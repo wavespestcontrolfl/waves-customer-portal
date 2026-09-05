@@ -1305,6 +1305,10 @@ class RelayConversation {
     const { executeTool: run } = require('./relay-tools');
     const work = Promise.resolve()
       .then(() => run(name, input, ctx))
+      .then((out) => {
+        if (ctx.toolOutcome) ctx.toolOutcome.ok = ![TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out) && ctx.toolFailed !== true;
+        return out;
+      })
       .catch((err) => {
         // executeTool has its own try/catch; this is the belt-and-braces path.
         logger.error(`[voice-relay] tool "${name}" rejected: ${err.message}`);
@@ -1520,20 +1524,7 @@ class RelayConversation {
       // threw, means no /relay-complete transfer callback will ever come —
       // the tool reverts the stamp and answers accordingly. An endSession
       // that reports nothing (older callers) counts as sent.
-      endForTransfer: () => {
-        if (this._ending) return false;
-        let sent = false;
-        try {
-          if (this._endSession) {
-            const r = this._endSession({ reason: 'transfer', captured: this.leadCaptured, owner: this.sessionKey || null });
-            sent = r !== false;
-          }
-        } catch (e) {
-          logger.error(`[voice-relay] endSession (transfer) failed callSid=${this.callSid}: ${e.message}`);
-        }
-        if (sent) this._ending = true;
-        return sent;
-      },
+      endForTransfer: () => this._endForHandoff('transfer'),
       // SERVER state for the handoff packet — never the model's claims.
       handoffFacts: () => ({
         verificationTier: convo._callerVerified === true
@@ -1560,6 +1551,18 @@ class RelayConversation {
         return revertHandoffPacket(db, { callSid: this.callSid, attempt, fence: (q) => this._fenceOwner(q) });
       },
     };
+  }
+
+  _endForHandoff(reason) {
+    if (this.ended || this._ending || !this._endSession) return false;
+    try {
+      const sent = this._endSession({ reason, captured: this.leadCaptured, owner: this.sessionKey || null }) !== false;
+      this._ending = sent;
+      return sent;
+    } catch (err) {
+      logger.error(`[voice-relay] handoff end frame failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return false;
+    }
   }
 
   /** The claim-owner fence every close-time write rides (PR 2A: shared with the handoff packet). */
@@ -1604,7 +1607,7 @@ class RelayConversation {
     let superseded = await this._sessionSuperseded();
     const { copy } = require('./relay-language');
     const { isTransferAvailable } = require('./relay-transfer');
-    if (!superseded && isTransferAvailable(toolCtx?.officeOpenNow?.())) {
+    if (!superseded && isTransferAvailable(toolCtx?.officeOpenNow())) {
       try {
         const { executeTool } = require('./relay-tools');
         const out = await executeTool('transfer_to_office', { intent: 'system trouble', summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
@@ -1619,9 +1622,19 @@ class RelayConversation {
       superseded = await this._sessionSuperseded();
       if (!superseded) this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
     }
-    this._ending = true;
-    try { this._endSession?.({ reason: superseded ? 'superseded' : 'provider_failure', captured: this.leadCaptured, owner: this.sessionKey || null }); } catch (err) {
-      logger.error(`[voice-relay] endSession (provider_failure) failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+    const sent = this._endForHandoff(superseded ? 'superseded' : 'provider_failure');
+    this._failureCallbackEndDecision?.(sent);
+    if (!sent) {
+      this._handoffForFailure = false;
+      if (this._failureCallbackReceipt) {
+        const { revertRelayFailureCallback } = require('../notification-service');
+        try {
+          await revertRelayFailureCallback(this._failureCallbackReceipt);
+          this._failureCallbackReceipt = null;
+        } catch (err) {
+          logger.error(`[voice-relay] unsent callback revert failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
+      }
     }
     return true;
   }
@@ -1751,6 +1764,7 @@ class RelayConversation {
       let resolveBell;
       const bell = new Promise((resolve) => { resolveBell = resolve; });
       const deadline = Date.now() + 3000;
+      const endedCleanly = new Promise((resolve) => { this._failureCallbackEndDecision = resolve; });
       const delivery = triggerNotification('customer_voicemail_callback', {
         name: this._estimateFields?.first_name || null,
         phone,
@@ -1762,9 +1776,10 @@ class RelayConversation {
         relayFailureCall: {
           callSid: this.callSid, owner: verified ? this.sessionKey : null,
           isActive: () => !this.ended && Date.now() < deadline,
+          onCommitted: (receipt) => { this._failureCallbackReceipt = receipt; },
         },
         onBell: resolveBell,
-        beforePush: async () => !(await this._sessionSuperseded()),
+        beforePush: async () => (await endedCleanly) && !(await this._sessionSuperseded()),
       });
       void delivery.then((result) => resolveBell(result?.bellWritten === true)).catch(() => resolveBell(false));
       return await withTimeout(bell, 3000, false);
@@ -2071,6 +2086,8 @@ class RelayConversation {
           // Detached tools retain their own outcome flag; live context getters stay live.
           const invocationCtx = Object.defineProperties({}, Object.getOwnPropertyDescriptors(toolCtx));
           invocationCtx.toolFailed = false;
+          const outcome = { name: block.name, ok: false };
+          invocationCtx.toolOutcome = outcome;
           const out = await this._executeToolBounded(block.name, block.input, invocationCtx);
           stat.toolMs += now() - toolStartAt;
           stat.toolCount += 1;
@@ -2080,7 +2097,8 @@ class RelayConversation {
           const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
           const toolOk = !sentinel && invocationCtx.toolFailed !== true;
           if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
-          this._toolOutcomes.push({ name: block.name, ok: toolOk });
+          this._toolOutcomes.push(outcome);
+          if (!sentinel) outcome.ok = toolOk; // a timeout must not overwrite a later confirmed result
           this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
           this._clearedFailures.tool ||= toolOk;
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });

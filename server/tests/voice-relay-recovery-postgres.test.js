@@ -92,6 +92,23 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     expect(row.metadata.relay_failure_callback_filed_at).toBeTruthy();
   });
 
+  test('end-frame compensation removes exactly its committed callback and is idempotent', async () => {
+    let receipt;
+    const bell = await NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
+      dedupeKey: `relay-failure:${callSid}`,
+      relayFailureCall: { callSid, owner: 'old', onCommitted: (value) => { receipt = value; } },
+    });
+    expect(receipt.notificationId).toBe(bell.id);
+    await NotificationService.revertRelayFailureCallback(receipt);
+    await NotificationService.revertRelayFailureCallback(receipt);
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeNull();
+    expect((await fileCallback()).id).toBeTruthy();
+    await NotificationService.revertRelayFailureCallback(receipt);
+    expect(await mockPg('notifications')).toHaveLength(1); // newer attempt survives a stale undo
+    expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeTruthy();
+  });
+
   test('an insertion or evidence failure rolls back the bell and callback stamp', async () => {
     await mockPg.raw("CREATE FUNCTION reject_callback_evidence() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''fixture evidence failure''; END;'");
     await mockPg.raw('CREATE TRIGGER reject_callback BEFORE UPDATE ON call_log FOR EACH ROW EXECUTE FUNCTION reject_callback_evidence()');

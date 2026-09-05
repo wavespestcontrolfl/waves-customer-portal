@@ -574,7 +574,7 @@ describe('the conversation side', () => {
     expect(await convo._fileFailureCallback()).toBe(true);
     expect(require('../services/notification-triggers').triggerNotification).toHaveBeenCalledWith(
       'customer_voicemail_callback', expect.any(Object),
-      expect.objectContaining({ relayFailureCall: { callSid: 'CA-old', owner: 'old', isActive: expect.any(Function) }, beforePush: expect.any(Function) }),
+      expect.objectContaining({ relayFailureCall: { callSid: 'CA-old', owner: 'old', isActive: expect.any(Function), onCommitted: expect.any(Function) }, beforePush: expect.any(Function) }),
     );
   });
 
@@ -1176,6 +1176,78 @@ describe('the conversation side', () => {
       });
       return { Convo, leadWriter, dbIso };
     }
+
+    test.each([true, false])('a write settling during the drain updates the transferred outcome (success: %s)', async (success) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+      let settle;
+      let packetFacts;
+      const write = new Promise((resolve) => { settle = resolve; });
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 'booking-1', name: 'request_booking', input: {} },
+      ] }) }));
+      const executeTool = jest.fn(async (name, _input, ctx) => {
+        if (name === 'request_booking') {
+          await write;
+          ctx.toolFailed = !success;
+          return success ? 'Booking requested.' : 'Booking failed.';
+        }
+        packetFacts = ctx.handoffFacts();
+        ctx.endForTransfer();
+        return 'Transferring the caller to the office now.';
+      });
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      const convo = new Convo({ callSid: 'CA-settled-booking', from: '+19415551234', send: jest.fn(), endSession: jest.fn(() => true) });
+      convo._toolFailures = 1;
+      convo._buildToolCtx = ((orig) => function () { const ctx = orig.call(this); ctx.officeOpenNow = () => true; return ctx; })(convo._buildToolCtx);
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+      try {
+        const pending = convo._runLoop('book me');
+        await jest.advanceTimersByTimeAsync(8010);
+        expect(convo._toolOutcomes).toEqual([{ name: 'request_booking', ok: false }]);
+        expect(packetFacts).toBeUndefined();
+        settle();
+        await pending;
+        expect(packetFacts.tools).toEqual([{ name: 'request_booking', ok: success }]);
+        expect(convo._inFlightWrites.size).toBe(0);
+      } finally { settle(); jest.useRealTimers(); }
+    });
+
+    test.each(['false', 'throw'])('an unsent end frame retracts the callback and allows another caller turn (%s)', async (failure) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso, firstRow: { id: 'call-fixture', metadata: {} } });
+      const service = require('../services/notification-service');
+      service.revertRelayFailureCallback = jest.fn(async () => {});
+      const receipt = { callSid: 'CA-end-failure', callbackStamp: 'stamp-fixture', notificationId: 'bell-fixture' };
+      const pushed = jest.fn();
+      const pushes = [];
+      require('../services/notification-triggers').triggerNotification.mockImplementation((_key, _payload, opts) => {
+        opts.relayFailureCall.onCommitted(receipt);
+        opts.onBell(true);
+        const delivery = opts.beforePush().then((allowed) => { if (allowed) pushed(); return { bellWritten: true }; });
+        pushes.push(delivery);
+        return delivery;
+      });
+      const endSession = jest.fn().mockImplementationOnce(() => {
+        if (failure === 'throw') throw new Error('socket send failed');
+        return false;
+      }).mockReturnValue(true);
+      const convo = new Convo({ callSid: 'CA-end-failure', from: '+19415551234', send: jest.fn(), endSession });
+      convo._modelFailures = 2;
+      await convo._maybeHandoffForFailure(null);
+      await pushes[0];
+      expect(service.revertRelayFailureCallback).toHaveBeenCalledWith(receipt);
+      expect(pushed).not.toHaveBeenCalled();
+      expect(convo._ending).toBe(false);
+      expect(convo._handoffForFailure).toBe(false);
+      await convo._runLoop('are you still there');
+      await pushes[1];
+      expect(endSession).toHaveBeenCalledTimes(2);
+      expect(convo._ending).toBe(true);
+      expect(pushed).toHaveBeenCalledTimes(1);
+    });
 
     test('transfer snapshots the outcome after a pending capture settles', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';

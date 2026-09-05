@@ -251,23 +251,32 @@ const NotificationService = {
         if (relayFailureCall.isActive?.() === false) throw new Error('relay callback cancelled');
         return persisted;
       });
-      // Closing during COMMIT cannot roll that COMMIT back. Remove only this
-      // attempt's bell and stamps under the call lock before reporting delivery.
-      if (callbackStamp && relayFailureCall.isActive?.() === false) {
-        await db.transaction(async (trx) => {
-          const call = await trx('call_log').where('twilio_call_sid', relayFailureCall.callSid).forUpdate().first('id');
-          const cleared = await trx('call_log').where('id', call.id)
-            .whereRaw("metadata->>'relay_failure_callback_filed_at' = ?", [callbackStamp])
-            .update({ voicemail_callback_alerted_at: null, metadata: trx.raw("metadata - 'relay_failure_callback_filed_at'") });
-          if (cleared && !persisted.deduped) await trx('notifications').where('id', persisted.notification.id).delete();
-        });
+      const receipt = callbackStamp && !persisted.deduped ? {
+        callSid: relayFailureCall.callSid, callbackStamp, notificationId: persisted.notification.id,
+      } : null;
+      // The same conditional compensation handles close during COMMIT and an
+      // end-frame failure after the bell result reaches the conversation.
+      if (receipt && relayFailureCall.isActive?.() === false) {
+        await this.revertRelayFailureCallback(receipt);
         return null;
       }
+      if (receipt) relayFailureCall.onCommitted?.(receipt);
       return shape(persisted);
     } catch (err) {
       logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
       return null;
     }
+  },
+
+  async revertRelayFailureCallback({ callSid, callbackStamp, notificationId }) {
+    return db.transaction(async (trx) => {
+      const call = await trx('call_log').where('twilio_call_sid', callSid).forUpdate().first('id');
+      if (!call) return;
+      const cleared = await trx('call_log').where('id', call.id)
+        .whereRaw("metadata->>'relay_failure_callback_filed_at' = ?", [callbackStamp])
+        .update({ voicemail_callback_alerted_at: null, metadata: trx.raw("metadata - 'relay_failure_callback_filed_at'") });
+      if (cleared) await trx('notifications').where('id', notificationId).delete();
+    });
   },
 
   // Create customer notification
