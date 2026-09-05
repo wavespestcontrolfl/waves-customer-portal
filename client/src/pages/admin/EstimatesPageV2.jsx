@@ -1762,11 +1762,16 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
 
+  const activeFilterRef = useRef(filter);
+  activeFilterRef.current = filter;
+  const estimatesRequestRef = useRef(0);
   const refreshEstimates = useCallback(() => {
+    const requestId = ++estimatesRequestRef.current;
     setLoading(true);
     setError(null);
-    const fetches = [fetchEstimatePipelineRows(filter)];
-    if (filter !== "archived") {
+    const currentFilter = activeFilterRef.current;
+    const fetches = [fetchEstimatePipelineRows(currentFilter)];
+    if (currentFilter !== "archived") {
       // Won = won forever: archived-accepted rows ride along so the Won
       // funnel and MRR-won KPI don't shrink when old wins get archived.
       // estimateMatchesFilter keeps them out of the All list. Desktop-only —
@@ -1779,19 +1784,22 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     }
     Promise.all(fetches)
       .then(([pipeline, archived = {}]) => {
+        if (requestId !== estimatesRequestRef.current) return;
         setEstimates(mergeEstimateRows(pipeline.rows, archived.estimates || []));
         setEstimatesTruncated(!!pipeline.truncated || !!archived.truncated);
         setLoading(false);
       })
       .catch((err) => {
+        if (requestId !== estimatesRequestRef.current) return;
         setError(err);
         setLoading(false);
       });
-  }, [filter]);
+  }, []);
 
   useEffect(() => {
     refreshEstimates();
-  }, [refreshEstimates]);
+    return () => { estimatesRequestRef.current += 1; };
+  }, [filter, refreshEstimates]);
 
   const archiveEstimate = useCallback(
     async (e) => {
@@ -2036,7 +2044,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
     );
   }
 
-  if (error && estimates.length === 0) {
+  if (error) {
     return (
       <div className="p-10 text-center">
         {" "}
@@ -2049,6 +2057,11 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
         <Button variant="primary" onClick={() => refreshEstimates()}>
           Retry
         </Button>{" "}
+        {filter !== "all" && (
+          <Button variant="secondary" onClick={() => setFilter("all")}>
+            Show all estimates
+          </Button>
+        )}
       </div>
     );
   }
@@ -2124,12 +2137,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
           }}
           defaultEstimateId={scheduleEstimate.id}
         />
-      )}
-
-      {error && (
-        <div className="mb-4 border-hairline border-alert-fg bg-alert-bg text-alert-fg rounded-xs p-3 text-13">
-          Failed to refresh estimates: {error.message || String(error)}
-        </div>
       )}
 
       <div className="grid gap-4 items-start grid-cols-1">
@@ -3585,18 +3592,30 @@ function EstimatesMobileListView({
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [sort, setSort] = useState("newest");
 
+  const activeFilterRef = useRef(filter);
+  activeFilterRef.current = filter;
+  const estimatesRequestRef = useRef(0);
   const refreshEstimates = useCallback(() => {
+    const requestId = ++estimatesRequestRef.current;
     setError(null);
-    fetchEstimatePipelineRows(filter)
-      .then(({ rows }) => setEstimates(rows))
-      .catch((err) => setError(err))
-      .finally(() => setLoading(false));
-  }, [filter]);
+    fetchEstimatePipelineRows(activeFilterRef.current)
+      .then(({ rows }) => {
+        if (requestId === estimatesRequestRef.current) setEstimates(rows);
+      })
+      .catch((err) => {
+        if (requestId === estimatesRequestRef.current) setError(err);
+      })
+      .finally(() => {
+        if (requestId === estimatesRequestRef.current) setLoading(false);
+      });
+  }, []);
 
   useEffect(() => {
     setLoading(true);
     refreshEstimates();
-  }, [refreshEstimates]);
+    // A filter change or unmount invalidates every callback of the old load.
+    return () => { estimatesRequestRef.current += 1; };
+  }, [filter, refreshEstimates]);
 
   const markEstimateAccepted = useCallback(
     async (e) => {
