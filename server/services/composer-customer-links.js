@@ -730,10 +730,15 @@ function shortRowDestination(row, hosts) {
   if (appointment) return { kind: 'appointment', token: appointment };
   const report = canonicalPortalToken(target, hosts, REPORT_TOKEN_RE, ANY_SCHEME);
   if (report) return { kind: 'service_report', token: report };
-  // Receipt delivery shortens /receipt/<token> (pre-push Codex P1 on r9) —
-  // a code pasted from message history is judged by its target like the
-  // long form.
-  const receipt = canonicalPortalToken(target, hosts, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME);
+  // A receipt short code pasted from message history is judged by its
+  // target like the long form (pre-push Codex P1 on r9). The receipt SMS
+  // itself shortens /pay/<invoice token> (InvoiceService.receiptSmsFacts —
+  // a paid invoice's pay page renders its receipt), so a receipt-KIND code
+  // hands over its /pay target's token too; an untyped /pay code is a pay
+  // link, not a receipt, and stays out of the receipt seam (GH Codex #3893
+  // r10 P2).
+  const receipt = canonicalPortalToken(target, hosts, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME)
+    || (row.kind === 'receipt' && canonicalPortalToken(target, hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME));
   if (receipt) return { kind: 'receipt', token: receipt };
   if (['appointment', 'service_report', 'receipt'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
@@ -761,6 +766,9 @@ const PRICE_CHANGE_TOKEN_RE = /^\/price-change\/([a-f0-9]{32})$/i;
 // /receipt/<invoices.token> — the permanent receipt URL; receipt delivery
 // (invoice-email.js) also shortens it to /l/<code> of kind 'receipt'.
 const RECEIPT_TOKEN_PATH_RE = /^\/receipt\/([A-Za-z0-9_-]{16,})$/i;
+// /pay/<invoices.token> — the target receipt delivery shortens (kind
+// 'receipt' short codes only; see shortRowDestination).
+const RECEIPT_PAY_TARGET_RE = /^\/pay\/([A-Za-z0-9_-]{16,})$/i;
 
 // Appointment page links (GH Codex #3844 r2 P1): every /appointment route
 // 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
@@ -1119,6 +1127,9 @@ async function checkProjectReportLinks(ctx, onRecipientAccount) {
     if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
       return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
     }
+    if (projectResendInFlight(project)) {
+      return refuseSend('This project report is being re-sent right now — give it a moment, then send again.');
+    }
     const bad = await onRecipientAccount(project.customer_id, 'project report link');
     if (bad) return bad;
     ctx.bearers += 1;
@@ -1137,17 +1148,22 @@ async function checkPriceChangeLinks(ctx) {
     // pasted upper-cased token is the same working page and is judged the
     // same (pre-push Codex P1).
     const notice = await db('price_change_notices').where({ notice_token: token.toLowerCase() }).first('id', 'customer_id', 'status', 'effective_date', 'sent_at', 'sms_sent');
-    if (!deliveredPriceChangeNotice(notice) || dateOnly(notice.effective_date) < etDateString()) {
+    if (!deliveredPriceChangeNotice(notice)) {
       return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
     }
     // Corrections are separate rows and nothing supersedes the earlier one,
     // so a notice texted before the operator clicks Send is still delivered,
     // upcoming and linkable — but it is no longer the customer's terms. The
     // link must be the newest texted notice, the builder's own pick (GH
-    // Codex #3893 r7 P1).
+    // Codex #3893 r7 P1) — judged newest BEFORE upcoming, so a correction
+    // whose date has passed still retires the older notice it corrected
+    // (r10 P1).
     const newest = await newestTextedPriceChangeNotice(notice.customer_id);
     if (!newest || newest.id !== notice.id) {
       return refuseSend('A newer price change notice has been sent to this customer — remove the link and insert a fresh one.');
+    }
+    if (!upcomingPriceChange(notice)) {
+      return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
     }
     const bad = await ownedByRecipient(ctx, notice.customer_id, 'price change notice link');
     if (bad) return bad;
@@ -1179,7 +1195,7 @@ async function checkAccountBoundLinks(ctx) {
 
 // Receipt links (permanent invoice token): the builder's own predicate
 // re-run — a settled self-pay invoice whose receipt the receipt lifecycle
-// already delivered — bound to the recipient's account, and the RECIPIENT's
+// already TEXTED — bound to the recipient's account, and the RECIPIENT's
 // receipt-text consent re-checked at the send (a scheduled message or a
 // draft dispatches long after the insert; the composer's /sms is
 // 'conversational' and never runs the payment_receipt policy itself) —
@@ -1187,8 +1203,12 @@ async function checkAccountBoundLinks(ctx) {
 // one live row on the number; an ambiguous number refuses, like the insert.
 async function checkReceiptLinks(ctx, shortRows, onRecipientAccount) {
   const vet = async (token) => {
-    const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id', 'receipt_sent_at');
-    if (!invoice || !RECEIPT_INVOICE_STATUSES.includes(String(invoice.status || '')) || invoice.payer_id || !invoice.receipt_sent_at) {
+    const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id');
+    if (!invoice || !RECEIPT_INVOICE_STATUSES.includes(String(invoice.status || '')) || invoice.payer_id) {
+      return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
+    }
+    // Texted by the receipt lifecycle already (the builder's own evidence).
+    if (!(await textedReceiptAudit().where({ invoice_id: String(invoice.id) }).first('id'))) {
       return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
     }
     const bad = await onRecipientAccount(invoice.customer_id, 'receipt link');
@@ -1977,10 +1997,9 @@ const RECEIPT_INVOICE_STATUSES = ['paid', 'refunded'];
  * invoice (payer_id) is the payer's AP inbox's alone: its receipt shows the
  * payer's billing address, AP email and payment method, and receipt delivery
  * already suppresses the homeowner text for it (pre-push Codex P0) — never
- * selected here. Delivered receipts only (receipt_sent_at). Raw permanent
+ * selected here. Receipts the lifecycle already texted only. Raw permanent
  * URL, nothing minted.
  */
-const RECEIPT_CANDIDATES = 20;
 // When the invoice settled — the PAYMENT event, from the linked payment the
 // receipt viewer renders: the refund webhook NULLs paid_at on a full refund,
 // so the row's own stamps alone misorder a refunded invoice against a
@@ -2019,37 +2038,54 @@ async function receiptTextBlockedReason(customerId) {
   return null;
 }
 
+// A receipt the receipt lifecycle already TEXTED: the messaging pipeline's
+// audit row for the payment_receipt purpose over SMS, with a real Twilio
+// accept (SM/MM sid — a suppressed leg records a sentinel id with sent_at
+// too). receipt_sent_at is not that evidence: the receipt queue stamps it
+// after an email-only delivery (channel_email_only / receipt_texts_opted_out
+// / sms_suppressed), so a customer who later allows receipt texts would make
+// the composer the never-texted receipt's FIRST text — without the
+// invoice_receipt template and the receipt lifecycle (GH Codex #3893 r8 +
+// r10 P1; same ruling as price notices, r2). Builder and send seam share it.
+function textedReceiptAudit() {
+  return db('messaging_audit_log')
+    .where({ purpose: 'payment_receipt', channel: 'sms' })
+    .whereNull('blocked_code')
+    .whereNotNull('sent_at')
+    .whereRaw("provider_message_id ~ '^(SM|MM)'");
+}
+
 async function buildReceiptLink(customerIds, recipientId = null) {
   const rows = await db('invoices')
     .whereIn('customer_id', customerIds)
     .whereIn('status', RECEIPT_INVOICE_STATUSES)
     .whereNull('payer_id')
     .whereNotNull('token')
-    // A re-share only: first receipt delivery is InvoiceService.sendReceipt's
-    // (the invoice_receipt template, the receipt_sent_at stamp closeout-status
-    // and the receipt queue read as delivered) — a composer text of an
-    // unsent receipt would leave that stamp empty, so the queue sends a
-    // duplicate later while the admin workflow reports it outstanding (GH
-    // Codex #3893 r8 P1; same ruling as price notices, r2).
-    .whereNotNull('receipt_sent_at')
-    // A bounded recent window; the pick below orders by the linked
-    // payment's event, which the row alone cannot.
+    // A re-share only — first receipt delivery is InvoiceService.sendReceipt's.
+    .whereExists(textedReceiptAudit().whereRaw('messaging_audit_log.invoice_id = invoices.id::text'))
+    // Every texted receipt on the account, not a window: a fully refunded
+    // invoice's paid_at is cleared, so the row alone under-orders it and a
+    // cap here could drop the true newest settlement before the pick below
+    // can see its payment (r10 P2). Paid rows carry their own event.
     .orderByRaw('COALESCE(paid_at, created_at) DESC, id DESC')
-    .limit(RECEIPT_CANDIDATES);
+    .select('id', 'customer_id', 'token', 'invoice_number', 'status', 'total', 'paid_at', 'created_at', 'stripe_payment_intent_id', 'stripe_charge_id');
   // The receipt route's own payment resolution (metadata, PI / charge id,
-  // manual-payment description). A refunded invoice whose refund record
-  // cannot be resolved has no receipt — its PDF answers 409 rather than
-  // render a 'paid' receipt for a refunded invoice — so it is skipped, not
-  // sent, and cannot shadow an older valid one (r7 P2).
+  // manual-payment description) where the row cannot date itself: a
+  // refunded invoice whose refund record cannot be resolved has no receipt
+  // — its PDF answers 409 rather than render a 'paid' receipt for a
+  // refunded invoice — so it is skipped, not sent, and cannot shadow an
+  // older valid one (r7 P2).
   const { loadPaymentForInvoice } = require('../routes/receipt-v2');
   let invoice = null;
   let settledAt = -Infinity;
   for (const row of rows) {
-    const payment = await loadPaymentForInvoice(row.id, row.customer_id, {
-      stripePaymentIntentId: row.stripe_payment_intent_id,
-      stripeChargeId: row.stripe_charge_id,
-      invoiceNumber: row.invoice_number,
-    });
+    const payment = row.status === 'refunded' || !row.paid_at
+      ? await loadPaymentForInvoice(row.id, row.customer_id, {
+        stripePaymentIntentId: row.stripe_payment_intent_id,
+        stripeChargeId: row.stripe_charge_id,
+        invoiceNumber: row.invoice_number,
+      })
+      : null;
     if (row.status === 'refunded' && !payment) continue;
     const at = receiptSettledAt(row, payment || {});
     if (at > settledAt) { invoice = row; settledAt = at; }
@@ -2103,25 +2139,30 @@ function deliveredPriceChangeNotice(notice) {
  * (STRICT_OWNER_KINDS) and /sms re-binds it. Permanent token, raw URL — the
  * same link the notices lane texted (price-change-notices.js).
  */
-// The customer's newest TEXTED notice for a change still ahead — the one
-// row the composer may link, for the builder and the send seam alike.
+// The customer's newest TEXTED notice — the one row the composer may link,
+// for the builder and the send seam alike. Newest regardless of effective
+// date: a later correction is the customer's terms even once its date has
+// passed, so filtering to upcoming first would let the older notice it
+// corrected resurface as "newest" (GH Codex #3893 r10 P1). Whether that
+// newest notice is still ahead is judged afterwards (upcomingPriceChange).
 function newestTextedPriceChangeNotice(customerId) {
   return db('price_change_notices')
     .where({ customer_id: customerId })
     .whereIn('status', PRICE_CHANGE_LINKABLE_STATUSES)
     .whereNotNull('sent_at')
     .where({ sms_sent: true })
-    .where('effective_date', '>=', etDateString())
     // Newest ISSUED, not farthest-out: a later correction effective sooner
     // must not be shadowed by an older notice with a farther effective date
     // (GH Codex #3893 r5 P1).
     .orderBy([{ column: 'sent_at', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .first('id', 'notice_token', 'effective_date', 'current_amount_cents', 'new_amount_cents', 'cadence_label', 'status');
 }
+// Still ahead: effective today (ET) or later.
+const upcomingPriceChange = (notice) => dateOnly(notice.effective_date) >= etDateString();
 
 async function buildPriceChangeNoticeLink(customerId) {
   const notice = await newestTextedPriceChangeNotice(customerId);
-  if (!notice) return { url: null, line: '', reason: 'No upcoming price change notice for this customer' };
+  if (!notice || !upcomingPriceChange(notice)) return { url: null, line: '', reason: 'No upcoming price change notice for this customer' };
   const { formatMoney } = require('./price-change-notices');
   const url = `${publicPortalUrl()}/price-change/${notice.notice_token}`;
   const effectiveDate = dateOnly(notice.effective_date);
@@ -2161,11 +2202,24 @@ const issuedProjectReport = (project) => Boolean(project)
   && PROJECT_REPORT_STATUSES.includes(String(project.status || ''))
   && Boolean(project.sent_at || project.delivery_status === PROJECT_REPORT_LEGACY_DELIVERY);
 
+// The project send flow's duplicate-delivery claim (admin-projects /send):
+// a resend of an issued report holds delivery_status 'sending' — status and
+// sent_at unchanged — for its provider window, and treats a claim older
+// than ten minutes as a crashed send it may take over. The composer respects
+// the live claim the same way: texting the report link inside that window
+// would be the duplicate the claim exists to stop (GH Codex #3893 r10 P1).
+const PROJECT_SEND_CLAIM_STALE_MS = 10 * 60 * 1000;
+function projectResendInFlight(project) {
+  if (project.delivery_status !== 'sending') return false;
+  const claimedAt = new Date(project.updated_at || 0).getTime();
+  return Number.isFinite(claimedAt) && claimedAt >= Date.now() - PROJECT_SEND_CLAIM_STALE_MS;
+}
+
 // The project a public report segment opens, exactly as the viewer resolves
 // it (reports-public loadProjectForReport): a full token matches its row; a
 // vanity prefix must match exactly one.
 async function linkableProjectReport(lookup) {
-  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
+  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status', 'updated_at'];
   if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...COLUMNS);
   const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`).limit(2);
   return rows.length === 1 ? rows[0] : null;
