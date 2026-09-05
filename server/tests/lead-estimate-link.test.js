@@ -1335,7 +1335,8 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // sits at. Deletes on that table are recorded on `database._deleted`; the
     // settled-root read's lead claim (whereExists) is recorded on
     // `database._claims`, and `rootChanged` makes that claim fail (codex r30).
-    const dbOf = (rows, funnelRows = {}, { rootChanged = false } = {}) => {
+    const dbOf = (rows, funnelRows = {}, opts = {}) => {
+      const { rootChanged = false } = opts;
       const deleted = [];
       const claims = [];
       const updated = [];
@@ -1353,7 +1354,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
               fn.call(bld); claims.push(sub); q._claimed = true; return q;
             },
             whereNot: (c) => { q._not = c; return q; },
-            del: async () => { deleted.push({ table, where: a }); return 1; },
+            del: async () => { deleted.push({ table, where: a, not: q._not }); return opts.ownCompletesMidTx ? 0 : 1; },
           };
           return q;
         },
@@ -1387,7 +1388,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       // The advance is conditioned in SQL on the root still being the row
       // validated here (identity + status + estimate link) — codex r29 P1.
       expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, ROOT_CLAIM);
-      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, }]);
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: { funnel_stage: 'completed' } }]);
       // The accepting customer lands on the root's row when it has none
       // (an unlinked, contact-matched root) — never over one already there
       // (codex r32 P1).
@@ -1408,7 +1409,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       const database = dbOf(rows, { root: 'lead', rep: 'booked' });
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
-      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, }]);
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: { funnel_stage: 'completed' } }]);
     });
 
     test('a root row ALREADY at booked (a replayed conversion: the monotonic bridge updates 0 rows) is settled — the repeat is not rebuilt into a second row (codex r28 P1)', async () => {
@@ -1427,6 +1428,13 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
       expect(database._deleted).toEqual([]);
+    });
+
+    test('a repeat row the revenue sync completes UNDER the settlement is never deleted — the conditioned drop hits 0 rows and the root\'s advance rolls back (pre-push P0)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead', rep: 'booked' }, { ownCompletesMidTx: true });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: { funnel_stage: 'completed' } }]);
     });
 
     test('a pre-booked root row is NOT settled once the root was re-identified since the read (the claimed read finds nothing) — the repeat carries its own row (codex r30 P1)', async () => {
