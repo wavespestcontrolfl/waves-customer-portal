@@ -160,8 +160,8 @@ function transferWhisper(handoff, fallbackName = '') {
 async function writeHandoffPacket(db, { callSid, packet, fence = (q) => q, terminal = [] }) {
   // Attempt-fenced (codex r2 P1): Promise.race cannot cancel a queued
   // UPDATE, so a write classified as timed out may still land. The row is
-  // matched when it is not yet terminal OR when it already carries THIS
-  // attempt's packet — and in that second case the statement leaves the
+  // matched when it is not yet terminal OR when it is ai_transferred and
+  // already carries THIS attempt's packet — and in that second case the statement leaves the
   // packet as it is (the fallback then confirms the earlier write instead
   // of refusing it). The returned context_available says which landed.
   const attempt = String(packet && packet.attempt ? packet.attempt : '');
@@ -169,7 +169,10 @@ async function writeHandoffPacket(db, { callSid, packet, fence = (q) => q, termi
     .where('twilio_call_sid', callSid)
     .where((w) => w
       .where((n) => n.whereNull('call_outcome').orWhereNotIn('call_outcome', terminal))
-      .orWhereRaw("(metadata->'relay_handoff'->>'attempt') = ?", [attempt]));
+      // …restricted to a row still in the transfer's own state: a later
+      // terminal outcome (voicemail after an unconfirmed ring) is preserved
+      // even when the timed-out full write executes after it (hook P1).
+      .orWhere((a) => a.where('call_outcome', 'ai_transferred').whereRaw("(metadata->'relay_handoff'->>'attempt') = ?", [attempt])));
   const rows = await fence(q).update({
     call_outcome: 'ai_transferred',
     metadata: db.raw(

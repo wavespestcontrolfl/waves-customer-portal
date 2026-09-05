@@ -114,7 +114,7 @@ describe('/relay-complete', () => {
     expect(b2.update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
   });
 
-  test('transfer with no staff numbers configured ⇒ voicemail (never a stranded caller)', async () => {
+  test('transfer with no staff numbers configured ⇒ voicemail (never a stranded caller) — and the stamp is bounded', async () => {
     process.env.WAVES_FALLBACK_FORWARD_NUMBERS = '';
     for (const k of ['OWNER_PHONE', 'ADAM_PHONE', 'VIRGINIA_PHONE', 'OFFICE_MANAGER_PHONE']) delete process.env[k];
     const { update } = primeDb();
@@ -124,6 +124,17 @@ describe('/relay-complete', () => {
     expect(res.body).not.toContain('<Dial');
     // Re-classified as voicemail — /call-complete never runs on this recorder.
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
+    // A stalled pool on the stamp (after a confirmed ring claim) still returns the recorder inside the deadline (hook P1).
+    jest.useFakeTimers();
+    const { builder } = primeDb();
+    let calls = 0;
+    builder.update = jest.fn(() => (++calls === 1 ? Promise.resolve(1) : new Promise(() => {})));
+    const res2 = mockRes();
+    const p = handlerFor('/relay-complete')({ body: { CallSid: 'CA-t3', HandoffData: TRANSFER }, query: {} }, res2);
+    await jest.advanceTimersByTimeAsync(2000);
+    await p;
+    jest.useRealTimers();
+    expect(res2.body).toContain('<Record');
   });
 
   test('a sandbox transfer hangs up — a test call never rings staff', async () => {

@@ -198,7 +198,8 @@ describe('the session side (relay-conversation tool ctx)', () => {
   test('writeHandoff rides the owner fence and never overwrites a terminal outcome — unless the row already carries THIS attempt (codex r2 P1)', async () => {
     const db = require('../models/db');
     const termQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
-    const guardQ = { where: jest.fn((fn) => { fn(termQ); return guardQ; }), orWhereRaw: jest.fn().mockReturnThis() };
+    const attemptQ = { where: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis() };
+    const guardQ = { where: jest.fn((fn) => { fn(termQ); return guardQ; }), orWhere: jest.fn((fn) => { fn(attemptQ); return guardQ; }) };
     const update = jest.fn(async () => [{ context_available: 'true' }]);
     const builder = { update, where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }), whereRaw: jest.fn(() => builder) };
     db.mockReturnValue(builder);
@@ -208,8 +209,10 @@ describe('the session side (relay-conversation tool ctx)', () => {
     expect(res).toEqual({ rows: 1, contextAvailable: true });
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA-w');
     expect(termQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']); // one transfer per CallSid, enforced by the row
-    // …OR the row already holds this attempt's packet (a timed-out write that landed): matched, left as-is.
-    expect(guardQ.orWhereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff'->>'attempt'"), ['att-1']);
+    // …OR the row is STILL ai_transferred and holds this attempt's packet (a timed-out write that landed):
+    // matched, left as-is — a later voicemail outcome is never flipped back (hook P1).
+    expect(attemptQ.where).toHaveBeenCalledWith('call_outcome', 'ai_transferred');
+    expect(attemptQ.whereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff'->>'attempt'"), ['att-1']);
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-1']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: 'ai_transferred' }), expect.any(Array));
     const meta = update.mock.calls[0][0].metadata;
@@ -381,6 +384,13 @@ describe('pre-push hook round 9', () => {
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_transfer_ring_at'));
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-1']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: null, metadata: expect.objectContaining({ sql: "metadata - 'relay_handoff'" }) }));
+  });
+
+  test('the recording processor gates the RECORDED segment of a composite against the recording length, never the AI segment too (P1)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('recordedSegmentText = transcription; // the hallucination guard below measures THIS against the recording, never the composite');
+    expect(src).toContain('const gateText = recordedSegmentText || transcription;');
+    expect(src).toContain('const fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);');
   });
 
   test('voicemail won the close race: the AI segment is stashed metadata-only on the transfer-marked voicemail row (P1)', async () => {

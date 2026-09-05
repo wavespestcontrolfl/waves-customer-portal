@@ -6710,6 +6710,7 @@ const CallRecordingProcessor = {
     // fallback is also missing/implausible.
     let primaryTranscriptRejected = false;
     let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
+    let recordedSegmentText = null; // PR 2A: the recorded leg of a composite (AI + recorded) transcript
     // Twilio CDN hasn't finished propagating the MP3 (404 or truncated
     // buffer for the known duration) — release the claim untouched instead
     // of stamping no_transcription, so the next timer/cron attempt retries
@@ -6782,6 +6783,7 @@ const CallRecordingProcessor = {
         // transcript replace it. Qualified on the persisted handoff packet.
         const relaySegment = composeRelaySegment(call);
         if (relaySegment) {
+          recordedSegmentText = transcription; // the hallucination guard below measures THIS against the recording, never the composite
           transcription = `${relaySegment.text}\n\n[${call.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${transcription}`;
           transcriptionProvenance.metadata.relay = relaySegment.metadata;
         }
@@ -6963,7 +6965,12 @@ const CallRecordingProcessor = {
     // looser fallback. Terminal 'voicemail' so the retry sweep won't re-run it
     // (a re-transcribe would just hallucinate again).
     const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
-    const fallbackImplausible = transcription && isImplausibleTranscript(transcription, recordingSeconds);
+    // A transferred call's composite carries the AI segment ahead of the
+    // recorded one; only the RECORDED text was spoken into this recording
+    // (hook P1 — a long Sandy conversation before a short voicemail is not
+    // a hallucination).
+    const gateText = recordedSegmentText || transcription;
+    const fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);
     // Two terminal-rejection cases: (a) the Twilio fallback ALSO produced an
     // implausible transcript; (b) the primary was implausible and no usable
     // fallback exists. Both finalize as an empty voicemail — NOT no_transcription
@@ -6974,7 +6981,7 @@ const CallRecordingProcessor = {
       // nulled, so use the char count captured before discarding it.
       const rawChars = transcription ? transcription.length : rejectedPrimaryChars;
       const cps = recordingSeconds && rawChars
-        ? Math.round((fallbackImplausible ? spokenCharCount(transcription) : rawChars) / recordingSeconds)
+        ? Math.round((fallbackImplausible ? spokenCharCount(gateText) : rawChars) / recordingSeconds)
         : null;
       logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
       let priorMeta = {};
