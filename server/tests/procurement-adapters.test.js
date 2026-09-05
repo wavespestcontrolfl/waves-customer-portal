@@ -282,6 +282,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // mfaAfterTender: the verification step appears only once bill-to-account is selected
       // mfaUnreadable: the MFA node's visibility read throws (detached mid-rerender) — must refuse, never read as absent
       if (sel === S.mfaField && st.mfaUnreadable) return el({ count: 1, isVisibleThrows: true });
+      // mfaAtClick: the MFA step appears only once the Place Order stage has begun (after the last scan)
+      if (sel === S.mfaField && st.mfaAtClick) return st.atClick ? el({ count: 1, visible: true }) : el();
       if (sel === S.mfaField) return st.mfaHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : st.mfaAfterTender && st.accountChecked ? el({ count: 1, visible: true }) : el();
       // cardUntilBillTo: the checkout defaults to card entry and hides the field once bill-to-account is selected
       if (sel === S.cardField) return st.cardUntilBillTo ? el({ count: 1, visible: !st.accountChecked }) : el();
@@ -294,8 +296,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       }
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
       // The option: a radio input, or (billIsLabel) a wrapping label whose radio is the sub-locator
-      const radio = (id = 'acct-radio') => el({ count: 1, id, visible: st.radioVisible ?? true, get checked() { return st.accountChecked === true; } });
-      const billOption = () => el({ count: 1, visible: true, tag: st.billIsLabel ? 'label' : 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
+      // uncheckAccountAtClick: a delayed rerender resets the verified radio once the Place Order stage has begun
+      const isChecked = () => st.accountChecked === true && !(st.uncheckAccountAtClick && st.atClick);
+      const radio = (id = 'acct-radio') => el({ count: 1, id, visible: st.radioVisible ?? true, get checked() { return isChecked(); } });
+      const billOption = () => el({ count: 1, visible: true, tag: st.billIsLabel ? 'label' : 'input', get checked() { return isChecked(); }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
       // billHiddenFirst: a hidden responsive copy of the option precedes the usable visible one; billVisibleCopies: N visible copies
       if (sel === S.billToAccount) {
         if (st.billHiddenFirst) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, tag: 'input', checked: false }) : billOption()) });
@@ -308,7 +312,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === '#acct-radio') return radio();
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
-      if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      if (sel === S.billToAccountSelected) return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       // checkoutTotalText: the checkout total (default = the cart total, so a dry run's bell reports 9900);
@@ -316,10 +320,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // totalByRead: a function of the read index for a total that keeps moving
       if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalByRead ? st.totalByRead(st.totalReads) : st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
+      if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
       const placeBtn = () => el({ count: 1, visible: true, onClick: () => { st.placeClicked += 1; } });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
       if (sel === S.placeOrder) return st.placeOrderHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } }) : placeBtn()) }) : placeBtn();
       // orderNumberHiddenFirst: a hidden stale confirmation node precedes the visible current one
+      // Before the click there is no confirmation node — unless orderNumberBeforeClick models a pre-existing reference element
+      if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : el();
       if (sel === S.orderNumber) return st.orderNumberHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'Order # SO-000001' }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' })) }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' });
       return el();
     };
@@ -451,6 +458,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order # 12345678')).toBe('12345678');
     expect(s1._internals.orderNumberIn('Order date 2026-09-05 · Order # SO-778899')).toBe('SO-778899'); // every labeled match is tried; a date is never an id (r2 P2)
     expect(s1._internals.orderNumberIn('Placed 2026-09-05')).toBeNull();
+    expect(s1._internals.orderNumberIn('Order date 09-05-2026')).toBeNull(); // any date shape (r3 P2)
+    expect(s1._internals.orderNumberIn('Order date 05/09/26 ref')).toBeNull();
   });
 
   test('bill-to-account must be CONFIRMED selected before the place-order click (r1 P1)', async () => {
@@ -646,6 +655,31 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const r = await s1.place(args(), deps);
     expect(r).toMatchObject({ externalOrderNumber: 'SO-778899' });
     expect(st.loggedIn).toBe(true);
+  });
+
+  test('the tender is re-checked immediately before the click: a rerender that unselects bill-to-account refuses, no click (r3 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ uncheckAccountAtClick: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
+  test('a blocker revealed at the click boundary (MFA after the last scan) refuses, no click (r3 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ mfaAtClick: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'mfa_required' });
+    expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('a confirmation-number node already on the page BEFORE the click is not the outcome: unchanged after the click = ambiguous (r3 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'PO reference 55501', orderNumberText: 'PO reference 55501', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'PO reference 55501' });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
   });
 
   test('a dry run walks through the checkout verifications and the final cap check, then stops BEFORE the click and bells the checkout total (r2 P1)', async () => {

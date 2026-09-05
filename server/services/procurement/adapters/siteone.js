@@ -601,6 +601,23 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
   if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at checkout — cannot tell which the order bills`);
   evidence.billToAccountVerified = true;
+  return radio;
+}
+
+// The tender and the blockers, re-checked immediately before the click: a
+// delayed checkout rerender during the earlier awaits (screenshot upload,
+// cap reservation) can reset the verified radio to a saved card or reveal
+// an MFA / terms step after the last scan (Codex #3876 r3 P1). Page reads
+// only — nothing is awaited off the page between here and the click.
+async function recheckTenderAtClick(page, radio, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  await scanCheckoutBlockers(page, refuse);
+  if (await blockerShown(page, SELECTORS.cardField, 'card', refuse)) await refuse('card_required', 'SiteOne checkout asks for card entry at the moment of submission — bot never supplies it');
+  let checked = null;
+  try { checked = await radio.isChecked(); } catch { checked = null; }
+  if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is no longer selected at the moment of submission — the bot never submits on another tender');
+  const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
+  if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at the moment of submission`);
 }
 
 // WHICH account, and WHERE to: the displayed values, compared to what the
@@ -654,8 +671,20 @@ async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) 
 // Returns the order number; calls markSubmitted() at the click boundary — the
 // caller's cart cleanup guard flips only when the click actually happened
 // (a pre-click refusal here still cleans the cart — Codex #3853 r15 P2).
-async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate }) {
+// The text of the ONE shown confirmation-number node, or null.
+async function shownOrderText(page) {
+  const nodes = (await matches(page, SELECTORS.orderNumber).catch(() => ({ shown: [] }))).shown;
+  if (nodes.length !== 1) return null;
+  return (await nodes[0].textContent().catch(() => '') || '').replace(/\s+/g, ' ');
+}
+
+async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio }) {
   const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
+  // Confirmation must be evidence created AFTER the click: a node the
+  // selector already matches before submission (a reference / PO element,
+  // a stale SPA confirmation) is remembered and never accepted as the
+  // outcome (Codex #3876 r3 P2).
+  const beforeText = await shownOrderText(page);
   // The total the click submits is the one shown NOW: an async tax /
   // shipping recalculation after the earlier read (which also spans the
   // screenshot upload and the cap reservation) would otherwise bypass the
@@ -674,6 +703,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     cents = shownCents;
     await gate(cents, 'total at the click');
   }
+  await recheckTenderAtClick(page, radio, { evidence, upload });
   markSubmitted();
   try {
     await placeOrder.click();
@@ -682,7 +712,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // (bounded) for a SHOWN confirmation-number node rather than sampling
     // once after a fixed delay (Codex #3876 r2 P2). A timeout falls through
     // to the ambiguous path below.
-    await waitForAnyShown(page, SELECTORS.orderNumber, CONFIRMATION_TIMEOUT).catch(() => {});
+    await waitForNewOrderText(page, beforeText, CONFIRMATION_TIMEOUT);
   } catch (e) {
     const err = new Error(`siteone submit outcome unknown: ${String(e.message).slice(0, 120)}`);
     err.ambiguous = true; err.evidence = evidence; err.cents = cents;
@@ -691,9 +721,8 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   await shot(page, 'confirmation', evidence, upload);
   // The ONE visible confirmation-number node — a hidden or stale responsive
   // copy must not record the wrong number or force the ambiguous path (r15 P2).
-  const numNodes = (await matches(page, SELECTORS.orderNumber).catch(() => ({ shown: [] }))).shown;
-  const numText = (numNodes.length === 1 ? (await numNodes[0].textContent().catch(() => '') || '') : '').replace(/\s+/g, ' ');
-  const number = orderNumberIn(numText);
+  const numText = await shownOrderText(page);
+  const number = numText != null && numText !== beforeText ? orderNumberIn(numText) : null; // pre-click text = no confirmation
   if (!number) {
     const err = new Error('siteone: order submitted but no confirmation number was found');
     err.ambiguous = true; err.evidence = evidence; err.cents = cents;
@@ -702,17 +731,33 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   return { number, cents };
 }
 
+// Wait (bounded) for a shown confirmation-number node whose text differs
+// from what was shown BEFORE the click; a timeout leaves the ambiguous path
+// to decide.
+async function waitForNewOrderText(page, beforeText, timeout) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const text = await shownOrderText(page);
+    if (text != null && text !== beforeText) return;
+    if (Date.now() >= deadline) return;
+    await page.waitForTimeout(500);
+  }
+}
+
 // The confirmation number: the token adjacent to the "Order #/number" label
 // when it is an identifier, else the first identifier-shaped token. An
 // identifier carries at least one DIGIT — a label word ("Confirmation",
 // "order") never becomes the recorded order number (Codex PR3 r1 P2).
 function orderNumberIn(text) {
-  const isId = (t) => !!t && /\d/.test(t) && !/^\d{4}-\d{2}-\d{2}$/.test(t); // never a date
+  // An identifier carries a digit and is never date-shaped: digits joined
+  // only by separators (2026-09-05, 09-05-2026, 05/09/26) are not ids —
+  // an unlabeled all-digit run (12345678) still is (Codex #3876 r3 P2).
+  const isId = (t) => !!t && /\d/.test(t) && !/^\d+([-/.]\d+)+$/.test(t);
   // EVERY labeled match is tried before any fallback: "Order date 2026-09-05
   // … Order # SO-778899" must yield the number, not the date (Codex #3876
   // r2 P2).
   for (const m of String(text).matchAll(/order\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/gi)) if (isId(m[1])) return m[1];
-  return (String(text).match(/[A-Z0-9-]{5,}/gi) || []).find(isId) || null;
+  return (String(text).match(/[A-Z0-9/.-]{5,}/gi) || []).find(isId) || null;
 }
 
 // The checkout stage: bill-to proof, identity + final total, the cap gate on
@@ -723,7 +768,7 @@ async function checkoutAndSubmit(page, { credentials, shipToTokens, gate, eviden
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
   await page.waitForTimeout(2000);
   if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
-  await verifyBillToAccount(page, { evidence, upload });
+  const radio = await verifyBillToAccount(page, { evidence, upload });
   await verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
   const finalCents = await readCheckoutTotal(page, { evidence, upload });
   await gate(finalCents, 'checkout total');
@@ -733,7 +778,7 @@ async function checkoutAndSubmit(page, { credentials, shipToTokens, gate, eviden
   // r2 P1). The caller's finally empties the cart.
   if (dryRun) { await shot(page, 'dry-run-stop', evidence, upload); return { dryRun: true, amountCents: finalCents, externalOrderNumber: null, evidence }; }
   let placed;
-  try { placed = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate }); }
+  try { placed = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio }); }
   catch (e) {
     // The click happened at THIS total: an ambiguous outcome parks with it
     // (a null amount on a placed_at row would count $0 against the
