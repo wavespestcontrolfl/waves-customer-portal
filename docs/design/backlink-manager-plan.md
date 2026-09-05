@@ -1841,3 +1841,31 @@ cutover (replaced by the provider race), v1 open decisions 2–3.
 3. `auto_outreach_daily_cap` starting value (proposal: 10; hard ceiling stays
    `LINK_OUTREACH_DAILY_CAP=12`) — Adam, at step 4.
 4. Whether `OWNER_MEMBERSHIP` cards should batch weekly (one digest) or ring per card — Adam.
+
+
+### Free execution integration implementation
+
+The free deterministic runner now claims against current execution authority and an
+exact owner approval when needed. Provider/mode stamps bind the lease, and a durable
+per-instance submission slot reserves the ET daily cap. The browser rechecks gates,
+policy, path revision and approval immediately before enabling submission. A replay
+cannot cross that boundary twice. Failures before submission release the slot;
+uncertainty after submission holds it and appears in the Owner queue. A report
+records only `placed`/pending; the verifier retains live/indexed truth.
+
+Content-submission paths honor send-first or submit-first ordering. Initial pitches
+can be drafted/sent on placed/live/indexed submit-first rows without replacing the
+Judge's lifecycle; the domain and inbox remain reserved while that pitch is owed.
+Completed profile scans reconcile fresh, target-matching outreach backlinks. A
+unique exact source disambiguates placement identity; ambiguous matches require an
+audited owner choice and never assign the same backlink to a sibling. Matching a
+placement retires its unsent follow-up while preserving other authority obligations.
+
+Validation: focused Jest tests plus `node scripts/qa/backlink-execution.cjs` with
+`WAVES_DATABASE_ENVIRONMENT=test` and `BACKLINK_TEST_DATABASE_URL` pointing to a
+verified preview database with the backlink schema. The latter rolls back migration
+up/up/down/down/up, synthetic authority/lease/report, and owner-match checks.
+Production rollout and a supervised real submission remain separate owner steps.
+Account/email/legal automation, paid execution/broker, provider benchmarks, D30
+learning, and recursive discovery/budget integration remain later work. This does
+not mark the entire step-4 or Backlink Manager plan complete.

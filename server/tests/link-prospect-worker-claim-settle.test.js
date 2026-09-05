@@ -8,7 +8,7 @@
  * raced by the next claim. In-memory knex-shaped store, real
  * link-registry.settleRetiredPlacements.
  */
-const mockStore = { seo_link_prospects: [], seo_link_acquisition_paths: [], seo_link_domains: [] };
+const mockStore = { seo_link_attempts: [], seo_link_prospects: [], seo_link_acquisition_paths: [], seo_link_domains: [] };
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const preds = [];
@@ -59,14 +59,18 @@ jest.mock('../models/db', () => {
   };
   const db = (t) => builder(t);
   db.transaction = async (cb) => cb(db);
+  db.raw = async () => ({});
   return db;
 });
 
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 const { isEnabled } = require('../config/feature-gates');
-const worker = require('../services/seo/link-prospect-worker');
+// These tests isolate path settlement; the authority/cap boundary has its own integration suite.
+jest.mock('../services/seo/link-execution-authority', () => ({ authorize: jest.fn(async () => ({})), reserveSlot: jest.fn(async (_trx, p, path, _auth, token, _now, preview) => { if (!preview) mockStore.seo_link_attempts.push({ id: p.id, prospect_id: p.id, path_id: path.id, action: 'submit', outcome: 'slot_reserved', lease_token: token }); return {}; }), releaseSlots: jest.fn(async () => {}) }));
+const realWorker = require('../services/seo/link-prospect-worker');
+const worker = { ...realWorker, claim: (opts) => realWorker.claim({ automationPolicy: opts.type === 'signup' ? 'submit_free' : null, ...opts, provider: 'deterministic_runner' }), report: (opts) => realWorker.report({ ...opts, provider: 'deterministic_runner' }) };
 
-beforeEach(() => { mockStore.seo_link_prospects.length = 0; mockStore.seo_link_acquisition_paths.length = 0; mockStore.seo_link_domains.length = 0; });
+beforeEach(() => { isEnabled.mockImplementation((key) => key === 'outreachDrafter'); mockStore.seo_link_attempts.length = 0; mockStore.seo_link_prospects.length = 0; mockStore.seo_link_acquisition_paths.length = 0; mockStore.seo_link_domains.length = 0; });
 
 test('claim hands out a placement on its LIVE successor path, moving the execution URL, atomically with the lease', async () => {
   const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-mid' };

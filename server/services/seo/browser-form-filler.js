@@ -196,7 +196,7 @@ async function callVision(anthropic, screenshotB64, text) {
  * fillCitationForm — submit one free citation form. Returns a structured outcome;
  * never throws (engine errors → { outcome:'failed' }).
  */
-async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launchBrowser = defaultLaunch, anthropic, resolveHostIps = resolvePublicIps } = {}) {
+async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launchBrowser = defaultLaunch, anthropic, resolveHostIps = resolvePublicIps, beforeSubmit } = {}) {
   let client = anthropic;
   if (!client && Anthropic && process.env.ANTHROPIC_API_KEY) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   if (!client) return { outcome: 'failed', errorCode: 'no_anthropic', notes: 'no LLM client' };
@@ -281,6 +281,8 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
         } catch { isSubmitReq = false; isFormNav = false; }
         let ok = false;
         try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
+        // Discovery and filling never grant mutation authority, including page-script POSTs.
+        if (!submitPhase && !['GET', 'HEAD', 'OPTIONS'].includes(String(req.method()).toUpperCase())) return route.abort();
         if (!ok) {
           if (isSubmitReq) submitAborted = true;       // a submit/nav request went off-host → reached nothing
           if (isFormNav) submitNavOffHost = true;      // the form NAVIGATED off-host with its data → real submit blocked
@@ -393,13 +395,18 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     // never actionable → nothing dispatched → genuinely retryable. Once it dispatches
     // (no throw), the POST may have landed — we NEVER auto-retry; any later navigation
     // /verification error becomes placed+pending below.
+    if (typeof beforeSubmit !== 'function' || !(await beforeSubmit())) {
+      return { outcome: 'failed', errorCode: 'not_authorized', notes: 'submission authority refused before mutation' };
+    }
     submitPhase = true; // requests from here are the submission (POST / nav)
     try {
       await page.click(last.selector, { noWaitAfter: true });
     } catch (e) {
+      submitPhase = false;
       return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit not actionable (nothing dispatched): ${e.message}` };
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {}); // best-effort settle; never fatal post-dispatch
+    submitPhase = false;
 
     // Verification is best-effort (its own try/catch — a throw here must NOT fall to the
     // outer catch's retryable engine_error). The verifier also reports a clear REJECTION

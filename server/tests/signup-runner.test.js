@@ -55,6 +55,7 @@ jest.mock('../models/db', () => {
 });
 
 const worker = require('../services/seo/link-prospect-worker');
+worker.SIGNUP_TYPES = ['directory', 'citation', 'social'];
 const { fillCitationForm } = require('../services/seo/browser-form-filler');
 const runner = require('../services/seo/signup-runner');
 const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify, LOCATION_MATCH_SQL } = runner._internals;
@@ -69,7 +70,7 @@ describe('alreadyPlacedAt location predicate (v2 identity)', () => {
   });
 });
 
-const prospect = (o = {}) => ({ id: 'p1', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
+const prospect = (o = {}) => ({ id: 'p1', link_type: 'directory', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
 
 beforeEach(() => {
   worker.claim.mockReset(); worker.report.mockReset();
@@ -143,11 +144,14 @@ describe('validateSubmitUrl (SSRF/host guard)', () => {
   });
 });
 
+jest.mock('../services/seo/link-execution-authority', () => ({ releaseSlots: jest.fn(async () => {}), beginSubmission: jest.fn(async () => true) }));
+
 describe('run — safety gates', () => {
-  test('live run with NO allowlist refuses to submit', async () => {
+  test('without a domain filter, the authority claim decides whether any work is allowed', async () => {
+    worker.claim.mockResolvedValueOnce([]);
     const r = await runner.run({ dryRun: false, allow: [] });
-    expect(r.note).toBe('no_allowlist');
-    expect(worker.claim).not.toHaveBeenCalled();
+    expect(r.claimed).toBe(0);
+    expect(worker.claim).toHaveBeenCalledWith(expect.objectContaining({ provider: 'deterministic_runner', mode: 'acquire' }));
   });
   test('dry-run skips both registry catch-ups (no writes of any kind); a live run performs board→registry, then attempts, BEFORE claiming', async () => {
     const { backfillLegacyAttempts, backfillLegacyBoard } = require('../services/seo/link-registry-backfill');
@@ -182,12 +186,12 @@ describe('run — safety gates', () => {
   test('dry-run uses a READ-ONLY preview claim (no lease/write)', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: true, allow: ['citysquares.com'] });
-    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', automationPolicy: 'submit_free', preview: true });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', provider: 'deterministic_runner', mode: 'acquire', preview: true, domains: ['citysquares.com'] });
   });
   test('live run pushes the allowlist into the claim query', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: false, allow: ['citysquares.com'] });
-    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', automationPolicy: 'submit_free', domains: ['citysquares.com'] });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', provider: 'deterministic_runner', mode: 'acquire', preview: false, domains: ['citysquares.com'] });
   });
   test('dry-run previews, never submits, and never leases/releases (no writes)', async () => {
     worker.claim.mockResolvedValue([prospect()]);
@@ -229,14 +233,14 @@ describe('run — safety gates', () => {
 });
 
 describe('run — outcomes', () => {
-  test('placed → reports placed + writes a ledger row', async () => {
+  test('placed reports through the provider-bound lease without inserting a second submit attempt', async () => {
     worker.claim.mockResolvedValue([prospect()]);
     fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: 'https://citysquares.com/biz/waves', pending: false, screenshot: Buffer.from('png') });
     const r = await runner.run({ allow: ['citysquares.com'] });
     expect(r.placed).toBe(1);
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', live_url: 'https://citysquares.com/biz/waves', evidence_url: 'backlink-evidence/x.png' }));
     // v2 ledger (seo_link_attempts): CHECKed enum outcome, provider + action, verbatim engine outcome in detail
-    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', provider: 'deterministic_runner', action: 'submit', path_id: null, detail: expect.stringContaining('"legacy_outcome":"placed"') }));
+    expect(mockInsert).not.toHaveBeenCalled();
     expect(require('../services/seo/link-registry-backfill').backfillLegacyAttempts).toHaveBeenCalled();
   });
   test('blocked_captcha → RECLASSIFIES (needs_account) + releases, no retry report', async () => {

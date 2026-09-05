@@ -66,7 +66,7 @@ const PATH_LINK_TYPES = Object.freeze([...CLAIMABLE_LINK_TYPES]);
 const ATTEMPT_PROVIDERS = Object.freeze(['deterministic_runner', 'openai_cua', 'claude_cu', 'stagehand', 'grok', 'human']);
 const ATTEMPT_ACTIONS = Object.freeze(['investigate', 'create_account', 'complete_form', 'submit', 'resume', 'outreach_send']);
 const ATTEMPT_OUTCOMES = Object.freeze([
-  'slot_reserved', 'submitting', 'submit_ambiguous',
+  'slot_reserved', 'slot_released', 'submitting', 'submit_ambiguous',
   'placed', 'pending', 'drafted', 'sent', 'failed', 'skipped', 'blocked', 'captcha',
   'needs_owner', 'human_step_done', 'ready_for_payment', 'ready_for_credentials',
   'no_payment_required', 'price_changed', 'instrument_unavailable', 'auto_renew_unavoidable',

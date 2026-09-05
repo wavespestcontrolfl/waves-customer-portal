@@ -1,13 +1,9 @@
 /**
- * Signup runner (Build C / Phase 1b) — autonomously submits the FREE, automation-
- * safe citation listings the classifier marked `submit_free`, fail-closed on
- * anything gated, with screenshot evidence + an honest attempt ledger. NEVER pays
- * or creates accounts (payments are Phase 2).
- *
- * Supervised-first: gated OFF (signupRunner) AND a live run requires an explicit
- * allowlist of domains — without one it submits nothing. When the engine discovers
- * a gate the classifier missed (login/CAPTCHA/payment), it RECLASSIFIES the row
- * (→ needs_account / pay_and_submit) so it's never auto-retried.
+ * Free acquisition runner. The registry's current execution authority, exact owner
+ * approval where required, and daily submission cap decide what can execute.
+ * GATE_LINK_AUTHORITY and GATE_SIGNUP_RUNNER both fail closed. An optional domain
+ * allowlist narrows a supervised trial; it grants no authority. Account, email,
+ * legal and payment steps remain held for a later runner.
  *
  * DEPLOYMENT PREREQUISITE (SSRF): this drives a real headless browser against
  * untrusted directory pages. browser-form-filler pins Chromium's DNS to a verified
@@ -84,6 +80,8 @@ function pickLocation(profile, prospect) {
   const locs = profile.locations || [];
   const def = locs.find((l) => l.id === profile.default_location_id) || locs[0] || {};
   if (!prospect) return def;
+  const explicit = locs.find((l) => l.id === prospect.location_key);
+  if (explicit) return explicit;
   const hay = `${prospect.target_page || ''} ${prospect.target_domain || ''}`.toLowerCase();
   for (const city of SORTED_CITIES) {
     if (hay.includes(city) || hay.includes(city.replace(/\s+/g, '-')) || hay.includes(city.replace(/\s+/g, ''))) {
@@ -190,7 +188,10 @@ async function leaseGuardedReclassify(p, patch) {
     // This IS a lease release (often into a parked policy nothing will claim
     // again): the placement follows a superseded path in the SAME transaction,
     // like every other release — released and settled, or neither.
-    if (updated) await worker.settleReleasedPlacements([p.id], trx);
+    if (updated) {
+      await require('./link-execution-authority').releaseSlots(trx, [p.id]);
+      await worker.settleReleasedPlacements([p.id], trx);
+    }
     return updated;
   });
   if (n === 0) logger.warn(`[signup-runner] stale lease on ${p.target_domain} — reclassify skipped (row was reclaimed)`);
@@ -198,8 +199,8 @@ async function leaseGuardedReclassify(p, patch) {
 }
 
 /**
- * run — submit the allowlisted submit_free citations. dryRun previews (no browser,
- * no writes) and releases its leases. Returns { claimed, placed, blocked, failed, skipped }.
+ * run — execute authorized free submissions. dryRun previews without leasing,
+ * opening a browser, or writing. Returns { claimed, placed, blocked, failed, skipped }.
  */
 async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, anthropic } = {}) {
   // Registry catch-up before claiming (plan v2 §3.4 / §4), skipped on dryRun (a dry
@@ -223,18 +224,13 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   const allowlist = (allow && allow.length ? allow : String(process.env.SIGNUP_RUNNER_ALLOWLIST || '').split(','))
     .map((d) => normDomain(d)).filter(Boolean);
 
-  // Live submission REQUIRES an explicit allowlist (supervised-first). Dry-run is
-  // exempt — it only previews what WOULD be claimed.
-  if (!dryRun && allowlist.length === 0) {
-    logger.warn('[signup-runner] no allowlist (SIGNUP_RUNNER_ALLOWLIST) — refusing to submit. Set an allowlist for the supervised first run.');
-    return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0, note: 'no_allowlist' };
-  }
+  // Optional operator filtering only; the authority lease and reserved daily slot govern every submission.
 
   // Live runs push the allowlist into the claim so only allowlisted rows are leased
   // (no starving the supervised target by claiming+releasing higher-ranked rows).
   // Dry-run uses a READ-ONLY preview (no lease/write) to show the full triage.
-  const claimed = await worker.claim({ n: batchSize, type: 'signup', automationPolicy: 'submit_free', ...(dryRun ? { preview: true } : { domains: allowlist }) });
-  if (!claimed.length) { logger.info('[signup-runner] no submit_free prospects to claim'); return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0 }; }
+  const claimed = await worker.claim({ n: batchSize, type: 'signup', mode: 'acquire', provider: 'deterministic_runner', preview: dryRun, ...(allowlist.length ? { domains: allowlist } : {}) });
+  if (!claimed.length) { logger.info('[signup-runner] no authorized free prospects to claim'); return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0 }; }
 
   const profile = worker.businessProfile();
   const counts = { claimed: claimed.length, placed: 0, blocked: 0, failed: 0, skipped: 0 };
@@ -251,7 +247,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     if (allowlist.length && !allowlist.includes(domain)) { releaseAtEnd.push({ id: p.id, lease_token: p.lease_token }); continue; }
 
     const loc = pickLocation(profile, p); // the GBP location this prospect maps to
-    if (await alreadyPlacedAt(domain, loc.id)) {
+    if (worker.SIGNUP_TYPES.includes(p.link_type) && await alreadyPlacedAt(domain, loc.id)) {
       await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       await recordAttempt(p, { outcome: 'skipped', errorCode: 'duplicate_placement', notes: `already placed for ${domain} / ${loc.id || 'default'}` }, null);
       counts.skipped++;
@@ -272,7 +268,9 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     }
 
     const nap = napFromLocation(profile, loc); // per-location NAP (Venice/Parrish/… address+phone)
-    const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic });
+    nap.website = p.target_page || nap.website;
+    const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic,
+      beforeSubmit: () => require('./link-execution-authority').beginSubmission(db, { prospectId: p.id, leaseToken: p.lease_token }) });
 
     // Run-level/environment/outage error (no LLM client, no browser, planning-LLM
     // outage) — same for EVERY prospect and not theirs to pay for. ABORT the batch
@@ -287,7 +285,6 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     }
 
     const evidenceKey = result.screenshot ? await uploadEvidence(result.screenshot, domain) : null;
-    await recordAttempt(p, result, evidenceKey);
 
     if (result.outcome === 'placed') {
       // No confirmed live URL → report as PENDING (slow-moderation), never as a
@@ -297,7 +294,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // verifier must reconcile THIS row against the homepage (not its money-page
       // target_page). A durable flag scopes the homepage rule to runner-created rows only —
       // manual/strategy directory rows keep target_page.
-      const rep = await worker.report({ prospect_id: p.id, outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, cited_homepage: true, location: String(loc.id || 'default'), notes: 'auto-submitted citation' });
+      const rep = await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, ...(p.location_key && p.location_key !== '-' ? { location: p.location_key } : {}), notes: 'auto-submitted placement' });
       if (rep && rep.ok) { counts.placed++; }
       else {
         // report rejected (e.g. stale lease) — don't claim success; the row stays
@@ -326,9 +323,8 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       await leaseGuardedReclassify(p, { automation_policy: 'skip' });
       counts.skipped++;
     } else {
-      // Engine error / no_submit_evidence / unconfirmed — retryable via the worker
-      // contract (MAX_ATTEMPTS). Nothing was observably submitted → safe to retry.
-      await worker.report({ prospect_id: p.id, outcome: 'failed', lease_token: p.lease_token, notes: `runner: ${result.errorCode || 'failed'}` });
+      // The worker retries only failures before submit; uncertainty after submit is quarantined.
+      await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'failed', lease_token: p.lease_token, notes: `runner: ${result.errorCode || 'failed'}` });
       counts.failed++;
     }
   }
