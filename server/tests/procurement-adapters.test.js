@@ -243,7 +243,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     });
     // cartRowChildrenHiddenFirst: inside a visible row, a hidden stale SKU / quantity copy precedes the shown one (r20 P2)
     // cartRowQtyTwoVisible: two VISIBLE quantity children — the input with the requested figure beside a label with SiteOne's adjustment (r21 P2); cartRowQtyTwoVisibleSame: both read the same
-    const child = (spec) => (spec.value != null && (st.cartRowQtyTwoVisible || st.cartRowQtyTwoVisibleSame)) ? el({ count: 2, nth: (i) => el({ count: 1, visible: true, value: i === 1 && st.cartRowQtyTwoVisible ? spec.value + 1 : spec.value }) }) : (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
+    const child = (spec) => (spec.value != null && (st.cartRowQtyTwoVisible || st.cartRowQtyTwoVisibleSame)) ? el({ count: 2, nth: (i) => (i === 1 && st.cartRowQtyTwoVisibleSame ? el({ count: 1, visible: true, text: ` ${spec.value} ` }) : el({ count: 1, visible: true, value: i === 1 && st.cartRowQtyTwoVisible ? spec.value + 1 : spec.value })) }) : (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
     // cartSkuInAttribute: the row's SKU node carries the code in data-product-code and shows unrelated text (r21 P2)
     // checkoutRowSwapAtClick: reading the row's SKU is the moment SiteOne replaces the row with a substitute product (S1-99 × same qty):
     // a re-resolving locator then reads the substitute's quantity beside the old SKU; the old row's handle is detached instead (r11 P1)
@@ -845,7 +845,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     }
   });
 
-  test('two VISIBLE quantity children that read differently are not a reading — the row proof fails closed; two that read the same pass (r21 P2)', async () => {
+  test('two VISIBLE quantity children that read differently are not a reading — the row proof fails closed; an input and a label reading the same value pass (r21 P2, hook P1)', async () => {
     const bad = fakeSiteOne({ cartRowQtyTwoVisible: true });
     await expect(s1.place(args(), bad.deps)).rejects.toMatchObject({ refuse: expect.stringMatching(/^(cart_mismatch|checkout_lines_mismatch)$/) });
     expect(bad.st.trialDone).toBeUndefined();

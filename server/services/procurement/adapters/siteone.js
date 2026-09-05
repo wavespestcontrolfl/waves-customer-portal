@@ -266,12 +266,14 @@ async function shownChild(rowHandle, selector) {
   const shown = [];
   for (const h of await rowHandle.$$(selector).catch(() => [])) if (await h.isVisible().catch(() => false)) shown.push(h);
   if (shown.length <= 1) return shown[0] || null;
+  // The VALUE is compared, not its DOM form: an input carrying "2" beside
+  // a label reading "2" is one reading (pre-push hook P1 on def020079).
   const reading = async (h) => {
     const attr = await h.getAttribute('data-product-code').catch(() => null);
-    if (attr) return `attr:${attr}`;
+    if (attr) return normalizeSku(attr);
     const value = await h.inputValue().catch(() => null);
-    if (value != null) return `value:${String(value).trim()}`;
-    return `text:${String(await h.textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim()}`;
+    const raw = value != null ? value : await h.textContent().catch(() => '');
+    return String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
   };
   const readings = new Set(await Promise.all(shown.map(reading)));
   return readings.size === 1 ? shown[0] : null;
