@@ -170,7 +170,13 @@ describe('notifyTechVisitChange', () => {
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
     prime({ visit: { ...VISIT, status: 'pending', source_action: 'voice_agent', technician_id: ADAM_ID } });
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    // Cancelled straight from pending: the row reads cancelled now, so the
+    // writer's pre-transition status is what keeps it silent.
+    prime({ visit: { ...VISIT, status: 'cancelled', source_action: 'voice_agent' } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1', previousStatus: 'pending' })).toEqual({ sent: false, skipped: 'stale' });
     expect(mockWriteCard).not.toHaveBeenCalled();
+    // A confirmed voice booking that is cancelled DOES tell its tech.
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1', previousStatus: 'confirmed' })).toEqual({ sent: true });
     // A pending row from any OTHER creator (announced at insert) still notifies.
     prime({ visit: { ...VISIT, status: 'pending', source_action: 'outbound_callback' } });
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: true });

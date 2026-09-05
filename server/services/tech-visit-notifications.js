@@ -222,12 +222,15 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
 // contradicts is dropped — the writer of the later change tells the tech
 // the current state, and the newest feed row is never stale. Returns the
 // row's holder (technicians.id or null) when the card stands, else false.
-function cardStands({ kind, technicianId, snapshot }, row) {
+function cardStands({ kind, technicianId, snapshot, previousStatus }, row) {
   // A voice-agent booking is silent until the office confirms it
   // (relay-booking.js: a pending office-review row is not yet real): a
   // reassignment, move, or cancel while it is still pending says nothing
-  // to anyone — the confirm hook announces it to whoever holds it then.
-  if (String(row.status) === 'pending' && row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION) return false;
+  // to anyone — the confirm hook announces it to whoever holds it then. A
+  // cancel reads `cancelled` by now, so the writer passes the status it
+  // transitioned FROM.
+  if (row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION
+    && (String(row.status) === 'pending' || String(previousStatus) === 'pending')) return false;
   const holder = row.technician_id ? String(row.technician_id) : null;
   const recipient = String(technicianId);
   if (kind === 'assigned' || kind === 'rescheduled') {
@@ -253,7 +256,7 @@ function cardStands({ kind, technicianId, snapshot }, row) {
  * lock when the card is written (writeCard). Never throws.
  */
 async function prepareNotice({
-  visitId, kind, technicianId, actorId = null, previous = null, snapshot = null, conn = db,
+  visitId, kind, technicianId, actorId = null, previous = null, snapshot = null, previousStatus = null, conn = db,
 } = {}) {
   try {
     if (!enabled()) return { ok: false, skipped: 'gate_off' };
@@ -274,6 +277,7 @@ async function prepareNotice({
       actorText,
       previous,
       snapshot,
+      previousStatus,
       type: TYPE_BY_KIND[kind],
       pushTitle: PUSH_TITLE_BY_KIND[kind],
     };
@@ -366,6 +370,8 @@ async function deliver(notices) {
  *                                       system label ('auto_dispatch', …)
  * @param {object|null} [args.previous]  { date, windowStart, windowEnd } —
  *                                       rescheduled only
+ * @param {string|null} [args.previousStatus]  cancelled only: the status the
+ *                                       writer transitioned from
  */
 async function runNotice(args = {}) {
   const notice = await prepareNotice(args);
@@ -457,7 +463,7 @@ function notifyVisitRescheduled({ visitId, technicianId, actorId = null, previou
  * processor, after its live-state compensation check) — the assigned tech
  * is read from the row.
  */
-function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, snapshot = null, trx = null } = {}) {
+function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, snapshot = null, previousStatus = null, trx = null } = {}) {
   if (!visitId) return null;
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
@@ -467,7 +473,7 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
       recipient = row?.technician_id || null;
     }
     if (!recipient) return;
-    await runNotice({ visitId, kind: 'cancelled', technicianId: recipient, actorId, snapshot });
+    await runNotice({ visitId, kind: 'cancelled', technicianId: recipient, actorId, snapshot, previousStatus });
   }, visitId);
 }
 

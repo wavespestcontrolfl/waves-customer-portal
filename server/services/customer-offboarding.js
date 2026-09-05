@@ -335,7 +335,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   // (another cancellation won after the preview) is a same-status repair:
   // its tech heard from that cancel, so no second card.
   if (String(fresh.status) !== 'cancelled') {
-    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null });
+    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null, previousStatus: fresh.status });
   }
   // No per-visit customer notice — the flow sends ONE combined
   // cancellation + refund email (owner ruling 2026-07-15); this also keeps

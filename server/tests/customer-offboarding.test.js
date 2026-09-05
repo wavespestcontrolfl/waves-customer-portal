@@ -349,8 +349,8 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
       expect(call[0]).toMatchObject({ suppressTechNotice: true });
     }
     expect(mockNotifyVisitCancelled.mock.calls.map((c) => c[0])).toEqual([
-      { visitId: 'v-1', actorId: 'tech-1' },
-      { visitId: 'v-2', actorId: 'tech-1' },
+      { visitId: 'v-1', actorId: 'tech-1', previousStatus: 'pending' },
+      { visitId: 'v-2', actorId: 'tech-1', previousStatus: 'confirmed' },
     ]);
 
     expect(mockRefundUnconsumed).toHaveBeenCalledWith({

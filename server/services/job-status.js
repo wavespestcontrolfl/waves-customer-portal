@@ -878,6 +878,7 @@ async function transitionJobStatus({
     void require('./tech-visit-notifications').notifyVisitCancelled({
       visitId: jobId, technicianId: adminPayload.tech_id, actorId: transitionedBy || null,
       snapshot: { date: adminPayload.scheduled_date, windowStart: adminPayload.window_start, windowEnd: adminPayload.window_end },
+      previousStatus: fromStatus,
       trx: trx || null,
     });
   }

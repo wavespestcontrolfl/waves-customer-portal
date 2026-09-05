@@ -1217,7 +1217,7 @@ async function processCancellationRequest({
         // reads "by the customer online" / "by <name>", and a staff member
         // cancelling their own visit stays silent.
         void require('./tech-visit-notifications').notifyVisitCancelled({
-          visitId: svc.id, actorId: actorType === 'customer' ? 'customer' : (actor?.userId || null),
+          visitId: svc.id, actorId: actorType === 'customer' ? 'customer' : (actor?.userId || null), previousStatus: svc.status,
         });
       }
     }

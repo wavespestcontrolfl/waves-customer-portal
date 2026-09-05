@@ -150,6 +150,9 @@ describe('transitionJobStatus → cancelled tech notice', () => {
     expect(mockNotifyVisitCancelled).toHaveBeenCalledWith({
       visitId: 'job-1', technicianId: 't-1', actorId: 'virginia',
       snapshot: { date: '2026-09-10', windowStart: '09:00', windowEnd: '11:00' },
+      // The status it transitioned FROM: a pending voice-agent booking cancelled
+      // before its office confirm stays silent (the row reads cancelled by now).
+      previousStatus: 'confirmed',
       trx: null,
     });
   });
@@ -320,13 +323,13 @@ describe('Codex r7 writers (source order)', () => {
 
   test('the cancellation processor names its actor (customer label or the acting staff row), never null', () => {
     const src = read('../services/cancellation-processor.js');
-    expect(src).toContain("visitId: svc.id, actorId: actorType === 'customer' ? 'customer' : (actor?.userId || null),");
+    expect(src).toContain("visitId: svc.id, actorId: actorType === 'customer' ? 'customer' : (actor?.userId || null), previousStatus: svc.status,");
     expect(src).not.toContain("notifyVisitCancelled({ visitId: svc.id, actorId: null })");
   });
 
   test('offboarding skips the cancel card on a same-status repair (row already cancelled when re-read)', () => {
     const src = read('../services/customer-offboarding.js');
-    expect(src).toContain("if (String(fresh.status) !== 'cancelled') {\n    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null });");
+    expect(src).toContain("if (String(fresh.status) !== 'cancelled') {\n    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null, previousStatus: fresh.status });");
   });
 
   test('Office Combine suppresses every tentative move (forward and rollback) and tells the holders after tryGroup() stands', () => {
