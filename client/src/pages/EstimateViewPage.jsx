@@ -29,7 +29,6 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
-import BrandFooter from '../components/BrandFooter';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
@@ -579,24 +578,17 @@ function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
 function Page({ children }) {
   return (
     <div style={{
-      minHeight: '100vh', background: ESTIMATE_BG,
+      flex: 1, background: ESTIMATE_BG,
       fontFamily: FONT_BODY, color: COLORS.navy,
       display: 'flex', flexDirection: 'column',
     }}>
       <EstimateGlassTheme active />
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
-      {/* Bottom padding: minimal — the pre-footer newsletter card is the
-          buffer under the last content card now (owner 2026-07-09: "close
-          the gap"), and it also gives the floating book bar something
-          non-critical to overlap at full scroll. */}
-      <div style={{ flex: 1, padding: '32px 20px 8px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* Bottom padding is the gap above the shell footer's rule. */}
+      <div style={{ flex: 1, padding: '32px 20px 40px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         {children}
       </div>
-      {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-      {/* Standard footer on estimates too (owner 2026-07-06) — same identity/
-          contact/socials/app-badge stack as every other customer page. */}
-      <BrandFooter />
     </div>
   );
 }
@@ -815,6 +807,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
   };
   const issuedDisplay = fmtDate(createdAt);
   const expiresDisplay = fmtDate(expiresAt);
+  const phone = useIsMobile(560);
   return (
     <div style={{ padding: '8px 0 24px' }}>
       <div style={{ ...HEADER_EYEBROW_STYLE, marginBottom: 8 }}>
@@ -833,7 +826,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         {headlineText}
       </h1>
       {subline ? (
-        <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
+        <p style={{ margin: '16px 0 0', fontSize: phone ? 15 : 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
           {subline}
         </p>
       ) : null}
@@ -874,6 +867,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
 }
 
 function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork = null, lockInCta = null }) {
+  const phone = useIsMobile(560);
   if (!intelligence) return null;
   const metrics = Array.isArray(intelligence.metrics) ? intelligence.metrics : [];
   const signals = Array.isArray(intelligence.signals) ? intelligence.signals : [];
@@ -948,20 +942,20 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
           {metrics.map((metric) => (
             <div
               key={`${metric.label}-${metric.value}`}
-              style={estimateInnerBox({ padding: '12px 12px' })}
+              style={estimateInnerBox({ padding: phone ? '10px 10px' : '12px 12px' })}
             >
               <div style={{
                 fontSize: 14,
                 color: ESTIMATE_MUTED,
                 textTransform: 'uppercase',
-                letterSpacing: '0.08em',
-                marginBottom: 4,
+                letterSpacing: phone ? '0.03em' : '0.06em',
+                marginBottom: 2,
               }}>
                 {metric.label}
               </div>
               <div style={{
                 fontFamily: FONTS.serif,
-                fontSize: 18,
+                fontSize: phone ? 15 : 16,
                 fontWeight: 500,
                 color: ESTIMATE_TEXT,
               }}>
@@ -1304,27 +1298,46 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
         </button>
       </form>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }} aria-label="Example questions">
-        {prompts.map((prompt) => (
+      <div
+        data-glass="soft"
+        role="list"
+        aria-label="Example questions"
+        style={{ display: 'grid', borderRadius: 10, border: '1px solid #CFE7F5', background: '#F8FCFE', padding: '0 14px' }}
+      >
+        {prompts.map((prompt, i) => (
+          <div key={prompt} role="listitem">
           <button
-            key={prompt}
             type="button"
             onClick={() => {
               setQuestion(prompt);
               ask(prompt);
             }}
             disabled={asking}
-            className="gc-section-cta"
             style={{
-              padding: '12px 16px', // >=40px hit height (touch audit 2026-07-06)
-              fontSize: 12,
-              fontWeight: 700,
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) auto',
+              alignItems: 'center',
+              gap: 12,
+              width: '100%',
+              minHeight: 44, // touch audit 2026-07-06
+              padding: '10px 0',
+              border: 0,
+              borderTop: i === 0 ? 0 : '1px solid rgba(4, 57, 94, 0.12)',
+              borderRadius: 0,
+              background: 'transparent',
+              color: ESTIMATE_TEXT,
+              fontSize: 14,
+              fontWeight: 500,
+              lineHeight: 1.35,
+              textAlign: 'left',
               cursor: asking ? 'not-allowed' : 'pointer',
               opacity: asking ? 0.65 : 1,
             }}
           >
-            {prompt}
+            <span>{prompt}</span>
+            <span aria-hidden="true" style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_MUTED }}>Ask ›</span>
           </button>
+          </div>
         ))}
       </div>
 
@@ -7964,8 +7977,8 @@ function EstimateViewPageInner() {
                   selectedFrequency={selectedFrequency}
                   serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
-                  cityLabel={estimateCity}
                   quickPick={seamlessAutoPay}
+                  cityLabel={estimateCity}
                 />
               </div>
             ) : (

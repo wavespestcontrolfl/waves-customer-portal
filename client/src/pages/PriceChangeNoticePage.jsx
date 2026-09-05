@@ -6,7 +6,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import PublicLoadError from '../components/PublicLoadError';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -42,7 +41,7 @@ const SURFACE = {
 const PRINT_STYLE = `
 @media print {
   body { background: white !important; }
-  .pcn-no-print { display: none !important; }
+  .pcn-no-print, [data-brand-footer] { display: none !important; }
   .pcn-card { box-shadow: none !important; border: none !important; }
 }
 `;
@@ -200,11 +199,8 @@ export default function PriceChangeNoticePage() {
       <style>{PRINT_STYLE}</style>
       <meta name="robots" content="noindex, nofollow" />
       <WavesShell variant="customer" topBar="solid">
-        <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
+        <div data-glass-clear="" style={{ flex: 1, background: SURFACE.page }}>
           {content}
-          <div className="pcn-no-print" style={{ maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', padding: `0 ${SP.md}px 40px`, fontFamily: DOC_FONT }}>
-            <BrandFooter />
-          </div>
         </div>
       </WavesShell>
     </>
