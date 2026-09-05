@@ -2625,7 +2625,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // assignment writer (tech-day fences, unassigned_overdue resolution,
   // dispatch broadcast). Each moved sibling is re-pointed AFTER its move
   // through alignMemberTechnician → assignDispatchJob instead.
-  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, technicianId: _tech, ...siblingBase } = options;
+  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, moveGuard: _moveGuard, technicianId: _tech, ...siblingBase } = options;
   // Landed state per member (date + window at the target) once its move
   // committed — the contract later member moves verify the row against.
   const landedState = {};

@@ -129,6 +129,40 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     the rebooker checks time/technician occupancy, so a different-time
  *     duplicate of the series would otherwise commit
  */
+/**
+ * Apply-time capability fence, run INSIDE the move transaction for every row
+ * that lands on `technicianId` (the tapped row via options.moveGuard, grouped
+ * members via options.memberGuard). The run's capability map is a start-of-run
+ * snapshot; the Team tab can turn a category Off mid-run, and Off is a HARD
+ * constraint — so the last fence reads the committed rows, never the snapshot,
+ * and regardless of whether the technician changed.
+ * Resolves, or throws `refuse(rowId, why)` for the first deactivated row.
+ */
+async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
+  if (!technicianId) return;
+  const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
+  if (!categories.length) return;
+  const caps = await trx('technician_capabilities')
+    .where({ technician_id: technicianId }).whereIn('service_category', categories)
+    .select('service_category', 'active');
+  const deactivated = new Set(caps.filter((c) => c.active === false).map((c) => c.service_category));
+  const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
+  if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
+}
+
+// The tapped row's own fence (standalone visits never reach the unit mover's
+// member guard). The receiving tech is the placement's, else the row's own.
+function makeMoveGuard({ service, best }) {
+  const refuse = (rowId, why) => Object.assign(
+    new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
+    { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
+  );
+  return async ({ trx, technicianId }) => {
+    const receiving = technicianId || best.technician_id || service.technician_id || null;
+    await assertCapabilitiesActive(trx, receiving, [service], refuse);
+  };
+}
+
 function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   const refuse = (memberId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: grouped service ${memberId} ${why}`),
@@ -205,21 +239,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
         .first('id');
       if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
     }
-    // Re-read the receiving tech's capabilities at apply time even when the
-    // tech is unchanged: the run's capability map was loaded at start, and the
-    // Team tab can turn a category Off mid-run (Off is a hard constraint, so
-    // the last fence must see the committed row, not the snapshot).
-    if (best.technician_id) {
-      const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
-      if (categories.length) {
-        const caps = await trx('technician_capabilities')
-          .where({ technician_id: best.technician_id }).whereIn('service_category', categories)
-          .select('service_category', 'active');
-        const deactivated = new Set(caps.filter((c) => c.active === false).map((c) => c.service_category));
-        const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
-        if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
-      }
-    }
+    // Every sibling against the receiving tech, committed rows, tech changed
+    // or not (see assertCapabilitiesActive).
+    await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);
   };
 }
 
@@ -236,6 +258,9 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // Every grouped member re-passes the apply-time hard guards under the
   // unit mover's stop lock, or the grouped move is refused (codex r13 P1).
   options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
+  // The tapped row itself re-passes the capability fence inside the rebooker's
+  // move transaction (a standalone visit has no member guard).
+  options.moveGuard = makeMoveGuard({ service, best });
 
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
   // reschedule() reloads it but only guards status — if staff locked/excluded it
@@ -454,4 +479,4 @@ async function unitMoveSize(service, best = null) {
   }
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard };
+module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, assertCapabilitiesActive };
