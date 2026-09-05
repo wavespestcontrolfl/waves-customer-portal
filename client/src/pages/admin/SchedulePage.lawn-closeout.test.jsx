@@ -9,6 +9,7 @@ const service = { id: 'test-visit', customerId: 'test-property', serviceType: 'E
 let submit;
 let planResolvers;
 let delayPlan;
+let mixAmount;
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -16,6 +17,7 @@ beforeEach(() => {
   window.history.replaceState({}, '', '/?completionImprovements=1');
   vi.stubGlobal('alert', vi.fn());
   delayPlan = false;
+  mixAmount = 15;
   planResolvers = [];
   submit = vi.fn().mockRejectedValue(new Error('Synthetic submit'));
   vi.stubGlobal('fetch', vi.fn(async (url) => {
@@ -26,7 +28,7 @@ beforeEach(() => {
     if (url.includes('lawn-assessment/history')) data = { history: [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }] };
     if (url.includes('treatment-plans')) {
       if (delayPlan) await new Promise((resolve) => { planResolvers.push(resolve); });
-      data = { plan: { protocol: {}, mixCalculator: { items: [{ product: products[0], mix: { ratePer1000: 3, rateUnit: 'fl_oz', amount: 15, amountUnit: 'fl_oz', treatedSqft: 5000 } }] } } };
+      data = { plan: { protocol: {}, mixCalculator: { items: [{ product: products[0], mix: { ratePer1000: 3, rateUnit: 'fl_oz', amount: mixAmount, amountUnit: 'fl_oz', treatedSqft: 5000 } }] } } };
     }
     if (url.includes('completion-actions')) data = { actions: [] };
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
@@ -82,4 +84,14 @@ it('preserves an intentionally empty product list restored before the plan arriv
   await screen.findByText('Assessment confirmed');
   await waitFor(() => expect(screen.queryByText('Loading treatment plan…')).toBeNull());
   expect(screen.queryByPlaceholderText('Total')).toBeNull();
+});
+
+it.each([false, true])('refreshes untouched plan defaults while preserving edits=%s', async (edited) => {
+  const view = mount();
+  await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe('15'));
+  if (edited) fireEvent.change(screen.getByPlaceholderText('Total'), { target: { value: '12' } });
+  mixAmount = 10;
+  view.rerender(<CompletionPanel service={{ ...service, id: 'plan-refresh' }} products={products} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('treatment-plans/plan-refresh'))).toBe(true));
+  await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe(edited ? '12' : '10'));
 });

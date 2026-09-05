@@ -962,3 +962,8 @@ test('a failed profile lookup cannot become a St. Augustine plan', async () => {
   };
   await expect(buildPlanForService('test-service', { db })).rejects.toThrow('Turf profile lookup failed');
 });
+
+test.each(['unknown', 'mixed'])('explicit %s turf never falls back to legacy St. Augustine', (grass_type) => {
+  const { selectProtocolVisit } = require('../services/waveguard-plan-engine');
+  expect(selectProtocolVisit({ grass_type }, new Date('2026-09-05T12:00:00Z'), 'St. Augustine').trackKey).toBeNull();
+});

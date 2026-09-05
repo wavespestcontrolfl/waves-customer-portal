@@ -4734,7 +4734,10 @@ export function ProtocolPanel({ service, onClose }) {
           : null;
       if (cancelled) return;
       const profile = profileResponse?.profile || null;
-      const recordedLawnTypes = [profile?.track_key, profile?.grass_type, service.lawnType, service.lawn_type];
+      const profileLawnTypes = [profile?.track_key, profile?.grass_type];
+      const recordedLawnTypes = profileLawnTypes.some((value) => String(value || "").trim())
+        ? profileLawnTypes
+        : [service.lawnType, service.lawn_type];
       const trackKey = isLawn && !failedSections.includes("Turf profile")
         ? recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean)
           || (recordedLawnTypes.some((value) => String(value || '').trim()) ? null : "st_augustine")
@@ -11055,15 +11058,19 @@ export function CompletionPanel({
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
-    if (!completionImprovements || !isLawn || lawnDefaultMixSeededRef.current || treatmentPlanLoading || lawnAssessmentReady === false) return;
-    if (!treatmentPlanMixItems.length || !products?.length) return;
-    if (selectedProducts.length) { lawnDefaultMixSeededRef.current = true; return; }
+    if (!completionImprovements || !isLawn || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
+    if (!products?.length) return;
+    const currentSnapshot = JSON.stringify(selectedProducts);
+    // Refresh only an untouched seed when today’s assessment changes the plan.
+    if (lawnDefaultMixSeededRef.current && currentSnapshot !== lawnDefaultMixSnapshotRef.current) return;
+    if (!lawnDefaultMixSeededRef.current && selectedProducts.length) { lawnDefaultMixSeededRef.current = true; return; }
     const rows = lawnPlanSelections(treatmentPlanMixItems, buildSelectedProduct);
-    if (!rows.length) return;
+    const nextSnapshot = JSON.stringify(rows);
+    if (nextSnapshot === currentSnapshot) return;
     lawnDefaultMixSeededRef.current = true;
     lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [completionImprovements, isLawn, treatmentPlanMixItems, treatmentPlanLoading, lawnAssessmentReady, products, selectedProducts]);
+  }, [completionImprovements, isLawn, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
     const area = areasServiced.join(", ");

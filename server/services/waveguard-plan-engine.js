@@ -973,10 +973,11 @@ function findNutrientProductsMissingConversions(items) {
 }
 
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null) {
-  const recorded = [profile?.track_key, profile?.grass_type, legacyGrass]
+  const profileRecorded = [profile?.track_key, profile?.grass_type]
     .some((value) => String(value || '').trim());
+  const recorded = profileRecorded || String(legacyGrass || '').trim();
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
-    || resolveTrackKey(null, normalizeGrassType(legacyGrass))
+    || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     || (recorded ? null : 'st_augustine');
   const track = trackKey ? protocols.lawn?.[trackKey] : null;
   const month = MONTH_ABBR[etParts(serviceDate).month - 1];

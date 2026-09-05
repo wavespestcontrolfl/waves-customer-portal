@@ -26,3 +26,11 @@ it('does not load a default protocol after a failed profile lookup', async () =>
   await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
   expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/programs'))).toBe(false);
 });
+
+it.each(['unknown', 'mixed'])('does not replace explicit %s turf with legacy St. Augustine', async (grass_type) => {
+  const fetchMock = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('turf-profile') ? { profile: { grass_type, lawn_sqft: 5000 } } : {} }));
+  vi.stubGlobal('fetch', fetchMock);
+  render(<ProtocolPanel service={{ id: 'test-visit', customerId: 'test-property', serviceType: 'Lawn Care', lawnSqft: 5000, lawnType: 'St. Augustine' }} onClose={() => {}} />);
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/equipment'))).toBe(true));
+  expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/lawn-mix') || url.includes('/protocols/programs'))).toBe(false);
+});
