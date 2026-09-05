@@ -50,7 +50,7 @@ describe('relay session → owed commitments', () => {
     expect(reconcileAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(reconcileAt);
     const site = conversation.slice(recordAt - 500, recordAt + 1000);
-    expect(site).toContain('if (updated && transcriptUpdate?.transcription) {');
+    expect(site).toContain('if ((updated || transferSalvaged) && transcriptUpdate?.transcription) {'); // the transfer's salvage qualifies too (PR 2A codex r2 P2)
     expect(site).toContain("isEnabled('callCommitments')");
     expect(site).toContain('transcript: transcriptUpdate.transcription,');
     expect(site).toContain("estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,");

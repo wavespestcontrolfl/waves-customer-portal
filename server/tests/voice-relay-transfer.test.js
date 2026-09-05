@@ -195,21 +195,42 @@ describe('the session side (relay-conversation tool ctx)', () => {
     expect(convo._ending).toBe(true);
   });
 
-  test('writeHandoff rides the owner fence and never overwrites a terminal outcome', async () => {
+  test('writeHandoff rides the owner fence and never overwrites a terminal outcome — unless the row already carries THIS attempt (codex r2 P1)', async () => {
     const db = require('../models/db');
-    const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
-    const update = jest.fn(async () => 1);
+    const termQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
+    const guardQ = { where: jest.fn((fn) => { fn(termQ); return guardQ; }), orWhereRaw: jest.fn().mockReturnThis() };
+    const update = jest.fn(async () => [{ context_available: 'true' }]);
     const builder = { update, where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }), whereRaw: jest.fn(() => builder) };
     db.mockReturnValue(builder);
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     const convo = new RelayConversation({ callSid: 'CA-w', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
-    const rows = await convo._buildToolCtx().writeHandoff({ intent: 'x', context_available: true });
-    expect(rows).toBe(1);
+    const res = await convo._buildToolCtx().writeHandoff({ intent: 'x', context_available: true, attempt: 'att-1' });
+    expect(res).toEqual({ rows: 1, contextAvailable: true });
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA-w');
-    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']); // one transfer per CallSid, enforced by the row
+    expect(termQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']); // one transfer per CallSid, enforced by the row
+    // …OR the row already holds this attempt's packet (a timed-out write that landed): matched, left as-is.
+    expect(guardQ.orWhereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff'->>'attempt'"), ['att-1']);
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-1']);
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: 'ai_transferred' }));
-    expect(update.mock.calls[0][0].metadata.bindings[0]).toContain('"relay_handoff"');
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: 'ai_transferred' }), expect.any(Array));
+    const meta = update.mock.calls[0][0].metadata;
+    expect(meta.sql).toMatch(/^CASE WHEN .*attempt.* THEN metadata ELSE/);
+    expect(meta.bindings[0]).toBe('att-1');
+    expect(meta.bindings[1]).toContain('"relay_handoff"');
+  });
+
+  test('every packet carries a fresh attempt nonce and the carrier attestation beside the tier (codex r2 P1s)', () => {
+    const a = transfer.buildHandoffPacket({ intent: 'x' }, { verificationTier: 'full', callerAttested: true });
+    const b = transfer.buildHandoffPacket({ intent: 'x' }, { verificationTier: 'full' });
+    expect(a.attempt).toMatch(/^[0-9a-f-]{36}$/);
+    expect(a.attempt).not.toBe(b.attempt);
+    expect(a.caller_attested).toBe(true);
+    expect(b.caller_attested).toBe(false);
+    const convo = new RelayConversation({ callSid: 'CA-att', from: '+19415551234', send: jest.fn() });
+    convo._callerVerified = true;
+    convo._callerContext = { tier: 'full', attested: true };
+    expect(convo._buildToolCtx().handoffFacts()).toMatchObject({ verificationTier: 'full', callerAttested: true });
+    convo._callerContext = { tier: 'full' };
+    expect(convo._buildToolCtx().handoffFacts().callerAttested).toBe(false);
   });
 
   test('ai_transferred is terminal for the socket reconcile and handled for the missed-call bell', () => {
@@ -241,6 +262,77 @@ describe('codex r1 follow-ups', () => {
     const { listTriggers, TRIGGER_REGISTRY } = require('../services/notification-triggers');
     expect(listTriggers().some((t) => t.key === 'sandy_transfer_no_context')).toBe(true);
     expect((TRIGGER_REGISTRY || {}).sandy_transfer_no_context?.techVisible).toBe(true);
+  });
+});
+
+describe('codex r2 follow-ups', () => {
+  test('a timed-out full write that LANDED is reconciled by the fallback: transfer proceeds WITH context, no bell (P1)', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const writeHandoff = jest.fn().mockRejectedValueOnce(new Error('pool stalled')).mockResolvedValueOnce({ rows: 1, contextAvailable: true });
+    const { ctx } = ctxFor({ writeHandoff });
+    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, ctx)).toMatch(/Transferring the caller/);
+    expect(writeHandoff).toHaveBeenCalledTimes(2);
+    expect(writeHandoff.mock.calls[1][0].attempt).toBe(writeHandoff.mock.calls[0][0].attempt); // the same nonce — the fallback recognizes its own packet
+    await new Promise((r) => setImmediate(r));
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
+  });
+
+  test('a transfer mid-round skips the remaining tools in the SAME response and starts no further model round (P2)', async () => {
+    let IsolatedConvo;
+    const stream = jest.fn(() => ({
+      finalMessage: async () => ({
+        content: [
+          { type: 'tool_use', id: 't1', name: 'transfer_to_office', input: { intent: 'x' } },
+          { type: 'tool_use', id: 't2', name: 'capture_lead', input: { name: 'Pat' } },
+        ],
+        stop_reason: 'tool_use',
+      }),
+    }));
+    const executeToolMock = jest.fn(async (name, input, ctx) => { if (name === 'transfer_to_office') ctx.endForTransfer(); return 'ok'; });
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream } }; });
+      jest.doMock('../services/voice-agent/relay-tools', () => ({ TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: executeToolMock }));
+      IsolatedConvo = require('../services/voice-agent/relay-conversation').RelayConversation;
+    });
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-mid', from: '+19415551234', send: jest.fn(), endSession });
+    await convo._runLoop('transfer me').catch(() => {});
+    expect(stream).toHaveBeenCalledTimes(1);
+    expect(executeToolMock).toHaveBeenCalledTimes(1);
+    expect(executeToolMock.mock.calls[0][0]).toBe('transfer_to_office');
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'transfer' }));
+    const last = convo.messages[convo.messages.length - 1];
+    expect(last.role).toBe('user');
+    expect(last.content.map((r) => r.tool_use_id)).toEqual(['t1', 't2']); // the history stays well-formed
+    expect(last.content[1].content).toMatch(/Not run/);
+  });
+
+  test('a transferred row\'s salvaged transcript still records Sandy\'s commitments; a relay_failed salvage does not (P2)', async () => {
+    const db = require('../models/db');
+    const calls = [];
+    const builder = {
+      where: jest.fn(() => builder), whereIn: jest.fn(() => builder), whereNull: jest.fn(() => builder), orWhereNotIn: jest.fn(() => builder),
+      whereRaw: jest.fn(() => builder), whereNotIn: jest.fn(() => builder), first: jest.fn(async () => null), select: jest.fn(() => builder),
+      update: jest.fn(async (patch) => { calls.push(patch); return calls.length === 1 ? 0 : 1; }), // reconcile: 0 rows (terminal); salvage: 1
+    };
+    db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => undefined) }));
+    const recordRelayCommitments = jest.fn(async () => ({ found: true, written: 1 }));
+    jest.doMock('../services/call-commitments', () => ({ recordRelayCommitments }));
+    for (const [transferRequested, expectedCalls] of [[true, 1], [false, 0]]) {
+      calls.length = 0; recordRelayCommitments.mockClear();
+      const convo = new RelayConversation({ callSid: 'CA-sal', sessionKey: 'nonce-s', from: '+19415551234', send: jest.fn() });
+      convo._transferRequested = transferRequested;
+      convo.leadCaptured = true; // the capture floor is not under test
+      convo._recordTurn('user', 'I want to cancel');
+      convo._recordTurn('agent', 'Someone will call you back today.');
+      await convo.end('transfer');
+      expect(recordRelayCommitments).toHaveBeenCalledTimes(expectedCalls);
+    }
+    jest.dontMock('../config/feature-gates');
+    jest.dontMock('../services/call-commitments');
   });
 });
 

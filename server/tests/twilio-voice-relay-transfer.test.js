@@ -95,11 +95,15 @@ describe('/relay-complete', () => {
     builder.update = jest.fn(() => new Promise(() => {})); // pool stalled
     const res = mockRes();
     const p = handlerFor('/relay-complete')({ body: { CallSid: 'CA-hung', HandoffData: TRANSFER }, query: {} }, res);
-    await jest.advanceTimersByTimeAsync(2000);
+    await jest.advanceTimersByTimeAsync(4000); // the claim deadline, then the voicemail stamp's own deadline (both bounded)
     await p;
     jest.useRealTimers();
     expect(res.body).toContain('<Record');
     expect(res.body).not.toContain('<Dial');
+    // The row is re-classified as voicemail (bounded, best-effort) — the
+    // recorder's /voicemail-complete never does, so an unconfirmed ring
+    // must not stay reported as a successful transfer (codex r2 P1).
+    expect(builder.update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
     // A DB error on the claim takes the same non-duplicating path.
     const { builder: b2 } = primeDb();
     b2.update = jest.fn(async () => { throw new Error('pool down'); });
@@ -107,6 +111,7 @@ describe('/relay-complete', () => {
     await handlerFor('/relay-complete')({ body: { CallSid: 'CA-err', HandoffData: TRANSFER }, query: {} }, res2);
     expect(res2.body).toContain('<Record');
     expect(res2.body).not.toContain('<Dial');
+    expect(b2.update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
   });
 
   test('transfer with no staff numbers configured ⇒ voicemail (never a stranded caller)', async () => {

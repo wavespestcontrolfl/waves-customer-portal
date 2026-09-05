@@ -807,7 +807,17 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       return;
     }
     if (!(Number(claimed) > 0)) {
+      // The recorder's action is /voicemail-complete, which never
+      // re-classifies: stamp voicemail here (bounded, best-effort) so a
+      // transfer that reached nobody is not reported as a success (codex r2 P1).
       logger.error(`[relay-complete] transfer ring claim ${claimed} for ${maskSid(callSid)} — voicemail instead of an unconfirmed ring`);
+      await withDeadline(
+        db('call_log').where('twilio_call_sid', callSid)
+          .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+          .catch((err) => logger.warn(`[relay-complete] unconfirmed-ring voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        STAMP_DEADLINE_MS,
+      );
+      queueVoiceMessageSync(callSid);
       appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
       return;
     }

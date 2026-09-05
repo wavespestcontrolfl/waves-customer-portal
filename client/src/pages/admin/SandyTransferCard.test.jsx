@@ -18,6 +18,7 @@ describe("SandyTransferCard", () => {
         handoff={{
           context_available: true,
           verification_tier: "full",
+          caller_attested: true,
           intent: "billing dispute",
           summary: "June invoice charged twice, wants a refund",
           unresolved_question: "refund timing",
@@ -38,6 +39,12 @@ describe("SandyTransferCard", () => {
     expect(screen.getByText(/get_invoice_history failed/)).toHaveClass("text-alert-fg");
     expect(screen.getByText("estimate")).toBeInTheDocument();
     expect(screen.getByText("4")).toBeInTheDocument();
+  });
+
+  it("an ANI-only primary-number match is a recognized number, never a verified caller (codex r2 P1)", () => {
+    render(<SandyTransferCard handoff={{ context_available: true, verification_tier: "full", caller_attested: false, intent: "x" }} />);
+    expect(screen.getByText("Recognized primary number")).toBeInTheDocument();
+    expect(screen.queryByText("Verified caller")).not.toBeInTheDocument();
   });
 
   it("renders the context-unavailable state", () => {

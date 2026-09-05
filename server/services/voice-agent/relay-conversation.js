@@ -1448,6 +1448,9 @@ class RelayConversation {
         verificationTier: convo._callerVerified === true
           ? ((convo._callerContext && convo._callerContext.tier === 'full') ? 'full' : 'redacted')
           : 'unverified',
+        // The carrier's word (STIR/SHAKEN A) rides beside the tier: an ANI
+        // match alone is spoofable, and the card must not call it verified.
+        callerAttested: !!(convo._callerContext && convo._callerContext.attested === true),
         from: this.from || null,
         language: this.language || null,
         factsCollected: { ...(convo._estimateFields || {}) },
@@ -1741,6 +1744,18 @@ class RelayConversation {
           const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
           this._toolOutcomes.push({ name: block.name, ok: !sentinel && toolCtx.toolFailed !== true });
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
+          // A transfer (or any end) inside this round ends the SESSION: no
+          // further tool in the same response may run — a booking or capture
+          // after the handoff would be a write absent from the packet — and
+          // no further model round starts (codex r2 P2). The skipped blocks
+          // still get a tool_result so the history stays well-formed.
+          if (this._ending || this.ended) {
+            logger.info(`[voice-relay] session ending mid-round callSid=${this.callSid} — remaining tools skipped, no further model round`);
+            const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
+            results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the call is ending.' })));
+            this.messages.push({ role: 'user', content: results });
+            return;
+          }
         }
         this.messages.push({ role: 'user', content: results });
         continue; // let the model respond to the tool result
@@ -1947,7 +1962,12 @@ class RelayConversation {
         // estimate — become owed commitments the office works from the
         // same queue as human calls. Read from the SCRUBBED transcript the
         // reconcile just wrote, never the raw turns. Best-effort, gated.
-        if (updated && transcriptUpdate?.transcription) {
+        // A transferred row's transcript lands through the salvage leg
+        // (ai_transferred is terminal); Sandy's pre-transfer promises must
+        // reach the Owed queue from there too (codex r2 P2) — only the
+        // transfer's salvage, never a relay_failed row's or the sandbox's.
+        const transferSalvaged = salvaged > 0 && this._transferRequested === true && this.sandbox !== true;
+        if ((updated || transferSalvaged) && transcriptUpdate?.transcription) {
           try {
             const { isEnabled } = require('../../config/feature-gates');
             if (isEnabled('callCommitments')) {

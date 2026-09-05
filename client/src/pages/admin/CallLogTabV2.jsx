@@ -334,7 +334,10 @@ function StatButton({ label, value, filter, active, onClick, alert }) {
 // Sandy PR 2A — the handoff packet a transferred call carries on
 // metadata.relay_handoff (server-built by relay-transfer.js). Compact,
 // read-only; the list already returns metadata, so no new endpoint.
-const TIER_LABEL = { full: "Verified caller", redacted: "Recognized number", unverified: "Unverified" };
+// An ANI match is spoofable: "Verified" needs the carrier's attestation on
+// top of the primary-number match; a bare match is a recognized number.
+const TIER_LABEL = { full: "Recognized primary number", redacted: "Recognized number", unverified: "Unverified" };
+const tierLabel = (h) => (h.verification_tier === "full" && h.caller_attested === true ? "Verified caller" : TIER_LABEL[h.verification_tier] || "Unverified");
 export function SandyTransferCard({ handoff }) {
   if (!handoff || typeof handoff !== "object") return null;
   const noContext = handoff.context_available !== true;
@@ -351,7 +354,7 @@ export function SandyTransferCard({ handoff }) {
     <div className="mt-1.5 ml-8 p-2 bg-zinc-50 border-hairline rounded-md" data-testid="sandy-transfer-card">
       <div className="flex items-center justify-between gap-2 mb-1">
         <span className="text-13 md:text-11 text-ink-tertiary font-medium">Sandy transfer</span>
-        <Badge tone="neutral">{TIER_LABEL[handoff.verification_tier] || "Unverified"}</Badge>
+        <Badge tone="neutral">{tierLabel(handoff)}</Badge>
       </div>
       {noContext ? (
         <div className="text-14 md:text-12 text-ink-secondary">

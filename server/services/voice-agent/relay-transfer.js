@@ -106,7 +106,11 @@ function buildHandoffPacket(input = {}, facts = {}) {
   const tools = Array.isArray(facts.tools) ? facts.tools.map((t) => ({ name: String(t.name || '').slice(0, 40), ok: t.ok === true })) : [];
   const commitments = Array.isArray(facts.commitments) ? facts.commitments : [];
   return {
+    // This attempt's nonce: a write that times out but lands later is
+    // recognized by the fallback as OUR packet (see writeHandoffPacket).
+    attempt: require('crypto').randomUUID(),
     verification_tier: facts.verificationTier || 'unverified',
+    caller_attested: facts.callerAttested === true,
     from: facts.from || null,
     language: facts.language || null,
     intent: lineClamp(input.intent, 12) || null,
@@ -148,14 +152,34 @@ function transferWhisper(handoff, fallbackName = '') {
  * row count (0 = already terminal / transferred, or owned elsewhere).
  */
 async function writeHandoffPacket(db, { callSid, packet, fence = (q) => q, terminal = [] }) {
+  // Attempt-fenced (codex r2 P1): Promise.race cannot cancel a queued
+  // UPDATE, so a write classified as timed out may still land. The row is
+  // matched when it is not yet terminal OR when it already carries THIS
+  // attempt's packet — and in that second case the statement leaves the
+  // packet as it is (the fallback then confirms the earlier write instead
+  // of refusing it). The returned context_available says which landed.
+  const attempt = String(packet && packet.attempt ? packet.attempt : '');
   const q = db('call_log')
     .where('twilio_call_sid', callSid)
-    .where((w) => w.whereNull('call_outcome').orWhereNotIn('call_outcome', terminal));
-  return fence(q).update({
+    .where((w) => w
+      .where((n) => n.whereNull('call_outcome').orWhereNotIn('call_outcome', terminal))
+      .orWhereRaw("(metadata->'relay_handoff'->>'attempt') = ?", [attempt]));
+  const rows = await fence(q).update({
     call_outcome: 'ai_transferred',
-    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_handoff: packet })]),
+    metadata: db.raw(
+      "CASE WHEN (metadata->'relay_handoff'->>'attempt') = ? THEN metadata ELSE COALESCE(metadata, '{}'::jsonb) || ?::jsonb END",
+      [attempt, JSON.stringify({ relay_handoff: packet })],
+    ),
     updated_at: new Date(),
-  });
+  }, [db.raw("(metadata->'relay_handoff'->>'context_available') AS context_available")]);
+  const list = Array.isArray(rows) ? rows : [];
+  return { rows: Array.isArray(rows) ? rows.length : Number(rows) || 0, contextAvailable: list.length > 0 && String(list[0] && list[0].context_available) === 'true' };
+}
+
+/** Row count from a writeHandoff result (a count, or { rows, contextAvailable }). */
+function writeRows(res) {
+  if (res && typeof res === 'object') return Number(res.rows) || 0;
+  return Number(res) || 0;
 }
 
 function withTimeout(promise, ms, fallback) {
@@ -195,7 +219,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // callback offer below is the better outcome (hook P1s).
   let wrote = await writePacketBounded(ctx, packet);
   if (wrote === 'failed') wrote = await recordNoContext(ctx, packet, facts);
-  if (wrote !== 'written') {
+  if (wrote !== 'written' && wrote !== 'reconciled') {
     logger.warn(`[voice-relay] transfer refused (${wrote}) — row not owned, already terminal, or storage unconfirmed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     return 'The transfer could not be started on this call. Do NOT try again — take their details with capture_lead '
       + 'and say a Waves team member will call them back.';
@@ -216,12 +240,12 @@ async function writePacketBounded(ctx, packet) {
   if (typeof ctx.writeHandoff !== 'function') return 'failed';
   const { maskSid } = require('../twilio-failure-alerts');
   try {
-    const rows = await withTimeout(Promise.resolve(ctx.writeHandoff(packet)), PACKET_WRITE_TIMEOUT_MS, 'timeout');
-    if (rows === 'timeout') {
-      logger.warn(`[voice-relay] transfer packet write timed out callSid=${maskSid(ctx.callSid)} — transferring without context`);
+    const res = await withTimeout(Promise.resolve(ctx.writeHandoff(packet)), PACKET_WRITE_TIMEOUT_MS, 'timeout');
+    if (res === 'timeout') {
+      logger.warn(`[voice-relay] transfer packet write timed out callSid=${maskSid(ctx.callSid)} — confirming through the fallback`);
       return 'failed';
     }
-    return Number(rows) > 0 ? 'written' : 'rejected';
+    return writeRows(res) > 0 ? 'written' : 'rejected';
   } catch (err) {
     logger.error(`[voice-relay] transfer packet write failed callSid=${maskSid(ctx.callSid)}: ${err.message}`);
     return 'failed';
@@ -238,8 +262,13 @@ async function writePacketBounded(ctx, packet) {
 async function recordNoContext(ctx, packet, facts) {
   let status = 'failed';
   try {
-    const rows = await withTimeout(Promise.resolve(ctx.writeHandoff({ ...packet, summary: null, unresolved_question: null, facts_collected: {}, tools: [], commitments: [], context_available: false })), NO_CONTEXT_WRITE_TIMEOUT_MS, 'timeout');
-    if (rows !== 'timeout') status = Number(rows) > 0 ? 'written' : 'rejected';
+    const res = await withTimeout(Promise.resolve(ctx.writeHandoff({ ...packet, summary: null, unresolved_question: null, facts_collected: {}, tools: [], commitments: [], context_available: false })), NO_CONTEXT_WRITE_TIMEOUT_MS, 'timeout');
+    if (res !== 'timeout') {
+      // 'reconciled' = the earlier (timed-out) full write had landed: the
+      // row carries THIS attempt's packet with context — no bell.
+      if (writeRows(res) > 0) status = res && typeof res === 'object' && res.contextAvailable === true ? 'reconciled' : 'written';
+      else status = 'rejected';
+    }
   } catch { /* storage down: unconfirmed */ }
   if (status !== 'written' || ctx.sandbox === true) return status;
   // Detached (never on the caller's path or the tool budget) and DEDUPED per
