@@ -47,14 +47,21 @@ describeOrSkip('agent runs: concurrent starts on PostgreSQL', () => {
   const live = (handles) => handles.filter((h) => !h.inert);
   const held = (handles) => handles.filter((h) => h.held);
 
-  test('a new key: exactly one of two simultaneous starts opens attempt 1, the other is held', async () => {
-    const both = await Promise.all([runs.startRun(args('new')), runs.startRun(args('new'))]);
+  test('a new key: exactly one of two simultaneous starts opens attempt 1, the other is held — and the loser leaves no work item (each supplied its own)', async () => {
+    const both = await Promise.all([
+      runs.startRun({ ...args('new'), workItem: { sourceRef: 'new-a', title: 'A' } }),
+      runs.startRun({ ...args('new'), workItem: { sourceRef: 'new-b', title: 'B' } }),
+    ]);
     expect(live(both)).toHaveLength(1);
     expect(held(both)).toHaveLength(1);
-    expect(held(both)[0].held).toMatchObject({ runId: live(both)[0].id, attemptNo: 1 });
+    expect(held(both)[0].held).toMatchObject({ reason: 'in_progress', runId: live(both)[0].id, attemptNo: 1 });
     const row = await db('agent_runs').where({ source_system: SRC, source_run_id: 'new' }).first();
     expect(row).toMatchObject({ attempts: 1, lifecycle: 'running' });
     expect(await db('agent_attempts').where({ run_id: row.id }).count({ n: '*' }).first()).toMatchObject({ n: '1' });
+    // the work item is minted only once the start owns the run: the loser's never exists (Codex r17)
+    const items = await db('work_items').where({ source_system: SRC });
+    expect(items).toHaveLength(1);
+    expect(row.work_item_id).toBe(items[0].id);
     await live(both)[0].finish({ result: 'succeeded' });
   });
 
@@ -66,7 +73,7 @@ describeOrSkip('agent runs: concurrent starts on PostgreSQL', () => {
     expect(live(both)).toHaveLength(1);
     expect(live(both)[0].attemptNo).toBe(2);
     expect(held(both)).toHaveLength(1);
-    expect(held(both)[0].held).toMatchObject({ runId: a.id, attemptNo: 2 });
+    expect(held(both)[0].held).toMatchObject({ reason: 'in_progress', runId: a.id, attemptNo: 2 });
     const attempts = await db('agent_attempts').where({ run_id: a.id }).orderBy('attempt_no');
     expect(attempts.map((x) => [x.attempt_no, x.error_code])).toEqual([[1, 'superseded'], [2, null]]);
     await live(both)[0].finish({ result: 'succeeded' });

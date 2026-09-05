@@ -173,7 +173,7 @@ async function upsertWorkItem(conn, args, laneId, policy) {
   return row ? row.id : null;
 }
 
-async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
+async function insertRun(conn, args, laneId, policy, traceId, now) {
   const sourceSystem = clip(args.sourceSystem, 60);
   const sourceRunId = clip(args.sourceRunId, 180);
   const lease = new Date(now.getTime() + policy.stall_after_ms);
@@ -184,7 +184,7 @@ async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
   const retryable = !!args.idempotencyKey && !NO_RETRY_CLASSES.has(policy.side_effect_class);
   await conn('agent_runs')
     .insert({
-      work_item_id: workItemId,
+      work_item_id: null, // bound by bindOnce once the start owns the run (Codex r17)
       lane_id: laneId,
       workflow_id: clip(args.workflowId, 80),
       agent_version_id: args.agentVersionId || null,
@@ -274,14 +274,27 @@ async function openAttempt(conn, run, policy, now) {
 // for a retry, and its lease unexpired — a worker is still heartbeating it
 // (a crashed worker's lease lapses after the policy's stall_after_ms).
 const WAITING = new Set(['waiting_human', 'waiting_external']);
-function isHeld(run, now) {
-  if (!(Number(run.attempts || 0) > 0) || ['terminal', 'queued'].includes(run.lifecycle)) return false;
-  // a parked attempt (wait()) stopped extending its lease on purpose: it is
-  // owned until resume / finish / fail / supersede, however long the human
-  // or the external party takes — the heartbeat lease is a RUNNING
-  // worker's liveness, not a wait's deadline (Codex r16)
-  if (WAITING.has(run.lifecycle)) return true;
-  return !!run.lease_expires_at && new Date(run.lease_expires_at).getTime() > now.getTime();
+// Why a start on an EXISTING run may not open an attempt (null = it may):
+//   in_progress  the current attempt is live — parked in a wait (wait()
+//                stopped extending its lease on purpose: owned until resume /
+//                finish / fail / supersede, however long the human or the
+//                external party takes; Codex r16), or running with its lease
+//                unexpired (a RUNNING worker's liveness; it lapses after
+//                stall_after_ms = crashed) (Codex r15)
+//   completed    the run is terminal — its outcome is recorded; a repeated
+//                queue delivery must not reopen it (Codex r17)
+//   exhausted    a lapsed attempt at the cap: fail() would not have queued a
+//                retry, so a restart must not either — max_attempts = 1 on a
+//                money / irreversible lane is the whole point (Codex r17)
+// A queued retry (fail() schedules it only under the cap) and a lapsed
+// attempt under the cap reopen. `supersede: true` overrides every reason.
+function refusalOf(run, now) {
+  if (!(Number(run.attempts || 0) > 0)) return null;
+  if (run.lifecycle === 'terminal') return 'completed';
+  if (run.lifecycle === 'queued') return null;
+  if (WAITING.has(run.lifecycle)) return 'in_progress';
+  if (run.lease_expires_at && new Date(run.lease_expires_at).getTime() > now.getTime()) return 'in_progress';
+  return Number(run.attempts) >= Number(run.max_attempts || 1) ? 'exhausted' : null;
 }
 
 // A later start's work item / agent version / workflow bind ON THE ROW,
@@ -297,18 +310,42 @@ async function bindOnce(trx, run, fields, now) {
   Object.assign(run, patch);
 }
 
-function refuse(run) {
-  logger.warn(`[agent-runs] startRun held: ${run.source_system}/${run.source_run_id} attempt ${run.attempts} is ${run.lifecycle} on ${run.worker_id || 'unknown worker'}${WAITING.has(run.lifecycle) ? '' : ` until ${new Date(run.lease_expires_at).toISOString()}`}`);
-  return { held: run };
-}
 
 // The handle a refused start gets: inert (writes nothing) and `held` names
-// the live attempt, so runManaged can refuse the body.
-function heldHandle(args, run) {
+// the reason and the run that holds the key, so runManaged can refuse the body.
+function heldHandle(args, run, reason) {
   return Object.freeze({
     ...inertHandle(args),
-    held: { runId: run.id, attemptNo: Number(run.attempts), workerId: run.worker_id || null, leaseExpiresAt: new Date(run.lease_expires_at) },
+    held: {
+      reason, runId: run.id, attemptNo: Number(run.attempts), lifecycle: run.lifecycle, result: run.result || null,
+      workerId: run.worker_id || null, leaseExpiresAt: run.lease_expires_at ? new Date(run.lease_expires_at) : null,
+    },
   });
+}
+
+function refuse(run, reason) {
+  // ids and states only — safe to log in full, and rare enough not to rate-limit
+  logger.warn(`[agent-runs] startRun refused (${reason}): ${run.source_system}/${run.source_run_id} attempt ${run.attempts} is ${run.lifecycle}${run.result ? ` / ${run.result}` : ''} on ${run.worker_id || 'unknown worker'}`);
+  return { held: run, reason };
+}
+
+// The refusals a start meets before it may touch anything, every read
+// LOCKED for the transaction: the run under this source key, then the run
+// that already holds this idempotency key under ANOTHER source key — that
+// insert would hit the separate UNIQUE (idempotency_key) and throw, and a
+// thrown start degrades to an inert handle whose body still runs, so the
+// key meant to make retries safe would fail OPEN (Codex r17).
+async function refusalBefore(trx, args, now) {
+  const sourceSystem = clip(args.sourceSystem, 60);
+  const sourceRunId = clip(args.sourceRunId, 180);
+  const existing = await trx('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).forUpdate().first();
+  const reason = existing ? refusalOf(existing, now) : null;
+  if (reason && !args.supersede) return { existing, refused: refuse(existing, reason) };
+  if (args.idempotencyKey) {
+    const byKey = await trx('agent_runs').where({ idempotency_key: clip(args.idempotencyKey, 260) }).forUpdate().first();
+    if (byKey && (byKey.source_system !== sourceSystem || byKey.source_run_id !== sourceRunId)) return { existing, refused: refuse(byKey, 'idempotency_conflict') };
+  }
+  return { existing, refused: null };
 }
 
 /**
@@ -316,16 +353,19 @@ function heldHandle(args, run) {
  *            traceId?, idempotencyKey?, maxAttempts?, agentVersionId?,
  *            summary?, link?, supersede? })
  * Requires laneId or workflowId (CHECK constraint) and sourceSystem +
- * sourceRunId (UNIQUE key). Returns a handle; never throws. A second start
- * on a source key whose attempt is still LIVE — running with its lease
- * unexpired, or parked in a wait — is refused: the returned handle is
- * inert with `held` set, and nothing (no work item either) is written for
- * it — superseding it would only rewrite the ledger while the first
- * worker's body keeps running or waits, so the business operation could
- * run twice (Codex r15 / r16). `supersede: true` is the explicit override
- * for a manual replay (the S4 watchdog's stall handling is the other way
- * out of a wait whose worker died). A queued retry, a terminal run and an
- * expired lease on a running attempt (crashed worker) reopen as a new attempt.
+ * sourceRunId (UNIQUE key). Returns a handle; never throws. A start is
+ * REFUSED — the handle is inert with `held.reason` set and nothing (no work
+ * item either) is written for it — when the key's attempt is live
+ * (`in_progress`: running with its lease unexpired, or parked in a wait),
+ * when the run is terminal (`completed`), when a lapsed attempt sits at its
+ * cap (`exhausted`), or when the idempotency key already belongs to another
+ * source run (`idempotency_conflict`): reopening would rewrite the ledger
+ * while the operation runs, waits, or is already done, so it could run
+ * twice (Codex r15–r17). `supersede: true` is the explicit override for a
+ * manual replay of this key's run (never of an idempotency conflict); the
+ * S4 watchdog's stall handling is the other way out of a wait whose worker
+ * died. A queued retry and a lapsed attempt under the cap reopen as a new
+ * attempt.
  */
 async function startRun(args = {}) {
   if (!runGateOn()) return inertHandle(args);
@@ -350,17 +390,18 @@ async function startRun(args = {}) {
   // or not at all: a crash between the counter bump and the attempt insert
   // would otherwise leave a run whose current attempt has no row.
   const opened = await guarded('startRun', () => db.transaction(async (trx) => {
-    // The existing run first, LOCKED for the transaction: a start refused
-    // for a live attempt leaves nothing behind — not even a work item
-    // minted for the refused start (Codex r16). Two starts on a NEW key
-    // both miss here and serialize on insertRun's locked read instead.
-    const existing = await trx('agent_runs').where({ source_system: clip(args.sourceSystem, 60), source_run_id: clip(args.sourceRunId, 180) }).forUpdate().first();
-    if (existing && isHeld(existing, now) && !args.supersede) return refuse(existing);
-    const workItemId = await upsertWorkItem(trx, args, laneId, policy);
-    const run = existing || await insertRun(trx, args, laneId, policy, workItemId, traceId, now);
+    // A refused start leaves nothing behind — not even a work item minted
+    // for it (Codex r16 / r17): the work item is upserted and bound only
+    // once ownership is established. Two starts on a NEW key both miss the
+    // locked lookup and serialize on insertRun's locked read instead.
+    const { existing, refused } = await refusalBefore(trx, args, now);
+    if (refused) return refused;
+    const run = existing || await insertRun(trx, args, laneId, policy, traceId, now);
     if (!run) throw new Error('run row missing after insert');
     // the new-key race: the row insertRun read was the other start's
-    if (isHeld(run, now) && !args.supersede) return refuse(run);
+    const late = refusalOf(run, now);
+    if (late && !args.supersede) return refuse(run, late);
+    const workItemId = await upsertWorkItem(trx, args, laneId, policy);
     await bindOnce(trx, run, { work_item_id: workItemId, agent_version_id: args.agentVersionId, workflow_id: clip(args.workflowId, 80) }, now);
     // A reopened run keeps ITS lane and policy: the persisted row decides
     // (a money lane cannot be reopened under a read-only one and gain a
@@ -375,7 +416,7 @@ async function startRun(args = {}) {
     return { run, attemptId, attemptNo, workItemId: run.work_item_id, laneId: persistedLane, policy: runPolicy };
   }));
   if (!opened) return inertHandle(args);
-  if (opened.held) return heldHandle(args, opened.held);
+  if (opened.held) return heldHandle(args, opened.held, opened.reason);
   // a reopened run keeps the trace its ledger rows already carry
   return liveHandle({ ...opened, traceId: opened.run.trace_id || traceId, workflowId: opened.run.workflow_id || null, agentVersionId: opened.run.agent_version_id || null });
 }
@@ -716,11 +757,13 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
  */
 async function runManaged(startArgs, fn) {
   const handle = await startRun(startArgs);
-  // a held start never runs the body: the operation is already in flight
-  // on another worker (code `run_in_progress`; `supersede: true` overrides)
+  // a refused start never runs the body: the operation is in flight on
+  // another worker, already done, out of attempts, or another source run's
+  // under this idempotency key (code `run_<reason>`; `supersede: true`
+  // overrides all but the idempotency conflict)
   if (handle.held) {
-    const err = new Error(`run in progress: ${clip(startArgs.sourceSystem, 60)}/${clip(startArgs.sourceRunId, 180)} attempt ${handle.held.attemptNo} is live until ${handle.held.leaseExpiresAt.toISOString()}`);
-    err.code = 'run_in_progress';
+    const err = new Error(`run ${handle.held.reason.replace(/_/g, ' ')}: ${clip(startArgs.sourceSystem, 60)}/${clip(startArgs.sourceRunId, 180)} — attempt ${handle.held.attemptNo} is ${handle.held.lifecycle}${handle.held.result ? ` / ${handle.held.result}` : ''}`);
+    err.code = `run_${handle.held.reason}`;
     err.held = handle.held;
     throw err;
   }

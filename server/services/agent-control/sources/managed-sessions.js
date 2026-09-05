@@ -13,9 +13,9 @@ const SOURCE = 'managed_sessions';
 // recordSessionUsage inserts AFTER the runner finishes AND after its usage
 // GET. The session's start is its FIRST turn's: the recorder persists the
 // start the runner captured (started_at; the session row's is the LEAST
-// across its turns — Codex r12: created_at − latency_ms drifts late by the
-// whole fetch, up to its timeout). Rows recorded before that column derive
-// it: the first turn row's recording time minus its own latency (the
+// across its RECORDED turns — Codex r12: created_at − latency_ms drifts
+// late by the whole fetch, up to its timeout). Rows recorded before that
+// column derive it: the first turn row's recording time minus its own latency (the
 // session row's latency_ms is GREATEST across turns, so a longer later turn
 // would move a start derived from it — and with it an already-paged row
 // behind its cursor; pre-push audit), else the session row's own.
@@ -31,7 +31,10 @@ const SOURCE = 'managed_sessions';
 const TURNS = "FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref";
 const TURN_START = 'COALESCE(t.started_at, t.created_at - make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0))';
 const FIRST_TURN_START = `(SELECT ${TURN_START} ${TURNS} ORDER BY ${TURN_START} ASC LIMIT 1)`;
-const SESSION_START = `COALESCE(started_at, ${FIRST_TURN_START}, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))`;
+// LEAST, not COALESCE-first: a session that already had turns before the
+// column existed carries the FIRST POST-COLUMN turn's start on its row,
+// while the earlier turns are still reconstructable from their rows (Codex r17)
+const SESSION_START = `COALESCE(LEAST(started_at, ${FIRST_TURN_START}), created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))`;
 // the page key: the session row's recording time, immutable (SESSION_START
 // can move earlier when a re-record recovers a first turn; Codex r14); the
 // window is judged on LAST_TURN

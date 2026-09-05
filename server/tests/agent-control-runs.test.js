@@ -212,7 +212,7 @@ describe('start / step / finish', () => {
     store.agent_runs[0].verification = 'passed';
     store.work_items = [{ id: 'wi-1', status: 'done' }];
     store.agent_runs[0].work_item_id = 'wi-1';
-    const b = await runs.startRun(base);
+    const b = await runs.startRun({ ...base, supersede: true }); // a replay of a terminal run is explicit (Codex r17)
     expect(b.id).toBe(a.id);
     expect(b.attemptNo).toBe(2);
     expect(b.traceId).toBe(a.traceId); // the persisted trace, not a fresh one
@@ -298,7 +298,7 @@ describe('start / step / finish', () => {
     const check = migration.match(/work_items_status_chk CHECK \(status IN \(([^)]*)\)\)/)[1].match(/'([a-z_]+)'/g).map((k) => k.replace(/'/g, ''));
     for (const s of Object.values(runs.WORK_ITEM_STATUS)) expect(check).toContain(s);
     store.work_items[0].status = 'open';
-    const b = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    const b = await runs.startRun({ ...base, workItem: { sourceRef: 'w' }, supersede: true });
     await b.finish({ result: 'errored' });
     expect(store.work_items[0].status).toBe('open');
   });
@@ -338,6 +338,41 @@ describe('start / step / finish', () => {
 });
 
 describe('concurrent starts', () => {
+  test('a terminal run and a lapsed attempt at its cap are refused (completed / exhausted) until supersede; runManaged names the reason (Codex r17)', async () => {
+    const a = await runs.startRun(base);
+    await a.finish({ result: 'succeeded' });
+    const again = await runs.startRun(base); // a repeated queue delivery
+    expect(again.held).toMatchObject({ reason: 'completed', runId: a.id, lifecycle: 'terminal', result: 'succeeded' });
+    expect(runRow().attempts).toBe(1);
+    await expect(runs.runManaged(base, async () => 'ran')).rejects.toMatchObject({ code: 'run_completed', held: { reason: 'completed' } });
+    expect((await runs.startRun({ ...base, supersede: true })).attemptNo).toBe(2);
+    // at the cap: a lapsed attempt does not reopen — fail() would not have queued it either (max_attempts = 1 on an irreversible lane is the point)
+    const one = await runs.startRun({ ...base, sourceRunId: 'one', idempotencyKey: 'k-one', maxAttempts: 1 });
+    crash(store.agent_runs.find((r) => r.source_run_id === 'one'));
+    expect((await runs.startRun({ ...base, sourceRunId: 'one', idempotencyKey: 'k-one', maxAttempts: 1 })).held).toMatchObject({ reason: 'exhausted', runId: one.id, attemptNo: 1 });
+    await expect(runs.runManaged({ ...base, sourceRunId: 'one', idempotencyKey: 'k-one' }, async () => 'ran')).rejects.toMatchObject({ code: 'run_exhausted' });
+    expect(store.agent_attempts.filter((x) => x.run_id === one.id)).toHaveLength(1);
+  });
+
+  test('an idempotency key already held by another source run refuses the start — never an inert handle whose body runs (Codex r17)', async () => {
+    const a = await runs.startRun(base); // k1 on r1
+    const body = jest.fn(async () => 'ran');
+    await expect(runs.runManaged({ ...base, sourceRunId: 'r-other' }, body)).rejects.toMatchObject({ code: 'run_idempotency_conflict', held: { runId: a.id, reason: 'idempotency_conflict' } });
+    expect(body).not.toHaveBeenCalled();
+    expect(store.agent_runs).toHaveLength(1);
+    // supersede replays THIS key's run; it never crosses to another source run's key
+    expect((await runs.startRun({ ...base, sourceRunId: 'r-other', supersede: true })).held).toMatchObject({ reason: 'idempotency_conflict' });
+    expect(mockWarn.mock.calls.some((c) => /refused \(idempotency_conflict\)/.test(c[0]))).toBe(true);
+  });
+
+  test('the work item is minted only after the start owns the run, so a refused start cannot leave one behind (Codex r17)', async () => {
+    await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    const runInsert = state.ops.indexOf('agent_runs:insert');
+    expect(runInsert).toBeGreaterThan(-1);
+    expect(state.ops.indexOf('work_items:insert')).toBeGreaterThan(runInsert);
+    expect(runRow().work_item_id).toBe(store.work_items[0].id);
+  });
+
   test('a refused start mints no work item for the live run; the same later start binds it once the attempt lapsed (Codex r16)', async () => {
     const a = await runs.startRun(base);
     expect(runRow().work_item_id).toBeNull();
@@ -358,13 +393,13 @@ describe('concurrent starts', () => {
     expect(runRow().workflow_id).toBeNull();
     expect(a.workflowId).toBeNull();
     await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
-    const b = await runs.startRun({ ...base, workflowId: 'nightly_sweep' });
+    const b = await runs.startRun({ ...base, workflowId: 'nightly_sweep', supersede: true });
     expect(runRow().workflow_id).toBe('nightly_sweep');
     expect(b.workflowId).toBe('nightly_sweep');
     expect(await b.step({ key: 's' }, async () => context.current().workflowId)).toBe('nightly_sweep');
     await b.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
     // the persisted workflow wins over a later request
-    const c = await runs.startRun({ ...base, workflowId: 'other' });
+    const c = await runs.startRun({ ...base, workflowId: 'other', supersede: true });
     expect(runRow().workflow_id).toBe('nightly_sweep');
     expect(c.workflowId).toBe('nightly_sweep');
   });
@@ -380,7 +415,7 @@ describe('concurrent starts', () => {
     expect(state.ops.slice(ops).filter((o) => /:update$/.test(o))).toEqual([]);
     expect(store.agent_attempts).toHaveLength(1);
     expect(events(a.id)).toEqual(['started']);
-    expect(mockWarn.mock.calls.some((c) => /startRun held/.test(c[0]))).toBe(true);
+    expect(mockWarn.mock.calls.some((c) => /refused \(in_progress\)/.test(c[0]))).toBe(true);
     // the held handle writes nothing, and its step still runs the wrapped work
     expect(await b.finish({ result: 'succeeded' })).toBeNull();
     expect(runRow()).toMatchObject({ lifecycle: 'running', attempts: 1 });
@@ -467,7 +502,7 @@ describe('a spent handle', () => {
     await a.heartbeat({ progress: true });
     expect(runRow().progress_sequence).toBe(2);
     await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
-    const b = await runs.startRun(base);
+    const b = await runs.startRun({ ...base, supersede: true });
     expect(runRow().progress_sequence).toBe(0);
     await b.heartbeat({ progress: true });
     expect(runRow().progress_sequence).toBe(1);
@@ -494,7 +529,7 @@ describe('a spent handle', () => {
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded' });
     expect(events(a.id)).toEqual(['started', 'finished']);
     // fail: the same — no half-persisted retry state
-    const b = await runs.startRun({ ...base, sourceRunId: 'r2', maxAttempts: 3 });
+    const b = await runs.startRun({ ...base, sourceRunId: 'r2', idempotencyKey: 'k-r2', maxAttempts: 3 });
     state.failNext = 'run_events';
     const r = await b.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: true });
     expect(r).toEqual({ retry: false, failureClass: 'provider', result: null, stale: false, persisted: false });
@@ -530,7 +565,7 @@ describe('a spent handle', () => {
     let mark = state.ops.length;
     await a.finish({});
     expect(order(mark)).toEqual(['agent_runs', 'agent_attempts']);
-    const b = await runs.startRun(base); // reopen: run first, then the open attempts, then the new attempt row
+    const b = await runs.startRun({ ...base, supersede: true }); // reopen: run first, then the open attempts, then the new attempt row
     expect(order(mark).slice(2, 4)).toEqual(['agent_runs', 'agent_attempts']);
     mark = state.ops.length;
     await b.fail({ error: new Error('x'), errorCode: 'openai_500' });
@@ -553,7 +588,7 @@ describe('a spent handle', () => {
     await runs.runManaged(base, async () => { state.failNext = 'run_events'; return 1; });
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded' });
     expect(events(runRow().id)).toEqual(['started', 'finished']);
-    await expect(runs.runManaged({ ...base, sourceRunId: 'r2', maxAttempts: 3 }, async () => { state.failNext = 'run_events'; const e = new Error('x'); e.code = 'openai_500'; e.retryable = true; throw e; })).rejects.toThrow('x');
+    await expect(runs.runManaged({ ...base, sourceRunId: 'r2', idempotencyKey: 'k-r2', maxAttempts: 3 }, async () => { state.failNext = 'run_events'; const e = new Error('x'); e.code = 'openai_500'; e.retryable = true; throw e; })).rejects.toThrow('x');
     expect(store.agent_runs.find((r) => r.source_run_id === 'r2')).toMatchObject({ lifecycle: 'queued', error_code: 'openai_500' });
   });
 
@@ -581,13 +616,13 @@ describe('a spent handle', () => {
     expect(a.agentVersionId).toBe('ver-1');
     await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
     let seen = null;
-    await runs.runManaged({ ...base, agentVersionId: 'ver-2' }, async (h) => { seen = { ctx: context.current().agentVersionId, handle: h.agentVersionId }; });
+    await runs.runManaged({ ...base, agentVersionId: 'ver-2', supersede: true }, async (h) => { seen = { ctx: context.current().agentVersionId, handle: h.agentVersionId }; });
     expect(seen).toEqual({ ctx: 'ver-1', handle: 'ver-1' });
     expect(runRow().agent_version_id).toBe('ver-1');
-    const c = await runs.startRun({ ...base, sourceRunId: 'r2' });
+    const c = await runs.startRun({ ...base, sourceRunId: 'r2', idempotencyKey: 'k-r2' });
     expect(c.agentVersionId).toBeNull();
     await c.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
-    const d = await runs.startRun({ ...base, sourceRunId: 'r2', agentVersionId: 'ver-3' });
+    const d = await runs.startRun({ ...base, sourceRunId: 'r2', idempotencyKey: 'k-r2', agentVersionId: 'ver-3', supersede: true });
     expect(d.agentVersionId).toBe('ver-3');
     expect(store.agent_runs.find((r) => r.source_run_id === 'r2').agent_version_id).toBe('ver-3');
   });
@@ -597,7 +632,7 @@ describe('a spent handle', () => {
     expect(a.workItemId).toBeNull();
     expect(runRow().work_item_id).toBeNull();
     await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
-    const b = await runs.startRun({ ...base, workItem: { sourceRef: 'entity-9', entityType: 'lead', entityId: '9', title: 'Lead 9' } });
+    const b = await runs.startRun({ ...base, workItem: { sourceRef: 'entity-9', entityType: 'lead', entityId: '9', title: 'Lead 9' }, supersede: true });
     expect(b.workItemId).toBe(store.work_items[0].id);
     expect(runRow().work_item_id).toBe(store.work_items[0].id);
     await b.finish({});
@@ -642,7 +677,7 @@ describe('fail and retry', () => {
     const money = Object.entries(require('../services/agent-control/lane-policies').LANE_RUNTIME).find(([, p]) => runs.NO_RETRY_CLASSES.has(p.side_effect_class))[0];
     const a = await runs.startRun({ laneId: money, sourceSystem: SRC, sourceRunId: 'mm', idempotencyKey: 'kmm', maxAttempts: 3 });
     await a.fail({ error: new Error('x') });
-    const b = await runs.startRun({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'mm', idempotencyKey: 'kmm', maxAttempts: 3 });
+    const b = await runs.startRun({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'mm', idempotencyKey: 'kmm', maxAttempts: 3, supersede: true });
     expect(b.laneId).toBe(money);
     expect(runRow().lane_id).toBe(money);
     expect((await b.fail({ error: new Error('y'), retryable: true })).retry).toBe(false);
@@ -657,7 +692,7 @@ describe('fail and retry', () => {
   });
 
   test('an explicit failure class outside the taxonomy is classified from the code instead', async () => {
-    const h = await runs.startRun({ ...base, sourceRunId: 'fc' });
+    const h = await runs.startRun({ ...base, sourceRunId: 'fc', idempotencyKey: 'k-fc' });
     expect((await h.fail({ errorCode: 'openai_500', failureClass: 'typo' })).failureClass).toBe('provider');
   });
 
@@ -671,16 +706,16 @@ describe('fail and retry', () => {
     const m = await runs.startRun({ laneId: money[0], sourceSystem: SRC, sourceRunId: 'm', idempotencyKey: 'km', maxAttempts: 3 });
     expect(store.agent_runs.find((r) => r.source_run_id === 'm').max_attempts).toBe(1);
     expect((await m.fail({ error: new Error('x'), retryable: true })).retry).toBe(false);
-    const nr = await runs.startRun({ ...base, sourceRunId: 'nr', maxAttempts: 3 });
+    const nr = await runs.startRun({ ...base, sourceRunId: 'nr', idempotencyKey: 'k-nr', maxAttempts: 3 });
     expect((await nr.fail({ error: new Error('x'), retryable: false })).retry).toBe(false);
   });
 
   test('result follows the class: timeout → timed_out, budget_exhausted code → budget_exhausted; quality classes raise an eval candidate; messages are sanitized', async () => {
-    const t = await runs.startRun({ ...base, sourceRunId: 't' });
+    const t = await runs.startRun({ ...base, sourceRunId: 't', idempotencyKey: 'k-t' });
     expect((await t.fail({ error: new Error('slow'), errorCode: 'timeout_budget_exhausted' })).result).toBe('timed_out');
-    const b = await runs.startRun({ ...base, sourceRunId: 'b' });
+    const b = await runs.startRun({ ...base, sourceRunId: 'b', idempotencyKey: 'k-b' });
     expect((await b.fail({ errorCode: 'budget_exhausted' })).result).toBe('budget_exhausted');
-    const q = await runs.startRun({ ...base, sourceRunId: 'q' });
+    const q = await runs.startRun({ ...base, sourceRunId: 'q', idempotencyKey: 'k-q' });
     await q.fail({ error: new Error('bad 941-555-0100'), failureClass: 'incorrect' });
     expect(events(q.id)).toEqual(['started', 'failed', 'eval_candidate']);
     expect(store.agent_runs.find((r) => r.source_run_id === 'q').error_message).toBe('bad [redacted-number]');
@@ -704,14 +739,14 @@ describe('runManaged', () => {
   test('a reopened managed run scopes its work under the persisted lane, not the requested one', async () => {
     const a = await runs.startRun({ laneId: 'lead_triage', sourceSystem: SRC, sourceRunId: 'rm' });
     await a.finish({});
-    const seen = await runs.runManaged({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'rm' }, async (h) => ({ lane: context.current().laneId, handleLane: h.laneId }));
+    const seen = await runs.runManaged({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'rm', supersede: true }, async (h) => ({ lane: context.current().laneId, handleLane: h.laneId }));
     expect(seen).toEqual({ lane: 'lead_triage', handleLane: 'lead_triage' });
   });
 
   test('a plain return finishes succeeded; a throw fails the run (retryable flag honoured) and re-throws unchanged', async () => {
-    expect(await runs.runManaged({ ...base, sourceRunId: 'p' }, async () => 42)).toBe(42);
+    expect(await runs.runManaged({ ...base, sourceRunId: 'p', idempotencyKey: 'k-p' }, async () => 42)).toBe(42);
     const err = Object.assign(new Error('nope'), { code: 'openai_429', retryable: true });
-    await expect(runs.runManaged({ ...base, sourceRunId: 'e', maxAttempts: 2 }, async () => { throw err; })).rejects.toBe(err);
+    await expect(runs.runManaged({ ...base, sourceRunId: 'e', idempotencyKey: 'k-e', maxAttempts: 2 }, async () => { throw err; })).rejects.toBe(err);
     expect(store.agent_runs.find((r) => r.source_run_id === 'e')).toMatchObject({ lifecycle: 'queued', failure_class: 'provider', error_code: 'openai_429' });
   });
 
