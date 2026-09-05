@@ -634,9 +634,39 @@ describe('PR review r4', () => {
   const failing = (fail, rows = []) => {
     const chain = {};
     for (const m of ['where', 'whereNotIn', 'orderBy', 'select', 'limit', 'modify', 'whereIn']) chain[m] = () => chain;
+    chain.orderByRaw = (sql) => { chain.orderByRawSql = sql; return chain; };
     chain.catch = (fn) => (fail ? Promise.resolve(fn(new Error('db down'))) : Promise.resolve(rows));
     return chain;
   };
+
+  test('open requests are read urgent-first so the three-row cutoff never hides an urgent one (hook P1)', async () => {
+    const chains = {};
+    const dbh = (table) => { chains[table] = failing(false); return chains[table]; };
+    await jobCard._test.loadOpenIssues(dbh, 'c1');
+    expect(chains.service_requests.orderByRawSql).toBe("CASE WHEN urgency = 'urgent' THEN 0 ELSE 1 END");
+  });
+
+  test('the searched dose runs the approval engine strict; a failed approval read withholds the dose (hook P1)', async () => {
+    const { mixForProduct } = jobCard;
+    const visit = { id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care', assigned_equipment_system_id: null, assigned_calibration_id: null };
+    const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-08-01' };
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], distributor_product_map: [] };
+    const dbh = (table) => {
+      const chain = {};
+      for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'orderBy', 'select', 'modify', 'andWhere', 'join', 'leftJoin', 'limit']) chain[m] = () => chain;
+      chain.first = () => Promise.resolve((rows[table] || [])[0] || null);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      return chain;
+    };
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [] } });
+    const evaluateApprovals = jest.fn().mockRejectedValue(new Error('rotation read failed'));
+    const out = await mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, now: new Date('2026-09-04T12:00:00Z') });
+    expect(evaluateApprovals.mock.calls[0][1]).toMatchObject({ strict: true });
+    expect(out.amount).toBeNull();
+    expect(out.planBlocks[0].code).toBe('approvals_unavailable');
+  });
 
   test('a failed open-requests read fails the card (503), never "nothing open" (P1)', async () => {
     const dbh = (table) => failing(table === 'service_requests');

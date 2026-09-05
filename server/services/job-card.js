@@ -204,6 +204,9 @@ async function loadOpenIssues(dbh, customerId) {
     dbh('service_requests')
       .where({ customer_id: customerId })
       .whereNotIn('status', OPEN_REQUEST_TERMINAL)
+      // Urgent first: three newer routine requests must never push an
+      // older urgent one past the cutoff.
+      .orderByRaw("CASE WHEN urgency = 'urgent' THEN 0 ELSE 1 END")
       .orderBy('created_at', 'desc')
       .select('subject', 'category', 'urgency', 'created_at')
       .limit(3)
@@ -804,6 +807,7 @@ function precautionText(product) {
  * plan; other lines come from the matched protocol visit's catalog hints.
  */
 const PLAN_UNAVAILABLE = { code: 'plan_unavailable', message: 'Lawn plan unavailable right now.' };
+const APPROVALS_UNAVAILABLE = { code: 'approvals_unavailable', message: 'Approval checks unavailable right now.' };
 
 /** { plan } or { plan: null, error } — a failed build is its own block. */
 async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date() } = {}) {
@@ -1085,7 +1089,11 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
         plan: plan.plan,
         products: [{ productId: product.id, name: product.name, rate: ratePer1000, rateUnit }],
         serviceDate: etCalendarDayOf(svc.scheduled_date || now),
-      }).catch((err) => { logger.warn(`[job-card] approval check failed: ${err.message}`); return { blocks: [PLAN_UNAVAILABLE] }; })).blocks.map((b) => ({ code: b.code || null, message: clean(b.message, 200) })),
+        // strict: the engine's own reads (catalog, rotation, turf profile)
+        // throw instead of reading as "nothing to block" — a failed safety
+        // lookup withholds the dose.
+        strict: true,
+      }).catch((err) => { logger.warn(`[job-card] approval check failed: ${err.message}`); return { blocks: [APPROVALS_UNAVAILABLE] }; })).blocks.map((b) => ({ code: b.code || null, message: clean(b.message, 200) })),
     ]
     : [];
   const planBlocks = [...planWide, ...productBlocks];
