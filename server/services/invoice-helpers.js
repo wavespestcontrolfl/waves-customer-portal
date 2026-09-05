@@ -49,17 +49,20 @@ const VISIT_NEVER_RAN_STATUSES = Object.freeze(['cancelled', 'canceled', 'no_sho
 // held visit row means staff is editing that very visit right now — PG
 // answers 55P03 immediately and the caller's transaction rolls back whole;
 // the operator retries once the edit lands.
-async function visitRefusesSettlement(trx, scheduledServiceId) {
-  if (!scheduledServiceId) return null;
-  let visit;
+async function lockVisitForSettlement(trx, scheduledServiceId, columns) {
   try {
-    visit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().noWait().first('id', 'status');
+    return await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().noWait().first(...columns);
   } catch (err) {
     if (err?.code !== '55P03') throw err;
     const busy = new Error("This invoice's visit is being edited right now — nothing was recorded. Retry in a moment.");
     busy.statusCode = 409; busy.isOperational = true; busy.code = 'visit_busy';
     throw busy;
   }
+}
+
+async function visitRefusesSettlement(trx, scheduledServiceId) {
+  if (!scheduledServiceId) return null;
+  const visit = await lockVisitForSettlement(trx, scheduledServiceId, ['id', 'status']);
   const status = invoiceStatusKey(visit?.status);
   return VISIT_NEVER_RAN_STATUSES.includes(status) ? status : null;
 }
@@ -147,6 +150,7 @@ module.exports = {
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,
+  lockVisitForSettlement,
   assertInvoiceCollectible,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,

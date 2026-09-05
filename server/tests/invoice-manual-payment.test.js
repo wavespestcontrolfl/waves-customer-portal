@@ -265,6 +265,35 @@ describe('recordManualPayment — refusal contract', () => {
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   });
 
+  test('requireSelfPay: a visit held by a concurrent schedule edit (NOWAIT 55P03) on the payer-source lock → 409 visit_busy before any resolution (Codex #3882 r4 P2)', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
+    rowIsSelfPayDue.mockResolvedValue(true);
+    let paymentsInsert = null;
+    let noWaitUsed = false;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] });
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
+        if (table === 'scheduled_services') {
+          const r = recorder();
+          r.noWait = jest.fn(() => { noWaitUsed = true; return r; });
+          r.first = jest.fn(async () => { const e = new Error('could not obtain lock on row'); e.code = '55P03'; throw e; });
+          return r;
+        }
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.code).toBe('visit_busy');
+    expect(noWaitUsed).toBe(true);
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
   test('the Zelle predicates refuse on the PRE-LOCK read before the Stripe session is retired (a bad match never cancels a live checkout)', async () => {
     StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_live', status: 'requires_payment_method' });
     // amount moved before the call: 409, no PI retire, no transaction

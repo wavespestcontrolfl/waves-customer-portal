@@ -63,7 +63,7 @@ const InvoiceService = require('./invoice');
 const PaymentPlans = require('./payment-plans');
 const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement } = require('./invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
 
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 const VALID_RECEIPT_CHANNELS = ['email', 'sms', 'both'];
@@ -240,9 +240,12 @@ async function recordManualPayment(id, {
       // point at (an inactive payer resolves as self-pay; a concurrent
       // re-activation must wait) so no reassignment can commit between this
       // read and the paid flip. Lock order: invoice → customer → visit → payer.
+      // The visit lock is NOWAIT (Codex #3882 r4 P2): this is the first
+      // visit acquisition on the self-pay path, so a blocking wait here
+      // would recreate the invoice↔visit cycle the fence below avoids.
       const cust = await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id', 'payer_id');
       const visit = locked.scheduled_service_id
-        ? await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forUpdate().first('id', 'payer_id')
+        ? await lockVisitForSettlement(trx, locked.scheduled_service_id, ['id', 'payer_id'])
         : null;
       const payerIds = [...new Set([cust?.payer_id, visit?.payer_id].filter(Boolean))];
       if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
