@@ -54,7 +54,12 @@ jest.mock('../services/prep-guide-sender', () => ({
   nextUpcomingVisit: jest.fn(),
   settleHeldEnrollment: jest.fn(async () => {}),
 }));
-jest.mock('../services/project-email', () => ({ ensureServicePrepToken: jest.fn() }));
+jest.mock('../services/project-email', () => ({
+  ensureServicePrepToken: jest.fn(),
+  // The email path's scrubbed customer-facing title (fee cues + recorded
+  // amounts) — the composer must go through it, never the raw column.
+  projectTitle: jest.fn((project) => `[safe] ${project.title}`),
+}));
 // The report viewer's own segment parser is real; the vanity path builder
 // (which numbers the customer's reports through the DB) is stubbed.
 jest.mock('../services/project-report-links', () => ({
@@ -1100,9 +1105,13 @@ describe('buildProjectReportLink', () => {
     expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
     expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/project/dana-${'f'.repeat(12)}`);
-    expect(r.line).toBe(`Here is your Termite Treatment report: ${r.url}\n\n`);
+    // The title rides the email path's type-gated fee scrub (projectTitle),
+    // in the line and in the toast payload alike (GH Codex #3893 r4 P1).
+    const { projectTitle } = require('../services/project-email');
+    expect(projectTitle).toHaveBeenCalledWith(ISSUED);
+    expect(r.line).toBe(`Here is your [safe] Termite Treatment report: ${r.url}\n\n`);
     expect(r.immediateOnly).toBe(true);
-    expect(r.projectReport).toEqual({ id: 'p-ok', title: 'Termite Treatment', projectType: 'termite', projectDate: '2026-08-10' });
+    expect(r.projectReport).toEqual({ id: 'p-ok', title: '[safe] Termite Treatment', projectType: 'termite', projectDate: '2026-08-10' });
   });
 
   test('no issued report (or only held ones) → reason', async () => {

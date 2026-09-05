@@ -2013,7 +2013,11 @@ async function buildProjectReportLink(customerIds) {
   const path = await require('./project-report-links').projectReportPathForProject(db, project, customer || {});
   if (!path) return { url: null, line: '', reason: 'No project report on this account yet' };
   const url = `${publicPortalUrl()}${path}`;
-  const title = String(project.title || '').trim() || 'project';
+  // The email path's own customer-facing title: a legacy or deploy-window
+  // title can carry the inspection fee literally or as a bare amount, and
+  // projectTitle runs the same type-gated cue + recorded-amount scrub the
+  // public /data headline does (GH Codex #3893 r4 P1). Reads findings.
+  const title = require('./project-email').projectTitle(project);
   return {
     url,
     line: `Here is your ${title} report: ${url}\n\n`,
