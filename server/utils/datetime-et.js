@@ -32,7 +32,12 @@ function parseETDateTime(input) {
   const guessOffset = offsetAt(utcGuess);
   const first = utcGuess + guessOffset;
   const settled = offsetAt(first);
-  return new Date(settled === guessOffset ? first : utcGuess + settled);
+  if (settled === guessOffset) return new Date(first);
+  // A wall clock that does not exist (02:xx on spring-forward day) fails the
+  // round trip under the settled offset; keep the forward candidate, as the
+  // single-pass helper always did, rather than land an hour BEFORE it.
+  const second = utcGuess + settled;
+  return new Date(second - offsetAt(second) === utcGuess ? second : first);
 }
 
 function formatETDay(dt) {

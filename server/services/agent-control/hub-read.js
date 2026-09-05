@@ -138,6 +138,9 @@ function laneAggregates(from, to) {
     db.raw('COALESCE(SUM(cache_write_tokens), 0)::bigint AS cache_write_tokens'),
     db.raw('COALESCE(SUM(output_tokens), 0)::bigint AS output_tokens'),
     db.raw('COALESCE(SUM(reasoning_tokens), 0)::bigint AS reasoning_tokens'),
+    // rows whose usage GET failed carry null counters (an unknown number, not
+    // a false zero) — the sums above skip them, so say how many they skipped
+    db.raw('COUNT(*) FILTER (WHERE input_tokens IS NULL)::int AS usage_unknown_rows'),
     db.raw('(percentile_disc(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE latency_ms IS NOT NULL))::int AS p50_latency_ms'),
     db.raw('(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE latency_ms IS NOT NULL))::int AS p95_latency_ms'),
     db.raw('MAX(created_at) AS last_active_at'),
@@ -157,7 +160,13 @@ function recentAggregates(since, to) {
 
 // Fallback rate lives on the chain rows (one per dispatchWithFallback chain,
 // `fallback_used` when the primary leg missed); call rows only know their
-// own provider.
+// own provider. Chain rows are written under GATE_LLM_DISPATCH_METRICS, a
+// gate independent of the call ledger's: off → no current chain rows, so
+// the read skips them and reports fallbackRate null with
+// basis.chainRecording = false (Codex r6).
+function chainRecording() {
+  return gateEnvValue('GATE_LLM_DISPATCH_METRICS');
+}
 function chainAggregates(from, to) {
   return db(TABLE)
     .where('row_kind', 'chain')
@@ -212,7 +221,7 @@ async function loadLedger(window, now) {
   const [current, prior, chains, buckets, recent] = await Promise.all([
     laneAggregates(window.from, window.to),
     window.priorAvailable ? laneAggregates(window.prior.from, window.prior.to) : Promise.resolve([]),
-    chainAggregates(window.from, window.to),
+    chainRecording() ? chainAggregates(window.from, window.to) : Promise.resolve([]),
     bucketRows(window.from, window.to, window.unit),
     recentAggregates(recentSince, now),
   ]);
@@ -383,7 +392,7 @@ function laneMetrics(row, before, chain, priorAvailable) {
   return {
     calls,
     okRate: round(okRate),
-    fallbackRate: round(rate(num(chain?.fallbacks), num(chain?.chains))),
+    fallbackRate: chainRecording() ? round(rate(num(chain?.fallbacks), num(chain?.chains))) : null,
     p50LatencyMs: row?.p50_latency_ms == null ? null : num(row.p50_latency_ms),
     p95LatencyMs: row?.p95_latency_ms == null ? null : num(row.p95_latency_ms),
     tokens: {
@@ -392,6 +401,8 @@ function laneMetrics(row, before, chain, priorAvailable) {
       cacheWrite: num(row?.cache_write_tokens),
       output: num(row?.output_tokens),
       reasoning: num(row?.reasoning_tokens),
+      // rows the sums above could not count (usage GET failed); > 0 = partial
+      unknownRows: num(row?.usage_unknown_rows),
     },
     estCostUsd: null,
     lastActiveAt: row?.last_active_at ? new Date(row.last_active_at).toISOString() : null,
@@ -441,7 +452,8 @@ function buildAreas({ areas, laneRows, window, ledger }) {
       calls,
       attention,
       okRate: round(rate(okCalls.get(area.key) || 0, calls)),
-      fallbackRate: round(rate(fallbacks.get(area.key) || 0, chains.get(area.key) || 0)),
+      fallbackRate: chainRecording() ? round(rate(fallbacks.get(area.key) || 0, chains.get(area.key) || 0)) : null,
+      tokensUnknownRows: rows.reduce((n, l) => n + l.tokens.unknownRows, 0),
       p95LatencyMs: p95.has(area.key) ? p95.get(area.key) : null,
       estCostUsd: null,
       deltaVsPrior: window.priorAvailable ? { calls: calls - priorCalls } : null,
@@ -466,6 +478,8 @@ function basisFor(window) {
     sessions: 'per_turn',
     // Off = no new rows are being written; what is shown is history.
     ledgerRecording: gateEnvValue('GATE_LLM_CALL_LEDGER'),
+    // Off = no chain rows → fallbackRate is null everywhere (its source is off)
+    chainRecording: chainRecording(),
     window: { key: window.key, from: window.from.toISOString(), to: window.to.toISOString(), unit: window.unit },
     // false = deltaVsPrior is null everywhere: the ledger keeps RETENTION_DAYS
     priorAvailable: window.priorAvailable,

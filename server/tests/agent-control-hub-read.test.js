@@ -39,13 +39,15 @@ const modelSwitchboard = require('../services/model-switchboard');
 
 // 2026-09-04 17:30 ET (EDT, UTC-4) — a fixed clock so buckets are stable.
 const NOW = new Date('2026-09-04T21:30:00Z');
-const GATES = ['GATE_AGENT_CONTROL_READ', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY', 'GATE_LLM_CALL_LEDGER'];
+const GATES = ['GATE_AGENT_CONTROL_READ', 'GATE_ADMIN_OPS_QUEUE', 'GATE_AGENT_ACTIVITY', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_DISPATCH_METRICS'];
 const saved = {};
 
 beforeAll(() => { for (const g of GATES) saved[g] = process.env[g]; });
 afterAll(() => { for (const g of GATES) { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; } });
 beforeEach(() => {
   for (const g of GATES) delete process.env[g];
+  // chain rows (fallback rate) are written under this gate; on by default here
+  process.env.GATE_LLM_DISPATCH_METRICS = 'true';
   for (const k of Object.keys(fixtures)) delete fixtures[k];
   mockOpsQueue.mockReset();
   mockActivity.mockReset();
@@ -110,7 +112,7 @@ describe('buildLanes', () => {
   const window = hubRead.resolveWindow('7d', NOW);
   const ledger = {
     current: [
-      { lane_id: 'sms_draft', calls: 6, ok_calls: 4, input_tokens: '600', cached_input_tokens: '0', cache_write_tokens: '33', output_tokens: '120', reasoning_tokens: '0', p50_latency_ms: 700, p95_latency_ms: 9000, last_active_at: '2026-09-04T21:00:00.000Z' },
+      { lane_id: 'sms_draft', calls: 6, ok_calls: 4, input_tokens: '600', cached_input_tokens: '0', cache_write_tokens: '33', output_tokens: '120', usage_unknown_rows: 1, reasoning_tokens: '0', p50_latency_ms: 700, p95_latency_ms: 9000, last_active_at: '2026-09-04T21:00:00.000Z' },
       { lane_id: 'report_copy', calls: 1, ok_calls: 1, input_tokens: '10', cached_input_tokens: '0', output_tokens: '5', reasoning_tokens: '0', p50_latency_ms: 300, p95_latency_ms: 300, last_active_at: '2026-09-02T12:00:00.000Z' },
       { lane_id: 'email_classify', calls: 3, ok_calls: 0, input_tokens: '0', cached_input_tokens: '0', output_tokens: '0', reasoning_tokens: '0', p50_latency_ms: null, p95_latency_ms: null, last_active_at: '2026-09-04T20:00:00.000Z' },
     ],
@@ -137,7 +139,7 @@ describe('buildLanes', () => {
     const sms = rows.find((l) => l.id === 'sms_draft');
     expect(sms).toMatchObject({
       area: 'sms', status: 'attention', calls: 6, okRate: 0.667, fallbackRate: 0.5, p50LatencyMs: 700, p95LatencyMs: 9000,
-      tokens: { input: 600, cachedInput: 0, cacheWrite: 33, output: 120, reasoning: 0 },
+      tokens: { input: 600, cachedInput: 0, cacheWrite: 33, output: 120, reasoning: 0, unknownRows: 1 },
       deltaVsPrior: { calls: 5, okRate: -0.333 },
       attention: { p0: 0, p1: 1, p2: 0, p3: 0 },
       sideEffectClass: 'customer_visible', riskTier: 2, maturity: 'M3', ledger: 'call', unrecordableReason: null,
@@ -187,7 +189,7 @@ describe('buildLanes', () => {
     const areas = hubRead.buildAreas({ areas: modelSwitchboard.AREAS, laneRows, window, ledger });
     expect(areas.map((a) => a.key)).toEqual(modelSwitchboard.AREAS.map((a) => a.key));
     const sms = areas.find((a) => a.key === 'sms');
-    expect(sms).toMatchObject({ calls: 6, okRate: 0.667, fallbackRate: 0.01, p95LatencyMs: 8500, attention: { p0: 0, p1: 1, p2: 0, p3: 0 }, deltaVsPrior: { calls: 5 }, estCostUsd: null });
+    expect(sms).toMatchObject({ calls: 6, okRate: 0.667, fallbackRate: 0.01, p95LatencyMs: 8500, attention: { p0: 0, p1: 1, p2: 0, p3: 0 }, deltaVsPrior: { calls: 5 }, estCostUsd: null, tokensUnknownRows: 1 });
     expect(sms.lanes).toBe(laneRows.filter((l) => l.area === 'sms').length);
     expect(sms.spark.at(-1)).toEqual({ t: '2026-09-04', calls: 6, errors: 2 });
     const email = areas.find((a) => a.key === 'email');
@@ -266,11 +268,23 @@ describe('readLanes / readAreas', () => {
     await expect(hubRead.readAreas({ now: NOW })).rejects.toThrow('relation missing');
   });
 
+  test('fallback rate is null everywhere while the chain recorder gate is off, and basis says so', async () => {
+    delete process.env.GATE_LLM_DISPATCH_METRICS;
+    fixtures.llm_dispatch_log = [{ lane_id: 'sms_draft', calls: 2, ok_calls: 2, chains: 2, fallbacks: 2, bucket: '2026-09-04', errors: 0 }];
+    const out = await hubRead.readLanes({ area: 'sms', now: NOW });
+    expect(out.basis.chainRecording).toBe(false);
+    expect(out.lanes.find((l) => l.id === 'sms_draft').fallbackRate).toBeNull();
+    const areas = await hubRead.readAreas({ now: NOW });
+    expect(areas.basis.chainRecording).toBe(false);
+    expect(areas.areas.find((a) => a.key === 'sms').fallbackRate).toBeNull();
+  });
+
   test('phases + basis flip with the gates', async () => {
     process.env.GATE_AGENT_CONTROL_READ = 'true';
     process.env.GATE_LLM_CALL_LEDGER = 'true';
     const out = await hubRead.readAreas({ window: 'today', now: NOW });
     expect(out.basis.ledgerRecording).toBe(true);
+    expect(out.basis.chainRecording).toBe(true);
     expect(out.window).toEqual({ from: '2026-09-04T04:00:00.000Z', to: NOW.toISOString() });
     expect(out.areas).toHaveLength(modelSwitchboard.AREAS.length);
     expect(out.areas[0].spark).toHaveLength(18);

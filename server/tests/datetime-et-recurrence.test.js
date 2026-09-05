@@ -47,6 +47,8 @@ describe('parseETDateTime on DST transition mornings', () => {
     ['2026-11-01T04:30', '2026-11-01T09:30:00.000Z'], // fall-back day, after the repeat: 04:30 EST, not 03:30
     ['2026-11-02T04:30', '2026-11-02T09:30:00.000Z'], // day after fall-back
     ['2026-11-01T00:30', '2026-11-01T04:30:00.000Z'], // fall-back day, before the repeat (EDT)
+    ['2026-03-08T02:30', '2026-03-08T07:30:00.000Z'], // nonexistent (the gap): forward to 03:30 EDT, never 01:30 EST
+    ['2026-03-08T02:00', '2026-03-08T07:00:00.000Z'], // the gap's first minute, same rule
     ['2026-07-04T12:00', '2026-07-04T16:00:00.000Z'], // plain summer
     ['2026-01-15T00:00', '2026-01-15T05:00:00.000Z'], // plain winter midnight
   ])('%s → %s', (naive, iso) => {
