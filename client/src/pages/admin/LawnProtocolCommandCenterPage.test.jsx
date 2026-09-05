@@ -71,9 +71,12 @@ describe("LawnProtocolCommandCenterPage embedded navigation", () => {
       "/admin/service-library?tab=protocols&protocolTab=readiness&alert=alert-123",
     );
 
-    expect(screen.getByRole("button", { name: "Readiness" }))
+    expect(screen.getByRole("button", { name: "Overview" }))
       .toHaveAttribute("aria-current", "page");
 
+    for (const name of ["Readiness", "Calibration", "Gates"]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
     fireEvent.click(screen.getByRole("button", { name: "Products" }));
 
     expect(screen.getByTestId("location-search")).toHaveTextContent(
