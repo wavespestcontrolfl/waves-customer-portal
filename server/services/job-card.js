@@ -354,6 +354,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     notes: scrubKnownCodes({
       instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
       visitNotes: clean(svc.notes, 2000) || null,
+      chemicalSensitivity: prefs?.chemical_sensitivities ? (clean(prefs.chemical_sensitivity_details, 2000) || 'yes') : null,
+      petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
     }, knownCodes),
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary

@@ -5078,6 +5078,12 @@ function JobCardTab({ card, loading, error, D }) {
       {card.paragraph?.text && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
+      {card.notes?.chemicalSensitivity && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Chemical sensitivity: {card.notes.chemicalSensitivity}</p>
+      )}
+      {card.notes?.petsSecured && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Pets: {card.notes.petsSecured}</p>
+      )}
       {card.notes?.instructions && (
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Instructions: {card.notes.instructions}</p>
       )}
