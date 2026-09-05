@@ -251,6 +251,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.loginPass) return st.loggedIn ? (st.loginPassHiddenAfterLogin ? el({ count: 1, visible: false }) : el()) : passField;
       if (sel === S.loginSubmit) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenSubmitClicked = (st.hiddenSubmitClicked || 0) + 1; } }) : submit) });
       if (sel === S.loginError) return el();
+      // The signed-in account page shows the sign-out link; noAccountMarker models an intermediate (MFA / maintenance) page (r22 P1)
+      if (sel === S.accountMarker) return st.loggedIn && !st.noAccountMarker ? el({ count: 1, visible: true }) : el();
       if (sel === S.searchInput) return el({ count: 1, visible: true });
       // productLinkHiddenFirst: a hidden responsive copy of the result link precedes the visible one
       const hitLink = el({ count: 1, visible: true, onClick: () => { st.hitClicked = (st.hitClicked || 0) + 1; } });
@@ -638,6 +640,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ loginRejects: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_rejected', adapterDown: true }); // adapterDown: the dispatcher claims no more SiteOne requests this run (r21 P1)
     expect(st.loginSubmits).toBe(1);
+  });
+
+  test('a same-host page with no password field but no signed-in marker (MFA step / maintenance) is NOT a login: login_unverified, adapter down for the run, one submit (r22 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ noAccountMarker: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_unverified', adapterDown: true });
+    expect(st.loginSubmits).toBe(1);
+    expect(st.addClicked).toBe(0); // nothing was done on the unauthenticated page
   });
 
   test('inside a visible cart row the SHOWN SKU / quantity node is read, not a hidden stale copy (r20 P2)', async () => {

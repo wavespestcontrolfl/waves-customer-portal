@@ -1195,12 +1195,17 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
       if (err.ambiguous) submitted = true;
-      const parked = await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env });
       // A refusal the adapter marks adapterDown (SiteOne rejected the stored
       // login) parks THIS request as usual and takes the adapter out of the
       // run: its remaining requests stay unclaimed instead of resubmitting
-      // the same rejected credential once each (Codex #3853 r21 P1).
-      return err.adapterDown ? { ...parked, adapterDown: adapterKey } : parked;
+      // the same rejected credential once each (Codex #3853 r21 P1). The
+      // marker rides on the park's failure too, so a transient DB error
+      // while parking cannot revive the adapter for the run (r22 P2).
+      const down = err.adapterDown ? adapterKey : null;
+      let parked;
+      try { parked = await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }); }
+      catch (parkErr) { if (down) parkErr.adapterDown = down; throw parkErr; }
+      return down ? { ...parked, adapterDown: down } : parked;
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
@@ -1220,7 +1225,8 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     // Run-level failures are scoped to THIS adapter for the batch loop: the
     // other vendors' requests still dispatch (Codex r8 P1).
     if (err.runLevel) { err.adapterKey = adapterKey; throw err; }
-    return settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents, env });
+    const settled = await settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents, env });
+    return err.adapterDown ? { ...settled, adapterDown: err.adapterDown } : settled;
   }
 }
 

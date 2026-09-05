@@ -64,7 +64,7 @@ jest.mock('../models/db', () => {
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
-    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
+    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && row.status && mockState.parkThrowsOnce) { mockState.parkThrowsOnce = false; throw new Error('park lost connection'); } mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -414,6 +414,17 @@ test('a rejected login parks its request with the bell AND takes the adapter out
   expect(r.results[0]).toMatchObject({ status: 'needs_review', reason: 'login_rejected', adapterDown: 'stickermule' });
   expect(notify).toHaveBeenCalledTimes(1); // one bell, for the parked request
   mockState.dispatchable = null;
+});
+
+test('the adapter-down marker survives a park that THROWS: the second request is still not claimed (Codex #3853 r22 P2)', async () => {
+  const rejected = new Error('SiteOne rejected the stored login'); rejected.refuse = 'login_rejected'; rejected.adapterDown = true;
+  const a = mockAdapter({ place: jest.fn(async () => { throw rejected; }) });
+  mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }];
+  mockState.parkThrowsOnce = true; // the first park (the refusal) fails on a transient DB error; settleAfterError's fallback records dispatch_error
+  try {
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } })).rejects.toThrow(/dispatch_error/); // the failed park makes the run red, as any dispatch_error does
+    expect(a.place).toHaveBeenCalledTimes(1); // the second request of the down adapter was never claimed
+  } finally { mockState.dispatchable = null; mockState.parkThrowsOnce = false; }
 });
 
 test('an unscoped run-level error after an adapter-scoped one replaces it and aborts the batch (Codex #3853 r11 P2)', async () => {
