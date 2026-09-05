@@ -14,6 +14,7 @@
  */
 
 const db = require('../models/db');
+const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
@@ -358,11 +359,38 @@ async function stampPrepSentForSequence(enrollment, step, steps) {
   }
 }
 
+// A customer-linked step runs under the customer's prep-send lock — the one
+// the manual sender, the composer's prep-link text and the executor's prep
+// step hold while they deliver and settle (prep-guide-sender
+// settleHeldEnrollment advances the cursor). Without it a settle can land
+// between this read and the send, so the step goes out twice and a later
+// failure write marks the advanced enrolment failed (pre-push Codex P1 on
+// 2256101b7). Held lease = not this tick: the row stays due and the next
+// tick retries. The tick already holds the runner's own lock, so this nests
+// on its session (try-lock, never a wait).
 async function sendStep(enrollmentId, { testRecipient } = {}) {
-  const enrollment = await db('automation_enrollments').where({ id: enrollmentId }).first();
-  if (!enrollment) throw new Error('enrollment not found');
-  if (enrollment.status !== 'active') throw new Error(`enrollment status is ${enrollment.status}`);
+  const pre = await db('automation_enrollments').where({ id: enrollmentId }).first();
+  if (!pre) throw new Error('enrollment not found');
+  if (pre.status !== 'active') throw new Error(`enrollment status is ${pre.status}`);
+  // No customer, no settler to race: the row just read is the row.
+  if (!pre.customer_id) return sendStepLocked(pre, { testRecipient });
+  const outcome = await runExclusive(`prep-send:${pre.customer_id}`, async () => {
+    // Re-read under the lock: a row a settle just advanced or finished is
+    // not this step any more.
+    const enrollment = await db('automation_enrollments').where({ id: enrollmentId }).first();
+    if (!enrollment) throw new Error('enrollment not found');
+    if (enrollment.status !== 'active') throw new Error(`enrollment status is ${enrollment.status}`);
+    return sendStepLocked(enrollment, { testRecipient });
+  }, { recordHealth: false, waitForSlot: false });
+  if (wasLockSkipped(outcome)) {
+    logger.info(`[automation-runner] enrollment ${enrollmentId} skipped this tick: customer prep lock ${outcome.reason}`);
+    return { sent: false, skipped: true, reason: outcome.reason };
+  }
+  return outcome;
+}
 
+async function sendStepLocked(enrollment, { testRecipient } = {}) {
+  const enrollmentId = enrollment.id;
   const template = await db('automation_templates').where({ key: enrollment.template_key }).first();
   if (!template) throw new Error('template missing');
 
@@ -459,8 +487,9 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
     });
     if (testRecipient) throw err;
 
-    // Mark enrollment failed so it stops retrying. Operator can re-enroll later.
-    await db('automation_enrollments').where({ id: enrollment.id }).update({
+    // Mark enrollment failed so it stops retrying. Operator can re-enroll
+    // later. Fenced on the step this attempt was for.
+    await db('automation_enrollments').where({ id: enrollment.id, current_step: enrollment.current_step }).update({
       status: 'failed', next_send_at: null, updated_at: new Date(),
     });
     return { sent: false, error: err.message };

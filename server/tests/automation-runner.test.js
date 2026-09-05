@@ -8,6 +8,12 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// The per-customer prep-send lock a customer-linked step runs under:
+// pass-through by default; a test flips it to "lease held elsewhere".
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_name, fn) => fn()),
+  wasLockSkipped: jest.requireActual('../utils/cron-lock').wasLockSkipped,
+}));
 
 const {
   renderAutomationStepContent,
@@ -250,21 +256,22 @@ describe('automation runner prep sequence delivery stamp', () => {
     db.fn = { now: jest.fn(() => 'NOW()') };
   });
 
-  function queuesForSend({ templateKey, stampChain }) {
+  const ENROLLMENT = (templateKey) => ({
+    id: 'enrollment-1',
+    status: 'active',
+    template_key: templateKey,
+    customer_id: 'cust-1',
+    current_step: 0,
+    email: 'megan@example.com',
+    first_name: 'Megan',
+    last_name: 'Example',
+  });
+
+  function queuesForSend({ templateKey, stampChain, lockedRow }) {
     const queues = {
       automation_enrollments: [
-        chain({
-          first: {
-            id: 'enrollment-1',
-            status: 'active',
-            template_key: templateKey,
-            customer_id: 'cust-1',
-            current_step: 0,
-            email: 'megan@example.com',
-            first_name: 'Megan',
-            last_name: 'Example',
-          },
-        }),
+        chain({ first: ENROLLMENT(templateKey) }), // the pre-lock read
+        chain({ first: lockedRow === undefined ? ENROLLMENT(templateKey) : lockedRow }), // the re-read under the lock
         chain({}),
       ],
       automation_templates: [
@@ -303,6 +310,43 @@ describe('automation runner prep sequence delivery stamp', () => {
     expect(result.sent).toBe(true);
     expect(stampChain.where).toHaveBeenCalledWith({ customer_id: 'cust-1', prep_template_key: 'prep.flea' });
     expect(stampChain.update).toHaveBeenCalledWith({ prep_sent_at: 'NOW()' });
+  });
+
+  test('a customer-linked step runs under the customer\'s prep-send lock and re-reads the row inside it; a held lease skips this tick (pre-push Codex P1 on 2256101b7)', async () => {
+    const { runExclusive } = require('../utils/cron-lock');
+    setDbQueues(queuesForSend({ templateKey: 'flea', stampChain: chain({}) }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+    expect((await sendStep('enrollment-1')).sent).toBe(true);
+    expect(runExclusive).toHaveBeenCalledWith('prep-send:cust-1', expect.any(Function), { recordHealth: false, waitForSlot: false });
+    // Both reads happened: the second is the one the send trusts.
+    expect(db).toHaveBeenCalledWith('automation_enrollments');
+    expect(db.mock.calls.filter(([t]) => t === 'automation_enrollments').length).toBeGreaterThanOrEqual(2);
+
+    // Lease held (a manual / composer prep delivery is settling this
+    // customer): nothing is sent, the row stays due for the next tick.
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    sendgrid.sendOne.mockClear();
+    setDbQueues(queuesForSend({ templateKey: 'flea' }));
+    expect(await sendStep('enrollment-1')).toEqual({ sent: false, skipped: true, reason: 'lease_held' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+
+    // The re-read finds the row already settled (advanced past step 0 to a
+    // step index the enabled steps do not have): no send, the enrolment
+    // completes as the runner always does for a missing step.
+    sendgrid.sendOne.mockClear();
+    const q = queuesForSend({ templateKey: 'flea', lockedRow: { ...ENROLLMENT('flea'), current_step: 1 } });
+    setDbQueues(q);
+    expect(await sendStep('enrollment-1')).toEqual({ done: true });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a failed send marks the enrolment failed only on the step this attempt was for', async () => {
+    setDbQueues(queuesForSend({ templateKey: 'cold_lead' }));
+    sendgrid.sendOne.mockRejectedValue(new Error('provider down'));
+    const out = await sendStep('enrollment-1');
+    expect(out.sent).toBe(false);
+    const failWrite = db.mock.results.map((r) => r.value).find((v) => v && v.update && v.update.mock.calls.some(([p]) => p && p.status === 'failed' && p.next_send_at === null));
+    expect(failWrite.where).toHaveBeenCalledWith({ id: 'enrollment-1', current_step: 0 });
   });
 
   test('non-prep sequences never touch the visit rows', async () => {
