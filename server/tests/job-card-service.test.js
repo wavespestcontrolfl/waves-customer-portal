@@ -1237,7 +1237,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] }, mixCalculator: { items: [] } });
     const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] } };
     const out = await jobCard.mixForProduct('d', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
-    expect(buildPlan).not.toHaveBeenCalled();
+    // The plan is read (it governs a product it names — hook P1) but it does not name Demand CS, so its blackout says nothing here.
+    expect(buildPlan).toHaveBeenCalled();
     expect(out.context).toEqual({ line: 'Quarterly Pest Control', conditional: false });
     expect(out.planBlocks).toEqual([]);
     // The protocol line's 0.4 fl oz/gal narrows the 0.2-0.8 label band (r5 P1).
@@ -1263,7 +1264,9 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // September's Headway line is secondary: "only for labeled ornamental disease and only if FRAC history allows".
     const protocols = { tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Talus IGR: label rate for whitefly/scale nymphs', secondary: 'Headway only for labeled ornamental disease and only if FRAC history allows' }] } };
     const out = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
-    expect(buildPlan).not.toHaveBeenCalled();
+    // The lawn plan is read (it would govern a product it names — hook P1); it names nothing here.
+    expect(buildPlan).toHaveBeenCalled();
+    buildPlan.mockClear();
     expect(out.context).toEqual({ line: 'Tree & Shrub Care', conditional: true });
     expect(out.amount).toBeNull();
     expect(out.reason).toBe('Listed as "if needed" on Tree & Shrub Care — confirm the call before mixing');
@@ -1291,6 +1294,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // lawn-named one through the lawn plan — unless a booked add-on's
     // protocol names the product.
     rows.scheduled_services = [{ ...visit, service_type: 'Lawn Assessment Service', service_category: 'inspection' }];
+    buildPlan.mockClear();
     const inspection = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(inspection.context).toEqual({ line: null });
     expect(inspection.amount).toBeNull();
@@ -1419,7 +1423,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const protocols = { tree_shrub: { visits: [{ visit: 3, month: 'Mar', primary: 'Distance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs or crawlers ($16.52)', secondary: '' }] } };
     const run = () => jobCard.mixForProduct('dist', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-03-09T14:00:00Z') });
     const out = await run();
-    expect(buildPlan).not.toHaveBeenCalled();
+    // The lawn plan is read (it governs a product it names — hook P1); it does not name Distance IGR.
+    expect(buildPlan).toHaveBeenCalled();
     expect(out).toMatchObject({ amount: 6.6, amountMax: 8.8, unit: 'fl_oz', ratePerGallon: { lo: 0.06, hi: 0.08, unit: 'fl_oz' }, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false } });
     // A protocol band outside the verified label band leaves the label band standing.
     protocols.tree_shrub.visits[0].primary = 'Distance IGR: 20-30 fl oz/100 gal for whitefly/scale nymphs';
@@ -1555,5 +1560,40 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out.context).toEqual({ line: null });
     expect(buildPlan).toHaveBeenCalled();
     expect(out).toMatchObject({ amount: null, planBlocks: [{ code: 'nitrogen_blackout' }] });
+  });
+
+  test('the lawn plan governs a product it names even when a non-lawn add-on\'s line names it too (hook P1)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const iron = { id: 'fe', name: 'Iron Plus', default_rate_per_1000: 1, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = {
+      scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' }],
+      products_catalog: [iron], equipment_calibrations: [live], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }],
+    };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const mix = { items: [{ product: { id: 'fe' }, mix: { ratePer1000: 0.5, rateUnit: 'oz' } }], conditionalOptions: [] };
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: mix });
+    const evaluateApprovals = jest.fn().mockResolvedValue({ blocks: [], warnings: [] });
+    // The add-on lists Iron Plus as "if needed" — the plan has already selected it.
+    const protocols = { tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Mn Combo: 1.5 fl oz/gal foliar', secondary: 'Iron Plus only if chlorosis is confirmed' }] } };
+    const opts = { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals, protocols }, now: new Date('2026-09-03T14:00:00Z') };
+    const planned = await jobCard.mixForProduct('fe', 110, opts);
+    expect(planned).toMatchObject({ amount: 27.5, rateSource: 'plan', context: { line: null }, planBlocks: [] });
+    expect(evaluateApprovals).toHaveBeenCalled();
+    // The plan's block withholds it too, add-on line or not.
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] }, mixCalculator: mix });
+    expect(await jobCard.mixForProduct('fe', 110, opts)).toMatchObject({ amount: null, planBlocks: [{ code: 'nitrogen_blackout' }] });
+    // A product the plan does not name stays under the add-on's line, and the plan's blackout says nothing about that mix.
+    rows.products_catalog = [{ id: 'mn', name: 'Mn Combo', default_rate: '1-2', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' }];
+    expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
   });
 });

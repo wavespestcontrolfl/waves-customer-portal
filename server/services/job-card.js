@@ -1465,14 +1465,22 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // not the primary lawn plan (an off-protocol / blackout block of the lawn
   // plan says nothing about a pest or tree & shrub mix), and a line the
   // protocol lists as "if needed" is withheld exactly as the card does.
-  const { line: protocolLine, treatment, primaryIsLawn, lawnAddon } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
+  const { line: addonLine, treatment, primaryIsLawn, lawnAddon } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
   // Same rule as the card: no plan at a non-primary address.
-  const plan = !protocolLine && primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
-  const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
+  const lawnPlan = primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
+  const planned = lawnPlan?.plan ? [...(lawnPlan.plan.mixCalculator?.items || []), ...(lawnPlan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
+  // The lawn plan governs every product it names (rate, blocks, approvals)
+  // even when a non-lawn add-on's line names it too — Iron Plus on a lawn
+  // plan with a Tree & Shrub add-on doses at the plan's rate, as the card
+  // shows it, and the add-on's "if needed" never withholds a plan-selected
+  // product. An add-on line governs only a product the plan does not name,
+  // and then the plan's blocks say nothing about that mix.
+  const protocolLine = planned ? null : addonLine;
+  const plan = protocolLine ? null : lawnPlan;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
   // Pest / tree products whose label rate is per gallon of finished spray
