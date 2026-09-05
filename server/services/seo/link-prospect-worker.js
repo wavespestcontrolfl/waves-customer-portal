@@ -343,13 +343,15 @@ async function claimFollowUps(trx, { limit, preview }) {
   if (!candidates.length) return [];
   const { isStandingConfidence } = require('./link-registry');
   const { lockProspectDomain } = require('./prospect-domain-lock');
-  // a standing path, and the lifecycle set is PATH-dependent: placed / live / indexed follow up only on a submit-first path
+  // a standing path; the retirement reader (followUpRetirement: the gate, the route, the lifecycle) is the rest
   const standing = (p) => Boolean(p) && !p.superseded_by && isStandingConfidence(p.confidence) && p.agent_completable !== false;
-  const eligible = (r, p) => standing(p) && M.FOLLOW_UP_STATUSES(p).includes(r.status);
   if (preview) {
-    const paths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(candidates.map((r) => r.path_id))]).select('id', 'superseded_by', 'confidence', 'agent_completable', 'execution_after_send', 'acquisition_type', 'account_required');
+    // the dry-run reads what the live claim below would lease — the same predicate, no retirement write
+    const paths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(candidates.map((r) => r.path_id).filter(Boolean))]).select('id', 'superseded_by', 'confidence', 'agent_completable', 'execution_after_send', 'acquisition_type', 'account_required');
     const pathById = new Map(paths.map((p) => [p.id, p]));
-    return candidates.filter((r) => eligible(r, pathById.get(r.path_id))).slice(0, limit).map((r) => ({ ...r }));
+    const domains = await trx('seo_link_domains').whereIn('id', [...new Set(candidates.map((r) => r.domain_id).filter(Boolean))]).select('id', 'best_path_id');
+    const domById = new Map(domains.map((d) => [d.id, d]));
+    return candidates.filter((r) => standing(pathById.get(r.path_id)) && !M.followUpRetirement({ row: r, path: pathById.get(r.path_id) || null, domain: domById.get(r.domain_id) || null })).slice(0, limit).map((r) => ({ ...r }));
   }
   // EVERY eligibility condition is re-asserted under locks before the lease (the initial claim's guarantee): the
   // per-domain advisory lock every domain writer takes first (the owner's Reject / Watch, the bridge, the

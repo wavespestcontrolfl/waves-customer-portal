@@ -30,7 +30,7 @@ describe('prospect-domain-lock helper', () => {
 
   test('claimProspectDomain: lock FIRST, then the domain-wide probe (canonical host SQL, status set, outreach lanes only by default) — in-flight row returned, else null', async () => {
     const order = []; let raws = []; let ins = null;
-    const q = { whereRaw: jest.fn((sql, bind) => { raws.push([sql, bind]); order.push('probe'); return q; }), whereIn: jest.fn((col, vals) => { ins = [col, vals]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'contacted', target_page: '/x' })) };
+    const q = { whereRaw: jest.fn((sql, bind) => { raws.push([sql, bind]); order.push('probe'); return q; }), whereIn: jest.fn((col, vals) => { ins = [col, vals]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'contacted', target_page: '/x' })), where: jest.fn(() => q), select: jest.fn(async () => []) }; // where / select: the owed-follow-up probe (Codex r24 P1) runs when the status set finds nothing
     const trx = Object.assign(jest.fn(() => q), { raw: jest.fn(async () => { order.push('lock'); }) });
     const r = await claimProspectDomain(trx, 'https://WWW.Blog.Example/');
     expect(order[0]).toBe('lock');

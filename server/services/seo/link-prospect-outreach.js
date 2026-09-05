@@ -57,15 +57,10 @@ const CONVERSATION_CLOSED_STATUSES = Object.freeze(['placed', 'live', 'indexed',
 // the pitch, so the inbox stays held whatever the status reads until the reconcile settles the outcome
 // (a follow-up in flight / errored holds the inbox the same way — its send may have been delivered too)
 const ambiguousSend = (row) => M.AMBIGUOUS_SEND_STATUSES.includes(row.outreach_status) || M.AMBIGUOUS_SEND_STATUSES.includes(row.follow_up_status);
-// — and EXCEPT while a submit-first placement's ONE follow-up is still owed past its outcome: on a submit-first path
-// the Judge-owned row (placed / live / indexed, FOLLOW_UP_STATUSES(path)) still has the follow-up to send — scheduled
-// (a due date), due, or drafted — so its conversation is not over and the inbox stays held (a send-first row that
-// reached live has no follow-up left: the sender refuses it by the same rule)
-const followUpOwed = (row, path) => row.outreach_status === 'sent'
-  && (['due', 'drafted'].includes(row.follow_up_status) || (row.follow_up_status === 'none' && Boolean(row.follow_up_due_at)))
-  && M.FOLLOW_UP_JUDGE_STATUSES.includes(row.status) && M.FOLLOW_UP_STATUSES(path).includes(row.status);
+// — and EXCEPT while a submit-first placement's ONE follow-up is still owed past its outcome (M.followUpOwed — the
+// domain guard reads the same): its conversation is not over and the inbox stays held
 const conversationClosed = (row, path) => !ambiguousSend(row)
-  && (Boolean(row.conversation_closed_at) || (CONVERSATION_CLOSED_STATUSES.includes(row.status) && !followUpOwed(row, path)));
+  && (Boolean(row.conversation_closed_at) || (CONVERSATION_CLOSED_STATUSES.includes(row.status) && !M.followUpOwed(row, path)));
 // `path` = the placement's acquisition path (execution_after_send) — the follow-up lifecycle is path-dependent
 const CONVERSATION_OPEN = (row, path = null) => !conversationClosed(row, path) && (
   ['contacted', 'negotiating'].includes(row.status)
@@ -531,6 +526,8 @@ async function settleRecipientRefusal(trx, { prospectId, reviewed, mode, now }) 
 // a header value from a Gmail metadata-format message
 const headerOf = (msg, name) => { const h = ((msg && msg.payload && msg.payload.headers) || []).find((x) => String(x.name || '').toLowerCase() === name.toLowerCase()); return h ? String(h.value || '') : ''; };
 const addressOf = (from) => { const m = /<([^>]+)>/.exec(from || ''); return M.normalizeEmail(m ? m[1] : from); };
+// a Gmail message's send time: internalDate (ms), else its Date header; null when neither parses
+const sentAtOf = (msg) => { const t = msg && msg.internalDate ? new Date(Number(msg.internalDate)) : new Date(headerOf(msg, 'Date')); return Number.isNaN(t.getTime()) ? null : t; };
 const withTimeout = (p, ms) => Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms).unref())]);
 /**
  * §6.4 — the fail-closed reply check inside the locked claim: the pitch's Gmail thread is read (`threads.get` on
@@ -565,12 +562,15 @@ async function replyCheck(trx, { prospectId, current, mode, now, followUp }) {
   // …and a SECOND message of our own in the thread is a follow-up already sent by hand from the inbox (the owner
   // answering silence before the due date): the ONE follow-up the plan allows exists — the scheduled one settles. A
   // Gmail DRAFT in the thread (threads.get lists it, own address, DRAFT label) was never sent: not a follow-up
-  const ownSent = messages.filter((m, i) => froms[i] === own && !(m.labelIds || []).includes('DRAFT')).length;
+  const ownSent = messages.filter((m, i) => froms[i] === own && !(m.labelIds || []).includes('DRAFT'));
   const reason = froms.some((a) => /^(mailer-daemon|postmaster)@/.test(a)) ? 'bounce'
     : froms.some((a) => a && a !== own) ? 'reply'
-      : ownSent > 1 ? 'manual_follow_up' : null;
+      : ownSent.length > 1 ? 'manual_follow_up' : null;
   if (reason) {
-    await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_status: 'skipped', follow_up_skipped_reason: reason, updated_at: now });
+    // the hand-sent follow-up IS the conversation's last send: its time is stamped as the follow-up's (the closure
+    // sweep's silence window runs from it), the latest own message's Gmail time — or, unreadable, the check's own
+    const manualAt = reason === 'manual_follow_up' ? (ownSent.slice(1).map(sentAtOf).filter(Boolean).sort((a, b) => b - a)[0] || now) : null;
+    await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_status: 'skipped', follow_up_skipped_reason: reason, ...(manualAt ? { follow_up_sent_at: manualAt } : {}), updated_at: now });
     logger.info(`[link-outreach] follow-up for ${prospectId} skipped: ${reason}`);
     const refusal = { bounce: ['bounced', 'the pitch bounced — no follow-up'], reply: ['reply_received', 'the recipient replied — the conversation is the owner\'s; no automatic follow-up'], manual_follow_up: ['follow_up_in_thread', 'a follow-up was already sent from the inbox by hand — the one follow-up exists; the scheduled one is settled'] }[reason];
     return { ok: false, code: refusal[0], error: refusal[1] };
@@ -1027,9 +1027,13 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   // RETIRES (`skipped`) instead of parking a draft nowhere lists
   let retired = false;
   const rows = await db.transaction(async (trx) => {
+    // under the locks every route writer takes (the per-domain lock, then the row, then the path FOR UPDATE — the
+    // lease's and the send's order): a supersede / re-rank orders before or after this decision, never between the
+    // route read and the CAS, so a requeue never parks a draft on a route that just moved
+    await lockProspectDomain(trx, prospect.target_domain);
     const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first('id', 'status', 'path_id', 'domain_id', 'notes', 'follow_up_sent_at');
     if (!row) return [];
-    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).first('id', 'execution_after_send', 'acquisition_type', 'account_required', 'superseded_by') : null;
+    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).forUpdate().first('id', 'execution_after_send', 'acquisition_type', 'account_required', 'superseded_by') : null;
     const dom = row.domain_id ? await trx('seo_link_domains').where({ id: row.domain_id }).first('best_path_id') : null;
     // …and a requeue cannot yield a sendable draft either when the ROUTE moved on under the pinned conversation — the
     // path superseded, or the domain re-ranked to another path — exactly the states the lease and the send retire

@@ -1342,6 +1342,41 @@ describe('Codex r2 on #3854', () => {
     const until = addETDaysAtWallClock(new Date(placement(s.db).outreach_sent_at), 45);
     expect(await Outreach.closeSilentConversations({ now: until })).toMatchObject({ closed: 1 });
   });
+  test('P1 (Codex r24): the DOMAIN guard holds a submit-first placement past its outcome while its follow-up is owed — no second placement for the publisher; released once the follow-up is sent / skipped; a send-first placed row never', async () => {
+    const s = scenario({ policy: AUTO_POLICY, path: { execution_after_send: false, account_required: true } });
+    await nightly(s.db);
+    Object.assign(placement(s.db), { status: 'placed', parked_from_status: null, outreach_status: 'sent', outreach_sent_at: NOW, outreach_thread_ref: 'thr1', follow_up_status: 'none', follow_up_due_at: new Date(Date.now() - DAY), updated_at: NOW });
+    expect((await claimProspectDomain(s.db, 'example.org')).inFlight?.id).toBe(s.row.id); // scheduled
+    placement(s.db).follow_up_status = 'drafted';
+    expect((await claimProspectDomain(s.db, 'example.org')).inFlight?.id).toBe(s.row.id); // drafted
+    placement(s.db).follow_up_status = 'sent';
+    expect((await claimProspectDomain(s.db, 'example.org')).inFlight).toBeNull(); // the lane complete: the domain is free again
+    const t = scenario({ policy: AUTO_POLICY });
+    await nightly(t.db);
+    Object.assign(placement(t.db), { status: 'placed', parked_from_status: null, outreach_status: 'sent', outreach_sent_at: NOW, follow_up_status: 'none', follow_up_due_at: new Date(Date.now() - DAY) });
+    expect((await claimProspectDomain(t.db, 'example.org')).inFlight).toBeNull(); // send-first: no follow-up past live
+  });
+  test('P2 (Codex r24): the hand-sent follow-up\'s Gmail time becomes the follow-up\'s send time — the closure window runs from it, not from the pitch', async () => {
+    const s = await conversation();
+    const manualAt = new Date(NOW.getTime() + 30 * DAY);
+    gmail.getThread.mockResolvedValue({ id: 'thr1', messages: [ours('msg1'), { ...ours('msg2'), internalDate: String(manualAt.getTime()) }] });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'follow_up_in_thread' });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: 'manual_follow_up', follow_up_sent_at: manualAt });
+    expect(await Outreach.closeSilentConversations({ now: addETDaysAtWallClock(NOW, 45) })).toMatchObject({ scanned: 0, closed: 0 }); // 45 days after the PITCH: not silent yet
+    expect(await Outreach.closeSilentConversations({ now: addETDaysAtWallClock(manualAt, 45) })).toMatchObject({ closed: 1 });
+  });
+  test('P2 (Codex r24): the drafter\'s dry-run (preview) reads what the live claim would lease — a gate-off or re-ranked follow-up is not previewed', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_subject: null, follow_up_body: null, follow_up_due_at: new Date(Date.now() - DAY) });
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true, preview: true })).toHaveLength(1);
+    s.db._tables.seo_link_domains[0].best_path_id = uid(); // re-ranked to another path
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true, preview: true })).toEqual([]);
+    s.db._tables.seo_link_domains[0].best_path_id = s.p.id;
+    isEnabled.mockImplementation((g) => g !== 'linkAuthority');
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true, preview: true })).toEqual([]);
+    isEnabled.mockImplementation(() => true);
+    expect(placement(s.db).follow_up_status).toBe('due'); // no retirement write from a preview
+  });
   test('P2 (Codex r19): a SKIP of an ambiguous follow-up keeps the attempt stamp (Gmail may have delivered it — the ET-day cap counts every attempt); only a confirmed-not-sent requeue clears it', async () => {
     const s = await conversation();
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: NOW })).ok).toBe(true);
