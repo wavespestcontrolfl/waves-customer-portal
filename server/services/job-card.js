@@ -1027,7 +1027,11 @@ function linesFromProtocolText(visit, catalog) {
   const out = [];
   for (const line of parsed) {
     const product = matchCatalogProduct(line, catalog);
-    if (product && !out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: line.role, selected: line.role === 'base' });
+    // The parser's own condition flag: a primary line phrased "if …"
+    // (Distance IGR "if rotation calls for IRAC 7C") is conditional work,
+    // never selected base work — the same rule the plan engine applies.
+    const conditional = Boolean(line.conditional);
+    if (product && !out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
   }
   return out;
 }

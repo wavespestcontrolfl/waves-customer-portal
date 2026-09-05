@@ -923,6 +923,13 @@ describe('PR review r8', () => {
 });
 
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
+  test('a primary protocol line phrased "if …" stays conditional (hook P1)', () => {
+    const catalog = [{ id: 'd', name: 'Distance IGR' }, { id: 't', name: 'TriTek' }, { id: 'c', name: 'Celsius WG' }];
+    const visit = { primary: 'Celsius WG 1 oz\nDistance IGR 6 fl oz if rotation calls for IRAC 7C\nTriTek 1 gal only if crawlers are present', secondary: '' };
+    const lines = jobCard._test.linesFromProtocolText(visit, catalog);
+    expect(lines.map((l) => [l.product.id, l.role, l.selected])).toEqual([['c', 'base', true], ['d', 'conditional', false], ['t', 'conditional', false]]);
+  });
+
   test('a spray-check Hold withholds the card amount like the tank search (hook P1)', async () => {
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', inventory_on_hand: 1, inventory_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
