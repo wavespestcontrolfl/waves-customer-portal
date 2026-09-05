@@ -1,4 +1,5 @@
 'use strict';
+/* global document */
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -71,4 +72,17 @@ async function previewPage(browser, baseUrl, viewport) {
   return page;
 }
 
-module.exports = { previewPage, previewServer, launchBrowser, evidence };
+async function waitForFonts(page) {
+  const families = ['Inter', 'Roboto', ...Object.keys(require('../../client/public/fonts/sources.json').licenses)];
+  await page.evaluate(async (required) => {
+    await document.fonts.ready;
+    for (const family of required) {
+      const faces = await document.fonts.load(`16px "${family}"`);
+      if (!faces.length || faces.some((face) => face.status !== 'loaded')) {
+        throw new Error(`QA font unavailable: ${family}`);
+      }
+    }
+  }, families);
+}
+
+module.exports = { waitForFonts, previewPage, previewServer, launchBrowser, evidence };
