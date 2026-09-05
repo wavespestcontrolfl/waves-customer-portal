@@ -130,9 +130,14 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
   // The event's scope first; then the scope the winning conversion
   // persisted (a replay carries none of its own); the repeat's link last.
   const scope = estimateId || wonEstimateOf(repeat) || repeat.estimate_id;
+  // The root's side of the same rule: the scope ITS win persisted, else its
+  // link — an unlinked root that won on estimate A is not the deal a
+  // repeat's deposit on estimate B closed, exactly as SECOND_WIN_SQL judges
+  // the pair (pre-push P1 on de469d9). Pinned on the lock below.
+  const rootScope = root ? wonEstimateOf(root) || root.estimate_id || null : null;
   const sameOpportunity = !!root && !root.deleted_at
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
-    && !(root.estimate_id && scope && String(root.estimate_id) !== String(scope));
+    && !(rootScope && scope && String(rootScope) !== String(scope));
   const rootOurs = sameOpportunity && OPEN_LEAD_STATUSES.includes(root.status);
   // A root of this opportunity that staff has since marked WON is the deal
   // closed: when its funnel row already carries the win (booked or beyond,
@@ -178,7 +183,9 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
       .whereNull('deleted_at').forUpdate().first('id');
     if (!stillWon) return null;
     if (!rootOurs && !rootWon) return rebuild(trx);
-    const rootHeld = await trx('leads').where({ id: root.id, ...onlyIfLead }).whereNull('deleted_at').forUpdate().first('id');
+    const rootHeld = await trx('leads').where({ id: root.id, ...onlyIfLead })
+      .whereRaw("COALESCE(extracted_data->>'won_estimate_id', estimate_id::text) IS NOT DISTINCT FROM ?", [rootScope === null ? null : String(rootScope)])
+      .whereNull('deleted_at').forUpdate().first('id');
     if (!rootHeld) return rebuild(trx);
 
     const own = await trx('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
@@ -798,7 +805,10 @@ async function acceptWizardNamedLead(database, { dataLeadId, estimate, estimateI
   const sameOpportunity = () => indirect()
     && leadMatchesEstimateContact(lead, estimate)
     && (!lead.customer_id || !customerId || lead.customer_id === customerId)
-    && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
+    && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId))
+    // ...nor won on a different estimate than this one (the scope its
+    // conversion persisted on an unlinked root — pre-push P1 on de469d9).
+    && (!wonEstimateOf(lead) || String(wonEstimateOf(lead)) === String(estimateId));
   // An indirect root is eligible by POSITIVE open membership, as every
   // other resolved root in this module (r23 / r24): a spam or cancelled
   // root is not answerable, so it neither takes the win nor has its
