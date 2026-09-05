@@ -89,10 +89,13 @@ function normalizeName(value) {
 const NAME_SUFFIXES = new Set(['jr', 'sr', 'md', 'dds', 'dvm', 'phd', 'esq', 'cpa']);
 const NUMERAL_SUFFIXES = new Set(['ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x']);
 
-// Normalized name tokens with the trailing suffixes dropped.
-function nameTokens(value) {
+// Normalized name tokens with the trailing suffixes dropped. `preceding` =
+// name tokens that stand before this segment ("John Smith, III": the tail
+// "iii" is a numeral suffix because two name tokens precede the comma;
+// GH codex #3875 r3 P2).
+function nameTokens(value, preceding = 0) {
   const tokens = normalizeName(value).split(' ').filter(Boolean);
-  const isSuffix = (t, n) => NAME_SUFFIXES.has(t) || (NUMERAL_SUFFIXES.has(t) && n >= 3);
+  const isSuffix = (t, n) => NAME_SUFFIXES.has(t) || (NUMERAL_SUFFIXES.has(t) && preceding + n >= 3);
   while (tokens.length && isSuffix(tokens[tokens.length - 1], tokens.length)) tokens.pop();
   return tokens;
 }
@@ -112,7 +115,7 @@ function reviewerSurnames(reviewerName) {
   const tailRaw = raw.slice(comma + 1);
   // A tail with letters is a given name (even one normalizeName fails
   // closed on); only a suffix-only or empty tail leaves normal order.
-  const suffixOnlyTail = !nameTokens(tailRaw).length && !(normalizeName(tailRaw) === '' && /\p{L}/u.test(tailRaw));
+  const suffixOnlyTail = !nameTokens(tailRaw, head.length).length && !(normalizeName(tailRaw) === '' && /\p{L}/u.test(tailRaw));
   if (suffixOnlyTail) return wholeWordSuffixes(head, 2);
   // Last-name-first: the whole head IS the surname (a one-token head included).
   return wholeWordSuffixes(head, 1).slice(0, 1);

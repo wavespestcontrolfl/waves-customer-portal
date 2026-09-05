@@ -373,6 +373,10 @@ describe('reviewerSurnames', () => {
     expect(reviewerSurnames('Smith, John, III')).toEqual(['smith']);
     expect(reviewerSurnames('John Smith, Jr.')).toEqual(['john smith', 'smith']);
     expect(reviewerSurnames('Smith, Jr.')).toEqual([]);
+    // A numeral after the comma is a suffix when two name tokens precede it (#3875 r3 P2).
+    expect(reviewerSurnames('John Smith, III')).toEqual(['john smith', 'smith']);
+    expect(reviewerSurnames('John Smith, VI')).toEqual(['john smith', 'smith']);
+    expect(reviewerSurnames('Smith, V')).toEqual(['smith']);
     expect(reviewerSurnames(', John')).toEqual([]);
     // #3875 r1 P2s: a numeral is a suffix only behind two name tokens; an
     // unfoldable given name after the comma is still a given name.
