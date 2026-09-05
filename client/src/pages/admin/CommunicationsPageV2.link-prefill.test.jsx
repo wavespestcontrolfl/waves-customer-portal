@@ -162,7 +162,7 @@ describe("buildCustomerLinkPrefill", () => {
 });
 
 describe("CUSTOMER_COMPOSER_LINKS", () => {
-  it("carries all eighteen customer rows in the customer category", () => {
+  it("carries all seventeen customer rows in the customer category", () => {
     expect(CUSTOMER_COMPOSER_LINKS.map((l) => l.key)).toEqual([
       "reschedule",
       "reservice",
@@ -177,7 +177,6 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
       "service_report",
       "contract",
       "statement",
-      "receipt",
       "project_report",
       "price_change",
       "portal_login",

@@ -222,6 +222,3 @@ router.get('/:token/pdf', async (req, res, next) => {
 });
 
 module.exports = router;
-// The composer's receipt quick link picks and vets invoices by the same
-// payment linkage this route renders (composer-customer-links.js).
-module.exports.loadPaymentForInvoice = loadPaymentForInvoice;

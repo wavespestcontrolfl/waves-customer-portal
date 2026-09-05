@@ -736,7 +736,6 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "service_report", name: "Latest service report link", keywords: "report service report visit summary last recap", dynamic: true },
   { key: "contract", name: "Contract signing link", keywords: "contract sign signature agreement document esign", dynamic: true },
   { key: "statement", name: "Statement pay link", keywords: "statement payer bill-to property manager builder net30 pay", dynamic: true },
-  { key: "receipt", name: "Latest receipt link", keywords: "receipt paid payment record proof bookkeeping refund", dynamic: true },
   { key: "project_report", name: "Project report link", keywords: "project report wdo termite inspection specialty findings pdf", dynamic: true },
   { key: "price_change", name: "Price change notice link", keywords: "price change increase rate notice new price effective", dynamic: true },
   {
@@ -1786,7 +1785,6 @@ function SmsTab() {
       d.statement
         ? `Statement pay link added — ${d.statement.number}, $${Number(d.statement.total).toFixed(2)} for ${d.statement.payerName}.`
         : "Statement pay link added.",
-    receipt: (d) => `Receipt link added${d.receipt?.invoiceNumber ? ` — invoice ${d.receipt.invoiceNumber}` : ""}${d.receipt?.paidAt ? `, paid ${d.receipt.paidAt}` : ""}.`,
     project_report: (d) => `Project report link added${d.projectReport?.title ? ` — ${d.projectReport.title}` : ""}${d.projectReport?.projectDate ? ` (${d.projectReport.projectDate})` : ""}.`,
     price_change: (d) =>
       d.priceChange
