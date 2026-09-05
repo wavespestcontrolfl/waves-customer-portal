@@ -10,31 +10,37 @@ const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require
 const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
-// recordSessionUsage inserts AFTER the runner finishes: created_at is the
-// recording time of the FIRST turn (the per-session upsert never moves
-// it); the start is that minus latency_ms (the wall time since the
-// runner's startedAt — the longest turn for the assistant). Sort / page on
-// the same projected start so the cursor and the rows agree. The session's
-// latest activity is its newest session_turn row (created_at for a
+// recordSessionUsage inserts AFTER the runner finishes. The session's
+// start is its FIRST turn's: that turn row's recording time minus its own
+// latency (the session row's latency_ms is GREATEST across turns, so a
+// longer later turn would move a start derived from it — and with it an
+// already-paged row behind its cursor; pre-push audit). A session recorded
+// before turn rows existed falls back to its own created_at − latency.
+// Sort / page on that same start so the cursor and the rows agree. The
+// latest activity is the newest session_turn row (created_at for a
 // one-turn session): that is the finish, and the WINDOW is judged on it,
 // so a long-lived assistant conversation stays listed while it still
 // turns instead of ageing out with its first turn (Codex r1).
-const START = () => db.raw("date_trunc('milliseconds', created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))");
-const LAST_TURN = "COALESCE((SELECT max(t.created_at) FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref), created_at)";
+const TURNS = "FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref";
+const FIRST_TURN_START = `(SELECT t.created_at - make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0) ${TURNS} ORDER BY t.created_at ASC LIMIT 1)`;
+const SESSION_START = `COALESCE(${FIRST_TURN_START}, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))`;
+const START = () => db.raw(`date_trunc('milliseconds', ${SESSION_START})`);
+const LAST_TURN = `COALESCE((SELECT max(t.created_at) ${TURNS}), created_at)`;
 const ID = 'provider_ref';
 const COLUMNS = () => [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',
   'latency_ms', 'input_tokens', 'output_tokens', 'created_at', 'run_id', 'trace_id', 'workload',
-  db.raw("(SELECT count(*) FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref) AS turns"),
+  db.raw(`(SELECT count(*) ${TURNS}) AS turns`),
+  db.raw(`${SESSION_START} AS started_at`),
   db.raw(`${LAST_TURN} AS last_turn_at`),
 ];
 
 function fromRow(s) {
   const turns = Number(s.turns || 0);
   const errored = s.ok === false;
-  // the row lands when the session is first billed: start = that minus its
-  // latency; the finish is its newest turn (= created_at for one turn)
-  const startedAt = new Date(new Date(s.created_at).getTime() - Number(s.latency_ms || 0));
+  // start = the first turn's (SESSION_START; the same fallback when a row
+  // carries no started_at); the finish is the newest turn (= created_at for one turn)
+  const startedAt = s.started_at ? new Date(s.started_at) : new Date(new Date(s.created_at).getTime() - Number(s.latency_ms || 0));
   const finishedAt = new Date(s.last_turn_at || s.created_at);
   return canonicalRun({
     source: SOURCE,

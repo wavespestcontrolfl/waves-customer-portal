@@ -260,8 +260,10 @@ describe('adapters project onto the canonical shape', () => {
     expect(ok.startedAt).toBe(ago(14e3).toISOString());
     expect(managedSessions.fromRow({ provider_ref: 's2', lane_id: 'agent_bi', ok: false, error_code: 'anthropic_529', created_at: ago(1e3) })).toMatchObject({ result: 'errored', failureClass: 'provider', errorCode: 'anthropic_529' });
     // a session the assistant keeps turning: created_at stays the first turn's; the newest turn is the finish and the span is the duration
-    const long = managedSessions.fromRow({ provider_ref: 's3', lane_id: 'customer_assistant', ok: true, latency_ms: 4000, created_at: ago(3600e3), last_turn_at: ago(2e3), turns: 6 });
+    // the start is the FIRST turn's own timing (started_at from SQL): the session row's latency is the longest turn's, so a longer later turn must not move it
+    const long = managedSessions.fromRow({ provider_ref: 's3', lane_id: 'customer_assistant', ok: true, latency_ms: 9000, created_at: ago(3600e3), started_at: ago(3604e3), last_turn_at: ago(2e3), turns: 6 });
     expect(long).toMatchObject({ startedAt: ago(3604e3).toISOString(), finishedAt: ago(2e3).toISOString(), durationMs: 3602e3, stepsDone: 6 });
+    expect(managedSessions.fromRow({ ...long, latency_ms: 20000, started_at: ago(3604e3) }).startedAt).toBe(ago(3604e3).toISOString());
   });
 
   test('agent_runs: columns map straight through; counts from the subqueries; work-item entity', () => {
