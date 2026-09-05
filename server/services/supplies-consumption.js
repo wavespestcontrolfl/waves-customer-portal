@@ -130,18 +130,24 @@ async function settledReason(trx, { productId, scheduledServiceId }) {
 // The visit-wide lookup bell is retired only when the lookup can be re-run
 // now AND every kit product that applies to this visit's line already has a
 // usage movement — one movement proves one product, not the visit (Codex
-// r27 P1, owner ruling). Unreadable again, or any product still owed: the
-// bell (and the owed marker) stay.
+// r27 P1, owner ruling). Any product still owed: false. Unreadable again
+// (the catalog or a movement read failed): NULL — indeterminate is not
+// "not settled": the caller keeps the bell AND records the retirement as
+// failed so the owed marker survives for a later retry (Codex r31 P1).
 async function lookupSettled(db, { scheduledServiceId, serviceLine }) {
-  let products;
-  try { products = await kitProducts(db); } catch { return false; }
-  // A corrupt scope is owed too (its hand-off is a product bell the retry
-  // may never have reached): fail closed, keep the visit bell.
-  const owed = products.filter((p) => parseLines(p.per_completion_service_lines) === INVALID_LINES || appliesToLine(p.per_completion_service_lines, serviceLine));
-  for (const p of owed) {
-    if (!await db('product_inventory_movements').where({ product_id: p.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')) return false;
+  try {
+    const products = await kitProducts(db);
+    // A corrupt scope is owed too (its hand-off is a product bell the retry
+    // may never have reached): fail closed, keep the visit bell.
+    const owed = products.filter((p) => parseLines(p.per_completion_service_lines) === INVALID_LINES || appliesToLine(p.per_completion_service_lines, serviceLine));
+    for (const p of owed) {
+      if (!await db('product_inventory_movements').where({ product_id: p.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')) return false;
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[supplies-consumption] lookup-bell settlement is indeterminate for visit ${scheduledServiceId}: ${err.message}`);
+    return null;
   }
-  return true;
 }
 
 async function ringMissedDeductionBell(db, result, { scheduledServiceId, product = null, reason, serviceLine = null }) {
@@ -303,16 +309,23 @@ async function consumeCompletionSupplies(db, {
   return result;
 }
 
+// Indeterminate at any step (the open-bell probe, the re-run lookup, the
+// retire itself) is a retirement FAILURE, never a quiet skip: the owed
+// marker must outlive a bell the office could still act on (Codex r31 P1).
 async function retireLookupBellIfSettled(db, result, { scheduledServiceId, serviceLine }) {
+  const failed = (message) => result.errors.push({ reason: 'bell_retire_failed', message });
+  let open;
   try {
-    const open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('read_at').first('id');
-    if (!open) return;
-    if (await lookupSettled(db, { scheduledServiceId, serviceLine }) && !(await clearMissedDeductionBells(db, { scheduledServiceId }))) {
-      result.errors.push({ reason: 'bell_retire_failed', message: 'the obsolete visit lookup bell could not be retired' });
-    }
+    open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('read_at').first('id');
   } catch (err) {
-    logger.warn(`[supplies-consumption] lookup-bell settlement check failed for visit ${scheduledServiceId}: ${err.message}`);
+    logger.warn(`[supplies-consumption] lookup-bell probe failed for visit ${scheduledServiceId}: ${err.message}`);
+    return failed(`the visit lookup bell could not be checked: ${err.message}`);
   }
+  if (!open) return;
+  const settled = await lookupSettled(db, { scheduledServiceId, serviceLine });
+  if (settled === false) return;
+  if (settled === null) return failed('the obsolete visit lookup bell could not be re-checked');
+  if (!(await clearMissedDeductionBells(db, { scheduledServiceId }))) failed('the obsolete visit lookup bell could not be retired');
 }
 
 module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE, INSPECTION_SERVICE_RE };

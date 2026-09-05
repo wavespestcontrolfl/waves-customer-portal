@@ -486,6 +486,22 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     logger.warn(`[order-dispatch] bell for ledger ${ledgerId} was not persisted (re-rung next run)`);
     return false;
   }
+  // Every OTHER version of this row's bell (an earlier park's copy, the
+  // unversioned key) is retired BEFORE this delivery is stamped: a retire
+  // that fails leaves bellAt null, so the next run re-rings this version (a
+  // dedupe refresh, never a double) and retries the retire — an obsolete
+  // reconcile / dry-run instruction is never left unread beside its
+  // replacement (Codex r31 P1).
+  try {
+    await conn('notifications')
+      .whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`])
+      .whereRaw("metadata->>'dedupeKey' <> ?", [v ? `auto-order:${ledgerId}:${v}` : `auto-order:${ledgerId}`])
+      .whereNull('read_at')
+      .update({ read_at: new Date() });
+  } catch (err) {
+    logger.warn(`[order-dispatch] earlier bell versions for ledger ${ledgerId} could not be retired (this bell re-rung next run): ${err.message}`);
+    return false;
+  }
   let superseded = false;
   try {
     // Stamp ONLY the bell version that was delivered: if the row's bell was
@@ -506,7 +522,8 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
   if (!superseded) return true;
   // The notification just inserted carries the superseded version's
   // instructions (a stale reconcile / dry-run text beside the replacement):
-  // retire it now rather than leave it unread (Codex r23 P1).
+  // retire it now rather than leave it unread (Codex r23 P1). Best effort
+  // here — the replacement's own delivery retires it durably (above).
   try {
     await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-order:${ledgerId}:${v}`]).whereNull('read_at').update({ read_at: new Date() });
   } catch (err) {
@@ -596,6 +613,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
   const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
   const transitioned = await conn.transaction(async (trx) => {
     let rowPatch = patch;
+    let reopen = false;
     if (staleBefore) {
       // Stale recovery: the request's status is read HERE, under the ledger →
       // request locks (the scan's snapshot is unlocked): received by an older
@@ -604,6 +622,12 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
       await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
       const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
       if (fresh?.status === 'received') rowPatch = { ...patch, evidence: JSON.stringify({ ...JSON.parse(patch.evidence), landedAfterReceive: new Date().toISOString() }) };
+      // Cancelled by an older pod while the claim was placing: the order may
+      // have gone out, and a cancelled request can be neither received nor
+      // revoked (both refuse) while the live-order guard blocks a
+      // replacement — restore it to ordered, as a late placement does
+      // (Codex r31 P1).
+      if (fresh?.status === 'cancelled') { reopen = true; rowPatch = { ...rowPatch, evidence: JSON.stringify({ ...JSON.parse(rowPatch.evidence), reopenedFromCancelledAt: new Date().toISOString() }) }; }
     }
     const transition = trx('vendor_orders').where({ id: ledger.id, status: 'placing' });
     // Stale recovery: the heartbeat observed at scan time must STILL be old —
@@ -612,7 +636,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
     if (staleBefore) transition.where('updated_at', '<', staleBefore);
     const n = await transition.update(rowPatch);
     if (!n) return false;
-    if (markRequestOrdered) await requestToOrdered(trx, request.id);
+    if (markRequestOrdered || reopen) await requestToOrdered(trx, request.id);
     // The vendor order number rides into the audit row when the park knows it (Codex r30 P2).
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, external_order_number: placed?.externalOrderNumber || null, reason: `${reason}: ${message}`.slice(0, 400), trx });
     return true;
@@ -1040,10 +1064,16 @@ async function settleAfterError(conn, err, { ctx, vendor, submitted, placed, quo
       // The figure this park records reaches the row under the cap lock
       // first, like every other post-submit amount (Codex r27 P1); a claim
       // lost meanwhile is attached as a late placement instead.
-      const amountCents = placed?.amountCents ?? quoteCents ?? null;
+      // The figure is the positive one — the vendor's, the quote, or what
+      // beforeSubmit reserved on the row — never a zero that would overwrite
+      // the reservation and drop the order from the month (Codex r31 P1);
+      // with no positive figure anywhere, the per-order cap, as every other
+      // post-submit park counts it.
+      const known = await settledFinalCents(conn, { ledger, placed, quoteCents });
+      const { amountCents, counted } = known == null ? unconfirmedAmount(env) : { amountCents: known, counted: '' };
       const reserved = await reservePostSubmitAmount(conn, ledger, amountCents, env);
       if (reserved.reason === 'claim_lost') return await recordPlaced(conn, { ctx, placed: placed || { externalOrderNumber: null, amountCents, evidence: null }, finalCents: amountCents, quoteCents });
-      const parked = await park(conn, { ...ctx, markRequestOrdered: true, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+      const parked = await park(conn, { ...ctx, markRequestOrdered: true, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${known != null ? ` (${dollars(known)})` : ''} was placed but recording it failed: ${err.message}.${counted}`, amountCents, evidence: placed?.evidence || null, placed });
       // The row had already left 'placing' (stale recovery / revoke while
       // the vendor call ran) and the late-placement attachment itself
       // failed: a skipped park would read as harmless while the confirmed

@@ -226,7 +226,24 @@ async function handleLiveRequest(ctx, p, existing) {
   // retired since must not ring "order manually" on top of it (hook r27
   // P0). Reconciliation — receive or revoke — is what reopens the lane.
   if (await require('./order-dispatch').findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
+  // A pre-submit park (no_price, dry_run, …) left this request a versioned
+  // ledger bell that already says "order manually": the generic hand-off
+  // must not ring beside it. Settle the ledger's bell first; when that
+  // fails, stand down — the ledger bell, re-rung by the dispatcher, still
+  // owns the request (Codex r31 P2).
+  if (!(await settleParkedLedgerBell(ctx, p, request))) return;
   await bellOrWarn(ctx, p, request, 'renotified');
+}
+
+async function settleParkedLedgerBell(ctx, product, request) {
+  try {
+    await ctx.conn.transaction((trx) => require('./order-dispatch').settleRequestLedgerBells(trx, request.id));
+    return true;
+  } catch (err) {
+    logger.error(`[auto-reorder] parked ledger bell for ${product.name} (request ${request.id}) NOT settled — hand-off bell withheld: ${err.message}`);
+    ctx.result.errors.push({ productId: product.id, name: product.name, requestId: request.id, message: `ledger bell: ${err.message}` });
+    return false;
+  }
 }
 
 function stillLow(fresh) {

@@ -377,6 +377,17 @@ test('an open lookup bell is retired at the end of a run only when every applica
   expect(keys).toEqual(['supplies-consumption-failed:prod-sign:svc-1', 'supplies-consumption-failed:lookup:svc-1']);
 });
 
+test('an open lookup bell whose end-of-run re-check is INDETERMINATE (the catalog re-read fails) is a bell_retire_failed — the owed marker stays, the bell is not retired (Codex r31 P1)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], openLookupBell: true });
+  let catalogReads = 0;
+  const flaky = (table) => { const q = db(table); if (table === 'products_catalog') { catalogReads += 1; if (catalogReads > 1) q.select = async () => { throw new Error('catalog lost connection'); }; } return q; };
+  flaky.transaction = db.transaction; flaky.raw = db.raw;
+  const res = await consumeCompletionSupplies(flaky, args);
+  expect(res.consumed).toHaveLength(1); // the main deduction landed
+  expect(res.errors).toEqual([{ reason: 'bell_retire_failed', message: expect.stringMatching(/could not be re-checked/) }]);
+  expect(updates.filter((u) => u.table === 'notifications').map((u) => u.key)).toEqual(['supplies-consumption-failed:prod-sign:svc-1']); // the product bell only; the lookup bell stands
+});
+
 test('a lookup bell this module auto-retired (a concurrent retry deducted the kit) does NOT hand off the next kit product — it is deducted (Codex r26 P1)', async () => {
   const { db, inserts } = fakeDb({ products: [sign], handedOff: 'auto' });
   const res = await consumeCompletionSupplies(db, args);

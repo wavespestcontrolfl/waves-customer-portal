@@ -768,6 +768,20 @@ test('an order that lands after stale recovery parked the row AND an older pod r
   expect(notify.mock.calls[0][2]).toMatch(/receive the request once more/);
 });
 
+test('a persist_after_placement park records the POSITIVE figure — the beforeSubmit reservation over a zero vendor total — never $0 over the reservation (Codex r31 P1)', async () => {
+  const dbFn = require('../models/db');
+  const realTx = dbFn.transaction;
+  let n = 0;
+  dbFn.transaction = async (fn) => { n += 1; if (n === 3) throw new Error('audit insert lost connection'); return fn(dbFn); };
+  try {
+    const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(10593); return { externalOrderNumber: 'S1-9', amountCents: 0, evidence: {} }; }) });
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'persist_after_placement' });
+    expect(lastLedgerPatch().amount_cents).toBe(10593);
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.amount_cents === 0)).toBe(false);
+  } finally { dbFn.transaction = realTx; }
+});
+
 test('a DB failure after the vendor call parks as persist_after_placement, never failed', async () => {
   const dbFn = require('../models/db');
   dbFn.raw.mockClear();
@@ -873,8 +887,25 @@ test('a delivered bell whose version stamp hits zero rows (the bell was replaced
   mockState.request = { ...baseRequest(), status: 'ordered' };
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
   mockState.bellStampMiss = false;
-  // The just-inserted v1 notification is retired — staff never read v1's instructions beside v2 (Codex r23 P1).
-  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
+  // The row's earlier versions are retired before the stamp (Codex r31 P1), then the just-inserted v1 itself — staff never read v1's instructions beside v2 (Codex r23 P1).
+  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(2);
+});
+
+test('a bell delivery retires the row\'s earlier bell versions BEFORE its stamp; a retire that fails leaves the bell pending — re-rung, and the retire retried, next run (Codex r31 P1)', async () => {
+  const evidence = { bell: { title: 'Auto-order needs review: x', body: 'v2 text', v: 'v2' } };
+  mockState.pendingBells = [{ id: 'ledger-7', evidence, request_id: 'req-7', product_name: 'x', vendor_name: 'v' }];
+  mockState.request = { ...baseRequest(), status: 'ordered' };
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
+  expect(r.bells).toEqual({ rung: ['ledger-7'], pending: [] });
+  const order = mockState.updates.map((u) => u.table);
+  expect(order.indexOf('notifications')).toBeGreaterThanOrEqual(0);
+  expect(order.indexOf('notifications')).toBeLessThan(order.indexOf('vendor_orders')); // retire, then the bellAt stamp
+  mockState.updates = [];
+  mockState.bellRetireThrows = true;
+  try {
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-7/);
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders')).toBe(false); // no stamp: the next run re-rings v2 (a dedupe refresh) and retries the retire
+  } finally { mockState.bellRetireThrows = false; }
 });
 
 test('the run goes red while a bell is undelivered', async () => {
@@ -980,6 +1011,23 @@ test('a placing row older than 30 minutes is parked needs_review with a do-not-r
   expect(row.error).toMatch(/stale_placing/);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
   expect(a.place).not.toHaveBeenCalled();
+});
+
+test('stale recovery of a claim whose request an older pod CANCELLED meanwhile restores the request to ordered — the possibly-placed order stays reconcilable (Codex r31 P1)', async () => {
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  mockState.freshRequestStatus = 'cancelled';
+  const a = mockAdapter();
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } });
+  expect(r.recovered).toEqual(['ledger-old']);
+  const reopen = mockState.updates.find((u) => u.table === 'product_restock_requests');
+  expect(reopen.row).toMatchObject({ status: 'ordered', closed_at: null });
+  const row = mockState.updates.find((u) => u.table === 'vendor_orders').row;
+  expect(JSON.parse(row.evidence).reopenedFromCancelledAt).toEqual(expect.any(String));
+  expect(row.status).toBe('needs_review');
+  // An open request is left open, as before.
+  mockState.updates = []; mockState.freshRequestStatus = 'open';
+  await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } });
+  expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0);
 });
 
 test('assertNoLiveAutoOrder: a placing or dispatched auto claim refuses a staff request with a 409 that names the tab (pre-push P0)', async () => {
