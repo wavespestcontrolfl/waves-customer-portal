@@ -112,14 +112,14 @@ async function main() {
       await page.goto(`${baseUrl}/login`);
       await page.getByLabel('Phone number', { exact: true }).fill(fixture.phone.slice(2));
       const send = page.waitForResponse((response) => response.url().endsWith('/api/auth/send-code'));
-      await page.getByRole('button', { name: 'Send Code', exact: true }).click();
+      await page.getByRole('button', { name: 'Send code', exact: true }).click();
       await json(await send);
       const captures = fs.readFileSync(captureFile, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
       const code = captures.filter((item) => item.kind === 'verification').at(-1)?.code;
       assert.ok(code, 'Expected captured OTP from the real send-code route');
       await page.getByLabel('Verification code', { exact: true }).fill(code);
       const login = page.waitForResponse((response) => response.url().endsWith('/api/auth/verify-code'));
-      await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
       customerToken = (await json(await login)).token;
       assert.ok(customerToken);
       assert.equal((await page.request.get(`${baseUrl}/api/admin/settings`, { headers: { Authorization: `Bearer ${customerToken}` } })).status(), 401);
