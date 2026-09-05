@@ -75,8 +75,17 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, promises = [] }) {
   return {
+    // Sandy's promises on this leg (kind, verdict, spoken expectation, when
+    // spoken) — restored on the resumed leg so the commitments pass keeps
+    // the original deadline instead of deriving a bare promise (hook P1).
+    promises: (Array.isArray(promises) ? promises : []).map((p) => ({
+      kind: String(p.kind || ''),
+      verdict: p.verdict === true,
+      expectation: p.expectation || null,
+      at: p.at instanceof Date ? p.at.toISOString() : (p.at || null),
+    })).filter((p) => p.kind),
     generation: Number(generation) || 0,
     session_key: sessionKey || null,
     reason: reason || null,
@@ -198,12 +207,22 @@ async function loadResumeState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_M
       const reconnects = Number(meta.relay_reconnects) || 0;
       if (reconnects <= 0) return null;
       const full = segmentsText(meta.relay_segments);
+      const ordered = [...(Array.isArray(meta.relay_segments) ? meta.relay_segments : [])]
+        .filter((seg) => seg && typeof seg === 'object')
+        .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0));
+      // Latest verdict per kind across the earlier legs.
+      const promises = new Map();
+      for (const seg of ordered) for (const p of (Array.isArray(seg.promises) ? seg.promises : [])) if (p && p.kind) promises.set(String(p.kind), { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at || null });
+      const callerLabel = `${require('./relay-transcript').CALLER_LABEL}: `;
+      const callerTurns = full.split('\n').filter((line) => line.startsWith(callerLabel)).map((line) => line.slice(callerLabel.length).trim()).filter(Boolean);
       return {
         reconnects,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
         // The seed keeps the TAIL (the most recent turns matter most).
         segmentsText: full.length > RESUME_SEED_MAX_CHARS ? `[…]${full.slice(-RESUME_SEED_MAX_CHARS)}` : full,
         relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : null,
+        promises: [...promises.entries()].map(([kind, v]) => ({ kind, ...v })),
+        callerTurns, // the earlier legs' caller lines — the resumed capture floor's summary starts from these
       };
     });
   const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); });

@@ -709,6 +709,13 @@ class RelayConversation {
           // lead_captured truthfully (hook P1). A later capture_lead updates
           // that lead by the same-call reuse rule.
           if (state && state.relayLeadId) this.leadCaptured = true;
+          // The earlier legs' promises (with their spoken expectation and
+          // original timestamp) carry over, so the close's commitments pass
+          // keeps the deadline Sandy actually gave; a promise this leg
+          // makes for the same kind supersedes it.
+          for (const p of (state && state.promises) || []) {
+            if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
+          }
           if (state) logger.info(`[voice-relay] resumed session proven callSid=${maskSid(this.callSid)} reconnects=${state.reconnects} priorChars=${state.segmentsText.length} lead=${state.relayLeadId ? 'linked' : 'none'}`);
           else logger.warn(`[voice-relay] resumed hint NOT proven by the row callSid=${maskSid(this.callSid)} — treated as a fresh session`);
         })
@@ -2019,6 +2026,7 @@ class RelayConversation {
           latency: summarizeTurnStats(this._turnStats),
           versions: this._versionStamps(),
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
+          promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid).update(recovery.appendSegmentPatch(db, segment)),
@@ -2338,8 +2346,12 @@ class RelayConversation {
     // though relay-transcript scrubs the call_log copy. One scrubber, both
     // destinations.
     const { scrubForStorage } = require('./relay-transcript');
-    const spokenSoFar = this._userTurns.length
-      ? `Caller said: ${scrubForStorage(this._userTurns.join(' | ')).slice(0, 600)}`
+    // PR 2B: on a resumed leg the earlier legs' caller lines come first —
+    // a caller who explained everything before the drop and hung up right
+    // after the reconnect must not produce a "No transcript captured" lead.
+    const callerTurns = [...((this._resume && this._resume.callerTurns) || []), ...this._userTurns];
+    const spokenSoFar = callerTurns.length
+      ? `Caller said: ${scrubForStorage(callerTurns.join(' | ')).slice(0, 600)}`
       : 'No transcript captured.';
     const write = createLeadFromExtraction(
       {
