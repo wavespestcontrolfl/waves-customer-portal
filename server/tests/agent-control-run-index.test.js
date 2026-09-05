@@ -224,9 +224,11 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.fromRow({ ...exhausted, processing_status: 'extraction_failed', v2_extraction_status: 'api_unavailable' }).failureClass).toBe('provider');
     expect(callLog.fromRow({ ...exhausted, processing_status: 'extraction_failed' }).failureClass).toBe('infrastructure');
     // … but a failure still inside the processor's retry limits is QUEUED work its sweep will claim again (the last failure stays as the code)
-    const retrying = callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(864e5) });
+    // (the window is judged against the REAL clock — fixtures relative to it, not the frozen NOW)
+    const realAgo = (ms) => new Date(Date.now() - ms);
+    const retrying = callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: realAgo(864e5) });
     expect(retrying).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'extraction_failed', attempts: 1, maxAttempts: CALL_EXTRACTION_MAX_ATTEMPTS });
-    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago((EXTRACTION_RETRY_WINDOW_DAYS + 1) * 864e5) }).lifecycle).toBe('terminal');
+    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: realAgo((EXTRACTION_RETRY_WINDOW_DAYS + 1) * 864e5) }).lifecycle).toBe('terminal');
     // extraction landed, the lead write did not: the extract step stays done, the link step fails
     const linkFailed = callLog.fromRow({ ...base, processing_status: 'lead_creation_failed', v2_extraction_status: 'valid', transcription_status: 'completed', enriched: true });
     expect(linkFailed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'failed']);
