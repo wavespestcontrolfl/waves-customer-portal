@@ -83,6 +83,18 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   edit is a silent no-op in every environment that already ran it. Ship a
   NEW migration instead, and re-check the PR's live merge state before
   pushing follow-up commits to it.
+- **Never delete, rename, or re-stamp a migration file once ANY deploy ran
+  it — Railway PR previews included.** Every push to an open PR deploys a
+  preview environment with its own Postgres that runs the branch's
+  migrations; if a later push removes or renames that file, knex fails
+  every subsequent deploy of that environment with "The migration
+  directory is corrupt, the following files are missing" (the merge state
+  shows UNSTABLE from the Railway check). Superseding a migration mid-PR
+  means a NEW file with a fresh stamp whose `up` reverses the old one; the
+  old file stays. If the damage is already done, prove prod never ran the
+  file (`knex_migrations` read-only), then clean the PREVIEW database
+  (delete its `knex_migrations` row and undo the DDL by hand) so the
+  preview deploys again (#3869, 2026-09-05).
 - House style: `exports.up = async function up(knex)` with a symmetric
   `down`; guard with `hasTable` on the first line and per-column
   `hasColumn` before `alterTable` — idempotent in both directions.
