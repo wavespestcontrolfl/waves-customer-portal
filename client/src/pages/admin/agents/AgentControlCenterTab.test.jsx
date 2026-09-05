@@ -178,6 +178,27 @@ describe("AgentControlCenterTab", () => {
     expect(screen.getByText("SMS reply draft")).toBeInTheDocument();
   });
 
+  it("never shows the previous scope's lanes under new controls: a slow or failed read leaves them cleared", async () => {
+    renderTab("/admin/agents?tab=overview");
+    await screen.findByText("SMS reply draft");
+    let resolveSlow;
+    adminFetch.mockImplementationOnce(() => new Promise((resolve) => { resolveSlow = resolve; }));
+    fireEvent.click(screen.getByRole("button", { name: /^Idle/ }));
+    // the "All" payload is gone at once; the controls stay so a second click needs no wait
+    expect(screen.queryByText("SMS reply draft")).not.toBeInTheDocument();
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Idle/ })).toBeInTheDocument();
+    resolveSlow({ ...PAYLOAD, counts: { all: 1, active: 0, attention: 0, idle: 1 }, lanes: [PAYLOAD.lanes[2]] });
+    await screen.findByText("Call transcription");
+    expect(screen.queryByText("SMS reply draft")).not.toBeInTheDocument();
+    // a failed read for the next scope shows the error, not the Idle lanes
+    adminFetch.mockRejectedValueOnce(new Error("boom"));
+    fireEvent.click(screen.getByRole("button", { name: "30D" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+    expect(screen.queryByText("Call transcription")).not.toBeInTheDocument();
+    expect(screen.queryByText(/lanes ·/)).not.toBeInTheDocument();
+  });
+
   it("writes ?status= and ?window= to the URL (defaults never litter it) and refetches", async () => {
     renderTab("/admin/agents?tab=overview");
     await screen.findByText("SMS reply draft");

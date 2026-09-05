@@ -14,12 +14,14 @@ export const STATUS_CHIPS = [
   { key: "idle", label: "Idle" },
 ];
 
-export default function StatusStrip({ value, counts = {}, onChange }) {
+// Without counts (a scope still loading, or its read failed) the chips carry
+// no number: a zero, or the previous scope's count, would be a claim.
+export default function StatusStrip({ value, counts, onChange }) {
   return (
     <div className="flex gap-2 flex-wrap" role="group" aria-label="Lane status">
       {STATUS_CHIPS.map((chip) => {
         const active = value === chip.key;
-        const count = counts[chip.key] ?? 0;
+        const count = counts ? counts[chip.key] ?? 0 : null;
         const alert = chip.key === "attention" && active && count > 0;
         return (
           <button
@@ -37,7 +39,7 @@ export default function StatusStrip({ value, counts = {}, onChange }) {
             )}
           >
             {chip.label}
-            <span className={cn("text-11 u-nums", alert ? "text-alert-fg" : active ? "text-zinc-300" : "text-ink-tertiary")}>{count}</span>
+            <span className={cn("text-11 u-nums", alert ? "text-alert-fg" : active ? "text-zinc-300" : "text-ink-tertiary")}>{count === null ? "" : count}</span>
           </button>
         );
       })}

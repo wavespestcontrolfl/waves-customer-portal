@@ -16,31 +16,39 @@ import LaneCard from "./LaneCard";
 
 export default function AgentControlCenterTab({ areas = [], setRefreshHandler }) {
   const { area, window: windowKey, status, set: setHubParams } = useHubParams();
-  const [data, setData] = useState(null);
+  const areaKnown = areas.some((a) => a.key === area);
+  // The scope is the query the read is made with. A payload only renders
+  // under the controls that asked for it: after a filter change the previous
+  // scope's lanes and counts must not sit, mislabelled, beneath the new
+  // controls while the read is in flight — or for good, if it fails.
+  const scopeKey = useMemo(() => {
+    const qs = new URLSearchParams({ window: windowKey, status });
+    if (areaKnown) qs.set("area", area);
+    return qs.toString();
+  }, [area, areaKnown, windowKey, status]);
+  const [resolved, setResolved] = useState(null); // { scope, payload }
+  const data = resolved?.scope === scopeKey ? resolved.payload : null;
   // A quick run of filter clicks starts several reads; only the newest may
   // land (an older, slower response would paint the wrong scope).
   const requestSeq = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const areaKnown = areas.some((a) => a.key === area);
   const load = useCallback(async () => {
     const seq = (requestSeq.current += 1);
     setLoading(true);
     setError(null);
     try {
-      const qs = new URLSearchParams({ window: windowKey, status });
-      if (areaKnown) qs.set("area", area);
-      const next = await adminFetch(`/admin/agents/control/lanes?${qs.toString()}`);
+      const next = await adminFetch(`/admin/agents/control/lanes?${scopeKey}`);
       if (seq !== requestSeq.current) return;
-      setData(next);
+      setResolved({ scope: scopeKey, payload: next });
     } catch (e) {
       if (seq !== requestSeq.current) return;
       setError(e?.message || "Failed to load the control center");
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [area, areaKnown, windowKey, status]);
+  }, [scopeKey]);
 
   useEffect(() => {
     load();
@@ -66,19 +74,34 @@ export default function AgentControlCenterTab({ areas = [], setRefreshHandler })
 
   const attentionLanes = useMemo(() => (data?.lanes || []).filter((l) => l.status === "attention"), [data]);
 
-  if (loading && !data) {
-    return (
-      <div className="px-3 md:px-0 py-6 text-14 text-ink-secondary" role="status">
-        Loading…
-      </div>
-    );
-  }
   const errorNotice = error && (
     <div className="text-14 text-alert-fg" role="alert">
       {error}
     </div>
   );
-  if (!data) return <div className="px-3 md:px-0 py-6">{errorNotice}</div>;
+  // The controls stay up while a scope loads (a second click must not wait
+  // for the first read); the counts and lanes below them come only from the
+  // payload read for this scope — the chips carry no number until then.
+  const controls = (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <StatusStrip value={status} counts={data?.counts} onChange={(next) => setHubParams({ status: next })} />
+      <WindowPresets value={windowKey} onChange={(next) => setHubParams({ window: next })} />
+    </div>
+  );
+  if (!data) {
+    return (
+      <div className="flex flex-col gap-4 px-3 md:px-0 pb-6">
+        {controls}
+        {loading ? (
+          <div className="py-6 text-14 text-ink-secondary" role="status">
+            Loading…
+          </div>
+        ) : (
+          errorNotice
+        )}
+      </div>
+    );
+  }
 
   const basis = data.basis || {};
   const notes = [];
@@ -89,10 +112,7 @@ export default function AgentControlCenterTab({ areas = [], setRefreshHandler })
   return (
     <div className="flex flex-col gap-4 px-3 md:px-0 pb-6">
       {errorNotice}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <StatusStrip value={status} counts={data.counts} onChange={(next) => setHubParams({ status: next })} />
-        <WindowPresets value={windowKey} onChange={(next) => setHubParams({ window: next })} />
-      </div>
+      {controls}
       <p className="m-0 text-13 text-ink-secondary">
         <span className="font-medium text-zinc-900 u-nums">{data.counts?.all ?? 0}</span> lanes{areaKnown ? ` in ${areas.find((a) => a.key === area)?.label}` : ""} · {windowLabel(windowKey)}.
         {notes.length > 0 ? ` ${notes.join(" ")}` : ""}
