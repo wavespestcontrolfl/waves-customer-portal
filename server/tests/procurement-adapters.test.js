@@ -227,7 +227,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       nth: (i) => spec.nth ? spec.nth(i) : el(spec),
       textContent: async () => spec.text ?? null,
       inputValue: async () => { if (spec.value == null) throw new Error('not an input'); return String(spec.value); },
-      isVisible: async () => !!spec.visible,
+      isVisible: async () => { if (spec.isVisibleThrows) throw new Error('Element is not attached to the DOM'); return !!spec.visible; },
       isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
       click: async () => { if (spec.onClick) await spec.onClick(); },
       fill: async (v) => { if (spec.onFill) spec.onFill(v); },
@@ -276,6 +276,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.checkoutButton) return st.checkoutHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : el({ count: 1, visible: true });
       // mfaHiddenFirst: a responsive duplicate — the first matching node is hidden, the second is the visible prompt
       // mfaAfterTender: the verification step appears only once bill-to-account is selected
+      // mfaUnreadable: the MFA node's visibility read throws (detached mid-rerender) — must refuse, never read as absent
+      if (sel === S.mfaField && st.mfaUnreadable) return el({ count: 1, isVisibleThrows: true });
       if (sel === S.mfaField) return st.mfaHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : st.mfaAfterTender && st.accountChecked ? el({ count: 1, visible: true }) : el();
       // cardUntilBillTo: the checkout defaults to card entry and hides the field once bill-to-account is selected
       if (sel === S.cardField) return st.cardUntilBillTo ? el({ count: 1, visible: !st.accountChecked }) : el();
@@ -305,7 +307,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.billToAccountSelected) return el({ count: (st.accountChecked ? 1 : 0) + (st.extraCheckedAccounts || 0) });
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
-      if (sel === S.checkoutTotal) return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: 'Order total $105.93' });
+      // checkoutTotalText: the checkout total (default = the cart total, so a dry run's bell reports 9900);
+      // totalAtClick: a DIFFERENT total shown once the Place Order stage re-reads it (async tax / shipping recalculation)
+      if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       const placeBtn = () => el({ count: 1, visible: true, onClick: () => { st.placeClicked += 1; } });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
@@ -440,6 +444,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.placeClicked).toBe(1);
     expect(s1._internals.orderNumberIn('Thank you for your order')).toBeNull();
     expect(s1._internals.orderNumberIn('Order # 12345678')).toBe('12345678');
+    expect(s1._internals.orderNumberIn('Order date 2026-09-05 · Order # SO-778899')).toBe('SO-778899'); // every labeled match is tried; a date is never an id (r2 P2)
+    expect(s1._internals.orderNumberIn('Placed 2026-09-05')).toBeNull();
   });
 
   test('bill-to-account must be CONFIRMED selected before the place-order click (r1 P1)', async () => {
@@ -456,7 +462,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('a cap refusal carries the vendor total it refused: the checkout total, not the earlier cart total (r4 P2)', async () => {
-    const { st, deps } = fakeSiteOne();
+    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93' });
     let calls = 0;
     const beforeSubmit = async (cents) => { calls += 1; return calls === 1 ? { ok: true } : { ok: false, reason: 'over_cap', message: `${cents} over the per-order cap` }; };
     await expect(s1.place(args({ beforeSubmit }), deps)).rejects.toMatchObject({ refuse: 'over_cap', cents: 10593 });
@@ -466,7 +472,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('an ambiguous submit (no confirmation number after the click) carries the checkout total the click happened at (pre-push P0)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberText: 'Thank you for your order' });
+    const { st, deps } = fakeSiteOne({ orderNumberText: 'Thank you for your order', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
   });
@@ -613,8 +619,50 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.loggedIn).toBe(true);
   });
 
+  test('a dry run walks through the checkout verifications and the final cap check, then stops BEFORE the click and bells the checkout total (r2 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93' });
+    const totals = [];
+    const r = await s1.place(args({ dryRun: true, beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
+    expect(r).toMatchObject({ dryRun: true, amountCents: 10593, externalOrderNumber: null });
+    expect(r.evidence.billToAccountVerified).toBe(true);
+    expect(r.evidence.accountVerified).toBe(true);
+    expect(totals).toEqual([9900, 10593]);
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]); // nothing submitted: the cart is emptied
+  });
+
+  test('a dry run still refuses on a checkout blocker — the selectors are exercised (r2 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ mfaAfterTender: true });
+    await expect(s1.place(args({ dryRun: true }), deps)).rejects.toMatchObject({ refuse: 'mfa_required' });
+    expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('the total is re-read at the click boundary: a changed figure is cap-gated again and is the amount recorded (r2 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93', totalAtClick: 'Order total $112.40' });
+    const totals = [];
+    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
+    expect(totals).toEqual([9900, 10593, 11240]);
+    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 11240 });
+    expect(r.evidence.totalChangedBeforeClick).toEqual({ from: 10593, to: 11240 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('a changed total at the click boundary that the cap refuses is NOT clicked (r2 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93', totalAtClick: 'Order total $999.00' });
+    const beforeSubmit = async (cents) => (cents > 20000 ? { ok: false, reason: 'over_cap', message: 'over' } : { ok: true });
+    await expect(s1.place(args({ beforeSubmit }), deps)).rejects.toMatchObject({ refuse: 'over_cap', cents: 99900 });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]); // pre-click refusal: cart emptied
+  });
+
+  test('an MFA check whose visibility cannot be read refuses (mfa_unreadable) — never read as absent (r2 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ mfaUnreadable: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'mfa_unreadable' });
+    expect(st.placeClicked || 0).toBe(0);
+  });
+
   test('bill-to-account confirmed → checkout total cap-checked → one place-order click, cart left to the vendor', async () => {
-    const { st, deps } = fakeSiteOne();
+    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93' });
     const totals = [];
     const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
     expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 10593, dryRun: false });
