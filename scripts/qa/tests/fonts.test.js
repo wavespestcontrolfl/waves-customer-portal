@@ -27,7 +27,12 @@ test('vendored font assets match their source hashes and local CSS references', 
     assert.ok(css.includes(`font-family: '${family}'`));
   }
   for (const file of fs.readdirSync(path.join(root, 'client')).filter((name) => name.endsWith('.html'))) {
-    assert.doesNotMatch(fs.readFileSync(path.join(root, 'client', file), 'utf8'), /fonts\.googleapis\.com/, `${file}: use the shared local fonts`);
+    const html = fs.readFileSync(path.join(root, 'client', file), 'utf8');
+    assert.doesNotMatch(html, /fonts\.googleapis\.com/, `${file}: use the shared local fonts`);
+    const entry = html.match(/<script[^>]+src="(\/src\/[^"]+)"/);
+    assert.ok(entry, `${file}: expected a client entry point`);
+    const source = fs.readFileSync(path.join(root, 'client', entry[1]), 'utf8');
+    assert.match(source, /import ['"][^'"]*\/(?:index|fonts)\.css['"]/, `${file}: entry must import shared fonts`);
   }
 });
 
