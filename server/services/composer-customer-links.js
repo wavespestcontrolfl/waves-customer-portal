@@ -639,6 +639,16 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
+    // A receipt page shows the payment, card brand / last four and billing
+    // address; /sms binds it to the recipient's account and re-runs the
+    // recipient's receipt-text consent — a queued message or a draft would
+    // dispatch past a later email-only preference (pre-push Codex P1 on r9).
+    label: 'Receipt',
+    fragment: /\/receipt\//i,
+    token: (run, host) => canonicalPortalToken(run, host, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
     // A price-change notice page is the customer's own (first name + their
     // price); /sms binds it to the recipient row and re-reads that the
     // change is still upcoming.
@@ -2034,6 +2044,9 @@ async function buildReceiptLink(customerIds, recipientId = null) {
   return {
     url,
     line: `Here is your receipt for ${number}: ${url}\n\n`,
+    // Immediate sends only — the send seam re-checks the recipient's
+    // receipt-text consent, and scheduled / draft dispatch does not run it.
+    immediateOnly: true,
     receipt: { id: invoice.id, invoiceNumber: invoice.invoice_number || null, status: invoice.status, total: Number(invoice.total) || 0, paidAt: dateOnly(invoice.paid_at) },
   };
 }

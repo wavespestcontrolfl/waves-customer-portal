@@ -1078,7 +1078,9 @@ describe('buildReceiptLink', () => {
     expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('receipt_sent_at');
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
     expect(r.line).toBe(`Here is your receipt for invoice INV-1042: ${r.url}\n\n`);
-    expect(r.immediateOnly).toBeUndefined();
+    // Immediate-only: the recipient's receipt-text consent is re-run by
+    // the send seam, which scheduled / draft dispatch never reaches.
+    expect(r.immediateOnly).toBe(true);
     expect(r.receipt).toEqual({ id: 'inv-1', invoiceNumber: 'INV-1042', status: 'paid', total: 85, paidAt: '2026-08-30' });
     const { shortenOrPassthrough } = require('../services/short-url');
     expect(shortenOrPassthrough).not.toHaveBeenCalled();
@@ -1362,6 +1364,8 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     // it is the same report and is fenced the same (r5 P1).
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana_lee.jr-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
+    expect(await immediateOnlyLinkSendCheck(`Receipt: portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`)).toEqual({ present: true, label: 'Receipt' });
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`)).toEqual({ present: true, label: 'Receipt' });
     // An explicit http:// owned link is still a protected link (fence reads presence).
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
     expect(await immediateOnlyLinkSendCheck(`evil.example/price-change/${'a'.repeat(32)}`)).toEqual({ present: false });
