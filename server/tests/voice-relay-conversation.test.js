@@ -67,6 +67,8 @@ describe('RelayConversation — explicit end after capture', () => {
       whereIn: jest.fn(() => builder),
     };
     db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
 
     const convo = new RelayConversation({ callSid: 'CA9', from: '+19415551234', send: jest.fn() });
     convo.leadCaptured = true; // skip the capture-floor lead write
@@ -94,6 +96,8 @@ describe('RelayConversation — explicit end after capture', () => {
       whereRaw: jest.fn(() => builder),
     };
     db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     const convo = new RelayConversation({ callSid: 'CA-failed', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn() });
     convo.leadCaptured = true;
     convo._transcript.push({ role: 'caller', text: 'hi, ants again', turn: 1 }, { role: 'agent', text: 'Sorry to hear that.', turn: 1 });

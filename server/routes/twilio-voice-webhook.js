@@ -141,7 +141,9 @@ function connectingAnnouncement(row) {
   // Sandy PR 2A: a transferred call carries its ≤20-word whisper — read from
   // the persisted packet only, spoken only here (after press-1; the screen
   // leg stays generic). No packet ⇒ today's line.
-  if (meta.relay_handoff && typeof meta.relay_handoff === 'object') {
+  // A transfer whose BOTH packet writes failed still carries the outcome
+  // stamp: the generic whisper prompts the recap (codex r1 P2).
+  if ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || row?.call_outcome === 'ai_transferred') {
     const { transferWhisper } = require('../services/voice-agent/relay-transfer');
     return transferWhisper(meta.relay_handoff, name);
   }
@@ -770,11 +772,17 @@ async function appendRelayTransfer(req, twiml, callSid) {
     return;
   }
   if (callSid) {
+    // Best-effort and BOUNDED: a stalled pool is exactly the failure the
+    // fail-open transfer tolerates, so this stamp may never hold the TwiML
+    // past Twilio's webhook timeout (codex r1 P1).
     const { RELAY_TERMINAL_OUTCOMES } = require('../services/voice-agent/relay-protocol');
-    await db('call_log').where('twilio_call_sid', callSid)
-      .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', RELAY_TERMINAL_OUTCOMES))
-      .update({ call_outcome: 'ai_transferred', updated_at: new Date() })
-      .catch((err) => logger.warn(`[relay-complete] ai_transferred stamp failed for ${maskSid(callSid)}: ${err.message}`));
+    await withDeadline(
+      db('call_log').where('twilio_call_sid', callSid)
+        .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', RELAY_TERMINAL_OUTCOMES))
+        .update({ call_outcome: 'ai_transferred', updated_at: new Date() })
+        .catch((err) => logger.warn(`[relay-complete] ai_transferred stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+      STAMP_DEADLINE_MS,
+    );
   }
   const forwardNumbers = getFallbackForwardNumbers();
   if (forwardNumbers.length === 0) {
@@ -1429,7 +1437,15 @@ router.post('/call-complete', async (req, res) => {
 
     const callUpdate = {
       status,
-      duration_seconds: duration,
+      // A Sandy transfer (PR 2A) reaches this Dial AFTER the relay leg: the
+      // AI portion (row created → packet transferred_at) is added back so the
+      // saved duration is the whole call, not the staff leg (codex r1 P2).
+      // One expression, no extra read; rows without a packet keep `duration`.
+      duration_seconds: db.raw(
+        "? + COALESCE(CASE WHEN (metadata->'relay_handoff'->>'transferred_at') IS NOT NULL "
+        + "THEN GREATEST(0, EXTRACT(EPOCH FROM ((metadata->'relay_handoff'->>'transferred_at')::timestamptz - created_at)))::int ELSE 0 END, 0)",
+        [duration],
+      ),
       answered_by: answeredBy,
       updated_at: new Date(),
     };
@@ -1949,7 +1965,7 @@ router.post('/inbound-forward-accept', async (req, res) => {
         try {
           callRow = await db('call_log')
             .where('twilio_call_sid', parentCallSid)
-            .select('metadata', 'from_phone')
+            .select('metadata', 'from_phone', 'call_outcome')
             .first();
         } catch (lookupErr) {
           logger.warn(`[voice] forward-accept caller lookup failed for ${maskSid(parentCallSid)}: ${lookupErr.message}`);

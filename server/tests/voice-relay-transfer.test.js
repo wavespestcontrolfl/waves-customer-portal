@@ -202,6 +202,29 @@ describe('the session side (relay-conversation tool ctx)', () => {
   });
 });
 
+describe('codex r1 follow-ups', () => {
+  test('office hours load when the transfer gate is on even with the context gate off (P1)', () => {
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    const off = new RelayConversation({ callSid: 'CA-oh-0', from: '+19415551234', send: jest.fn() });
+    expect(off._officeHoursReady).toBeNull();
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const on = new RelayConversation({ callSid: 'CA-oh-1', from: '+19415551234', send: jest.fn() });
+    expect(on._officeHoursReady).not.toBeNull();
+  });
+
+  test('a caught tool failure is recorded as ok:false (P2)', async () => {
+    const ctx = { callSid: 'CA-tf' };
+    const out = await executeTool('find_slots', { when: 'tomorrow' }, ctx); // the booking engine is not mocked here ⇒ throws ⇒ caught
+    expect(out).toMatch(/Could not look up appointment times/);
+    expect(ctx.toolFailed).toBe(true);
+  });
+
+  test('the no-context bell is on the bell-policy allowlist (P2)', () => {
+    const { _private } = require('../services/notification-bell-policy');
+    expect(_private.TRIGGER_BELL_ALLOWLIST.has('sandy_transfer_no_context')).toBe(true);
+  });
+});
+
 describe('whisper + AI segment', () => {
   test('≤20 words, sanitized, from the packet only', () => {
     const w = transfer.transferWhisper({ context_available: true, caller_name: 'Pat "Doe" <b>', intent: 'cancel service', unresolved_question: 'refund for June and the extra visit last week please' });
@@ -225,6 +248,9 @@ describe('whisper + AI segment', () => {
     expect(transfer.composeRelaySegment({ ...row, call_outcome: 'voicemail' })).not.toBeNull(); // nobody pressed 1 ⇒ voicemail, AI segment survives
     expect(transfer.composeRelaySegment({ ...row, metadata: { relay_handoff: { context_available: false } } })).not.toBeNull();
     expect(transfer.composeRelaySegment({ ...row, metadata: {} })).toBeNull(); // an ordinary relay call: the processor path is unchanged
+    // The recording-status swap cleared the transcript columns: the metadata copy end() stashed still rebuilds the segment (P1).
+    const swapped = { call_outcome: 'voicemail', transcription: null, transcription_provider: null, transcription_metadata: null, metadata: { relay_handoff: { context_available: true }, relay_transcript: { text: 'Caller: hi\nSandy: hello', metadata: { provider: 'conversation_relay' } } } };
+    expect(transfer.composeRelaySegment(swapped)).toEqual({ text: '[AI segment]\nCaller: hi\nSandy: hello', metadata: { provider: 'conversation_relay' } });
     expect(transfer.composeRelaySegment({ ...row, transcription_provider: 'openai' })).toBeNull();
     expect(transfer.composeRelaySegment({ ...row, transcription: '' })).toBeNull();
   });

@@ -1530,6 +1530,9 @@ async function executeTool(name, input = {}, ctx = {}) {
     return `Unknown tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}". Do not retry; continue the conversation.`;
   } catch (err) {
     logger.error(`[voice-relay] tool "${name}" failed: ${err.message}`);
+    // The failure is answered with a string; the session reads this flag so
+    // the handoff record never reports a failed tool as ok.
+    if (ctx && typeof ctx === 'object') ctx.toolFailed = true;
     if (name === 'capture_lead') {
       return 'The lead could not be saved right now, but proceed to wrap up the call politely; the call is still recorded for follow-up.';
     }

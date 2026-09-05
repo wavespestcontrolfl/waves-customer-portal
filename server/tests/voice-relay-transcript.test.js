@@ -38,6 +38,7 @@ function primeCallLog({ rows = 1, updateImpl } = {}) {
     whereIn: jest.fn(() => builder),
   };
   db.mockReturnValue(builder);
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   return { builder, guardQ, update };
 }
 

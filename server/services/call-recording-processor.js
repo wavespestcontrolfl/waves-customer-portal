@@ -6800,7 +6800,12 @@ const CallRecordingProcessor = {
         if (!result.structuredSegments && !contactPassTranscript) {
           transcriptUpdate.transcript_structured = null;
         }
-        if (result.structuredSegments || contactPassTranscript) {
+        // A composite (AI + recorded segment) has no structured form: the
+        // synced view would render the recorded segment alone and hide the
+        // AI conversation (codex r1 P2) — the flat transcript is the view.
+        if (relaySegment) {
+          transcriptUpdate.transcript_structured = null;
+        } else if (result.structuredSegments || contactPassTranscript) {
           transcriptUpdate.transcript_structured = JSON.stringify({
             provider: result.provider,
             model: result.model || OPENAI_TRANSCRIPTION_MODEL,

@@ -73,6 +73,18 @@ describe('/relay-complete', () => {
     expect(res.body).not.toContain('<Record');
   });
 
+  test('a HUNG outcome stamp never holds the transfer TwiML (P1) — the Dial renders within the stamp deadline', async () => {
+    jest.useFakeTimers();
+    const { builder } = primeDb();
+    builder.update = jest.fn(() => new Promise(() => {})); // pool stalled
+    const res = mockRes();
+    const p = handlerFor('/relay-complete')({ body: { CallSid: 'CA-hung', HandoffData: TRANSFER }, query: {} }, res);
+    await jest.advanceTimersByTimeAsync(2000);
+    await p;
+    jest.useRealTimers();
+    expect(res.body).toContain('<Dial record="record-from-answer-dual"');
+  });
+
   test('transfer with no staff numbers configured ⇒ voicemail (never a stranded caller)', async () => {
     process.env.WAVES_FALLBACK_FORWARD_NUMBERS = '';
     for (const k of ['OWNER_PHONE', 'ADAM_PHONE', 'VIRGINIA_PHONE', 'OFFICE_MANAGER_PHONE']) delete process.env[k];
@@ -116,6 +128,8 @@ describe('press-1 whisper', () => {
     const row = { metadata: JSON.stringify({ screen_caller_name: 'Pat Doe', relay_handoff: { context_available: true, caller_name: 'Pat Doe', intent: 'cancel service', unresolved_question: 'refund' } }) };
     expect(connectingAnnouncement(row)).toBe('Sandy transfer from Pat Doe: cancel service; refund.');
     expect(connectingAnnouncement({ metadata: { relay_handoff: { context_available: false } } })).toBe('Sandy transfer. The caller requested assistance; the summary was unavailable.');
+    // Both packet writes failed but the outcome stamp landed: still the generic Sandy whisper (P2).
+    expect(connectingAnnouncement({ metadata: { screen_caller_name: 'Pat Doe' }, call_outcome: 'ai_transferred' })).toBe('Sandy transfer. The caller requested assistance; the summary was unavailable.');
     expect(connectingAnnouncement({ metadata: { screen_caller_name: 'Pat Doe' } })).toBe('Connecting your call from Pat Doe.');
     expect(connectingAnnouncement(null)).toBe('Connecting your call from an unknown number.');
   });

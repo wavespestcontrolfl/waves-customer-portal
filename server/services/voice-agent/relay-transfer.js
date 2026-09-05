@@ -242,8 +242,8 @@ async function recordNoContext(ctx, packet, facts) {
 /**
  * The AI segment to keep ahead of a transferred call's recording transcript
  * (call-recording-processor). Qualified on the PERSISTED handoff packet
- * (metadata.relay_handoff) plus the relay's own provider stamp — never on
- * the final outcome: a transfer nobody accepted ends as 'voicemail' through
+ * (metadata.relay_handoff) plus the relay transcript (metadata.relay_transcript,
+ * else the relay-stamped columns) — never on the final outcome: a transfer nobody accepted ends as 'voicemail' through
  * /call-complete, and that voicemail's transcript must not erase the AI
  * conversation either. Anything else ⇒ null (today's overwrite).
  */
@@ -253,11 +253,19 @@ function composeRelaySegment(call) {
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
   if (!meta || typeof meta !== 'object' || !meta.relay_handoff || typeof meta.relay_handoff !== 'object') return null;
   const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
-  if (call.transcription_provider !== TRANSCRIPTION_PROVIDER) return null;
-  const text = String(call.transcription || '').trim();
+  // The durable copy first: end() stashes the relay transcript under
+  // metadata.relay_transcript because the recording-status swap CLEARS the
+  // transcript columns before the recording is transcribed (codex r1 P1).
+  const stash = meta.relay_transcript && typeof meta.relay_transcript === 'object' ? meta.relay_transcript : null;
+  let text = String((stash && stash.text) || '').trim();
+  let tmeta = stash && stash.metadata && typeof stash.metadata === 'object' ? stash.metadata : null;
+  if (!text) {
+    if (call.transcription_provider !== TRANSCRIPTION_PROVIDER) return null;
+    text = String(call.transcription || '').trim();
+    tmeta = call.transcription_metadata;
+    if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
+  }
   if (!text) return null;
-  let tmeta = call.transcription_metadata;
-  if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
   return {
     text: `[AI segment]\n${text}`,
     metadata: tmeta && typeof tmeta === 'object' ? tmeta : { provider: TRANSCRIPTION_PROVIDER },

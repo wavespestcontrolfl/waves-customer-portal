@@ -663,6 +663,11 @@ class RelayConversation {
       // contact-slot match is a shared number and does not speak for the
       // account holder.
       this._contextReady.then(() => { void this._persistLanguagePreference(); }).catch(() => {});
+    }
+    // Office hours feed the clock block (context gate) AND the transfer rule
+    // (PR 2A gate) — loaded when either is on, so GATE_VOICE_RELAY_TRANSFER
+    // works without the unrelated account-context gate (codex r1 P1).
+    if (isContextEnabled() || require('./relay-transfer').isTransferGateOn()) {
       const { loadOfficeHours } = require('./relay-context');
       this._officeHoursReady = loadOfficeHours()
         .then((hours) => { this._officeHours = hours; })
@@ -1722,11 +1727,15 @@ class RelayConversation {
           // carry the caller's contact details and belongs in the lead row.
           this._recordTurn('tool', block.name);
           const toolStartAt = now();
+          toolCtx.toolFailed = false; // set by executeTool's catch (an operational failure answered with a string)
           const out = await this._executeToolBounded(block.name, block.input, toolCtx);
           stat.toolMs += now() - toolStartAt;
           stat.toolCount += 1;
-          // ok = the tool answered (a timeout / in-flight refusal is not an answer).
-          this._toolOutcomes.push({ name: block.name, ok: ![TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out) });
+          // ok = the tool answered without failing (a timeout / in-flight
+          // refusal / caught failure is not a success — the handoff card
+          // must not tell staff a failed lookup succeeded, codex r1 P2).
+          const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
+          this._toolOutcomes.push({ name: block.name, ok: !sentinel && toolCtx.toolFailed !== true });
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
         }
         this.messages.push({ role: 'user', content: results });
@@ -1899,8 +1908,18 @@ class RelayConversation {
         if (transcriptUpdate && !updated) {
           // ai_transferred (PR 2A) likewise: the outcome is the transfer's,
           // the AI segment's transcript is still this session's to write.
+          // The transcript ALSO rides metadata.relay_transcript: a transfer's
+          // staff/voicemail recording later REPLACES the transcript columns
+          // (recording-status swap), and the processor rebuilds the AI segment
+          // from this copy (codex r1 P1).
           salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['relay_failed', 'ai_transferred']))
-            .update({ ...transcriptUpdate, updated_at: new Date() });
+            .update({
+              ...transcriptUpdate,
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                relay_transcript: { text: transcriptUpdate.transcription, metadata: JSON.parse(transcriptUpdate.transcription_metadata) },
+              })]),
+              updated_at: new Date(),
+            });
           if (salvaged) logger.info(`[voice-relay] transcript kept on a relay_failed row callSid=${maskSid(this.callSid)} turns=${this._transcript.length}`);
         }
         if (transcriptUpdate && !updated && !salvaged) {
