@@ -254,7 +254,12 @@ function fillLoginForm({ user, pw, userSel, passSel }) {
   try { action = new URL(form.getAttribute('action') || '', location.href); } catch { return 'badform'; }
   const ah = action.hostname.toLowerCase();
   if (action.protocol !== 'https:' || !(ah === 'siteone.com' || ah.endsWith('.siteone.com'))) return 'badform';
-  const u = form.querySelector(userSel);
+  // The ONE visible username field inside THAT form: a hidden honeypot or
+  // responsive copy ahead of it would take the fill and park a valid login
+  // as login_rejected (Codex #3853 r19 P1); two visible = ambiguous.
+  const visibleUser = Array.from(form.querySelectorAll(userSel)).filter((el) => !!el.offsetParent);
+  if (visibleUser.length > 1) return 'ambiguousform';
+  const u = visibleUser[0];
   if (!u) return 'nofields';
   for (const [el, v] of [[u, user], [p, pw]]) {
     el.focus();

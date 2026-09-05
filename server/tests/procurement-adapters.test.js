@@ -180,9 +180,11 @@ describe('siteone internals', () => {
   test('the login fill binds both fields to the ONE visible password form — a newsletter email input ahead of it is never the username; two visible forms abort (r15 P1)', () => {
     const { fillLoginForm, SELECTORS: S } = s1._internals;
     const field = (name, extra = {}) => ({ name, value: '', events: [], focus() {}, dispatchEvent(e) { this.events.push(e.type); }, offsetParent: {}, ...extra });
-    const mkForm = (action, fields) => ({ getAttribute: () => action, querySelector: () => fields.user || null });
+    // The form's username lookup returns every match in document order: a hidden honeypot email input sits AHEAD of the visible username (r19 P1)
+    const mkForm = (action, fields) => ({ getAttribute: () => action, querySelectorAll: () => fields.users || [] });
     const pw = field('password'); const user = field('username');
-    const form = mkForm('/login', { user }); pw.form = form; user.form = form;
+    const honeypot = field('email', { offsetParent: null });
+    const form = mkForm('/login', { users: [honeypot, user] }); pw.form = form; user.form = form;
     const newsletter = field('email');
     const hiddenPw = field('password', { offsetParent: null });
     global.location = { hostname: 'www.siteone.com', protocol: 'https:', href: 'https://www.siteone.com/en/login' };
@@ -192,6 +194,10 @@ describe('siteone internals', () => {
       expect(fillLoginForm({ user: 'u@x', pw: 'p', userSel: S.loginUser, passSel: S.loginPass })).toBe('ok');
       expect(user.value).toBe('u@x'); expect(pw.value).toBe('p');
       expect(newsletter.value).toBe(''); // the document-wide first email input is untouched
+      expect(honeypot.value).toBe(''); // the form's hidden first username match is untouched (r19 P1)
+      const user2 = field('username', { form }); form.querySelectorAll = () => [user, user2];
+      expect(fillLoginForm({ user: 'u@x', pw: 'p', userSel: S.loginUser, passSel: S.loginPass })).toBe('ambiguousform'); // two visible username fields in the form
+      form.querySelectorAll = () => [honeypot, user];
       const pw2 = field('password', { form }); global.document.querySelectorAll = (sel) => (sel === S.loginPass ? [pw, pw2] : [user]);
       expect(fillLoginForm({ user: 'u@x', pw: 'p', userSel: S.loginUser, passSel: S.loginPass })).toBe('ambiguousform');
       const orphan = field('password'); orphan.form = mkForm('/login', {}); global.document.querySelectorAll = (sel) => (sel === S.loginPass ? [orphan] : []);
