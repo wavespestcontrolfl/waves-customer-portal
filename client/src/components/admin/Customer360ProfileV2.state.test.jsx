@@ -228,6 +228,41 @@ describe('Customer360ProfileV2 profile state', () => {
     await waitFor(() => expect(propertyFetches()).toBe(2));
   });
 
+  it('saves a city correction without resubmitting unchanged shared contacts or billing settings', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    detail.customer.address.city = 'Duette';
+    detail.customer.email = 'shared@example.test';
+    detail.customer.phone = '+12025550123';
+    detail.customer.monthlyRate = 0;
+    let savedPayload;
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/admin/customers/customer-a') && options.method === 'PUT') {
+        savedPayload = JSON.parse(options.body);
+        if ('email' in savedPayload || 'phone' in savedPayload) {
+          return response({ error: 'contact_exists_on_another_account' }, 409);
+        }
+        detail.customer.address.city = savedPayload.city;
+        return response({ success: true });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(detail);
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+    fireEvent.change(screen.getByDisplayValue('Duette'), { target: { value: 'Parrish' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByText('Edit customer')).not.toBeInTheDocument());
+    expect(savedPayload).toEqual({
+      addressLine1: 'customer-a Main St', addressLine2: 'Unit 4', city: 'Parrish', state: 'FL', zip: '34102',
+    });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+    expect(screen.getByDisplayValue('Parrish')).toBeInTheDocument();
+  });
+
   it('flags partially refunded payments in overview Recent Transactions', async () => {
     // A partial refund must not render like an untouched paid row — the
     // gross amount would read as fully collected while Lifetime Rev drops.
