@@ -177,7 +177,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // write must lose rather than overwrite its customer, codex #3834 r18 P1):
 // 0 rows ⇒ a concurrent transition wins and nothing below runs.
 // Returns whether the lead converted.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity } = {}) {
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, estimateId } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -204,7 +204,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   }
 
   const linkedCustomer = customerId || null;
-  await settleWonFunnelRow(leadId, linkedCustomer);
+  await settleWonFunnelRow(leadId, linkedCustomer, estimateId || null);
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
@@ -254,10 +254,12 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 // Best-effort like the bridge and the stamp: the status write has committed,
 // so a settlement read that fails must not fail the conversion (codex r28
 // P2). Lazy require: the lead-estimate-link ⇄ lead-attribution cycle.
-async function settleWonFunnelRow(leadId, customerId = null) {
+// `estimateId` (the estimate the conversion closed, when it closed one)
+// scopes which root may take the win's row — see settleRepeatFunnelRow.
+async function settleWonFunnelRow(leadId, customerId = null, estimateId = null) {
   await bridgeLeadFunnelStage(leadId, 'won');
   try {
-    const rebuild = await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId });
+    const rebuild = await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId, estimateId });
     if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId, funnelStage: 'booked' });
   } catch (err) {
     logger.warn(`[LeadAttribution] funnel-row settlement failed for lead ${leadId}: ${err.message}`);

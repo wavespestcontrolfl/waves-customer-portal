@@ -48,7 +48,7 @@ describe('markConverted claims', () => {
     const ok = await markConverted('lead-manual', { customerId: 'c1' });
     expect(ok).toBe(true);
     expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-manual', 'won');
-    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-manual', { customerId: 'c1' });
+    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-manual', { customerId: 'c1', estimateId: null });
     expect(stampLeadFunnelRow).toHaveBeenCalledWith(db, mockRepeatRow, { customerId: 'c1', funnelStage: 'booked' });
     const statusWrite = mockCalls.findIndex((c) => c[1] === 'update');
     expect(statusWrite).toBeGreaterThanOrEqual(0);
@@ -56,10 +56,16 @@ describe('markConverted claims', () => {
     expect(settleRepeatFunnelRow.mock.invocationCallOrder[0]).toBeLessThan(stampLeadFunnelRow.mock.invocationCallOrder[0]);
   });
 
+  test('an estimate-scoped conversion (deposit_paid / acceptance) hands the estimate to the settlement so a root linked to another estimate is never booked for it (pre-push P1 on 1ea5d47)', async () => {
+    mockRepeatRow = null;
+    await markConverted('lead-rep', { customerId: 'c1', estimateId: 'e-B' });
+    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-rep', { customerId: 'c1', estimateId: 'e-B' });
+  });
+
   test('a settled win (the root took it) or a non-repeat with no funnel row stamps nothing — an inbound call on the Ads bridge number keeps its slot for the delayed paid-call bridge (codex r24 P1, r27 P2)', async () => {
     mockRepeatRow = null; // settleRepeatFunnelRow: root bridged, or not a quote_wizard row with a marker
     await markConverted('lead-call', { customerId: 'c1' });
-    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-call', { customerId: 'c1' });
+    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-call', { customerId: 'c1', estimateId: null });
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 
@@ -75,7 +81,7 @@ describe('markConverted claims', () => {
     mockRepeatRow = { id: 'lead-booked', lead_type: 'quote_wizard', extracted_data: { duplicate_of_lead_id: 'root' } };
     await settleWonFunnelRow('lead-booked', 'c1');
     expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-booked', 'won');
-    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-booked', { customerId: 'c1' });
+    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-booked', { customerId: 'c1', estimateId: null });
     expect(stampLeadFunnelRow).toHaveBeenCalledWith(db, mockRepeatRow, { customerId: 'c1', funnelStage: 'booked' });
     expect(mockCalls.some((c) => c[0] === 'leads' && c[1] === 'update')).toBe(false);
   });
@@ -84,7 +90,7 @@ describe('markConverted claims', () => {
     bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 1, stage: 'booked' });
     mockRepeatRow = null;
     await markConverted('lead-bridged', { customerId: 'c1' });
-    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-bridged', { customerId: 'c1' });
+    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-bridged', { customerId: 'c1', estimateId: null });
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
   });
 

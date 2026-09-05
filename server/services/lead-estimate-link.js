@@ -95,13 +95,21 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // lose and the repeat carries its own row (codex r29 P1); and once the root's
 // row carries the win, a lead-stage row the repeat kept because /calculate's
 // own delete failed is dropped, so the deal is never counted twice (r29 P2).
-async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {}) {
+// `estimateId` is the estimate the conversion closed (deposit_paid, an
+// acceptance): a root linked to a DIFFERENT estimate is that deal's lead —
+// the resolver refused it as the keeper for exactly that reason (codex r22
+// P1) — so its row must not be booked for this one. The event's scope is
+// judged first; an unlinked repeat carries none of its own, and reading only
+// the repeat's link let root A take the funnel row of a deposit on estimate
+// B (pre-push P1 on 1ea5d47).
+async function settleRepeatFunnelRow(database, leadId, { customerId = null, estimateId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
   if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
   const { root } = await resolveAncestry(database, repeat);
+  const scope = estimateId || repeat.estimate_id;
   const rootOurs = !!root && !root.deleted_at && OPEN_LEAD_STATUSES.includes(root.status)
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
-    && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
+    && !(root.estimate_id && scope && String(root.estimate_id) !== String(scope));
   if (!rootOurs) return repeat;
   const onlyIfLead = { ...identityOf(root), status: root.status };
   // Every read or write on the root's row below carries the lead claim the
@@ -854,6 +862,10 @@ async function markLinkedLeadEstimateAccepted({
       monthlyValue,
       initialServiceValue,
       waveguardTier,
+      // The accepted estimate scopes the funnel settlement (see
+      // settleRepeatFunnelRow): a root linked to another estimate is never
+      // booked for this deal.
+      estimateId,
       // The status write carries the same claim — status AND identity — so
       // nothing between the stamp and the conversion can hand the row to a
       // different customer (codex #3834 r11 P1, r18 P1).
@@ -1358,6 +1370,10 @@ async function convertLeadFromEvent({
 
     for (const lead of open) {
       const conversion = { triggerSource: source };
+      // An estimate-scoped event (deposit_paid) scopes the funnel settlement
+      // too: the resolver refused a root linked to another estimate as the
+      // keeper, and the settlement must refuse it as the row to book.
+      if (estimateId) conversion.estimateId = estimateId;
       if (resolvedCustomerId) conversion.customerId = resolvedCustomerId;
       else if (lead.customer_id) conversion.customerId = lead.customer_id;
       // Pass revenue fields only when an estimate supplied them — otherwise

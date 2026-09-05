@@ -285,7 +285,7 @@ describe('lead-estimate link service', () => {
 
     expect(leadAttribution.markConverted).toHaveBeenCalledTimes(1);
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-open', {
-      customerId: 'customer-1', monthlyValue: 125, initialServiceValue: 99, waveguardTier: 'Gold',
+      customerId: 'customer-1', monthlyValue: 125, initialServiceValue: 99, waveguardTier: 'Gold', estimateId: 'estimate-1',
     });
     expect(database._updates).toHaveLength(0); // already linked → no estimate_id re-stamp
   });
@@ -829,6 +829,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(result).toMatchObject({ converted: true, count: 1, leadIds: ['L1'] });
     expect(markConverted).toHaveBeenCalledWith('L1', {
       customerId: 'c1',
+      estimateId: 'e1',
       monthlyValue: 125,
       initialServiceValue: 99,
       waveguardTier: 'Gold',
@@ -921,6 +922,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(result).toMatchObject({ converted: true, leadIds: ['Laddon'] });
     expect(markConverted.mock.calls[0][1]).toEqual({
       customerId: 'c1',
+      estimateId: 'e9',
       triggerSource: 'appointment_booked',
       monthlyValue: null,
       initialServiceValue: 450,
@@ -1476,6 +1478,17 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
     });
 
+    test('an UNLINKED repeat converted by a deposit on estimate B: a root linked to estimate A is that deal\'s lead — the event\'s estimate scopes the settlement, and the repeat carries its own row (pre-push P1 on 1ea5d47)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'estimate_sent', customer_id: 'c1', phone: '9415550142', estimate_id: 'e-A' } };
+      const database = dbOf(rows, { root: 'estimate_sent' });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-B' })).resolves.toBe(rows.rep);
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(database._deleted).toEqual([]);
+      // ...and the same root IS the deal when the deposit is on ITS estimate.
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-A' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, expect.objectContaining({ onlyIfLead: expect.objectContaining({ estimate_id: 'e-A' }) }));
+    });
+
     test('a root linked to the SAME estimate as the repeat is the same deal', async () => {
       const rows = { rep: repeat('rep', { estimate_id: 'e-1' }), root: { id: 'root', status: 'estimate_viewed', customer_id: 'c1', estimate_id: 'e-1' } };
       const database = dbOf(rows, { root: 'estimate_viewed' });
@@ -1555,7 +1568,10 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     const result = await convertLeadFromEvent({ source: 'deposit_paid', estimateId: 'e2', customerId: 'c1', database, leadAttributionService: { markConverted } });
     expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-rep-e2'] });
     expect(markConverted).not.toHaveBeenCalledWith('L-root-e1', expect.anything());
-    expect(markConverted).toHaveBeenCalledWith('L-rep-e2', expect.objectContaining({ onlyIfStatusIn: ['duplicate'] }));
+    // ...and the event's estimate rides through to the settlement, so the
+    // out-of-scope root is refused as the row to book as well as the keeper
+    // (pre-push P1 on 1ea5d47).
+    expect(markConverted).toHaveBeenCalledWith('L-rep-e2', expect.objectContaining({ onlyIfStatusIn: ['duplicate'], estimateId: 'e2' }));
     // The stamp is markConverted's (so the backfill preview stub covers it) —
     // never a direct write from the resolver (codex r18 P1).
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
