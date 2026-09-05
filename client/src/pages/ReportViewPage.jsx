@@ -35,6 +35,7 @@ import {
   Wind,
   Download,
 } from 'lucide-react';
+import Icon from '../components/Icon';
 import {
   COLORS as B,
   FONTS,
@@ -2947,9 +2948,9 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
         ))}
       </div>
       {answer && (
-        <div className="floating-ask-answer" role="status" data-glass="soft">
+        <div className="waves-ask-answer" role="status">
           <span>{answer}</span>
-          <button type="button" className="floating-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">{'\u2715'}</button>
+          <button type="button" className="waves-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer"><Icon name="close" size={16} strokeWidth={2} /></button>
         </div>
       )}
     </section>
@@ -7367,168 +7368,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
-        /* Floating Ask Waves bar — sticky under the 49px shell header (live only).
-           Grid areas: desktop "title pills form"; phone stacks form + pills. */
-        .floating-ask-wrap {
-          position: sticky;
-          top: 57px;
-          z-index: 8;
-          margin-top: 20px;
-        }
-        /* stuck-detection sentinel (useStickyStuck) — 1px tall so
-           IntersectionObserver tracks it reliably, margin cancels the height */
-        .floating-ask-sentinel {
-          height: 1px;
-          margin-bottom: -1px;
-        }
-        .floating-ask-bar {
-          display: grid;
-          grid-template-areas: 'title pills form';
-          grid-template-columns: auto minmax(0, 1fr) minmax(280px, 38%);
-          align-items: center;
-          gap: 10px;
-          border: 1px solid var(--line);
-          border-radius: 12px;
-          background: var(--wash);
-          padding: 10px 14px;
-        }
-        .floating-ask-title {
-          grid-area: title;
-          color: var(--text);
-          font-size: 14px;
-          font-weight: 800;
-          letter-spacing: 0.08em;
-          text-transform: uppercase;
-          white-space: nowrap;
-        }
-        .floating-ask-title::before {
-          /* \\2726 = four-pointed star (escaped: raw glyphs fail check:portal-brand) */
-          content: '\\2726  ';
-          color: ${B.yellow};
-        }
-        /* prompt marquee: pills drift slowly left, fade out behind the Waves AI
-           label and re-enter from the input side (owner ask 2026-07-09). The
-           track holds the prompt list twice and loops at exactly half its own
-           width, so the belt is seamless; hover/focus pauses it for clicking. */
-        .floating-ask-pills {
-          grid-area: pills;
-          min-width: 0;
-          overflow: hidden;
-          -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
-          mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
-        }
-        .floating-ask-track {
-          display: flex;
-          gap: 8px;
-          width: max-content;
-          animation: floatingPillMarquee 56s linear infinite;
-        }
-        .floating-ask-pills:hover .floating-ask-track,
-        .floating-ask-track:focus-within {
-          animation-play-state: paused;
-        }
-        @keyframes floatingPillMarquee {
-          from { transform: translateX(0); }
-          /* -4px = half the 8px gap, so the loop point is invisible */
-          to { transform: translateX(calc(-50% - 4px)); }
-        }
-        .floating-ask-pill {
-          flex: 0 0 auto;
-          border: 1px solid var(--line);
-          border-radius: 999px;
-          background: #fff;
-          color: var(--text);
-          font: inherit;
-          font-size: 14px;
-          line-height: 1;
-          font-weight: 700;
-          padding: 9px 12px;
-          cursor: pointer;
-          white-space: nowrap;
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .floating-ask-track { animation: none; }
-        }
-        .floating-ask-form {
-          grid-area: form;
-          display: flex;
-          gap: 8px;
-          min-width: 0;
-        }
-        .floating-ask-form input {
-          flex: 1;
-          min-width: 0;
-          border: 1px solid var(--line);
-          border-radius: 999px;
-          padding: 9px 14px;
-          color: var(--text);
-          font: inherit;
-          font-size: 14px;
-          outline: none;
-          background: #fff;
-        }
-        .floating-ask-form button {
-          border: 1px solid ${B.glassNavy};
-          border-radius: 999px;
-          background: ${B.yellow};
-          color: ${B.glassNavy};
-          font: inherit;
-          font-size: 14px;
-          font-weight: 800;
-          padding: 9px 16px;
-          cursor: pointer;
-          white-space: nowrap;
-        }
-        .floating-ask-form button:disabled,
-        .floating-ask-pills button:disabled {
-          opacity: .5;
-          cursor: default;
-        }
-        /* answer floats as a dropdown UNDER the bar (absolute — an in-flow answer
-           grows the sticky bar and scroll-anchoring yanks the page) */
-        .floating-ask-answer {
-          position: absolute !important;
-          top: calc(100% + 8px);
-          left: 0;
-          right: 0;
+        /* Ask Waves answer sits in the card's normal flow under the question
+           rows (the old sticky bar's dropdown was absolutely positioned). */
+        .waves-ask-answer {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
           gap: 12px;
+          margin-top: 4px;
           border: 1px solid var(--line);
-          border-radius: 14px;
+          border-radius: 10px;
           background: var(--wash);
           padding: 12px 14px;
           color: var(--text);
-          font-size: 14px;
+          font-size: 15px;
           line-height: 1.5;
-          box-shadow: 0 18px 50px rgba(4, 57, 94, 0.18);
         }
-        .floating-ask-dismiss {
+        .waves-ask-dismiss {
           flex: 0 0 auto;
+          min-width: 44px;
+          min-height: 44px;
+          margin: -10px -12px -10px 0;
           border: 0;
           background: transparent;
           color: var(--muted);
-          font-size: 14px;
-          line-height: 1;
-          padding: 2px 4px;
+          display: grid;
+          place-items: center;
           cursor: pointer;
-        }
-        @media (max-width: 700px) {
-          .floating-ask-bar {
-            grid-template-areas:
-              'title form'
-              'pills pills';
-            grid-template-columns: auto minmax(0, 1fr);
-            border-radius: 12px;
-          }
-          /* While pinned on a phone, collapse to the slim ask row — the
-             two-row bar hid a third of the screen over the report content
-             (owner screenshot 2026-07-29). Pills return at the top. */
-          .floating-ask-wrap[data-stuck] .floating-ask-pills { display: none; }
-          .floating-ask-wrap[data-stuck] .floating-ask-bar {
-            grid-template-areas: 'title form';
-          }
         }
         /* animated weather mark — live only; the media block below parks it */
         .weather-call-icon-animated {
@@ -8941,8 +8807,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           /* Interactive chrome never prints — covers a customer hitting
              Print on the live view, where the floating Ask-Waves bar and
              other controls would otherwise stamp into the paper document. */
-          .floating-ask-sentinel,
-          .floating-ask-wrap { display: none; }
+          .waves-ask-card { display: none; }
           /* The accordion is a control, not content: never print the
              "More information / Details" toggle bar or its frame. An open
              details (force-open on pdf/static, or customer-expanded on a
