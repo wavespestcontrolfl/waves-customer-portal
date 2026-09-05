@@ -844,7 +844,9 @@ export default function PublicBookingPage() {
   )?.fullDate;
   // Slot length follows the service (60 → "1-hour", else "<n>-minute").
   const slotLenLabel = service.duration === 60 ? '1-hour' : `${service.duration}-minute`;
-  const continueDisabled = !selectedSlot;
+  // A pending custom-date lookup will replace the picker (and clear the
+  // selection) when it lands — Continue waits for it.
+  const continueDisabled = !selectedSlot || browseLoading;
 
   return (
     <WavesShell variant="customer" topBar="solid">
