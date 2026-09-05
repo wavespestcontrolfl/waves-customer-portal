@@ -2280,8 +2280,10 @@ function composerLinkBuilders() {
     // key here only admits the kind).
     statement: null,
     // A receipt is the account's, like the pay link (a household shares
-    // its bills); a project report the account's, like a service report.
-    receipt: (ids) => builders.buildReceiptLink(ids),
+    // its bills) — the resolved owner is the recipient whose receipt-text
+    // consent the builder checks; a project report the account's, like a
+    // service report.
+    receipt: (ids, primaryId) => builders.buildReceiptLink(ids, primaryId),
     project_report: (ids) => builders.buildProjectReportLink(ids),
     // A price-change notice names its customer and their price — the
     // phone owner's own row only. STRICT_OWNER_KINDS below.

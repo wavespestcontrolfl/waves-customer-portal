@@ -1050,15 +1050,17 @@ describe('buildReceiptLink', () => {
   test('the account\'s most recently settled invoice — permanent /receipt token, raw URL, nothing minted', async () => {
     mockBuilders = { invoices: chainBuilder({ rows: [PAID] }) };
     loadPaymentForInvoice.mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' });
-    const r = await buildReceiptLink(['c1', 'c2']);
+    const r = await buildReceiptLink(['c1', 'c2'], 'c1');
     // Vetted by the receipt route's own payment linkage.
     expect(loadPaymentForInvoice).toHaveBeenCalledWith('inv-1', 'c2', { stripePaymentIntentId: 'pi_1', stripeChargeId: null, invoiceNumber: 'INV-1042' });
-    // … and by the receipt policy's own text consent, for the invoice's
-    // customer, with the receipt path's input shape (r9 P1).
-    const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+    // … and by the receipt policy's own text consent, for the RECIPIENT
+    // (the resolved phone owner c1, not the invoice's c2), with the receipt
+    // path's input shape (r9 P1 + pre-push P1).
+    const { checkConsentForPurpose, loadContactState } = require('../services/messaging/validators/consent');
     const { checkSuppression } = require('../services/messaging/validators/suppression');
     const { PURPOSE_POLICY } = require('../services/messaging/policy');
-    const input = { customerId: 'c2', to: '+19415550100', channel: 'sms', audience: 'customer', purpose: 'payment_receipt', hasEmailLeg: true };
+    expect(loadContactState).toHaveBeenCalledWith({ customerId: 'c1' });
+    const input = { customerId: 'c1', to: '+19415550100', channel: 'sms', audience: 'customer', purpose: 'payment_receipt', hasEmailLeg: true };
     expect(checkSuppression).toHaveBeenCalledWith(input, PURPOSE_POLICY.payment_receipt, expect.any(Object));
     expect(checkConsentForPurpose).toHaveBeenCalledWith(input, PURPOSE_POLICY.payment_receipt, expect.any(Object));
     expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
@@ -2046,6 +2048,47 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
       wireAccount({ linkCustomer: acct('c9', 'other'), report: { id: 'r1', customer_id: 'c9', structured_notes: null } });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+    });
+
+    describe('receipt links re-run the builder\'s predicate, bind to the account, and re-check the RECIPIENT\'s receipt-text consent at the send (pre-push Codex P1 on r9)', () => {
+      const TOKEN = 'r'.repeat(64);
+      const inv = (over = {}) => ({ id: 'inv-1', customer_id: 'c2', status: 'paid', payer_id: null, receipt_sent_at: '2026-08-30T15:00:00Z', ...over });
+      function wireReceipt({ row = inv(), ...account } = {}) {
+        wireAccount({ linkCustomer: acct('c2'), ...account });
+        mockBuilders.invoices = chainBuilder({ firstRow: row });
+      }
+
+      test('a delivered self-pay receipt on the recipient\'s account passes as a bearer; consent is the trusted recipient\'s', async () => {
+        const { checkConsentForPurpose, loadContactState } = require('../services/messaging/validators/consent');
+        wireReceipt();
+        expect(await bearerLinkSendCheck(`Receipt: portal.wavespestcontrol.com/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(mockBuilders.invoices.where).toHaveBeenCalledWith({ token: TOKEN });
+        expect(loadContactState).toHaveBeenCalledWith({ customerId: 'c1' });
+        expect(checkConsentForPurpose).toHaveBeenCalled();
+        // No trusted customer: the one live row on the number is the recipient.
+        wireReceipt({ recipientRows: [acct('c1')] });
+        expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, customerId: 'c1' });
+        expect(loadContactState).toHaveBeenLastCalledWith({ customerId: 'c1' });
+      });
+
+      test('an undelivered, open, or payer-billed receipt, a vanished token, another account, or a recipient without receipt-text consent refuses', async () => {
+        const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+        const send = () => bearerLinkSendCheck(`portal.wavespestcontrol.com/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' });
+        wireReceipt({ row: inv({ receipt_sent_at: null }) });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ row: inv({ status: 'sent' }) });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ row: inv({ payer_id: 'payer-1' }) });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ row: null });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ linkCustomer: acct('c9', 'other') });
+        expect((await send()).error).toMatch(/different customer/);
+        wireReceipt();
+        checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'CHANNEL_EMAIL_ONLY' });
+        expect((await send()).error).toMatch(/receipts by email only — remove the receipt link/);
+        expect((await bearerLinkSendCheck(`https://evil.example/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
+      });
     });
 
     describe('project report links resolve as the viewer does and bind to the account', () => {

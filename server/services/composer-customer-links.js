@@ -1154,7 +1154,44 @@ async function checkAccountBoundLinks(ctx) {
   const onRecipientAccount = recipientAccountBinder(ctx);
   return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
     || (await checkReportLinks(ctx, shortRows, onRecipientAccount))
-    || checkProjectReportLinks(ctx, onRecipientAccount);
+    || (await checkProjectReportLinks(ctx, onRecipientAccount))
+    || checkReceiptLinks(ctx, onRecipientAccount);
+}
+
+const RECEIPT_TOKEN_PATH_RE = /^\/receipt\/([A-Za-z0-9_-]{16,})$/i;
+// Receipt links (permanent invoice token): the builder's own predicate
+// re-run — a settled self-pay invoice whose receipt the receipt lifecycle
+// already delivered — bound to the recipient's account, and the RECIPIENT's
+// receipt-text consent re-checked at the send (a scheduled message or a
+// draft dispatches long after the insert; the composer's /sms is
+// 'conversational' and never runs the payment_receipt policy itself) —
+// pre-push Codex P1 on r9. The recipient is the trusted customer, else the
+// one live row on the number; an ambiguous number refuses, like the insert.
+async function checkReceiptLinks(ctx, onRecipientAccount) {
+  for (const run of linkRuns(ctx.runs, /\/receipt\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, RECEIPT_TOKEN_PATH_RE);
+    if (!token) return refuseSend('A receipt link in this message is not on the Waves portal — remove it before sending.');
+    const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id', 'receipt_sent_at');
+    if (!invoice || !RECEIPT_INVOICE_STATUSES.includes(String(invoice.status || '')) || invoice.payer_id || !invoice.receipt_sent_at) {
+      return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
+    }
+    const bad = await onRecipientAccount(invoice.customer_id, 'receipt link');
+    if (bad) return bad;
+    const recipientId = ctx.trustedCustomerId || await soleLiveCustomerOnNumber(ctx.toLast10);
+    if (!recipientId) return refuseSend('That number is not on file for exactly one customer — pick the customer from the search dropdown before sending a receipt link.');
+    const blocked = await receiptTextBlockedReason(recipientId);
+    if (blocked) return refuseSend(`${blocked} — remove the receipt link before sending.`);
+    ctx.bearers += 1;
+  }
+  return null;
+}
+
+async function soleLiveCustomerOnNumber(toLast10) {
+  const rows = await db('customers')
+    .whereNull('deleted_at')
+    .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [toLast10])
+    .limit(2);
+  return rows.length === 1 ? rows[0].id : null;
 }
 
 // Contract signing links: a stored hash (a link the customer may hold —
@@ -1951,7 +1988,7 @@ async function receiptTextBlockedReason(customerId) {
   return null;
 }
 
-async function buildReceiptLink(customerIds) {
+async function buildReceiptLink(customerIds, recipientId = null) {
   const rows = await db('invoices')
     .whereIn('customer_id', customerIds)
     .whereIn('status', RECEIPT_INVOICE_STATUSES)
@@ -1987,7 +2024,10 @@ async function buildReceiptLink(customerIds) {
     if (at > settledAt) { invoice = row; settledAt = at; }
   }
   if (!invoice) return { url: null, line: '', reason: 'No paid invoice on this account yet' };
-  const blocked = await receiptTextBlockedReason(invoice.customer_id);
+  // The RECIPIENT's consent, not the invoice owner's — a household shares
+  // its bills, and the text goes to the phone's resolved owner (pre-push
+  // Codex P1 on r9); a direct call without one falls to the owner.
+  const blocked = await receiptTextBlockedReason(recipientId || invoice.customer_id);
   if (blocked) return { url: null, line: '', reason: blocked };
   const url = `${publicPortalUrl()}/receipt/${invoice.token}`;
   const number = invoice.invoice_number ? `invoice ${invoice.invoice_number}` : 'your payment';

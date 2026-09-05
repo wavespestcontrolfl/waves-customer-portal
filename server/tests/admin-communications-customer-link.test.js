@@ -325,7 +325,8 @@ describe('POST /admin/communications/customer-link', () => {
     await withServer(async (baseUrl) => {
       const receipt = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'receipt' });
       expect(receipt.status).toBe(200);
-      expect(builders.buildReceiptLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      // The resolved owner rides in as the recipient whose receipt-text consent the builder checks.
+      expect(builders.buildReceiptLink).toHaveBeenCalledWith([CUSTOMER_UUID], CUSTOMER_UUID);
       const receiptBody = await receipt.json();
       expect(receiptBody).toMatchObject({ kind: 'receipt', url: 'portal.wavespestcontrol.com/receipt/abc', receipt: { invoiceNumber: 'INV-1' }, customerId: CUSTOMER_UUID });
       expect(receiptBody.immediateOnly).toBeUndefined();
