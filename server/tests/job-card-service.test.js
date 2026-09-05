@@ -923,6 +923,14 @@ describe('PR review r8', () => {
 });
 
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
+  test('card line text keeps the instruction, never the dosing value (hook P1)', () => {
+    const { describeLine } = jobCard._test;
+    expect(describeLine('Celsius WG 0.113 oz per 1,000 sq ft if rotation calls for IRAC 7C')).toBe('Celsius WG if rotation calls for IRAC 7C');
+    expect(describeLine('Distance IGR 6 fl oz/100 gal foliar, only if crawlers are present')).toBe('Distance IGR foliar, only if crawlers are present');
+    expect(describeLine('Headway G 3 lbs/1000 broadcast')).toBe('Headway G broadcast');
+    expect(describeLine('IMA-jet or Propizol only when diagnosis supports it')).toBe('IMA-jet or Propizol only when diagnosis supports it');
+  });
+
   test('a lineMeta line phrased "if …" stays conditional too (hook P1)', () => {
     const catalog = [{ id: 't', name: 'TriTek' }, { id: 'c', name: 'Celsius WG' }];
     const visit = {
@@ -967,7 +975,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       { name: 'Bee/Wasp removal', products: 0, visit: null, note: 'No protocol matched this add-on' },
     ]);
     const [, card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
-    expect(card.line).toBe('Tree & Shrub Care: Speedzone Southern 1 fl oz');
+    expect(card.line).toBe('Tree & Shrub Care: Speedzone Southern');
   });
 
   test('an add-on that selects a product the primary lists as conditional wins the card through the merger (r1 P1)', async () => {
@@ -979,7 +987,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const celsius = cards.find((c) => c.id === 'c');
     expect(cards).toHaveLength(2);
     expect(celsius.conditional).toBe(false);
-    expect(celsius.line).toBe('Tree & Shrub Care: Celsius WG 1 oz · Celsius WG 1 oz');
+    expect(celsius.line).toBe('Tree & Shrub Care: Celsius WG · Celsius WG');
   });
 
   test('a failed add-on read fails the card (503)', async () => {
