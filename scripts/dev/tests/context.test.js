@@ -72,11 +72,19 @@ test('fresh worktrees receive distinct stable port blocks and private state', as
 
 test('runner identifies its checkout, rejects foreign stop requests, and releases its ports', { timeout: 30000 }, async () => {
   const { spawn } = require('node:child_process');
-  const root = path.resolve(__dirname, '../../..');
+  const sourceRoot = path.resolve(__dirname, '../../..');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'waves-runner-test-')));
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['-C', root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'test']);
+  fs.cpSync(path.join(sourceRoot, 'scripts/dev'), path.join(root, 'scripts/dev'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'client'));
+  fs.copyFileSync(path.join(sourceRoot, 'client/vite.config.js'), path.join(root, 'client/vite.config.js'));
+  fs.writeFileSync(path.join(root, 'client/preview-estimate.html'), '<!doctype html><title>Runner fixture</title>');
+  // This disposable test fixture only reads the installed dependencies.
+  fs.symlinkSync(path.join(sourceRoot, 'node_modules'), path.join(root, 'node_modules'), 'dir');
   const context = await setup(root);
   const databaseFile = path.join(root, '.tmp/dev/database.env');
-  const createdDatabaseFixture = !fs.existsSync(databaseFile);
-  if (createdDatabaseFixture) fs.writeFileSync(databaseFile, 'DATABASE_URL=fixture-must-not-egress', { flag: 'wx', mode: 0o600 });
+  fs.writeFileSync(databaseFile, 'DATABASE_URL=fixture-must-not-egress', { flag: 'wx', mode: 0o600 });
   const child = spawn(process.execPath, ['scripts/dev/run.js', 'client'], { cwd: root, stdio: 'pipe' });
   let output = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
@@ -94,6 +102,7 @@ test('runner identifies its checkout, rejects foreign stop requests, and release
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.equal(status?.root, root, output);
+    assert.equal(status?.pid, child.pid, 'Never control a runner this test did not spawn');
     const foreign = await fetch(`${base}/stop`, { method: 'POST', headers: { Authorization: 'Bearer another-worktree' } });
     assert.equal(foreign.status, 404);
     let page;
@@ -114,6 +123,7 @@ test('runner identifies its checkout, rejects foreign stop requests, and release
     assert.equal(await availablePort(context.ports.control), true);
   } finally {
     if (child.exitCode === null) child.kill('SIGTERM');
-    if (createdDatabaseFixture) fs.unlinkSync(databaseFile);
+    await exited;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
