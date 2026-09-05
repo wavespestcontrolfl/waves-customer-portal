@@ -567,13 +567,13 @@ async function getCallLog(input) {
   }
 
   const fetched = await query.limit(limit + 1).offset(offset);
-  const calls = fetched.slice(0, limit);
+  const calls = fetched.slice(0, limit).filter(c => !isAdminPhone(c.from_phone) || !isAdminPhone(c.to_phone));
 
   return {
     has_more: fetched.length > limit,
     next_offset: fetched.length > limit ? offset + limit : null,
     coverage: { days_back: input.call_id ? null : days_back, offset, limit },
-    calls: calls.filter(c => !isAdminPhone(c.from_phone) || !isAdminPhone(c.to_phone)).map(c => ({
+    calls: calls.map(c => ({
       id: c.id,
       direction: c.direction,
       from: c.from_phone,

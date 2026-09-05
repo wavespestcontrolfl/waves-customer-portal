@@ -509,3 +509,23 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard({ trx, members })).resolves.toBeUndefined();
   });
 });
+
+
+test.each(['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city',
+  'service_address_state', 'service_address_zip', 'lat', 'lng'])('refuses a changed destination %s after scoring', async field => {
+  db.mockImplementation(() => readRow({ ...SERVICE, [field]: 'changed' }));
+  await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('pins the scored destination in the rebooker atomic expected-state predicate', async () => {
+  const service = { ...SERVICE, property_id: 'fixture-property', service_address_line1: '100 Test Street', lat: '27.4' };
+  const queue = [readRow(service), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(service, BEST, 'run1', {});
+  expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject({
+    property_id: service.property_id, service_address_line1: service.service_address_line1,
+    service_address_line2: null, service_address_city: null, service_address_state: null,
+    service_address_zip: null, lat: '27.4', lng: null,
+  });
+});

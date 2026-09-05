@@ -1658,7 +1658,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     const customerId = service.customerId || service.customer_id;
     setAddressState("loading");
     setSelectedPropertyId("");
-    adminFetch(`/admin/customers/${customerId}/properties`)
+    adminFetch(`/admin/customers/${customerId}/properties?context=appointment_address`)
       .then((data) => {
         if (cancelled) return;
         setAddressOptions(data.properties || []);

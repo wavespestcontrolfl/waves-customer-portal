@@ -2447,10 +2447,14 @@ router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, 
 
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
+    const canChangeAppointmentAddress = require('../config/feature-gates').isEnabled('editApptAddress');
+    if (req.query?.context === 'appointment_address' && !canChangeAppointmentAddress) {
+      return res.json({ properties: [], canChangeAppointmentAddress: false });
+    }
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
-    res.json({ properties, canChangeAppointmentAddress: require('../config/feature-gates').isEnabled('editApptAddress') });
+    res.json({ properties, canChangeAppointmentAddress });
   } catch (err) { next(err); }
 });
 

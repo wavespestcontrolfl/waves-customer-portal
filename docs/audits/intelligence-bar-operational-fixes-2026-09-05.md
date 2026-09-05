@@ -109,3 +109,13 @@ which INSERTs a property (customer-properties.js:178). A missing primary propert
 must be registered through the existing Properties screen before the saved-property
 switch tool can target it. Adding that write to an ungated read would bypass the
 IB confirmation boundary; a future registration action must use a write gate.
+
+Second review fixes: the appointment editor identifies its property request so
+the endpoint returns before lazy registration when the address gate is off;
+the existing Properties screen keeps its registration behavior. Call counts now
+match the filtered result. Auto-dispatch rechecks destination fields after scoring
+and includes them in the existing rebooker atomic expected-state predicate.
+All 37 targeted route/read/address tests, 130 auto-dispatch unit tests, and four
+migrated-PostgreSQL tests passed; the production build passed. The new PostgreSQL
+case proves that a destination changed after scoring is rejected. This is still
+not a simultaneous multi-session race test.

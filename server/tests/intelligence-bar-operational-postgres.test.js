@@ -99,4 +99,12 @@ postgres('Intelligence Bar operational flows on PostgreSQL', () => {
     expect(continuation.calls[0].transcript).toBe('x');
   });
 
+  test('auto-dispatch rejects a destination changed after scoring', async () => {
+    const { revalidatePlacement } = require('../services/auto-dispatch/apply');
+    const scored = await mockDb('scheduled_services').where({ id: ids.template }).first();
+    expect(await revalidatePlacement(scored)).toMatchObject({ ok: true });
+    await mockDb('scheduled_services').where({ id: ids.template }).update({ property_id: ids.rental });
+    expect(await revalidatePlacement(scored)).toMatchObject({ ok: false, code: 'STALE_PLACEMENT' });
+  });
+
 });

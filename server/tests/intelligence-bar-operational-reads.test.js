@@ -1,3 +1,6 @@
+const previousAdminPhone = process.env.ADAM_PHONE;
+process.env.ADAM_PHONE = '+15555550999';
+afterAll(() => { if (previousAdminPhone === undefined) delete process.env.ADAM_PHONE; else process.env.ADAM_PHONE = previousAdminPhone; });
 // Real Knex SQL compilation with an in-memory transport: never opens a DB socket.
 jest.mock('../models/db', () => {
   const db = require('knex')({ client: 'pg' });
@@ -109,4 +112,15 @@ test('unavailable property storage is marked unknown rather than empty', async (
   expect(result.error).toBeUndefined();
   expect(result.properties).toBeNull();
   expect(result.coverage.properties).toBe('unavailable');
+});
+
+
+test('call returned_count excludes internal calls omitted from the response', async () => {
+  db.__rows = () => [
+    { id: 'internal', from_phone: '+15555550999', to_phone: '+15555550999' },
+    { id: 'customer', from_phone: '+15555550101', to_phone: '+15555550102' },
+  ];
+  const result = await executeCommsTool('get_call_log', {});
+  expect(result.calls.map(row => row.id)).toEqual(['customer']);
+  expect(result.returned_count).toBe(1);
 });

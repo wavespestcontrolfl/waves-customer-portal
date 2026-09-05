@@ -1,3 +1,4 @@
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 /**
  * POST /admin/customers/:id/properties — the admin "Add service address"
  * path. customer_properties.state is varchar(2): a full state name must be
@@ -120,5 +121,30 @@ describe('POST /admin/customers/:id/properties', () => {
       const res = await post(baseUrl, { address_line1: '10 Palm Ave', city: 'Naples', state: 'FL', zip: '34102' });
       expect(res.status).toBe(409);
     });
+  });
+});
+
+
+describe('appointment address property lookup gate', () => {
+  test('dark appointment editor does not lazily register a primary property', async () => {
+    await withServer(async base => {
+      const result = await fetch(`${base}/admin/customers/cust-1/properties?context=appointment_address`);
+      expect(await result.json()).toEqual({ properties: [], canChangeAppointmentAddress: false });
+    });
+    expect(mockProps.ensurePrimaryProperty).not.toHaveBeenCalled();
+    expect(mockProps.listProperties).not.toHaveBeenCalled();
+  });
+  test('enabled appointment editor loads its registered properties', async () => {
+    require('../config/feature-gates').isEnabled.mockReturnValueOnce(true);
+    await withServer(async base => {
+      const result = await fetch(`${base}/admin/customers/cust-1/properties?context=appointment_address`);
+      expect((await result.json()).canChangeAppointmentAddress).toBe(true);
+    });
+    expect(mockProps.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1');
+    expect(mockProps.listProperties).toHaveBeenCalledWith('cust-1');
+  });
+  test('existing Properties screen keeps its primary registration behavior', async () => {
+    await withServer(async base => { await fetch(`${base}/admin/customers/cust-1/properties`); });
+    expect(mockProps.ensurePrimaryProperty).toHaveBeenCalledWith('cust-1');
   });
 });
