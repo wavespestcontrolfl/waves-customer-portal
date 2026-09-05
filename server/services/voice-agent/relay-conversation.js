@@ -1699,15 +1699,17 @@ class RelayConversation {
     // PR 2B: the earlier segment(s) of a reconnected call ride the USER role
     // the same way, ONCE, as played text — the model resumes instead of
     // starting over. Only when the row proved the reconnect.
-    if (!this._resumeSeeded && this._resume && !this._resume.segmentsText && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS) {
+    if (!this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS) {
       // The previous socket appends its segment only after draining its turn
       // chain and in-flight writes; a reconnect that wins that race read an
       // empty list. Reload (bounded) on each of the first turns until the
       // segment is there — the seed then lands on that turn (hook P1).
       this._resumeReloads = (this._resumeReloads || 0) + 1;
       try {
+        // Also the retry for an initial load that timed out, or a verification
+        // that settled late — the owner + verification checks stay (hook P1).
         const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
-        if (fresh && fresh.segmentsText) this._applyResumeState(fresh); // the same restoration as the constructor's load (hook P1)
+        if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh); // the same restoration as the constructor's load (hook P1)
       } catch { /* fail-soft: the next turn retries */ }
     }
     if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
@@ -2002,10 +2004,10 @@ class RelayConversation {
       // segment is refreshed ONCE here (bounded): the floor below must see
       // the earlier caller turns even when the caller never spoke on this
       // leg, so the turn-time reload never ran (hook P1).
-      if (this._resume && !this._resume.segmentsText) {
+      if (this._resumedHint && (!this._resume || !this._resume.segmentsText)) {
         try {
           const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
-          if (fresh && fresh.segmentsText) this._applyResumeState(fresh);
+          if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh);
         } catch { /* fail-soft */ }
       }
     }

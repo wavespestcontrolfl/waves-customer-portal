@@ -354,6 +354,24 @@ describe('the conversation side', () => {
     expect(updates[3].metadata.sql).toContain("jsonb_build_object('relay_transcript', jsonb_build_object('text', ?, 'metadata', ?::jsonb))");
   });
 
+  test('an initial resume read that TIMED OUT is retried on the next turn (owner + verification checks intact) (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder } = primeDb();
+    const row = { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back' }] } };
+    let reads = 0;
+    builder.first = jest.fn(() => (++reads === 1 ? new Promise(() => {}) : Promise.resolve(row))); // the first read never answers
+    jest.useFakeTimers();
+    const convo = resumedConvo({ callSid: 'CA-to' });
+    await jest.advanceTimersByTimeAsync(2100); // past the 2s bound
+    jest.useRealTimers();
+    await convo._resumeReady;
+    expect(convo._resume).toBeNull();
+    await convo._runLoop('hello again').catch(() => {});
+    expect(convo._resume).toEqual(expect.objectContaining({ segmentsText: 'Caller: my ants are back', relayLeadId: 'L1' }));
+    expect(convo.leadCaptured).toBe(true);
+    expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('Caller: my ants are back'))).toBe(true);
+  });
+
   test('a proven prior lead restores the capture state (lead_captured true; the session may end when the caller is done) (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1' } } });
