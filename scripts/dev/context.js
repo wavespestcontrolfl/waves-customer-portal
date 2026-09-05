@@ -72,7 +72,7 @@ async function setup(root = rootDirectory()) {
 
 // Only explicitly selected dev DB credentials enter child processes. Never
 // inherit provider keys, Railway deployment identity, NODE_OPTIONS or .env.
-function childEnvironment(context, { database = false } = {}) {
+function childEnvironment(context, { database = false, sha } = {}) {
   const env = {};
   for (const key of ['PATH', 'HOME', 'TMPDIR', 'TEMP', 'SystemRoot']) {
     if (process.env[key]) env[key] = process.env[key];
@@ -82,7 +82,7 @@ function childEnvironment(context, { database = false } = {}) {
     PORT: String(context.ports.api), CLIENT_URL: `http://127.0.0.1:${context.ports.client}`,
     VITE_API_PROXY_TARGET: `http://127.0.0.1:${context.ports.api}`,
     JWT_SECRET: context.jwtSecret, WAVES_WORKTREE_ID: context.id,
-    WAVES_WORKTREE_SHA: git(context.root, 'rev-parse', 'HEAD'),
+    WAVES_WORKTREE_SHA: sha || git(context.root, 'rev-parse', 'HEAD'),
   });
   if (database) {
     const file = path.join(context.root, '.tmp', 'dev', 'database.env');
