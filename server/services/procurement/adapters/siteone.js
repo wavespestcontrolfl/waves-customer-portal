@@ -170,6 +170,15 @@ async function waitForAnyShown(page, selector, timeout) {
   }
 }
 
+// The ONE visible control for a fill / click: a hidden responsive copy ahead
+// of the visible control would time out and park the one-shot claim as
+// failed (Codex #3853 r14 P2, r16 P1 + P2). Refuses BEFORE acting.
+async function visibleControl(page, selector, what, evidence) {
+  const { shown } = await matches(page, selector);
+  if (shown.length !== 1) throw new RefusedError(shown.length ? `${what}_ambiguous` : `no_${what}`, `${shown.length} visible ${what.replace(/_/g, ' ')} controls — expected exactly one`, evidence);
+  return shown[0];
+}
+
 // Any visible match (the MFA / card / unavailable blockers fail closed).
 async function visible(page, selector) {
   try { return (await matches(page, selector)).shown.length > 0; } catch { return false; }
@@ -186,12 +195,13 @@ async function gotoCart(page) {
 
 // Every line in the cart as { sku, qty }: an unreadable SKU or quantity is
 // returned as-is (empty / NaN) so the caller's exact-match check fails closed.
+// Only SHOWN lines count: SiteOne renders each item again in a hidden
+// desktop / mobile container, and the one-line proof must not refuse a
+// valid single-item cart on its responsive copy (Codex #3853 r16 P2).
 async function cartLines(page) {
-  const lines = page.locator(SELECTORS.cartLine);
-  const n = await lines.count();
+  const { shown } = await matches(page, SELECTORS.cartLine);
   const out = [];
-  for (let i = 0; i < n; i += 1) {
-    const line = lines.nth(i);
+  for (const line of shown) {
     const sku = (await line.locator(SELECTORS.cartLineSku).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
     const qtyEl = line.locator(SELECTORS.cartLineQty).first();
     let qtyText = await qtyEl.inputValue().catch(() => null);
@@ -259,8 +269,16 @@ async function login(page, creds) {
     const filled = await page.evaluate(fillLoginForm, { user: creds.email || creds.username, pw: creds.password, userSel: SELECTORS.loginUser, passSel: SELECTORS.loginPass });
     const FILL_ABORT = { offhost: 'redirected off the trusted host', nofields: 'login fields not found', ambiguousform: 'more than one visible login form — nothing typed', badform: 'the login form would post credentials off the trusted host — nothing typed' };
     if (filled !== 'ok') throw runLevel(`siteone login aborted: ${FILL_ABORT[filled] || filled}`);
-    const submit = page.locator(SELECTORS.loginSubmit).first();
-    await submit.click().catch(() => page.locator(SELECTORS.loginPass).first().press('Enter'));
+    // Submit the form the fill wrote into: the ONE visible password field's
+    // own form, never a document-wide first match (a hidden responsive login
+    // form ahead of the visible one would take the click and the valid login
+    // would park login_rejected — Codex #3853 r16 P1). Without exactly one
+    // visible submit control in that form, Enter on the password field
+    // submits it.
+    const passField = (await matches(page, SELECTORS.loginPass)).shown[0];
+    const formSubmits = (await matches(passField.locator('xpath=ancestor::form[1]'), SELECTORS.loginSubmit)).shown;
+    if (formSubmits.length === 1) await formSubmits[0].click().catch(() => passField.press('Enter'));
+    else await passField.press('Enter');
     // Signed in = EVERY password field gone or hidden (a hidden responsive
     // duplicate must not read as "still on the login page" — pre-push P1).
     await page.waitForFunction((passSel) => Array.from(document.querySelectorAll(passSel)).every((pw) => !pw.offsetParent), SELECTORS.loginPass, { timeout: LOGIN_TIMEOUT }).catch(() => {});
@@ -377,8 +395,9 @@ async function lockContext(browser, evidence, pinned) {
 // add. Fail CLOSED: an unreadable SKU (selector drift) must never let the
 // first search hit into the cart.
 async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
-  await page.locator(SELECTORS.searchInput).first().fill(String(vendorSku));
-  await page.locator(SELECTORS.searchInput).first().press('Enter');
+  const search = await visibleControl(page, SELECTORS.searchInput, 'search_input', evidence);
+  await search.fill(String(vendorSku));
+  await search.press('Enter');
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
   await page.waitForTimeout(2000);
   const hit = page.locator(SELECTORS.productLink).first();
@@ -390,8 +409,8 @@ async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
   if (!pageSkuRaw) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_unreadable', `could not read the product SKU on the page for ${vendorSku} (SELECTORS.productSku)`, evidence); }
   if (normalizeSku(pageSkuRaw) !== normalizeSku(vendorSku)) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_mismatch', `product page shows "${pageSkuRaw.slice(0, 60)}", expected ${vendorSku}`, evidence); }
   if (await visible(page, SELECTORS.unavailable)) { await shot(page, 'product', evidence, upload); throw new RefusedError('unavailable', `SiteOne lists ${vendorSku} as unavailable`, evidence); }
-  await page.locator(SELECTORS.qtyInput).first().fill(String(qty));
-  await page.locator(SELECTORS.addToCart).first().click();
+  await (await visibleControl(page, SELECTORS.qtyInput, 'qty_input', evidence)).fill(String(qty));
+  await (await visibleControl(page, SELECTORS.addToCart, 'add_to_cart', evidence)).click();
   await page.waitForTimeout(2000);
 }
 
