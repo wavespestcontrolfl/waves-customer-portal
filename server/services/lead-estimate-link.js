@@ -134,7 +134,11 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     // customer is stamped onto it, never over one already there (codex #3834
     // r32 P1).
     if (customerId) await trx('ad_service_attribution').where({ lead_id: root.id }).whereNull('customer_id').whereExists(rootStillOurs).update({ customer_id: customerId, updated_at: new Date() });
-    const dropped = await trx('ad_service_attribution').where({ lead_id: repeat.id }).whereNot({ funnel_stage: 'completed' }).del();
+    // IS DISTINCT FROM, not <>: a retained row with a NULL stage (the column
+    // is nullable; the bridge ranks NULL as stage 0) is a non-completed row
+    // to drop, and <> would leave it in place and read the 0-row delete as
+    // a completed row (codex #3834 r33 P2).
+    const dropped = await trx('ad_service_attribution').where({ lead_id: repeat.id }).whereRaw("funnel_stage IS DISTINCT FROM 'completed'").del();
     if (own && !dropped) throw KEEP_OWN_ROW;
     return null;
   }).catch((err) => {
@@ -690,6 +694,97 @@ function parseEstimateData(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+// Tier 2 of markLinkedLeadEstimateAccepted — the wizard-origination
+// acceptance, split out the way resolveCustomerLinkCandidates is from
+// convertLeadFromEvent: the row `estimate_data.lead_id` names, its root via
+// the one-hop duplicate marker, and the named-row fallback. `convert` is the
+// caller's claimed stamp-and-convert.
+async function acceptWizardNamedLead(database, { dataLeadId, estimate, estimateId, customerId, convert }) {
+  const named = await database('leads').where({ id: dataLeadId }).first();
+  // A named row that no longer exists is still "accounted for": never
+  // fall through to the contact sweep on a wizard estimate.
+  if (!named) return;
+  // followDuplicateLink returns the original when the marker resolves and
+  // the named row itself otherwise, so `lead` is always a row here.
+  let lead = await followDuplicateLink(database, named);
+  // An INDIRECTLY resolved original (via a duplicate marker) is validated
+  // like the send/view path validates the named lead: its contact must
+  // match the accepted estimate, it must not already belong to a different
+  // customer (markConverted would overwrite an unrelated lead's customer
+  // linkage — codex #3834 r2 P1), and it must not already be FK-linked to
+  // a DIFFERENT estimate (the office may have built and sent one for the
+  // original after the repeat was filed — converting it here would credit
+  // the win to that estimate and leave the accepted one unlinked, codex
+  // #3834 r4 P1). A named lead that is itself open converts as before.
+  // Functions of the row AS IT IS NOW: `lead` is refreshed in full when a
+  // claim loses (and re-pointed when the chain grew, below), and every
+  // later judgement re-reads the identity (codex #3834 r16 P1) — not a
+  // value computed before the race.
+  const indirect = () => lead.id !== named.id;
+  const sameOpportunity = () => indirect()
+    && leadMatchesEstimateContact(lead, estimate)
+    && (!lead.customer_id || !customerId || lead.customer_id === customerId)
+    && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
+  // An indirect root is eligible by POSITIVE open membership, as every
+  // other resolved root in this module (r23 / r24): a spam or cancelled
+  // root is not answerable, so it neither takes the win nor has its
+  // funnel booked — the named repeat stands in (codex #3834 r26 P1). The
+  // named row itself keeps the not-closed rule (an open named lead
+  // converts as before; its own 'duplicate' label is closed here).
+  const eligible = () => !lead.deleted_at && (indirect() ? OPEN_LEAD_STATUSES.includes(lead.status) && sameOpportunity() : !CLOSED_LEAD_STATUSES.has(lead.status));
+  // A claim that lost because the original was relabelled IN FLIGHT — a
+  // concurrent /calculate marked it a duplicate of an older root while
+  // this acceptance was between its read and its stamp — is not a
+  // closure: the refreshed row now carries a marker that reaches further,
+  // so the hop follows it and claims the root it reaches, instead of
+  // promoting the named repeat while that root stays open (codex #3834
+  // r21 P1). Bounded like every marker walk; a dead or unchanged hop ends
+  // it and the fallback below judges whatever `lead` is now.
+  for (let hops = 0; eligible(); hops++) {
+    if (await convert(lead, indirect() ? OPEN_LEAD_CLAIM : null)) return;
+    // followDuplicateLink hands back the row itself unless it is a live
+    // duplicate whose marker reaches further — exactly the relabel case.
+    const next = hops < 2 ? await followDuplicateLink(database, lead) : lead;
+    if (next.id === lead.id) break;
+    lead = next;
+  }
+  // The hop could not land (original gone, another customer's, contact
+  // mismatch, already FK-linked to a different estimate, or lost the
+  // stamp race to a concurrent link). An accepted
+  // estimate must still credit SOME lead (pre-push P1 on #3834): fall back
+  // to the run's own named row — its 'duplicate' status was a dedupe label,
+  // not a lost/won decision, and the acceptance is stronger evidence. It
+  // converts with the accepted estimate stamped, so nothing on the
+  // original is overwritten and the office still sees one open lead to
+  // merge. A named row closed by any OTHER status stays closed, and an
+  // original that is ALREADY won (the office closed the inquiry before
+  // this acceptance) means the deal is credited once — a second won row
+  // would double-count it in the raw lead KPIs (codex #3834 r6 P1) — but
+  // only when that won original was validated as THIS opportunity: a won
+  // root that failed the contact / customer / estimate checks is someone
+  // else's closed deal (a shared household contact), and this customer's
+  // accepted estimate still credits its own named row (codex #3834 r14
+  // P1). Judged as the original IS NOW (the lost claim refreshed it): won
+  // via a DIFFERENT estimate since the read is a different deal. When the
+  // hop did not resolve, `lead` IS the named duplicate row, never won here.
+  const creditedOnOriginal = lead.status === 'won' && sameOpportunity();
+  // The duplicate row never got an ad_service_attribution row (/calculate
+  // skips it for repeats), so the win's funnel row is markConverted's to
+  // settle AFTER the conversion write (settleRepeatFunnelRow): the
+  // original's row advances to booked only when the original, read at
+  // that moment, is still this opportunity (funnel table only — its lead
+  // row stays untouched, codex #3834 r8 P1; judged as it IS NOW, not at a
+  // check made before the awaited conversion, r12 / r27 P1); otherwise
+  // the named row gets the row its own run would have stamped, at booked
+  // (r14 P2). One row either way.
+  // ...and only an UNLINKED named row: a repeat staff linked to another
+  // estimate since its run is that deal's lead (a link to THIS estimate
+  // would have been the FK branch above), and converting it here would
+  // write this acceptance's customer and value hints onto it (codex #3834
+  // r29 P1).
+  if (named.status === 'duplicate' && !named.deleted_at && !named.estimate_id && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
+}
+
 // Status sets the accept path's conditional stamps claim against (see
 // `convert` below): the original must still be open; the fallback row must
 // still carry the dedupe label.
@@ -816,91 +911,9 @@ async function markLinkedLeadEstimateAccepted({
   //    mirrors the lead id in `estimate_data.lead_id` (NOT `leads.estimate_id`).
   //    The contact fallback's `customer_id IS NULL` guard would miss it, so
   //    convert that exact lead by id — precise, no sweeping.
-  const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id || null;
+  const dataLeadId = parseEstimateData(estimate.estimate_data)?.lead_id;
   if (dataLeadId) {
-    const named = await database('leads').where({ id: dataLeadId }).first();
-    // A named row that no longer exists is still "accounted for": never
-    // fall through to the contact sweep on a wizard estimate.
-    if (!named) return;
-    // followDuplicateLink returns the original when the marker resolves and
-    // the named row itself otherwise, so `lead` is always a row here.
-    let lead = await followDuplicateLink(database, named);
-    // An INDIRECTLY resolved original (via a duplicate marker) is validated
-    // like the send/view path validates the named lead: its contact must
-    // match the accepted estimate, it must not already belong to a different
-    // customer (markConverted would overwrite an unrelated lead's customer
-    // linkage — codex #3834 r2 P1), and it must not already be FK-linked to
-    // a DIFFERENT estimate (the office may have built and sent one for the
-    // original after the repeat was filed — converting it here would credit
-    // the win to that estimate and leave the accepted one unlinked, codex
-    // #3834 r4 P1). A named lead that is itself open converts as before.
-    // Functions of the row AS IT IS NOW: `lead` is refreshed in full when a
-    // claim loses (and re-pointed when the chain grew, below), and every
-    // later judgement re-reads the identity (codex #3834 r16 P1) — not a
-    // value computed before the race.
-    const indirect = () => lead.id !== named.id;
-    const sameOpportunity = () => indirect()
-      && leadMatchesEstimateContact(lead, estimate)
-      && (!lead.customer_id || !customerId || lead.customer_id === customerId)
-      && (!lead.estimate_id || String(lead.estimate_id) === String(estimateId));
-    // An indirect root is eligible by POSITIVE open membership, as every
-    // other resolved root in this module (r23 / r24): a spam or cancelled
-    // root is not answerable, so it neither takes the win nor has its
-    // funnel booked — the named repeat stands in (codex #3834 r26 P1). The
-    // named row itself keeps the not-closed rule (an open named lead
-    // converts as before; its own 'duplicate' label is closed here).
-    const eligible = () => !lead.deleted_at && (indirect() ? OPEN_LEAD_STATUSES.includes(lead.status) && sameOpportunity() : !CLOSED_LEAD_STATUSES.has(lead.status));
-    // A claim that lost because the original was relabelled IN FLIGHT — a
-    // concurrent /calculate marked it a duplicate of an older root while
-    // this acceptance was between its read and its stamp — is not a
-    // closure: the refreshed row now carries a marker that reaches further,
-    // so the hop follows it and claims the root it reaches, instead of
-    // promoting the named repeat while that root stays open (codex #3834
-    // r21 P1). Bounded like every marker walk; a dead or unchanged hop ends
-    // it and the fallback below judges whatever `lead` is now.
-    for (let hops = 0; eligible(); hops++) {
-      if (await convert(lead, indirect() ? OPEN_LEAD_CLAIM : null)) return;
-      // followDuplicateLink hands back the row itself unless it is a live
-      // duplicate whose marker reaches further — exactly the relabel case.
-      const next = hops < 2 ? await followDuplicateLink(database, lead) : lead;
-      if (next.id === lead.id) break;
-      lead = next;
-    }
-    // The hop could not land (original gone, another customer's, contact
-    // mismatch, already FK-linked to a different estimate, or lost the
-    // stamp race to a concurrent link). An accepted
-    // estimate must still credit SOME lead (pre-push P1 on #3834): fall back
-    // to the run's own named row — its 'duplicate' status was a dedupe label,
-    // not a lost/won decision, and the acceptance is stronger evidence. It
-    // converts with the accepted estimate stamped, so nothing on the
-    // original is overwritten and the office still sees one open lead to
-    // merge. A named row closed by any OTHER status stays closed, and an
-    // original that is ALREADY won (the office closed the inquiry before
-    // this acceptance) means the deal is credited once — a second won row
-    // would double-count it in the raw lead KPIs (codex #3834 r6 P1) — but
-    // only when that won original was validated as THIS opportunity: a won
-    // root that failed the contact / customer / estimate checks is someone
-    // else's closed deal (a shared household contact), and this customer's
-    // accepted estimate still credits its own named row (codex #3834 r14
-    // P1). Judged as the original IS NOW (the lost claim refreshed it): won
-    // via a DIFFERENT estimate since the read is a different deal. When the
-    // hop did not resolve, `lead` IS the named duplicate row, never won here.
-    const creditedOnOriginal = lead.status === 'won' && sameOpportunity();
-    // The duplicate row never got an ad_service_attribution row (/calculate
-    // skips it for repeats), so the win's funnel row is markConverted's to
-    // settle AFTER the conversion write (settleRepeatFunnelRow): the
-    // original's row advances to booked only when the original, read at
-    // that moment, is still this opportunity (funnel table only — its lead
-    // row stays untouched, codex #3834 r8 P1; judged as it IS NOW, not at a
-    // check made before the awaited conversion, r12 / r27 P1); otherwise
-    // the named row gets the row its own run would have stamped, at booked
-    // (r14 P2). One row either way.
-    // ...and only an UNLINKED named row: a repeat staff linked to another
-    // estimate since its run is that deal's lead (a link to THIS estimate
-    // would have been the FK branch above), and converting it here would
-    // write this acceptance's customer and value hints onto it (codex #3834
-    // r29 P1).
-    if (named.status === 'duplicate' && !named.deleted_at && !named.estimate_id && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
+    await acceptWizardNamedLead(database, { dataLeadId, estimate, estimateId, customerId, convert });
     return;
   }
 
@@ -1154,6 +1167,10 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     ? String(row.customer_id) === String(customerId)
     : leadMatchesEstimateContact(row, { customer_phone: phone, customer_email: email }));
   const linked = await findOpenLeadsForCustomer(database, customerId);
+  const skip = (reason, why, leadIds) => {
+    logger.warn(`[lead-trigger] ${source} customer-link skip — ${why}`, { source, customerId, leadIds });
+    return { reason };
+  };
   // Newest by LATEST wizard submission (a rerun on a repeat's own token
   // bumps updated_at), not by insertion: the sibling the customer just
   // re-ran and booked from is the one the win and its stored touch belong
@@ -1191,18 +1208,19 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
     // (customerHasWonLead cannot see it) — codex #3834 r17 P1. A root won
     // through a DIFFERENT estimate than this event's is a different deal, as
     // the accept path judges it, and the repeat stands in as before.
-    const rootOurs = !!root && ownedByUs(root) && inScope(root);
-    if (rootOurs && root.status === 'won') {
-      wonAncestry = true;
-      continue;
-    }
     // Open by positive membership (OPEN_LEAD_STATUSES), never NOT-closed: a
     // spam or cancelled root is not answerable and the open-status claim
     // would reject it, so the repeat stands in — as it does for a lost root
     // (codex #3834 r23 P1).
-    if (rootOurs && OPEN_LEAD_STATUSES.includes(root.status)) {
-      if (!keepers.has(ancestryKey)) keepers.set(ancestryKey, root);
-      continue;
+    if (root && ownedByUs(root) && inScope(root)) {
+      if (root.status === 'won') {
+        wonAncestry = true;
+        continue;
+      }
+      if (OPEN_LEAD_STATUSES.includes(root.status)) {
+        if (!keepers.has(ancestryKey)) keepers.set(ancestryKey, root);
+        continue;
+      }
     }
     const began = await ancestryFirstContactAt(database, repeat, ownedByUs);
     const keeper = keepers.get(ancestryKey);
@@ -1221,20 +1239,10 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
   // A won ancestry with nothing else open IS the established customer, not
   // a customer with no lead (the reason the caller logs).
   if (!scoped.length) return wonAncestry ? { reason: 'customer_link_established' } : { candidates: [] };
-  if (scoped.length > 1) {
-    logger.warn(`[lead-trigger] ${source} customer-link skip — ${scoped.length} open leads (ambiguous)`, {
-      source, customerId, leadIds: scoped.map((l) => l.id),
-    });
-    return { reason: 'ambiguous_customer_link' };
-  }
-  const established = wonAncestry || await customerHasWonLead(database, customerId, { estimateId });
-  const originating = await isOriginatingLead(database, customerId, scoped[0]);
-  if (established || !originating) {
-    logger.warn(`[lead-trigger] ${source} customer-link skip (established=${established}, originating=${originating})`, {
-      source, customerId, leadIds: scoped.map((l) => l.id),
-    });
-    return { reason: established ? 'customer_link_established' : 'customer_link_not_originating' };
-  }
+  const leadIds = scoped.map((l) => l.id);
+  if (scoped.length > 1) return skip('ambiguous_customer_link', `${scoped.length} open leads (ambiguous)`, leadIds);
+  if (wonAncestry || await customerHasWonLead(database, customerId, { estimateId })) return skip('customer_link_established', 'established customer', leadIds);
+  if (!(await isOriginatingLead(database, customerId, scoped[0]))) return skip('customer_link_not_originating', 'not the originating lead', leadIds);
   return { candidates: scoped };
 }
 

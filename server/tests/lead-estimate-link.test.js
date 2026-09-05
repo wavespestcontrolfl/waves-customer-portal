@@ -1353,7 +1353,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
               const bld = { select: () => bld, from: (t) => { sub.from = t; return bld; }, whereRaw: (r) => { sub.whereRaw = r; return bld; }, where: (c) => { sub.where = c; return bld; }, whereNull: (c) => { sub.whereNull = c; return bld; } };
               fn.call(bld); claims.push(sub); q._claimed = true; return q;
             },
-            whereNot: (c) => { q._not = c; return q; },
+            whereRaw: (sql) => { q._not = sql; return q; },
             del: async () => { deleted.push({ table, where: a, not: q._not }); return opts.ownCompletesMidTx ? 0 : 1; },
           };
           return q;
@@ -1388,7 +1388,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       // The advance is conditioned in SQL on the root still being the row
       // validated here (identity + status + estimate link) — codex r29 P1.
       expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, ROOT_CLAIM);
-      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: { funnel_stage: 'completed' } }]);
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: "funnel_stage IS DISTINCT FROM 'completed'" }]);
       // The accepting customer lands on the root's row when it has none
       // (an unlinked, contact-matched root) — never over one already there
       // (codex r32 P1).
@@ -1409,7 +1409,18 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       const database = dbOf(rows, { root: 'lead', rep: 'booked' });
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
-      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: { funnel_stage: 'completed' } }]);
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: "funnel_stage IS DISTINCT FROM 'completed'" }]);
+    });
+
+    test('a repeat row at a NULL stage is a non-completed row: it is dropped (IS DISTINCT FROM, not <>) and the settlement lands on the root, not KEEP_OWN_ROW (codex r33 P2)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead', rep: null });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, ROOT_CLAIM);
+      // The predicate must be NULL-safe: a plain whereNot({ funnel_stage }) is
+      // "<>", which no NULL row satisfies, so the drop would hit 0 rows and
+      // the settlement would read that as a completed row and roll back.
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: "funnel_stage IS DISTINCT FROM 'completed'" }]);
     });
 
     test('a root row ALREADY at booked (a replayed conversion: the monotonic bridge updates 0 rows) is settled — the repeat is not rebuilt into a second row (codex r28 P1)', async () => {
@@ -1434,7 +1445,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       const database = dbOf(rows, { root: 'lead', rep: 'booked' }, { ownCompletesMidTx: true });
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
-      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: { funnel_stage: 'completed' } }]);
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: "funnel_stage IS DISTINCT FROM 'completed'" }]);
     });
 
     test('a pre-booked root row is NOT settled once the root was re-identified since the read (the claimed read finds nothing) — the repeat carries its own row (codex r30 P1)', async () => {
