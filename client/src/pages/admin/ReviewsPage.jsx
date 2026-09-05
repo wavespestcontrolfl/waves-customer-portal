@@ -1332,8 +1332,10 @@ function ReviewIncentivesPanel() {
     setLikelyReviewers([]);
     setCandidateLoading(false);
     // Auto-search on open so the click-correlated "likely reviewers" show up
-    // without a keystroke. qOverride avoids the just-set-state stale closure.
-    if (!isOpen) searchCandidates(review, review.reviewerName || "");
+    // without a keystroke. No q: the server falls back to the reviewer name
+    // AND expands its surnames ("slim northgate" finds Sam Northgate); an
+    // explicit q is plain field matching (GH codex r6 P2).
+    if (!isOpen) searchCandidates(review, "");
   };
 
   const searchCandidates = async (review, qOverride) => {
@@ -1341,9 +1343,12 @@ function ReviewIncentivesPanel() {
     setCandidateLoading(true);
     setError(null);
     try {
+      // The box opens holding the reviewer name; sent untouched it would be
+      // an explicit q and lose the surname expansion — only what the admin
+      // changed is a query.
       const params = new URLSearchParams({
         reviewId: review.id,
-        q: qOverride ?? (candidateSearch || review.reviewerName || ""),
+        q: qOverride ?? (candidateSearch === (review.reviewerName || "") ? "" : candidateSearch),
       });
       const result = await adminFetch(`/admin/reviews/incentives/attribution-candidates?${params.toString()}`);
       if (candidateReqRef.current !== reqId) return; // superseded — drop stale response
@@ -1824,6 +1829,7 @@ function ReviewIncentivesPanel() {
                                         >
                                           Tapped link {candidate.clickOffsetLabel}
                                           {candidate.locationMatch ? " | same location" : ""}
+                                          {candidate.nameMatch ? " | last name matches" : ""}
                                         </span>
                                       }
                                     />

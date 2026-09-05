@@ -34,6 +34,7 @@ const { lintComms } = require('../comms-lint');
 const { canonicalEmail } = require('../ads/ad-audience-consent');
 const { SERVICE_CONTACT_SLOTS } = require('../customer-contact');
 const { isValidEmail } = require('./link-prospect-worker');
+const { addETDaysAtWallClock } = require('../../utils/datetime-et');
 
 // The commitments §6.4 keeps out of an automatic send. Conservative by design:
 // a false positive costs one owner click; a false negative sends a promise.
@@ -73,10 +74,52 @@ function lintDraft({ subject, body }) {
 function draftReview(placement) {
   const p = placement || {};
   if (p.outreach_status !== 'drafted') return { clean: false, flags: [], lint: [], reason: 'no draft' };
-  if (!isValidEmail(p.outreach_to_email)) return { clean: false, flags: [], lint: [], reason: 'invalid recipient' };
-  if (!p.outreach_subject || !p.outreach_body) return { clean: false, flags: [], lint: [], reason: 'incomplete draft' };
-  const flags = [...new Set([...classifyDraft(p.outreach_subject), ...classifyDraft(p.outreach_body)])];
-  const lint = lintDraft({ subject: p.outreach_subject, body: p.outreach_body });
+  return reviewDraft({ to: p.outreach_to_email, subject: p.outreach_subject, body: p.outreach_body });
+}
+/**
+ * The same verdict for the FOLLOW-UP draft (§6.4): drafted, addressed to the thread's recipient, lint-clean, no flag —
+ * AND the follow-up's own deterministic shape (the prompt asks for it; the drafter accepts any parseable JSON, so the
+ * review is what AUTO_OUTREACH relies on): the subject is exactly `Re: <the pitch's subject>` (it answers the thread —
+ * a new subject reads as a second pitch) and the body is a nudge, not another pitch (FOLLOW_UP_MAX_WORDS).
+ */
+const FOLLOW_UP_MAX_WORDS = 160;
+const followUpShape = (p) => {
+  const flags = [];
+  if (String(p.follow_up_subject || '').trim() !== `Re: ${String(p.outreach_subject || '').trim()}`) flags.push('follow_up_subject');
+  if (String(p.follow_up_body || '').trim().split(/\s+/).length > FOLLOW_UP_MAX_WORDS) flags.push('follow_up_length');
+  return flags;
+};
+function followUpReview(placement) {
+  const p = placement || {};
+  if (p.follow_up_status !== 'drafted') return { clean: false, flags: [], lint: [], reason: 'no follow-up draft' };
+  const text = reviewDraft({ to: p.outreach_to_email, subject: p.follow_up_subject, body: p.follow_up_body });
+  const shape = followUpShape(p);
+  const flags = [...text.flags, ...shape];
+  const reasons = [text.reason, ...shape].filter(Boolean);
+  // a stable refusal of an AUTOMATIC attempt routes the follow-up to the owner (§6.4: never sent by default) — the
+  // text may be clean, the SEND is not automatic: a failed reply check, or a recipient sharing a domain with a
+  // customer / lead contact (§13: acknowledged only by the owner's click)
+  const marker = OWNER_MARKER_REASONS[p.follow_up_skipped_reason];
+  if (marker) reasons.push(marker);
+  const clean = text.clean && shape.length === 0 && !marker;
+  return { clean, flags, lint: text.lint, reason: clean ? null : reasons.join(', ') };
+}
+// the markers the sender stamps on follow_up_skipped_reason (the draft stays drafted) when an automatic attempt was
+// refused for a reason only the owner resolves — followUpReview reads them as unclean, the selection re-selects the
+// domain on them, the bridge re-decides the follow-up OWNER_OUTREACH, the auto sender refuses while one stands
+const REPLY_CHECK_FAILED = 'reply_check_failed';
+const RECIPIENT_REVIEW_REQUIRED = 'recipient_review_required';
+const OWNER_MARKER_REASONS = Object.freeze({
+  [REPLY_CHECK_FAILED]: 'reply check failed on the automatic attempt — the owner sends it',
+  [RECIPIENT_REVIEW_REQUIRED]: 'the recipient shares a domain with a customer or lead contact — the owner reviews the match and sends it',
+});
+const OWNER_MARKERS = Object.freeze(Object.keys(OWNER_MARKER_REASONS));
+/** The mandate verdict over a bare draft — the sender re-reviews the LOCKED text of either send with it. */
+function reviewDraft({ to, subject, body }) {
+  if (!isValidEmail(to)) return { clean: false, flags: [], lint: [], reason: 'invalid recipient' };
+  if (!subject || !body) return { clean: false, flags: [], lint: [], reason: 'incomplete draft' };
+  const flags = [...new Set([...classifyDraft(subject), ...classifyDraft(body)])];
+  const lint = lintDraft({ subject, body });
   const clean = flags.length === 0 && lint.length === 0;
   return { clean, flags, lint, reason: clean ? null : [...flags, ...lint.map((l) => `lint:${l.rule}`)].join(', ') };
 }
@@ -103,6 +146,62 @@ const consumerMail = (host) => SHARED_MAIL_DOMAINS.has(host) || SHARED_MAIL_DOMA
 function draftHash({ outreach_to_email: to, outreach_subject: subject, outreach_body: body } = {}) {
   return sha256([normalizeEmail(to), String(subject || ''), String(body || '')]);
 }
+/** The outreach_followup action hash: the same shape over the follow-up draft (its recipient is the thread's). */
+function followUpHash({ outreach_to_email: to, follow_up_subject: subject, follow_up_body: body } = {}) {
+  return draftHash({ outreach_to_email: to, outreach_subject: subject, outreach_body: body });
+}
+/** Which draft a send acts on — the initial pitch or the follow-up — as the sender's `draft` shape. */
+const draftOf = (placement, followUp = false) => (followUp
+  ? { outreach_to_email: placement.outreach_to_email, outreach_subject: placement.follow_up_subject, outreach_body: placement.follow_up_body }
+  : { outreach_to_email: placement.outreach_to_email, outreach_subject: placement.outreach_subject, outreach_body: placement.outreach_body });
+
+// §6.4 — the follow-up: ONE per outreach cycle, due 10 ET calendar days after the pitch at the pitch's ET wall-clock
+// time — never raw elapsed milliseconds, which land an hour early or late across a DST seam (the America/New_York
+// discipline: every day-offset goes through datetime-et)
+const FOLLOW_UP_DELAY_DAYS = 10;
+const followUpDueAt = (sentAt) => addETDaysAtWallClock(sentAt, FOLLOW_UP_DELAY_DAYS);
+// the lifecycle statuses a follow-up may act on: `contacted` (the initial send left the row there), plus the
+// Judge-owned statuses on a SUBMIT-FIRST path (the policy's submitFirst: an outreach path whose acquire step exists AND
+// precedes the pitch — `execution_after_send` alone is persisted on every path and means nothing without the step), where
+// the acquisition moved the row on before the pitch — a follow-up there is claimable and never demotes the row (the
+// follow-up writes its own columns). The path needs acquisition_type, account_required and execution_after_send.
+// FOLLOW_UP_STATUSES_ANY is the widest set, for a query that narrows per path afterwards.
+const FOLLOW_UP_JUDGE_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
+const FOLLOW_UP_STATUSES_ANY = Object.freeze(['contacted', ...FOLLOW_UP_JUDGE_STATUSES]);
+// §6.4 — why a pending follow-up can never be composed, authorized or sent on its pinned route, or null: the route GONE
+// (the path deleted — FK SET NULL — or superseded: a sent conversation is pinned to its path, the mover never re-paths
+// it), the domain RE-RANKED to another path (the conversation frozen off the best path: no authority is ever decided for
+// it, domainRefusal refuses the old path), or the placement OUT of the path's follow-up lifecycle (a send-first row the
+// verifier promoted to live). ONE reader for the lease, the drafter's report, the send and the reconcile — the places
+// that retire it (`skipped`, the reason stamped) so the conversation completes and the closure sweep releases the inbox.
+// …and a follow-up exists under the authority contract ONLY (§6.4: its instance, its approval and its reply check are the
+// contract's): with GATE_LINK_AUTHORITY off nothing can ever send it — read at every visit, not only when the pitch
+// schedules it (followUpSchedule), so a follow-up scheduled before the gate was turned off settles the same way
+const GATE_OFF_REASON = 'GATE_LINK_AUTHORITY off — follow-ups send under the authority contract only';
+// a submit-first placement's ONE follow-up still OWED past its outcome (§6.4): on a submit-first path the Judge-owned
+// row (placed / live / indexed, FOLLOW_UP_STATUSES(path)) still has the follow-up to send — scheduled (a due date),
+// due, or drafted — so its conversation is not over: the inbox guard and the domain guard both hold it (a send-first
+// row that reached live has no follow-up left: the sender refuses it by the same rule). ONE reader for both guards.
+const followUpOwed = (row, path) => row.outreach_status === 'sent'
+  && (['due', 'drafted'].includes(row.follow_up_status) || (row.follow_up_status === 'none' && Boolean(row.follow_up_due_at)))
+  && FOLLOW_UP_JUDGE_STATUSES.includes(row.status) && FOLLOW_UP_STATUSES(path).includes(row.status);
+function followUpRetirement({ row, path, domain = null }) {
+  if (!require('../../config/feature-gates').isEnabled('linkAuthority')) return GATE_OFF_REASON;
+  if (!path) return 'acquisition path deleted before the follow-up';
+  if (path.superseded_by) return 'acquisition path superseded before the follow-up';
+  if (domain && domain.best_path_id && row.path_id && domain.best_path_id !== row.path_id) return 'domain re-ranked to another path before the follow-up';
+  if (!FOLLOW_UP_STATUSES(path).includes(row.status)) return `placement left the follow-up lifecycle (${row.status})`;
+  return null;
+}
+const FOLLOW_UP_STATUSES = (path) => Object.freeze(['contacted', ...(path && require('./link-authority-policy').submitFirst(path) ? FOLLOW_UP_JUDGE_STATUSES : [])]);
+// a follow-up the bridge must DECIDE (the communication/followup instance exists for it): drafted — while the
+// placement is still in the lifecycle a follow-up may act on for ITS path (FOLLOW_UP_STATUSES: a send-first row the
+// verifier promoted to live has left it; the sender refuses the draft by the same rule, so the instance is no longer
+// required and the bridge ends it) — or in flight / ambiguous after the claim, whatever the lifecycle (the instance
+// stays pinned until the reconcile settles it)
+const followUpPending = (placement, path) => Boolean(placement) && placement.outreach_status === 'sent'
+  && (['sending', 'send_error'].includes(placement.follow_up_status)
+    || (placement.follow_up_status === 'drafted' && FOLLOW_UP_STATUSES(path).includes(placement.status)));
 
 // Consumer mail providers: a shared domain there says nothing about identity, so
 // only an EXACT address match can be a customer at these hosts.
@@ -191,4 +290,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, draftReview, classifyDraft, lintDraft, draftHash, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpRetirement, GATE_OFF_REASON, followUpOwed, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

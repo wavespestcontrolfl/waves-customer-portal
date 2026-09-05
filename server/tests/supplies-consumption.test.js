@@ -360,11 +360,32 @@ test('a successful deduction retires the failure bell an earlier attempt rang fo
   expect(String(retired[0].row.metadata)).toContain('autoRetired'); // stamped so it never reads as a staff hand-off (Codex r26 P1)
 });
 
+test('a deduction whose obsolete bell could NOT be retired reports bell_retire_failed so the owed marker stays for the next retry (Codex r30 P1)', async () => {
+  const { db } = fakeDb({ products: [sign] });
+  const inner = db;
+  const failing = (table) => { const q = inner(table); if (table === 'notifications') q.update = async () => { throw new Error('notifications lost connection'); }; return q; };
+  failing.transaction = db.transaction; failing.raw = db.raw;
+  const res = await consumeCompletionSupplies(failing, args);
+  expect(res.consumed).toHaveLength(1);
+  expect(res.errors).toEqual([{ productId: 'prod-sign', reason: 'bell_retire_failed', message: expect.any(String) }]);
+});
+
 test('an open lookup bell is retired at the end of a run only when every applicable kit product has a movement (hook r27 P1)', async () => {
   const { db, updates } = fakeDb({ products: [sign], openLookupBell: true });
   await consumeCompletionSupplies(db, args); // sign is deducted in this run → the one applicable product is settled
   const keys = updates.filter((u) => u.table === 'notifications').map((u) => u.key);
   expect(keys).toEqual(['supplies-consumption-failed:prod-sign:svc-1', 'supplies-consumption-failed:lookup:svc-1']);
+});
+
+test('an open lookup bell whose end-of-run re-check is INDETERMINATE (the catalog re-read fails) is a bell_retire_failed — the owed marker stays, the bell is not retired (Codex r31 P1)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], openLookupBell: true });
+  let catalogReads = 0;
+  const flaky = (table) => { const q = db(table); if (table === 'products_catalog') { catalogReads += 1; if (catalogReads > 1) q.select = async () => { throw new Error('catalog lost connection'); }; } return q; };
+  flaky.transaction = db.transaction; flaky.raw = db.raw;
+  const res = await consumeCompletionSupplies(flaky, args);
+  expect(res.consumed).toHaveLength(1); // the main deduction landed
+  expect(res.errors).toEqual([{ reason: 'bell_retire_failed', message: expect.stringMatching(/could not be re-checked/) }]);
+  expect(updates.filter((u) => u.table === 'notifications').map((u) => u.key)).toEqual(['supplies-consumption-failed:prod-sign:svc-1']); // the product bell only; the lookup bell stands
 });
 
 test('a lookup bell this module auto-retired (a concurrent retry deducted the kit) does NOT hand off the next kit product — it is deducted (Codex r26 P1)', async () => {
@@ -472,7 +493,7 @@ describe('recap consumption hook — retry window (source contract)', () => {
     expect(hook).toMatch(/settlement deferred, marker kept/);
     expect(hook).not.toMatch(/consuming anyway:/); // the old warn-and-return-true branch
     // Cleared unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must not deduct again.
-    expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent'\);/);
+    expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent' \|\| e\.reason === 'bell_retire_failed'\);/); // a bell that could not be retired keeps the marker too (Codex r30 P1)
     expect(hook).toMatch(/if \(result\.recordId && !handoffLost\) await db\('service_records'\)/);
     expect(hook).toMatch(/- 'completion_supplies_owed'/); // cleared after the at-most-once consume
     expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);

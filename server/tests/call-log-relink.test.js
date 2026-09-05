@@ -119,6 +119,9 @@ describe('relinkUnattributedCalls — an operator\'s explicit unlink is never wr
     expect(rawSqls(write)).toContain(NOT_EXPLICITLY_UNLINKED_SQL);
     // The write still carries the sentinel guard too — the unlink predicate is additive.
     expect(rawSqls(write)).toContain('transcription IS DISTINCT FROM ?');
+    // A bake-off (sandbox) row never becomes a customer's call — both legs (codex #3852 gh-r4 P1).
+    expect(rawSqls(scan)).toContain("COALESCE(??, '') <> ?");
+    expect(rawSqls(write)).toContain("COALESCE(??, '') <> ?");
   });
 });
 

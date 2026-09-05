@@ -44,9 +44,14 @@ jest.mock('../models/db', () => {
     const q = {};
     for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
+    q.where = (w) => { q._where = w; return q; };
+    q.whereRaw = (sql, bindings) => { (q._raws = q._raws || []).push([sql, bindings]); return q; };
     q.first = async (...cols) => {
-      if (cols[0] === 'vo.status') return mockState.liveAutoOrder; // assertNoLiveAutoOrder's aliased join
+      if (cols[0] === 'vo.status') return mockState.liveAutoOrderAfterBell && mockState.bellRung ? mockState.liveAutoOrderAfterBell : mockState.liveAutoOrder; // findLiveAutoOrder's aliased join (a claim landing after the hand-off bell: liveAutoOrderAfterBell)
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
+      // deliverBell's locked version read: the row's CURRENT bell is the one being delivered (the park's / the pending row's), unless a test replaced it (bellStampMiss).
+      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'evidence') { const pending = mockState.pendingBells.find((r) => r.id === q._where?.id); return { id: q._where?.id, evidence: { bell: { v: mockState.bellStampMiss ? 'replaced' : (pending?.evidence?.bell?.v ?? mockState.currentBellV ?? null) } } }; }
+      if (table === 'vendor_orders' && cols.length === 1 && cols[0] === 'id') return mockState.requestLedger || null; // settleRequestLedgerBells' row (null = the request has no ledger row); the lock-only reads ignore the value
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
@@ -64,7 +69,7 @@ jest.mock('../models/db', () => {
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
-    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && row.status && mockState.parkThrowsOnce) { mockState.parkThrowsOnce = false; throw new Error('park lost connection'); } mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
+    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && row.status && mockState.parkThrowsOnce) { mockState.parkThrowsOnce = false; throw new Error('park lost connection'); } if (table === 'vendor_orders' && typeof row.evidence === 'string') { try { const v = JSON.parse(row.evidence).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } } mockState.updates.push({ table, row, ...(q._raws ? { raws: q._raws } : {}) }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -78,7 +83,7 @@ jest.mock('../models/db', () => {
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
-  dbFn.raw = jest.fn(async (sql) => sql);
+  dbFn.raw = jest.fn(async (sql, bindings) => { try { const v = JSON.parse(bindings?.[0]).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } return sql; }); // the late-placement attach writes its bell through raw
   dbFn.transaction = async (fn) => fn(dbFn);
   return dbFn;
 });
@@ -98,7 +103,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null, currentBellV: null });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -226,6 +231,28 @@ test('the claim retires the request\'s manual bell in its own transaction; a fai
     expect(b.place).not.toHaveBeenCalled();
     expect(mockState.ledgerRows).toHaveLength(0);
   } finally { mockState.bellRetireThrows = false; }
+});
+
+test('a claim another pod inserts while the hand-off bell is being written retires that bell after the write (Codex r29 P1)', async () => {
+  process.env.GATE_AUTO_ORDER = 'false';
+  mockState.liveAutoOrderAfterBell = { status: 'placing', external_order_number: null, vendor_name: 'Sticker Mule' };
+  notify = jest.fn(async () => { mockState.bellRung = true; return { id: 'n1' }; });
+  try {
+    const r = await run(mockAdapter());
+    expect(r).toEqual({ requestId: 'req-1', skipped: 'gated', autoOrderLive: true });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(mockState.updates.some((u) => u.table === 'notifications' && u.row.read_at instanceof Date)).toBe(true); // the just-written bell retired
+  } finally { mockState.liveAutoOrderAfterBell = null; mockState.bellRung = false; }
+});
+
+test('stale recovery of a claim whose request an older pod received meanwhile parks WITH landedAfterReceive (Codex r29 P1)', async () => {
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  mockState.freshRequestStatus = 'received'; // read under the park's locks, not from the scan (Codex r30 P1)
+  const r = await dispatch.recoverStalePlacing({ notify });
+  expect(r.recovered).toEqual(['ledger-old']);
+  const patch = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status).row;
+  expect(patch.status).toBe('needs_review');
+  expect(JSON.parse(patch.evidence).landedAfterReceive).toEqual(expect.any(String));
 });
 
 test('master gate off with an automatic order already OUT for the product → no "order manually" hand-off bell (hook r27 P0/P1)', async () => {
@@ -601,6 +628,17 @@ test.each([
   expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
 });
 
+test('a claim-time cancel of a request with a re-claimable dry-run row retires that row\'s own bell too (Codex r30 P1)', async () => {
+  mockState.product = { ...sticker, auto_reorder_enabled: false };
+  mockState.requestLedger = { id: 'ledger-dry' };
+  try {
+    const r = await run(mockAdapter());
+    expect(r).toMatchObject({ skipped: 'auto_reorder_disabled', cancelled: true });
+    expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(2); // the sweep's request bell + the dry-run ledger bell
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence && !u.row.status)).toBe(true); // evidence.bell stripped
+  } finally { mockState.requestLedger = null; }
+});
+
 test('master gate off: the run still re-rings pending bells and recovers stale placing rows, places nothing (pre-push P0)', async () => {
   process.env.GATE_AUTO_ORDER = 'false';
   mockState.pendingBells = [{ id: 'ledger-p', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y' } }, request_id: 'req-p', product_name: 'x', vendor_name: 'v' }];
@@ -793,6 +831,20 @@ test('an order that lands after stale recovery parked the row AND an older pod r
   expect(notify.mock.calls[0][2]).toMatch(/receive the request once more/);
 });
 
+test('a persist_after_placement park records the POSITIVE figure — the beforeSubmit reservation over a zero vendor total — never $0 over the reservation (Codex r31 P1)', async () => {
+  const dbFn = require('../models/db');
+  const realTx = dbFn.transaction;
+  let n = 0;
+  dbFn.transaction = async (fn) => { n += 1; if (n === 3) throw new Error('audit insert lost connection'); return fn(dbFn); };
+  try {
+    const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(10593); return { externalOrderNumber: 'S1-9', amountCents: 0, evidence: {} }; }) });
+    const r = await run(a);
+    expect(r).toMatchObject({ status: 'needs_review', reason: 'persist_after_placement' });
+    expect(lastLedgerPatch().amount_cents).toBe(10593);
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.amount_cents === 0)).toBe(false);
+  } finally { dbFn.transaction = realTx; }
+});
+
 test('a DB failure after the vendor call parks as persist_after_placement, never failed', async () => {
   const dbFn = require('../models/db');
   dbFn.raw.mockClear();
@@ -899,8 +951,30 @@ test('a delivered bell whose version stamp hits zero rows (the bell was replaced
   mockState.request = { ...baseRequest(), status: 'ordered' };
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
   mockState.bellStampMiss = false;
-  // The just-inserted v1 notification is retired — staff never read v1's instructions beside v2 (Codex r23 P1).
-  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
+  // ONLY the just-inserted v1 notification is retired — staff never read v1's instructions beside v2 (Codex r23 P1) — and v2's own notification is untouched: a delayed
+  // v1 delivery must never retire the current bell, whose row is already stamped and would never re-ring (hook r31 P1).
+  const retired = mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at);
+  expect(retired).toHaveLength(1);
+  expect(retired[0].raws).toEqual([[expect.stringContaining("dedupeKey' = ?"), ['auto-order:ledger-9:v1']]]);
+});
+
+test('a bell delivery retires the row\'s earlier bell versions BEFORE its stamp; a retire that fails leaves the bell pending — re-rung, and the retire retried, next run (Codex r31 P1)', async () => {
+  const evidence = { bell: { title: 'Auto-order needs review: x', body: 'v2 text', v: 'v2' } };
+  mockState.pendingBells = [{ id: 'ledger-7', evidence, request_id: 'req-7', product_name: 'x', vendor_name: 'v' }];
+  mockState.request = { ...baseRequest(), status: 'ordered' };
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } });
+  expect(r.bells).toEqual({ rung: ['ledger-7'], pending: [] });
+  const order = mockState.updates.map((u) => u.table);
+  expect(order.indexOf('notifications')).toBeGreaterThanOrEqual(0);
+  expect(order.indexOf('notifications')).toBeLessThan(order.indexOf('vendor_orders')); // retire, then the bellAt stamp — one transaction under the row lock (hook r31 P1)
+  const retire = mockState.updates.find((u) => u.table === 'notifications');
+  expect(retire.raws.map((r) => r[1])).toEqual([['auto-order:ledger-7', 'auto-order:ledger-7:%'], ['auto-order:ledger-7:v2']]); // every other version of THIS row's bell, never v2 itself
+  mockState.updates = [];
+  mockState.bellRetireThrows = true;
+  try {
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-7/);
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders')).toBe(false); // no stamp: the next run re-rings v2 (a dedupe refresh) and retries the retire
+  } finally { mockState.bellRetireThrows = false; }
 });
 
 test('the run goes red while a bell is undelivered', async () => {
@@ -1100,6 +1174,23 @@ test('a placing row older than 30 minutes is parked needs_review with a do-not-r
   expect(row.error).toMatch(/stale_placing/);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
   expect(a.place).not.toHaveBeenCalled();
+});
+
+test('stale recovery of a claim whose request an older pod CANCELLED meanwhile restores the request to ordered — the possibly-placed order stays reconcilable (Codex r31 P1)', async () => {
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  mockState.freshRequestStatus = 'cancelled';
+  const a = mockAdapter();
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } });
+  expect(r.recovered).toEqual(['ledger-old']);
+  const reopen = mockState.updates.find((u) => u.table === 'product_restock_requests');
+  expect(reopen.row).toMatchObject({ status: 'ordered', closed_at: null });
+  const row = mockState.updates.find((u) => u.table === 'vendor_orders').row;
+  expect(JSON.parse(row.evidence).reopenedFromCancelledAt).toEqual(expect.any(String));
+  expect(row.status).toBe('needs_review');
+  // An open request is left open, as before.
+  mockState.updates = []; mockState.freshRequestStatus = 'open';
+  await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } });
+  expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0);
 });
 
 test('assertNoLiveAutoOrder: a placing or dispatched auto claim refuses a staff request with a 409 that names the tab (pre-push P0)', async () => {

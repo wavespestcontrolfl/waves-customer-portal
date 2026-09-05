@@ -2842,10 +2842,11 @@ function OutreachApprovals({ canRun, onChange }) {
     if (!ok && r.code === "recipient_review_required") setAcks((prev) => ({ ...prev, [ackKey]: false })); // the reload below shows the current match
     setBusyId(null); refresh();
   };
-  const reconcile = async (id, outcome) => {
+  const reconcile = async (p, outcome) => {
+    const id = p.id;
     setBusyId(id); setMsg(null);
-    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome });
-    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome, ...(p.follow_up ? { follow_up: true } : {}) });
+    setMsg({ ok, text: ok ? (outcome === "sent" ? "Marked as sent." : outcome === "skip" ? "Follow-up skipped." : r.retired ? "Not sent — the placement moved on; the follow-up is retired." : "Returned to drafts.") : (OUTREACH_CODE_MSG[r.code] || r.error || "Reconcile failed.") });
     setBusyId(null); refresh();
   };
 
@@ -2923,12 +2924,14 @@ function OutreachApprovals({ canRun, onChange }) {
             <div key={p.id} style={{ background: D.card, border: `1px solid ${D.amber}`, borderRadius: 8, padding: 14, marginBottom: 10 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{p.target_domain}</div>
+                  <div style={{ fontSize: 13, color: D.heading, fontWeight: 500 }}>{p.target_domain}{p.follow_up ? " · follow-up" : ""}</div>
                   <div style={{ fontSize: 12, color: D.muted }}>To: {p.outreach_to_email} · <b>{p.outreach_subject}</b></div>
+                  {p.unverifiable && <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{`The automatic attempt could not verify this follow-up (${String(p.follow_up_skipped_reason || "").replace(/_/g, " ")}). Send it from the Owner queue once the cause clears, or skip it.`}</div>}
                 </div>
                 <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                  <button onClick={() => reconcile(p.id, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>
-                  <button onClick={() => reconcile(p.id, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>
+                  {!p.unverifiable && <button onClick={() => reconcile(p, "sent")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.green, false, busyId === p.id)}>It sent</button>}
+                  {!p.unverifiable && <button onClick={() => reconcile(p, "requeue")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.amber, false, busyId === p.id)}>Re-queue</button>}
+                  {p.follow_up && <button onClick={() => reconcile(p, "skip")} disabled={!canRun || busyId === p.id} style={outreachBtn(D.muted, false, busyId === p.id)}>Skip follow-up</button>}
                 </div>
               </div>
             </div>
@@ -3573,6 +3576,23 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     }
   };
 
+  // the owner's TERMINAL review of a follow-up that is theirs to send (§6.4): skipped, the conversation settles and
+  // its inbox and domain are released on the closure sweep — the queue never sends an owner-routed follow-up
+  const skipFollowUp = async (card, row) => {
+    setBusy(row.id);
+    setError(null);
+    setResult(null);
+    try {
+      await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/outreach/reconcile`, { method: "POST", body: { outcome: "skip", follow_up: true } });
+      setResult({ tone: D.muted, text: `Skipped the follow-up on ${card.domain.domain} — the conversation settles without it` });
+      await refresh();
+    } catch (e) {
+      setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Skip failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // the send click IS the approval of a communication row (§6.3 2c)
   const send = async (card, row) => {
     setBusy(row.id);
@@ -3584,7 +3604,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     const body = { draft_hash: row.draft?.hash || "", ...(acks[ackKey] && lookupHash ? { reviewed_lookup_hash: lookupHash } : {}) };
     try {
       const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
-      setResult({ tone: D.green, text: `Sent the pitch to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
+      setResult({ tone: D.green, text: `Sent the ${row.action === "outreach_followup" ? "follow-up" : "pitch"} to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}` });
       await refresh();
     } catch (e) {
       setError(OUTREACH_CODE_MSG[e?.code] || e?.message || "Send failed");
@@ -3671,9 +3691,11 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                 {c.placement.location_key && c.placement.location_key !== "-" ? <span style={{ color: D.muted, fontWeight: 400 }}>{` · ${c.placement.location_key}`}</span> : ""}
                 {c.placement.status === "ready_for_payment" && <span style={{ color: D.amber, fontWeight: 400 }}>{" · at the publisher's checkout"}</span>}
                 {["placed", "live", "indexed"].includes(c.placement.status) && (() => {
-                  // the label is the PENDING payment action, never the status alone: a placed placement can still owe its initial fee
+                  // the label is the PENDING action, never the status alone: a placed placement can still owe its initial fee — or
+                  // only its follow-up send (§6.4), which owes no fee at all
                   const pending = c.rows.find((r) => r.dimension === "payment" && !r.satisfied_at); // approved-but-unsettled is still the obligation
-                  return <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status} — ${pending && pending.action === "renewal" ? "renewal" : "initial fee"}`}</span>;
+                  const what = pending ? (pending.action === "renewal" ? "renewal" : "initial fee") : c.rows.some((r) => r.action === "outreach_followup" && !r.satisfied_at) ? "follow-up" : null;
+                  return <span style={{ color: D.amber, fontWeight: 400 }}>{` · ${c.placement.status}${what ? ` — ${what}` : ""}`}</span>;
                 })()}
               </div>
               <div style={{ fontSize: 12, color: D.muted }}>
@@ -3764,8 +3786,11 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                               <RecipientReview review={r.draft?.recipient_review} acked={acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]} disabled={rowBusy} onAck={(v) => setAcks({ ...acks, [`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]: v })} />
                               <span>
                                 <button onClick={() => send(c, r)} disabled={rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`])} style={btn(rowBusy || domainBusy || (r.draft?.recipient_review?.kind === "ambiguous" && !acks[`${r.id}:${r.draft?.recipient_review?.lookup_hash || ""}`]), D.green)}>
-                                  {rowBusy ? "Sending…" : "Send the pitch"}
+                                  {rowBusy ? "Sending…" : r.action === "outreach_followup" ? "Send the follow-up" : "Send the pitch"}
                                 </button>
+                                {r.action === "outreach_followup" && (
+                                  <button onClick={() => skipFollowUp(c, r)} disabled={rowBusy || domainBusy} style={{ ...btn(rowBusy || domainBusy, D.muted), marginLeft: 6 }}>Skip the follow-up</button>
+                                )}
                               </span>
                             </div>
                           ) : r.approvable ? (

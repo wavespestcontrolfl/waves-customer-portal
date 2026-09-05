@@ -63,6 +63,7 @@ async function classifyChurnReason(text) {
   // Nothing to classify — the generic request boilerplate carries no signal.
   if (!detail || detail.length < 3) return { code: 'unclassified', source: 'none' };
   const payload = {
+    laneId: 'churn_classify',
     system: SYSTEM,
     text: `Cancellation message:\n"""${detail.slice(0, 1500)}"""`,
     jsonMode: true,

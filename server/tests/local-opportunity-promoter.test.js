@@ -23,6 +23,7 @@ function fakeDb({ ownActive = [], existing = [], inFlight = [] } = {}) {
         where: () => probe, // v2: findPlacementRow adds .where('location_key', …)
         // the guard's domain-wide probe: an `inFlight` fixture row for the domain
         first: async () => inFlight.find((p) => p.target_domain === probeDomain) || null,
+        select: async () => [], // the owed-follow-up probe (Codex #3854 r24 P1): no Judge-owned rows in these fixtures
       };
       return {
         whereRaw: probe.whereRaw,

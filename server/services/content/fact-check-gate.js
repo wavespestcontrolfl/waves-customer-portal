@@ -122,6 +122,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
       }
       : MODELS.TEXT_POLICIES.deepAnalysis;
     response = await dispatchWithFallback(policy, {
+      laneId: 'fact_check_gate',
       maxTokens: 6000,
       timeoutMs: FACTCHECK_TIMEOUT_MS,
       jsonMode: true,

@@ -74,17 +74,30 @@ jest.mock('@anthropic-ai/sdk', () => (
   }))
 ));
 jest.mock('../services/composer-customer-links', () => ({
+  REVIEW_GATE_REASONS: jest.requireActual('../services/composer-customer-links').REVIEW_GATE_REASONS,
   buildReviewRequestLink: jest.fn(),
   buildPayBalanceLink: jest.fn(),
   buildLatestEstimateLink: jest.fn(),
   buildReferralLink: jest.fn(),
   buildAutopaySetupLink: jest.fn(),
   buildAppointmentPageLink: jest.fn(),
+  buildCardRequestLink: jest.fn(),
   buildPrepGuideLink: jest.fn(),
   buildServiceReportLink: jest.fn(),
+  buildContractSigningLink: jest.fn(),
   buildStatementLink: jest.fn(),
 }));
+jest.mock('../services/prep-guide-sender', () => ({
+  isSupportedPestType: () => true,
+  isSupportedChannel: () => true,
+  sendPrepToCustomer: jest.fn(),
+}));
+// The card funnel's own live-status set — the route narrows its visit pick to it.
+jest.mock('../services/appointment-card-request', () => ({ LIVE_VISIT_STATUSES: ['pending', 'confirmed'] }));
 jest.mock('../services/review-request', () => ({
+  sendGatedAsk: jest.fn(),
+  findInlineAwaitingEmail: jest.fn(async () => null),
+  sendInlineEmailCopy: jest.fn(),
 }));
 
 const express = require('express');
@@ -346,6 +359,133 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  // Quick Links review channel (owner ruling 2026-09-03).
+  describe('review_request channel', () => {
+    test('sms (default) and both mint the inline link; both echoes its channel', async () => {
+      wireDb({ customers: soloCustomer() });
+      builders.buildReviewRequestLink.mockResolvedValue({
+        url: 'https://portal.wavespestcontrol.com/l/rv333', line: 'x', requestId: 'rr-1',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'both' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ channel: 'both', requestId: 'rr-1' });
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+      });
+    });
+
+    test('email sends the review email now through the gated engine path — nothing to insert', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'sent', requestId: 'rr-9' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body).toMatchObject({ kind: 'review_request', channel: 'email', sent: true, requestId: 'rr-9' });
+        expect(body.url).toBeUndefined();
+        expect(ReviewService.sendGatedAsk).toHaveBeenCalledWith(
+          expect.objectContaining({ customerId: CUSTOMER_UUID, channel: 'email', triggeredBy: 'admin', strictChannel: true }),
+        );
+        expect(builders.buildReviewRequestLink).not.toHaveBeenCalled();
+      });
+    });
+
+    test('email after a Both whose email leg failed re-sends the SAME inline row copy (no cooldown refusal)', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
+      ReviewService.sendInlineEmailCopy.mockResolvedValueOnce({ sent: true });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ channel: 'email', sent: true, requestId: 'rr-texted', retriedInline: true });
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-texted');
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+      });
+
+      // A failed retry keeps the leg's own reason.
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
+      ReviewService.sendInlineEmailCopy.mockResolvedValueOnce({ sent: false, reason: 'prefs_unavailable' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/could not be read — try again/);
+      });
+
+      // The owed-leg lookup fails CLOSED: never fall through to a fresh ask (r11 P2).
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockRejectedValueOnce(new Error('db down'));
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ reason: 'owed_lookup_failed' });
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+      });
+
+      // An uncertain leg (post-dispatch throw) is never "try again" — the
+      // provider may hold it (GH Codex #3856 r8 P2).
+      wireDb({ customers: soloCustomer() });
+      ReviewService.findInlineAwaitingEmail.mockResolvedValueOnce({ id: 'rr-texted' });
+      ReviewService.sendInlineEmailCopy.mockResolvedValueOnce({ sent: false, reason: 'email_uncertain' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/may or may not have gone out — check the customer's email log/);
+      });
+    });
+
+    test('email: the toast names the resolved email contact, not the phone owner', async () => {
+      const customers = soloCustomer();
+      customers.first = jest.fn(() => Promise.resolve({
+        first_name: 'PersonA', email: 'a@example.com', phone: '+15551234567',
+        service_contact_name: 'Jamie Onsite', service_contact_email: 'jamie@example.com',
+      }));
+      wireDb({ customers });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'sent', requestId: 'rr-9' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(200);
+        expect((await res.json()).firstName).toBe('Jamie');
+      });
+    });
+
+    test('email: a blocked outcome keeps the touch\'s own reason (transient ≠ no email on file)', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', reason: 'prefs_unavailable' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect((await res.json()).error).toMatch(/could not be read — try again/);
+      });
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', reason: 'opted_out' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect((await res.json()).error).toMatch(/turned off/);
+      });
+    });
+
+    test('email: a gate refusal is a 409 with the shared gate copy', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'cooldown' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ outcome: 'cooldown', error: expect.stringMatching(/last 30 days/) });
+      });
+    });
+
+    test('an unknown channel is a 400', async () => {
+      wireDb({ customers: soloCustomer() });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'fax' });
+        expect(res.status).toBe(400);
+        expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
+        expect(builders.buildReviewRequestLink).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   test('404 with the builder\'s plain reason when there is nothing to link', async () => {
     wireDb({ customers: soloCustomer() });
     builders.buildPayBalanceLink.mockResolvedValue({ url: null, line: '', reason: 'No open balance on this account' });
@@ -353,6 +493,40 @@ describe('POST /admin/communications/customer-link', () => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'pay_balance' });
       expect(res.status).toBe(404);
       expect((await res.json()).error).toBe('No open balance on this account');
+    });
+  });
+
+  // POST /send-prep — a zero-confirmed send whose leg the provider MAY have
+  // accepted must not read as "try again" (GH Codex #3856 r8 P2).
+  describe('POST /send-prep', () => {
+    const { sendPrepToCustomer } = require('../services/prep-guide-sender');
+    test('no leg confirmed + an uncertain leg → check the log, not try again', async () => {
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'email' });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("The prep email may or may not have gone out — check the customer's email log before sending it again.");
+      });
+      // Both whose text could not be planned: the email went, the copy names the link reason.
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: true, reason: 'partial', failedChannel: 'sms', smsLinkReason: 'prep_page_taken', takenBy: 'Interior Pest Treatment', label: 'Lawn', emailSent: true, emailAddress: 'a@example.com', smsSent: false });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'lawn', channel: 'both' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ partial: true, message: "Lawn prep emailed to a@example.com. The text was not sent — the customer's next visit already carries the Interior Pest Treatment prep page." });
+      });
+      // An automation already sending this guide: nothing to do by hand.
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'prep_send_pending', label: 'Flea Treatment' });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'both' });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/already queued to send automatically/);
+      });
+      // A definite failure keeps the plain retry copy.
+      sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, smsSent: false });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'flea', channel: 'email' });
+        expect((await res.json()).error).toMatch(/try again/);
+      });
     });
   });
 
@@ -433,7 +607,7 @@ describe('POST /admin/communications/customer-link', () => {
     }
   });
 
-  test('appointment: the route picks the soonest live visit and hands the row to the builder', async () => {
+  test('appointment + card_request: the route picks the soonest live visit and hands the row to the builder', async () => {
     // A week out in ET — a fixed near-today date rots into pageState 'past' (pre-push Codex P1).
     const NEXT_WEEK = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86_400_000));
     const visit = { id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
@@ -454,6 +628,21 @@ describe('POST /admin/communications/customer-link', () => {
       // recipient's own consent policy applies (GH Codex #3844 r4 P1).
       expect(body.customerId).toBe(CUSTOMER_UUID);
     });
+
+    const visits = makeVisitsBuilder([]);
+    wireDb({ customers: soloCustomer(), visits });
+    builders.buildCardRequestLink.mockResolvedValue({ url: null, line: '', reason: 'No upcoming appointment for this customer' });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
+      expect(res.status).toBe(404);
+      expect(builders.buildCardRequestLink).toHaveBeenCalledWith(null);
+      // Card requests anchor on the phone OWNER's visits only, never a sibling's.
+      expect(db.mock.calls.filter(([t]) => t === 'scheduled_services').length).toBeGreaterThan(0);
+      // …and only on the funnel's own live statuses — a soonest 'rescheduled'
+      // placeholder must not be picked here and rejected there (Codex r1 P1).
+      expect(visits.whereIn).toHaveBeenCalledWith('status', ['pending', 'confirmed']);
+      expect((await res.json()).error).toMatch(/No upcoming appointment/);
+    });
   });
 
   test('service_report: dispatches the whole account id set, with the phone owner riding back (the text is customer-specific — GH Codex #3844 r4 P1)', async () => {
@@ -472,6 +661,25 @@ describe('POST /admin/communications/customer-link', () => {
       expect(body.customerId).toBe(CUSTOMER_UUID);
       expect(body.immediateOnly).toBe(true);
       expect(body.report).toEqual({ id: 'r1', serviceDate: '2026-09-01', serviceType: 'Lawn Care' });
+    });
+  });
+
+  test('contract: per customer ROW — the phone owner only, with the owner id riding back', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildContractSigningLink.mockResolvedValue({
+      url: 'https://portal.wavespestcontrol.com/contract/tokX',
+      line: 'Please review and sign your Auto Pay Authorization here: https://portal.wavespestcontrol.com/contract/tokX\n\n',
+      contract: { id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true },
+      expiresAt: '2026-10-03T00:00:00.000Z',
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'contract' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(builders.buildContractSigningLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      expect(body.customerId).toBe(CUSTOMER_UUID);
+      expect(body.expiresAt).toBe('2026-10-03T00:00:00.000Z');
+      expect(body.contract).toEqual({ id: 'k1', title: 'Auto Pay Authorization', requiresSignature: true });
     });
   });
 
@@ -513,6 +721,22 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
+  test.each(['email', 'both'])('review_request by %s: 409 when two live siblings on the account share the phone — the emailed ask goes to the owner\'s own inbox, never an arbitrary row\'s (GH Codex #3856 r21 P1)', async (channel) => {
+    wireDb({ customers: makeCustomersBuilder({
+      selectResults: [
+        [{ id: CUSTOMER_UUID, account_id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002', account_id: CUSTOMER_UUID }], // number → one account
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // account expansion
+        [{ first_name: 'PersonA' }, { first_name: 'PersonA' }], // greeting name
+        [{ id: CUSTOMER_UUID }, { id: 'bbbb2222-0000-4000-8000-000000000002' }], // phone rows on the account
+      ],
+    }) });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/more than one customer on this account/);
+    });
+  });
+
   test.each(['appointment', 'service_report'])('%s: 409 when two live siblings on the account share the phone and no customer was picked — the owner that rides back is never an arbitrary row (GH Codex #3844 r9 P1)', async (kind) => {
     wireDb({ customers: makeCustomersBuilder({
       selectResults: [
@@ -529,7 +753,22 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test.each(['prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
+  test('card_request: a same-day live visit whose arrival window has elapsed is skipped for the next eligible one — the funnel would mint for the missed visit (GH Codex #3851 r5 P2)', async () => {
+    const { etDateString } = require('../utils/datetime-et');
+    const TODAY = etDateString();
+    const NEXT_WEEK = etDateString(new Date(Date.now() + 7 * 86_400_000));
+    const elapsed = { id: 'v-missed', customer_id: CUSTOMER_UUID, scheduled_date: TODAY, window_start: null, window_end: '00:00', service_type: 'Flea Treatment', status: 'confirmed' };
+    const later = { id: 'v-next', customer_id: CUSTOMER_UUID, scheduled_date: NEXT_WEEK, window_start: '09:00', window_end: '11:00', service_type: 'Flea Treatment', status: 'confirmed' };
+    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([elapsed, later]) });
+    builders.buildCardRequestLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/secure/tok22', line: 'Secure: portal.wavespestcontrol.com/secure/tok22\n\n', standalone: true, immediateOnly: true });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
+      expect(res.status).toBe(200);
+      expect(builders.buildCardRequestLink).toHaveBeenCalledWith(later);
+    });
+  });
+
+  test.each(['contract', 'card_request', 'prep_guide'])('%s: 409 when the phone belongs to more than one sibling — same rule as Auto Pay', async (kind) => {
     const other = 'bbbb2222-0000-4000-8000-000000000002';
     wireDb({
       customers: makeCustomersBuilder({
@@ -545,7 +784,21 @@ describe('POST /admin/communications/customer-link', () => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind });
       expect(res.status).toBe(409);
       expect((await res.json()).error).toMatch(/more than one customer on this account/);
+      expect(builders.buildContractSigningLink).not.toHaveBeenCalled();
+      expect(builders.buildCardRequestLink).not.toHaveBeenCalled();
       expect(builders.buildPrepGuideLink).not.toHaveBeenCalled();
+    });
+  });
+
+  test('card_request: autoSecured answers 200 like Auto Pay — a success with nothing to insert', async () => {
+    wireDb({ customers: soloCustomer(), visits: makeVisitsBuilder([{ id: 'v1', customer_id: CUSTOMER_UUID, scheduled_date: '2026-09-08', status: 'confirmed' }]) });
+    builders.buildCardRequestLink.mockResolvedValue({ url: null, line: '', autoSecured: true });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'card_request' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.autoSecured).toBe(true);
+      expect(body.url).toBeNull();
     });
   });
 });

@@ -411,6 +411,7 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
       createMessage = (params) => createDeepMessage(client, params);
     }
     const response = await createMessage({
+      laneId: 'quarantine_arbiter',
       model: MODELS.DEEP,
       max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }],

@@ -24,6 +24,7 @@ const {
 } = require('../utils/staff-password-policy');
 const { validDateOnly } = require('../utils/date-only');
 const { canonicalStaffEmail } = require('../utils/staff-identity');
+const { employmentPatch } = require('../services/technician-eligibility');
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -459,7 +460,10 @@ async function register(req, res, next) {
         email: normalizedEmail,
         password_hash: hash,
         role: staffRole,
-        active: true,
+        // employmentPatch keeps the legacy `active` column in step; a
+        // registered hire signs in but takes no field work until the Team
+        // tab marks them field-dispatchable.
+        ...employmentPatch('active'),
         // The register password is chosen by the owner and handed over
         // out-of-band — force the hire to set their own at first login
         // (middleware 403s everything else until they do). The rotation

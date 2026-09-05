@@ -42,6 +42,7 @@
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
+ *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -334,6 +335,18 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+
+  // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
+  // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
+  // address + service, 30 days) files as status 'duplicate' carrying
+  // extracted_data.duplicate_of_lead_id instead of a second 'new' lead —
+  // label only, the public route never writes the original. OFF (default,
+  // every environment): every run files as 'new', byte-identical to before.
+  // Flip only once the conversion side (PR B′: accept-time and self-booking
+  // resolution of a repeat to its root) has merged, or accepted reruns
+  // credit no lead as won. Kill switch: unset. This entry is for
+  // logGateStatus; the route reads gateEnvValue at CALL time.
+  wizardLeadDedupe: gateEnvValue('GATE_WIZARD_LEAD_DEDUPE'),
 
   // Booking stamping contract (Tier 2 consolidation): the shared
   // field-stamping authority in services/booking/create-scheduled-service.js
@@ -640,6 +653,28 @@ const gates = {
   // the vestibule is never offered when no Spanish session could start.
   voiceSpanishMenu: process.env.GATE_VOICE_SPANISH_MENU === 'true',
 
+  // Sandy PR 1B — interruption-aware conversation context. On, a barge-in
+  // rewrites the cut reply in the model's history to what the caller actually
+  // heard (the played-text record, "… [interrupted]") and prefixes the next
+  // caller message with `[Caller interrupted you after: "…"]`, so the model
+  // resumes from there instead of repeating the unheard clause. Off ⇒ a
+  // barge-in only aborts the generation; the model's messages are
+  // byte-identical to today. Read at CALL time in
+  // services/voice-agent/relay-conversation.js (a flip needs no redeploy);
+  // this entry is the status/log listing. Kill switch: unset.
+  voiceRelayInterruptContext: gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT'),
+
+  // Sandy PR 2A — human handoff. On, and ONLY while the office is open right
+  // now, the relay registers `transfer_to_office`: the caller is handed to
+  // the staff simul-ring (press-1 screen, ≤20-word whisper after accept)
+  // with a server-built handoff packet on call_log.metadata.relay_handoff
+  // and call_outcome='ai_transferred'. After hours the tool is absent and
+  // the prompt offers a callback via capture_lead. Off ⇒ no tool, prompt and
+  // /relay-complete byte-identical to today. Read at CALL time
+  // (services/voice-agent/relay-transfer.js, exact 'true'); this entry is the
+  // status/log listing. Kill switch: unset.
+  voiceRelayTransfer: process.env.GATE_VOICE_RELAY_TRANSFER === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -766,7 +801,7 @@ const gates = {
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
 
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
-  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : true,
+  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : process.env.GATE_CRON_JOBS !== 'false',
 
   // Weekly lawn pricing invariant sweep — re-runs the pricing engine across the
   // full track×size×tier grid against LIVE DB config and raises an admin alert
@@ -1270,6 +1305,16 @@ const gates = {
   // Born from the 2026-07 backlog: ~1,800 open vs 32 ever resolved.
   // Off → cron ticks are no-ops.
   triageAutoResolve: process.env.GATE_TRIAGE_AUTO_RESOLVE === 'true',
+  // Evidence rules layered on the sweep above (needs it ON to run at all):
+  // quote_promised closes on an estimate DIRECTLY linked to the call and
+  // delivered after it; email_unverified on the call-captured address
+  // engaging (open/click, not merely delivered) with a later email;
+  // caller_not_authorized on a human adding the caller's number as a
+  // service contact after the call; not_confirmed on a live booking created
+  // after the card; address cards on a completed visit at the address the
+  // call named. Every rule needs evidence that postdates the CARD, never
+  // same-customer coincidence. Off → the four original rules only.
+  triageAutoResolveEvidence: process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
@@ -1353,6 +1398,15 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+  // The surname rung of that matcher (click_name: the ONE in-window clicker
+  // whose complete last name is the reviewer's; see
+  // findConfidentClickMatch). Ships DARK on its own switch because its
+  // ambiguity semantics were still converging at review time (#3822 r6):
+  // off, the rung never links and its inverse-location scan never runs —
+  // sole_click and click_near stay on reviewClickAutoLink alone; the
+  // surname still ranks SUGGESTIONS. Needs reviewClickAutoLink too. Kill:
+  // unset.
+  reviewClickAutoLinkSurname: process.env.GATE_REVIEW_CLICK_AUTOLINK_SURNAME === 'true',
 
   // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
   // environment, same rationale as treatmentAutomationEnroll; each kill =
@@ -2308,6 +2362,16 @@ const gates = {
   // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
   // CALL time via gateEnvValue.
   llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
+
+  // Agent-control hub read — routes/admin-agents.js /control/areas +
+  // /control/lanes via services/agent-control/hub-read.js. ON: the Control
+  // center reads per-lane calls, ok / fallback rates, latency, tokens and
+  // attention status from the llm_dispatch_log call ledger, and the hub
+  // probe reports features.ledger = true. OFF (default, dev AND prod): both
+  // routes 404 and the probe says no ledger, so the client renders nothing
+  // new. Read-only either way. Kill switch: unset. This entry is for
+  // logGateStatus; the route reads gateEnvValue at CALL time.
+  agentControlRead: gateEnvValue('GATE_AGENT_CONTROL_READ'),
 
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become

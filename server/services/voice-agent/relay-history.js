@@ -116,6 +116,8 @@ async function callHistoryText(fromPhone) {
       "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
       [key, key],
     )
+    // The owner's own bake-off calls are not this caller's history.
+    .modify((qb) => require('./relay-protocol').whereNotSandboxCall(qb))
     // ⭐ THE RELAY'S OWN CALLS ARE HISTORY TOO. Relay transcripts deliberately
     // leave ai_extraction NULL (synthesizing one would pollute the extraction
     // eval cohorts), so an extraction-only predicate made every AI-handled call

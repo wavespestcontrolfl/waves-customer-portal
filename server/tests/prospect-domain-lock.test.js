@@ -30,11 +30,13 @@ describe('prospect-domain-lock helper', () => {
 
   test('claimProspectDomain: lock FIRST, then the domain-wide probe (canonical host SQL, status set, outreach lanes only by default) — in-flight row returned, else null', async () => {
     const order = []; let raws = []; let ins = null;
-    const q = { whereRaw: jest.fn((sql, bind) => { raws.push([sql, bind]); order.push('probe'); return q; }), whereIn: jest.fn((col, vals) => { ins = [col, vals]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'contacted', target_page: '/x' })) };
+    const q = { whereRaw: jest.fn((sql, bind) => { raws.push([sql, bind]); order.push('probe'); return q; }), whereIn: jest.fn((col, vals) => { ins = [col, vals]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'contacted', target_page: '/x' })), where: jest.fn(() => q), select: jest.fn(async () => []) }; // where / select: the owed-follow-up probe (Codex r24 P1) runs when the status set finds nothing
     const trx = Object.assign(jest.fn(() => q), { raw: jest.fn(async () => { order.push('lock'); }) });
     const r = await claimProspectDomain(trx, 'https://WWW.Blog.Example/');
     expect(order[0]).toBe('lock');
     expect(r).toEqual({ domain: 'blog.example', inFlight: { id: 'p1', status: 'contacted', target_page: '/x' } });
+    // a closed CONVERSATION (contacted / negotiating with the §13 stamp) holds the domain no more than the inbox; a reopened prospect / awaiting_owner row carrying a stale stamp is still the domain's next conversation
+    expect(raws[2]).toEqual(['(conversation_closed_at IS NULL OR status NOT IN (?, ?))', ['contacted', 'negotiating']]);
     expect(raws[0]).toEqual([`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, ['blog.example']]);
     expect(ins).toEqual(['status', [...ACTIVE_OUTREACH_STATUSES]]);
     // signup-lane rows (directory/citation/social — claimed by the signup runner, per-location) are not an outreach conversation
@@ -113,7 +115,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('routes/admin-backlink-agent-v2.js');
     const block = s.slice(s.indexOf("router.patch('/prospects/:id'"), s.indexOf("router.post('/prospects/:id/recheck'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at')");
+    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id')");
     const iGate = block.indexOf("&& !inOutreach(current.status, current.link_type)");
     // a link_type change out of the signup lane (directory/citation/social → outreach type) is an admission too
     expect(block).toMatch(/const inOutreach = \(status, type\) => ACTIVE_OUTREACH_STATUSES\.includes\(status\) && !SIGNUP_TYPES\.includes\(type \|\| ''\);/);

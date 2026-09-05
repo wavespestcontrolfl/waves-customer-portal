@@ -27,6 +27,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { redactText } = require('./agent-decision-training');
 const { redact: redactPii } = require('./content/pii-redactor');
 const { dispatchWithFallback } = require('./llm/call');
@@ -204,6 +205,7 @@ function mapSegmentRefs(quote, transcriptStructured) {
 function eligibleCallsQuery({ onlyUnmined = true } = {}) {
   let q = db('call_log')
     .where('direction', 'inbound')
+    .modify((qb) => whereNotSandboxCall(qb)) // voice-agent bake-off calls never reach a corpus
     .whereNotNull('transcription')
     .where('call_recording_consent_disclaimer_played', true)
     .where(function () {
@@ -220,7 +222,10 @@ function eligibleCallsQuery({ onlyUnmined = true } = {}) {
     // evaluate UNKNOWN on NULL, dropping every legacy human call.
     .where(function () {
       this.whereNull('transcription_provider').orWhereNot('transcription_provider', 'conversation_relay');
-    });
+    })
+    // …and a TRANSFERRED call's composite (Sandy PR 2A): stored under the
+    // recording's provider, but it opens with the relay's "[AI segment]".
+    .whereRaw("COALESCE(transcription, '') NOT LIKE '[AI segment]%'");
   if (onlyUnmined) {
     q = q.where(function () {
       this.whereNull('research_mined_at')
@@ -246,6 +251,7 @@ async function extractResearchChunks(call, customer, { route = CALL_RESEARCH_ROU
   // primary would starve the Claude leg. The dispatcher's default budget
   // splits evenly across legs, which is exactly what a nightly job wants.
   const res = await dispatchWithFallback(route, {
+    laneId: 'call_research',
     text: buildCallResearchPrompt(transcript),
     jsonMode: true,
     jsonSchema: PROVIDER_OUTPUT_SCHEMA,

@@ -316,7 +316,8 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
               .orWhereRaw("regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`]);
           })
           .where('created_at', '>=', lookback)
-          .where('created_at', '<=', processedBy);
+          .where('created_at', '<=', processedBy)
+          .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb)); // a bake-off call is not a concurrent caller
         if (call?.twilio_call_sid) concurrentQ = concurrentQ.whereNot('twilio_call_sid', call.twilio_call_sid);
         if (call?.id) concurrentQ = concurrentQ.whereNot('id', call.id);
         const concurrentCall = await concurrentQ.first();

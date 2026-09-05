@@ -56,11 +56,16 @@ const TEXT = fs.readFileSync(path.join(__dirname, 'fixtures', 'zelle-notice-capi
 const FORWARDED_AUTH = 'mx.google.com; dkim=pass header.i=@notification.capitalone.com header.s=k1; '
   + 'spf=pass smtp.mailfrom="owner+caf_=contact=wavespestcontrol.com@gmail.com"; dmarc=pass header.from=capitalone.com';
 
+// Received one hour ago on the real clock: the reconciler parks anything
+// older than STALE_NOTICE_MS (48h) at first decision, so an absolute date
+// here turned every settlement test into a stale_notice park two days later.
+const RECEIVED_AT = new Date(Date.now() - 60 * 60 * 1000);
+
 function notice(over = {}) {
   return {
     id: 'email-1', from_address: 'capitalone@notification.capitalone.com', subject: 'Good news: Someone sent you money with Zelle®.',
     body_text: TEXT, body_html: null, snippet: 'PAT DOE has just sent you money', authentication_results: FORWARDED_AUTH,
-    received_at: new Date('2026-09-02T17:00:00Z'), ...over,
+    received_at: RECEIVED_AT, ...over,
   };
 }
 const openRow = (over = {}) => ({
@@ -400,7 +405,7 @@ describe('park reasons', () => {
   test('an exact-amount invoice CREATED AFTER the notice is never auto-matched (the transfer predates that debt) ⇒ no_match, still listed as a candidate for the operator', async () => {
     claimed();
     OpenBalance.openSelfPayInvoicesByAmountDue.mockImplementation(async (cents, opts = {}) => (opts.toleranceCents ? [] : [
-      openRow({ id: 'inv-later', invoice_number: 'WPC-2026-0510', created_at: new Date('2026-09-02T17:30:00Z') }), // notice received 17:00Z
+      openRow({ id: 'inv-later', invoice_number: 'WPC-2026-0510', created_at: new Date(RECEIVED_AT.getTime() + 30 * 60 * 1000) }), // 30 min after the notice
     ]));
     expect(await maybeHandleZelleNotice(notice())).toBe(true);
     const patch = closesOf('inbound_payment_notices')[0];

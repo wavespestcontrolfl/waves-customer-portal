@@ -147,9 +147,17 @@ deliberate POST form submission (scanner-safe, mirrors confirm), answer/
 reaction keys validated against the server-side config allowlists
 (newsletter-quiz.js / newsletter-feedback.js), 30 req/min per IP, always
 returns 200 so it can't probe which tokens/answers are real),
-`/api/public/prep/:token` (read-only, 32-hex token format gate,
+`/api/public/prep/:token` (32-hex token format gate,
 60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-filters email-only blocks, server-side interpolation, generic 404),
+filters email-only blocks, server-side interpolation, generic 404; the
+ONLY writes are its own view analytics, all after a successful render —
+for a scheduled-service token the visit's `prep_view_count` /
+`prep_first_viewed_at` stamp is fenced on the rendered template key (a
+miss = the key moved, so the page re-resolves and renders the new guide),
+which pairs with the manual prep sender's re-key / release fence on those
+view columns so an opened page never changes guide or 404s behind the
+customer; the `prep_guide_views` log row follows; response shape
+unchanged),
 `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
 action-bar Download parity with service reports; same 32-hex token format
 gate, same 60 req/min limiter, same privacy headers, generic 404; payload
@@ -501,6 +509,30 @@ lookup-measured or customer-confirmed lot (owner ruling 2026-09-03; the
 recurring program joined this contract then, so a direct-API caller that
 posts an unconfirmed `lotSqFt` with `mosquito` now receives a manual
 quote where it previously received a price)).
+
+Repeat-run dedupe (#3834 split, PR A′; DARK behind `GATE_WIZARD_LEAD_DEDUPE`,
+read at call time, default off in every environment — off, every run
+files as `new` exactly as before): a tokenless `/calculate` whose typed
+email AND phone AND quoted address AND service (catalog `serviceKey`, or
+the normalized service-mix label for the direct `services` shape) equal an
+OPEN `quote_wizard` lead's (`OPEN_LEAD_STATUSES`) created inside 30 days,
+with no additional properties on either side and a live courtship (no
+FK-linked estimate that is declined, expired or archived, and the LATEST
+mirrored `estimate_data.lead_id` estimate, if any, is open), is filed as `status = 'duplicate'` carrying
+`extracted_data.duplicate_of_lead_id` = that original's id, instead of a
+second `new` lead. The token path (`leadId` + email) re-runs the exact
+predicate against its OWN row, excluding itself and looking only back
+(older rows), so the label lands, moves or clears on THIS row — scoped to
+the status and typed identity the request read; a relabel that hits 0
+rows follows the row as it now is. A row that just filed as a repeat
+drops its own lead-stage `ad_service_attribution` row and the root's row
+is rebuilt when missing. Label ONLY: the route never selects, updates or
+reads the original for anything but re-validating the chosen target; the
+marker grants no access (a typed contact is not ownership evidence), the
+draft estimate stays mirrored to the run's own row, and `/upsell` reaches
+only the authenticated lead's draft. Resolving a repeat to its root at
+estimate acceptance / self-booking is PR B′ (services, not this route).
+Kill switch: unset the gate — rows already labelled keep their marker.
 `/api/public/ai-intake` (`GET /status` + `POST /message`) (the Ask Waves
 marketing-site chat brain — no auth, no token, **gated behind GATE_ASK_WAVES**
 (503 when off; fails closed in prod). Rate limits: 30 req/15min in-route on
@@ -991,6 +1023,67 @@ service-contact slot — are gated separately again by
 booking and no re-service ticket).
 Any change to this endpoint, its auth, or its frame handling is
 security-critical).
+`/api/webhooks/twilio/relay-sandbox` + `/api/webhooks/twilio/relay-sandbox/cell`
+(POST; machine-to-machine TwiML webhooks — the voice URL and the in-call
+`<Gather>` action of the dead GA# SANDBOX number, the only test path for the
+AI receptionist. Twilio-signature validated at the `/api/webhooks/twilio`
+mount like every Twilio inbound route, and additionally fail-closed to a 403
+`<Hangup/>` unless the posted `To` is exactly `VOICE_RELAY_SANDBOX_NUMBER`
+(unset ⇒ every request refused) and a `CallSid` is present; relay not
+attached ⇒ a spoken notice and hangup. The first hit inserts a `call_log`
+row for the CallSid (`direction` inbound, `source` 'voice_relay_sandbox')
+under the same per-CallSid advisory lock `/voice` and `/call-status` take;
+a generic `/call-status` fallback row that won the race (`source` NULL) is
+adopted — sandbox source, customer link cleared — and any row with a foreign
+non-null source is refused (403 hangup). `/call-status` itself writes the
+sandbox-sourced row, with no customer link or touchpoint, when it sees the
+sandbox number first. The handler then renders a 3-second two-digit DTMF
+`<Gather>` (a relay-profile cell code, `relay-profiles.SANDBOX_CELLS`;
+'99' = the raw env attributes; no digits ⇒ the production profile) followed
+by the same `<Connect><ConversationRelay>` + per-call minted token that
+`/voice` renders — the WS secret never leaves the server. Payload: standard
+Twilio voice-webhook form fields (`CallSid`, `From`, `To`, `CallStatus`,
+`Digits` on the cell action). The session that answers is a DRY RUN: the ws
+upgrade proves the sandbox source from the call_log row and the relay answers
+`capture_lead` / `request_reservice` / `request_booking` without running them,
+its hangup capture floor stays down, and every call reader (Calls tab,
+unified inbox, dashboard KPIs, corpus/research/insights miners, self-audit,
+the relay's own call history) drops the source through
+`relay-protocol.whereNotSandboxCall` — so a test call, or a stranger dialling
+the test number, can neither create dispatch work nor move a metric. The
+transcript, latency summary and version stamps land on the sandbox row
+exactly as in production; that record is the bake-off. Any change to the
+number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/relay-complete` (POST; machine-to-machine TwiML
+webhook — the `<Connect><ConversationRelay>` action Twilio calls when the
+AI receptionist's relay leg ends. Twilio-signature validated at the
+`/api/webhooks/twilio` mount like every Twilio inbound route. Payload:
+standard Twilio voice-webhook form fields (`CallSid`, `SessionStatus`,
+`ErrorCode`) plus `HandoffData` — the JSON string the relay's OWN end frame
+set (absent on a caller hang-up or a session failure), which the handler
+parses tolerantly and trusts for nothing beyond `reason`. Pre-PR-2A
+behaviour is unchanged: a failed session ⇒ voicemail (sandbox: a
+`relay_failed` stamp + hangup), otherwise a bare `<Response/>`. **Sandy PR
+2A adds `reason: 'transfer'`** (`GATE_VOICE_RELAY_TRANSFER` exactly 'true'
+— the gate lives at the `transfer_to_office` tool that emits the frame; the
+frame itself only exists when the tool ran, and only the server's own
+socket can send one): the handler claims ONE staff ring per CallSid
+atomically on the call_log row (`metadata.relay_transfer_ring_at`, stamped
+with `call_outcome = 'ai_transferred'` when the row is not already
+terminal) under a 1.5s deadline, OWNER-BOUND to the frame's
+`owner` (the socket's `relay_session_claim_owner` nonce; a superseded
+socket's frame matches 0 rows), and renders the same staff simul-ring
+`<Dial>` the live `/voice` backstop renders — identical screen / accept
+URLs, no summary, no id and no query string on any URL: the ≤20-word staff
+whisper is read from the persisted packet (`metadata.relay_handoff`) after
+press-1 only. A Twilio retry (ring already claimed ⇒ 0 rows) gets a bare
+response, never a second ring; an unconfirmed claim (timeout / error) and
+a call with no staff forward numbers are stamped `voicemail` (bounded,
+best-effort) and get the voicemail recorder; `?sandbox=1` (the signed
+query the sandbox route rendered) hangs up — a test call never rings
+staff. The caller's own text is never in the URL or the TwiML. Any change
+to the claim, the owner fence, the sandbox branch or what the whisper may
+speak is security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up

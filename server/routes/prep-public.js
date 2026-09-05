@@ -177,49 +177,51 @@ const VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY = {
 // have no project row — 20260714100000). Returns null when neither owns
 // the token or the guide can't render; the route answers a uniform 404
 // so unknown/expired/unmapped stay indistinguishable.
-async function resolvePrepSource(token) {
-  const now = new Date();
+// Read-only. A scheduled-service source carries stampView(): the page
+// route commits the visit's view AFTER a successful render, fenced on the
+// key it rendered (see the handler); the PDF twin never stamps (contract).
+async function customerById(id) {
+  return id ? db('customers').where({ id }).first() : null;
+}
 
-  const project = await db('projects').where({ prep_token: token }).first();
-  if (project) {
-    if (project.prep_expires_at && new Date(project.prep_expires_at) < now) return null;
-    const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
-      : null;
-    const templateKey = project.prep_template_key || prepTemplateForProjectType(project.project_type);
-    if (!templateKey) return null;
-    return {
-      customer,
-      templateKey,
-      customerId: project.customer_id,
-      familyType: project.project_type,
-      typeLabel: getProjectType(project.project_type)?.label || project.project_type || 'Waves service',
-      serviceDate: formatDisplayDate(project.project_date || project.created_at, { fallback: '' }),
-      techName: String(project.tech_name || project.technician_name || '').trim() || 'your Waves technician',
-      serviceAddress: null,
-      viewRow: { project_id: project.id },
-      countView: () => db('projects').where({ id: project.id }).update({
-        prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
-        prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
-      }),
-    };
-  }
+// A project's prep page: the token is a project token (expired → null).
+async function projectPrepSource(project, now) {
+  if (project.prep_expires_at && new Date(project.prep_expires_at) < now) return null;
+  const templateKey = project.prep_template_key || prepTemplateForProjectType(project.project_type);
+  if (!templateKey) return null;
+  return {
+    customer: await customerById(project.customer_id),
+    templateKey,
+    customerId: project.customer_id,
+    familyType: project.project_type,
+    typeLabel: getProjectType(project.project_type)?.label || project.project_type || 'Waves service',
+    serviceDate: formatDisplayDate(project.project_date || project.created_at, { fallback: '' }),
+    techName: String(project.tech_name || project.technician_name || '').trim() || 'your Waves technician',
+    serviceAddress: null,
+    viewRow: { project_id: project.id },
+    countView: () => db('projects').where({ id: project.id }).update({
+      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+    }),
+  };
+}
 
-  const service = await db('scheduled_services as s')
-    .leftJoin('technicians as t', 's.technician_id', 't.id')
-    .where('s.prep_token', token)
+// A visit's prep page: the token is a scheduled_services token. A token
+// that is unknown, expired or keyless matches nothing (404).
+async function servicePrepSource(token, now) {
+  const service = await db('scheduled_services')
+    .where({ prep_token: token })
+    .whereNotNull('prep_template_key')
+    .where((q) => q.whereNull('prep_expires_at').orWhere('prep_expires_at', '>=', now))
     .first(
-      's.id', 's.customer_id', 's.service_type', 's.scheduled_date',
-      's.prep_template_key', 's.prep_expires_at',
-      's.service_address_line1', 's.service_address_city', 's.service_address_state', 's.service_address_zip',
-      't.name as tech_name',
+      'id', 'customer_id', 'service_type', 'scheduled_date', 'prep_template_key', 'technician_id',
+      'service_address_line1', 'service_address_city', 'service_address_state', 'service_address_zip',
     );
   if (!service) return null;
-  if (service.prep_expires_at && new Date(service.prep_expires_at) < now) return null;
-  if (!service.prep_template_key) return null;
-  const customer = service.customer_id
-    ? await db('customers').where({ id: service.customer_id }).first()
+  const tech = service.technician_id
+    ? await db('technicians').where({ id: service.technician_id }).first('name')
     : null;
+  const customer = await customerById(service.customer_id);
   const serviceAddress = service.service_address_line1
     ? [
       service.service_address_line1,
@@ -234,14 +236,31 @@ async function resolvePrepSource(token) {
     familyType: VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY[service.prep_template_key] || null,
     typeLabel: String(service.service_type || '').trim() || 'Waves service',
     serviceDate: formatDisplayDate(service.scheduled_date, { fallback: '' }),
-    techName: String(service.tech_name || '').trim() || 'your Waves technician',
+    techName: String(tech?.name || '').trim() || 'your Waves technician',
     serviceAddress,
     viewRow: { scheduled_service_id: service.id },
-    countView: () => db('scheduled_services').where({ id: service.id }).update({
-      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
-      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
-    }),
+    // The view stamp, fenced on the key that was RENDERED: the manual prep
+    // sender hands an undelivered fresh claim back fenced on these very view
+    // columns (prep-guide-sender.js releasePrepPage), and the row lock
+    // orders the two — either this stamp lands and the release matches
+    // nothing, or the release landed first and this stamp matches nothing
+    // (0), so the handler re-resolves instead of stamping a view of a page
+    // the customer never saw (GH Codex
+    // #3856 r17 P0 + pre-push P1 on 92afc3361). Committed only after a
+    // successful render, so an unrenderable template never pins its token.
+    stampView: () => db('scheduled_services')
+      .where({ id: service.id, prep_template_key: service.prep_template_key })
+      .update({
+        prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+        prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+      }),
   };
+}
+
+async function resolvePrepSource(token) {
+  const now = new Date();
+  const project = await db('projects').where({ prep_token: token }).first();
+  return project ? projectPrepSource(project, now) : servicePrepSource(token, now);
 }
 
 // Load + interpolate the guide blocks for a resolved source. Shared by the
@@ -307,17 +326,44 @@ router.get('/:token', async (req, res) => {
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
 
   try {
-    const source = await resolvePrepSource(token);
-    if (!source) return res.status(404).json({ error: 'Not found' });
-
-    const guide = await renderGuideForSource(source);
-    if (!guide) return res.status(404).json({ error: 'Not found' });
+    // Render first, then stamp the view of THAT key (a scheduled-service
+    // source). A 0-row stamp means the key moved between the read and the
+    // stamp — resolve and render again so the customer sees the guide the
+    // row now carries, and stamp THAT; every attempt is awaited and fenced,
+    // never fire-and-forget (pre-push Codex P1 on bd85be714). A row still
+    // churning after a few rounds, or a stamp that FAILS, is answered 503
+    // rather than with a page that could change or vanish behind the
+    // customer — an unstamped view is invisible to the manual sender's
+    // re-key / release fences (pre-push Codex P1 on 514bc1fd2). Every
+    // fallible payload read happens BEFORE the stamp, which is the last
+    // step before the response: a stamp is a permanent fence, so it must
+    // never outlive a request that then failed (pre-push Codex P1 on
+    // 402de0045).
+    let source = null;
+    let guide = null;
+    let upcomingVisits = [];
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      source = await resolvePrepSource(token);
+      if (!source) return res.status(404).json({ error: 'Not found' });
+      guide = await renderGuideForSource(source);
+      if (!guide) return res.status(404).json({ error: 'Not found' });
+      upcomingVisits = await fetchUpcomingFamilyVisits(source.customerId, source.familyType);
+      if (!source.stampView) break;
+      let stamped;
+      try {
+        stamped = Number(await source.stampView());
+      } catch (err) {
+        logger.warn(`[prep-public] view stamp failed: ${err.message}`);
+        return res.status(503).json({ error: 'Try again in a moment' });
+      }
+      if (stamped > 0) break;
+      source = null;
+    }
+    if (!source) return res.status(503).json({ error: 'Try again in a moment' });
     const { customer } = source;
     const {
       customerFirstName, typeLabel, serviceDate, techName, propertyAddress, renderedBlocks,
     } = guide;
-
-    const upcomingVisits = await fetchUpcomingFamilyVisits(source.customerId, source.familyType);
 
     const ipHash = req.ip
       ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
@@ -327,8 +373,10 @@ router.get('/:token', async (req, res) => {
       ip_hash: ipHash,
       user_agent: String(req.get('user-agent') || '').slice(0, 512) || null,
     }).catch((err) => logger.warn(`[prep-public] view log failed: ${err.message}`));
-    void source.countView()
-      .catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
+    if (source.countView) {
+      void source.countView()
+        .catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
+    }
 
     return res.json({
       customerFirstName,

@@ -16,7 +16,7 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 ## Procedure
 
 ### 1. Start clean
-- Work in a worktree, never in the bare host repo (`~/waves-customer-portal` is a bare/stale host): `git -C ~/waves-customer-portal fetch origin main && git -C ~/waves-customer-portal worktree add ~/wt-<slug> -b <branch> origin/main`.
+- Work in a dedicated task worktree. Use `npm run worktree:create -- <slug> [destination]` from an existing checkout, or fetch origin/main and use `git worktree add` manually. Run `worktree:setup` in manually created worktrees; startup and database isolation are documented in `docs/development.md`. Inspect Git state instead of assuming the host checkout is bare.
 - Branch off `origin/main`, never local main (base contamination). Audits and reviews also run against `origin/main`, not the current checkout — stale feature branches produce phantom findings; verify the ref before fanning out review agents.
 - An audit finding needs TWO proofs before it's reported as live: it exists on `origin/main` AND it's reachable (page routed in `App.jsx`, function imported outside tests, path actually fires in prod). One phantom finding → re-verify every other finding in the same batch.
 - Fresh portal worktrees need `npm ci` before tests — `@waves/*` workspace packages are absolute symlinks; an interrupted install makes jest hang silently (fix: `rm -rf node_modules && npm ci`).

@@ -61,6 +61,8 @@ jest.mock('../models/db', () => {
 jest.mock('../services/procurement/order-dispatch', () => ({
   canAutoOrder: jest.fn(async ({ vendorId }) => mockState.autoOrder === true && (!mockState.autoOrderVendor || vendorId === mockState.autoOrderVendor)),
   findLiveAutoOrder: jest.fn(async () => mockState.liveAutoOrder || null), // the product's unreconciled automatic order
+  // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
+  settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
 }));
 
 const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
@@ -330,6 +332,27 @@ test('an open auto request with an automatic order already OUT (ambiguous submit
     expect(r.deduped).toEqual([expect.objectContaining({ requestId: 'req-auto' }), expect.objectContaining({ requestId: 'req-auto', reason: 'auto_order_live' })]);
     expect(notify).not.toHaveBeenCalled();
   } finally { mockState.liveAutoOrder = null; }
+});
+
+test('a re-ring settles the request\'s parked ledger bell (a pre-submit park\'s "order manually") BEFORE the generic hand-off rings; a failed settle withholds the hand-off and is a sweep error (Codex r31 P2)', async () => {
+  const { settleRequestLedgerBells } = require('../services/procurement/order-dispatch');
+  settleRequestLedgerBells.mockClear();
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Sticker Mule', metadata: { vendorId: 'vend-sm' } };
+  mockState.autoOrder = false; // the vendor gate closed after a no_price park
+  const order = [];
+  settleRequestLedgerBells.mockImplementationOnce(async () => { order.push('settle'); });
+  const notify = jest.fn(async () => { order.push('bell'); return {}; });
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(settleRequestLedgerBells).toHaveBeenCalledWith(expect.anything(), 'req-auto');
+  expect(order).toEqual(['settle', 'bell']);
+  mockState.ledgerBellThrows = true;
+  try {
+    const bad = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+    expect(bad.renotified).toEqual([]);
+    expect(bad.errors).toEqual([{ productId: 'prod-sign', name: lowSign.name, requestId: 'req-auto', message: 'ledger bell: ledger bell lost connection' }]);
+  } finally { mockState.ledgerBellThrows = false; }
 });
 
 test('an open auto request is found and re-belled even after the product\'s low-stock threshold was cleared (Codex r15 P2)', async () => {

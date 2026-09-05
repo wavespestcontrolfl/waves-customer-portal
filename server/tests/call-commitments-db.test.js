@@ -9,6 +9,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const SID = 'CA' + '8'.repeat(30) + 'd1';
 const PHONE = '+15555550177';
+// The send_estimate handoff witness: a REAL delivery (deliveryState.lastDeliveredAt)
+// `agoSec` seconds ago — sent_at alone proves nothing for any source.
+const handedOff = (agoSec = 30, extra = {}) => JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(Date.now() - agoSec * 1000).toISOString() }, ...extra });
 const OUR_NUMBER = '+15555550100';
 
 maybeDescribe('call_commitments (live Postgres)', () => {
@@ -278,6 +281,31 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     expect(await cc.resolveFulfillment(db, { kind: 'call_back' }, call)).toMatchObject({ kind: 'inbound_call', record_id: inboundLater.id, strength: 'association' });
   });
 
+  test('a delivery inside the window keeps counting after a resend outside it — firstDeliveredAt is the retained witness (codex #3811 r29 P2)', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const inWindow = new Date(call.created_at.getTime() + 2 * 24 * 60 * 60 * 1000);
+    const resent = new Date(call.created_at.getTime() + (cc.ASSOCIATION_WINDOW_DAYS + 5) * 24 * 60 * 60 * 1000);
+    const [est] = await db('estimates').insert({
+      status: 'sent', customer_phone: PHONE, sent_at: resent, created_at: inWindow,
+      estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: inWindow.toISOString(), lastDeliveredAt: resent.toISOString() } }),
+    }).returning('id');
+    try {
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association', matched_at: inWindow });
+      // A resend-only row (first and last both outside the window) is not a hint.
+      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: resent.toISOString(), lastDeliveredAt: resent.toISOString() } }) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // Delivered BEFORE the call, resent inside the window, resent again
+      // after it: first and last are both outside, the send history
+      // (deliveryState.deliveredAt) carries the in-window handoff (codex
+      // #3811 r30 P2). A malformed history element is skipped.
+      const before = new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000);
+      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: before.toISOString(), lastDeliveredAt: resent.toISOString(), deliveredAt: [before.toISOString(), 'yesterday afternoon', inWindow.toISOString(), resent.toISOString()] } }) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'association', matched_at: inWindow });
+    } finally {
+      await db('estimates').where({ id: est.id }).del();
+    }
+  });
+
   test('an association outside the window is not a hint at all', async () => {
     const call = await db('call_log').where({ id: callId }).first();
     const [late] = await db('sms_log').insert({
@@ -323,41 +351,86 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     }
   });
 
-  test('an estimate on a REUSED lead that was sent before the call is not this call\'s proof; one sent after it is direct proof', async () => {
+  test('an estimate on a REUSED lead that was sent before the call is not this call\'s proof; one handed off after it is direct proof', async () => {
     const call = await db('call_log').where({ id: callId }).first();
-    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000) }).returning('id');
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000), estimate_data: handedOff(3 * 24 * 60 * 60) }).returning('id');
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
     try {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      // …but ACCEPTED after the call: the promise was kept at acceptance,
+      // whatever sent_at says (pre-push hook P1 on 3b5b2cb27).
+      await db('estimates').where({ id: est.id }).update({ accepted_at: new Date(Date.now() - 30 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      await db('estimates').where({ id: est.id }).update({ accepted_at: null });
       // Sent after the call ended even though CREATED before it (an existing
       // estimate re-sent on request — the watcher's rule, r14): direct proof.
-      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000) });
+      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000), estimate_data: handedOff() });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
       // Sent after the call STARTED but before it ENDED (created_at is ring
       // time; this call ran 90 s): not this call's proof (codex #3738 gh-r13 P1).
-      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(call.created_at.getTime() + 30 * 1000) });
+      const midCall = new Date(call.created_at.getTime() + 30 * 1000);
+      await db('estimates').where({ id: est.id }).update({ sent_at: midCall, estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: midCall.toISOString() } }) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       // Created and sent after the call ended: direct proof.
-      await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000), sent_at: new Date(Date.now() - 60 * 1000) });
-      // …unless it is a report/plan-restart mint whose sent_at is the
-      // publish-without-delivery stamp: only a real handoff witness
-      // (deliveryState.lastDeliveredAt after the call) counts (#3725 r13 P1 class).
+      await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000), sent_at: new Date(Date.now() - 60 * 1000), estimate_data: handedOff() });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      // The ONE handoff witness, every source: sent_at alone is the
+      // publish-without-delivery stamp of a report/plan-restart mint AND the
+      // suppression-only stamp of an ordinary send (#3725 r13 P1 class,
+      // #3811 r5). Only a real handoff (deliveryState.lastDeliveredAt after
+      // the call) or an acceptance after the call counts.
       await db('estimates').where({ id: est.id }).update({ source: 'service_report_cta', estimate_data: JSON.stringify({}) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
-      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(Date.now() - 30 * 1000).toISOString() } }) });
+      await db('estimates').where({ id: est.id }).update({ source: null });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('estimates').where({ id: est.id }).update({ accepted_at: new Date(Date.now() - 30 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
-      await db('estimates').where({ id: est.id }).update({ source: null, estimate_data: null });
-      const proof = await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call);
-      expect(proof).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      // A MANUAL accept (an admin recording a verbal yes — price locked by
+      // 'manual_accept') delivered nothing; the customer's own accept did
+      // (codex r18 P1).
+      await db('estimates').where({ id: est.id }).update({ price_locked_by: 'manual_accept' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('estimates').where({ id: est.id }).update({ price_locked_by: 'customer_accept' });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      await db('estimates').where({ id: est.id }).update({ price_locked_by: null });
+      // An acceptance BEFORE the call is not this call's handoff either.
+      await db('estimates').where({ id: est.id }).update({ accepted_at: new Date(call.created_at.getTime() - 60 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      await db('estimates').where({ id: est.id }).update({ accepted_at: null, estimate_data: handedOff() });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      // A group-send SIBLING carries no deliveryState of its own — it
+      // inherits the anchor's handoff through groupPublishedByEstimateId.
+      const [anchor] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), estimate_data: handedOff() }).returning('id');
+      try {
+        await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ groupPublishedByEstimateId: anchor.id }) });
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+        // A sibling sent on its own BEFORE joining the group keeps its stale
+        // stamp; the anchor's later handoff still counts (Codex r6 P2).
+        await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString() }, groupPublishedByEstimateId: anchor.id }) });
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+        await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ groupPublishedByEstimateId: anchor.id }) });
+        await db('estimates').where({ id: anchor.id }).update({ estimate_data: JSON.stringify({}) });
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
+      } finally {
+        await db('estimates').where({ id: anchor.id }).del();
+      }
+      await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff() });
       // The same lead reached only through the metadata.lead_id STAMP by a
       // call with a different SID is a REUSED lead: its estimate is a hint,
       // not direct proof (codex gh-r13 P1). The estimator's own callLogId
       // stamp on the estimate is explicit provenance and stays direct.
       const reusing = { ...call, twilio_call_sid: 'CA' + '9'.repeat(30) + 'd2', metadata: JSON.stringify({ lead_id: lead.id }) };
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, reusing)).toMatchObject({ record_id: est.id, strength: 'association', basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call' });
-      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ estimatorEngine: { callLogId: call.id } }) });
+      await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff(30, { estimatorEngine: { callLogId: call.id } }) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, reusing)).toMatchObject({ record_id: est.id, strength: 'direct', basis: 'estimate_stamped_with_this_call' });
-      await db('estimates').where({ id: est.id }).update({ estimate_data: null });
+      await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff() });
+      // A lead OLDER than the call that carries its SID only because
+      // attribution re-stamped it on reuse is a reused lead: association,
+      // not direct (Codex #3811 r9 P1). Created at/after the call: minted.
+      await db('leads').where({ id: lead.id }).update({ created_at: new Date(call.created_at.getTime() - 24 * 60 * 60 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id, strength: 'association', basis: 'estimate_sent_on_a_lead_reused_from_an_earlier_call' });
+      await db('leads').where({ id: lead.id }).update({ created_at: new Date(call.created_at.getTime() + 30 * 1000) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ record_id: est.id, strength: 'direct' });
       // The same-customer association path: an estimate created before the
       // call but sent after it is a hint like any other (r14).
       await db('leads').where({ id: lead.id }).update({ estimate_id: null });
@@ -367,12 +440,36 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
       await db('estimates').where({ id: est.id }).update({ created_at: new Date(Date.now() - 120 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
-      // The association arm applies the same delivery witness: a same-customer
+      // The association arm applies the same handoff witness: a same-customer
       // report-tap mint with no delivery is not even a hint.
       await db('estimates').where({ id: est.id }).update({ source: 'plan_restart', estimate_data: JSON.stringify({}) });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toBeNull();
-      await db('estimates').where({ id: est.id }).update({ estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(Date.now() - 30 * 1000).toISOString() } }) });
+      await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff() });
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      // Sibling and anchor witnesses are tested against the window on their
+      // own: an anchor resent past the association window does not hide the
+      // sibling's own qualifying handoff (Codex r8 P2).
+      const [lateAnchor] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: new Date(Date.now() + 20 * 24 * 60 * 60 * 1000).toISOString() } }) }).returning('id');
+      try {
+        await db('estimates').where({ id: est.id }).update({ estimate_data: handedOff(30, { groupPublishedByEstimateId: lateAnchor.id }) });
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      } finally {
+        await db('estimates').where({ id: lateAnchor.id }).del();
+      }
+      // The hint is the estimate handed off EARLIEST after the call: a
+      // sibling row carrying a stale pre-call handoff plus a later post-call
+      // acceptance is admitted, but its qualifying witness (the acceptance)
+      // is later than est's own handoff, so it must not sort ahead of est
+      // (codex r15 P2).
+      const [stale] = await db('estimates').insert({
+        status: 'accepted', customer_id: cust.id, sent_at: new Date(call.created_at.getTime() - 3 * 24 * 60 * 60 * 1000),
+        accepted_at: new Date(Date.now() - 5 * 1000), estimate_data: handedOff(3 * 24 * 60 * 60),
+      }).returning('id');
+      try {
+        expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, { ...call, customer_id: cust.id })).toMatchObject({ record_id: est.id, strength: 'association' });
+      } finally {
+        await db('estimates').where({ id: stale.id }).del();
+      }
     } finally {
       await db('leads').where({ id: lead.id }).del();
       await db('estimates').where({ id: est.id }).del();
@@ -381,7 +478,7 @@ maybeDescribe('call_commitments (live Postgres)', () => {
 
   test('an estimate linked only by customer_phone fulfills an UNLINKED caller\'s promise; a linked estimate on a shared number does not (codex #3738 P1)', async () => {
     const call = await db('call_log').where({ id: callId }).first(); // unlinked (customer_id NULL), from_phone = PHONE
-    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), customer_phone: PHONE }).returning('id');
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), customer_phone: PHONE, estimate_data: handedOff() }).returning('id');
     let otherId = null;
     try {
       // An UNLINKED estimate whose phone matches the caller keeps the promise
@@ -402,13 +499,14 @@ maybeDescribe('call_commitments (live Postgres)', () => {
   test('fulfillment is measured from the END of the call: an estimate sent while the caller was still on the line is not proof of a promise made in that call', async () => {
     const call = await db('call_log').where({ id: callId }).first(); // inbound, 90 s long
     const midCall = new Date(call.created_at.getTime() + 30 * 1000);
-    const [est] = await db('estimates').insert({ status: 'sent', sent_at: midCall, created_at: midCall }).returning('id');
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: midCall, created_at: midCall, estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: midCall.toISOString() } }) }).returning('id');
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
     try {
       expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toBeNull();
       // Created mid-call (capture_lead's shape) but SENT after the call ended: direct proof.
-      await db('estimates').where({ id: est.id }).update({ sent_at: new Date(call.created_at.getTime() + 120 * 1000) });
-      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct' });
+      const afterEnd = new Date(call.created_at.getTime() + 120 * 1000);
+      await db('estimates').where({ id: est.id }).update({ sent_at: afterEnd, estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: afterEnd.toISOString() } }) });
+      expect(await cc.resolveFulfillment(db, { kind: 'send_estimate' }, call)).toMatchObject({ kind: 'estimate_sent', record_id: est.id, strength: 'direct', matched_at: afterEnd });
     } finally {
       await db('leads').where({ id: lead.id }).del();
       await db('estimates').where({ id: est.id }).del();
@@ -417,7 +515,7 @@ maybeDescribe('call_commitments (live Postgres)', () => {
 
   test('a relay call that REUSED a prospect lead (stamped relay_lead_id, the lead keeps its original SID) finds that lead\'s later estimate as a HINT, not direct proof (codex #3738 gh-r13 P1)', async () => {
     const call = await db('call_log').where({ id: callId }).first();
-    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000) }).returning('id');
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), estimate_data: handedOff() }).returning('id');
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x0', estimate_id: est.id, status: 'estimate_sent' }).returning('id');
     try {
       const relayCall = { ...call, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x1', customer_id: null, metadata: JSON.stringify({ relay_lead_id: lead.id }) };
@@ -432,9 +530,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
   test('the estimator provenance stamp is direct proof on its own; the public-quote mirror on a stamped lead that carries another call\'s SID is a reused-lead hint (codex #3738 gh-r13 P1)', async () => {
     const call = await db('call_log').where({ id: callId }).first();
     const sentAfter = { status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000) };
-    const [stamped] = await db('estimates').insert({ ...sentAfter, estimate_data: JSON.stringify({ estimatorEngine: { callLogId: call.id } }) }).returning('id');
+    const [stamped] = await db('estimates').insert({ ...sentAfter, estimate_data: handedOff(30, { estimatorEngine: { callLogId: call.id } }) }).returning('id');
     const [lead] = await db('leads').insert({ phone: PHONE, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x2', status: 'new' }).returning('id');
-    const [mirror] = await db('estimates').insert({ ...sentAfter, estimate_data: JSON.stringify({ lead_id: lead.id }) }).returning('id');
+    const [mirror] = await db('estimates').insert({ ...sentAfter, estimate_data: handedOff(30, { lead_id: lead.id }) }).returning('id');
     try {
       // Unlinked prospect: no customer, no lead stamp, no SID match — only the provenance stamp ties the estimate to this call.
       const unlinked = { ...call, customer_id: null, twilio_call_sid: 'CA' + '8'.repeat(30) + 'x3', metadata: JSON.stringify({}) };
@@ -450,6 +548,41 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     } finally {
       await db('estimates').whereIn('id', [stamped.id, mirror.id]).del();
       await db('leads').where({ id: lead.id }).del();
+    }
+  });
+
+  test('directEstimatesSentAfter: every call behind leads that share one estimate gets the direct proof (Codex r8 P2)', async () => {
+    const call = await db('call_log').where({ id: callId }).first();
+    const sid2 = 'CA' + '8'.repeat(30) + 'z2';
+    const [call2] = await db('call_log').insert({ twilio_call_sid: sid2, direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed', duration_seconds: 90, created_at: call.created_at }).returning('id');
+    cleanup.callIds.push(call2.id);
+    const [est] = await db('estimates').insert({ status: 'sent', sent_at: new Date(Date.now() - 60 * 1000), created_at: new Date(Date.now() - 120 * 1000), estimate_data: handedOff() }).returning('id');
+    const [leadA] = await db('leads').insert({ phone: PHONE, twilio_call_sid: SID, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
+    const [leadB] = await db('leads').insert({ phone: PHONE, twilio_call_sid: sid2, estimate_id: est.id, status: 'estimate_sent' }).returning('id');
+    try {
+      const after = new Date(call.created_at.getTime() + 90 * 1000);
+      const out = await cc.directEstimatesSentAfter(db, [
+        { key: 'a', callId: call.id, twilioCallSid: SID, callStartedAt: call.created_at, after },
+        { key: 'b', callId: call2.id, twilioCallSid: sid2, callStartedAt: call.created_at, after },
+      ]);
+      expect(out.get('a')).toMatchObject({ record_id: est.id, strength: 'direct' });
+      expect(out.get('b')).toMatchObject({ record_id: est.id, strength: 'direct' });
+      // Owned by a customer neither (unlinked) call is linked to — the shape
+      // a relink leaves behind — it is no longer either call's proof; the
+      // call's own customer keeps it.
+      const [stranger] = await db('customers').insert({ first_name: 'Stranger', phone: '+15555550199' }).returning('id');
+      cleanup.customerIds.push(stranger.id);
+      await db('estimates').where({ id: est.id }).update({ customer_id: stranger.id });
+      const probes = [
+        { key: 'a', callId: call.id, twilioCallSid: SID, callStartedAt: call.created_at, after },
+        { key: 'b', callId: call2.id, twilioCallSid: sid2, callStartedAt: call.created_at, customerId: stranger.id, after },
+      ];
+      const owned = await cc.directEstimatesSentAfter(db, probes);
+      expect(owned.get('a')).toBeUndefined();
+      expect(owned.get('b')).toMatchObject({ record_id: est.id, strength: 'direct' });
+    } finally {
+      await db('leads').whereIn('id', [leadA.id, leadB.id]).del();
+      await db('estimates').where({ id: est.id }).del();
     }
   });
 
@@ -539,6 +672,20 @@ maybeDescribe('call_commitments (live Postgres)', () => {
     await db('call_commitments').where({ call_log_id: relay.id }).del();
     await db('call_log').where({ id: relay.id }).update({ metadata: JSON.stringify({}) });
     expect((await cc.recordRelayCommitments(db, { ...args, sessionKey: 'nonce-unverified' })).written).toBeGreaterThan(0);
+  });
+
+  test('a voice-agent SANDBOX call never records commitments — a test promise is not office work', async () => {
+    const sid = 'CA' + '9'.repeat(30) + 'sb';
+    const [sandbox] = await db('call_log').insert({
+      twilio_call_sid: sid, direction: 'inbound', from_phone: PHONE, to_phone: OUR_NUMBER, status: 'completed',
+      processing_status: null, source: 'voice_relay_sandbox', metadata: JSON.stringify({ relay_sandbox: true }),
+    }).returning('id');
+    cleanup.callIds.push(sandbox.id);
+    const out = await cc.recordRelayCommitments(db, {
+      callSid: sid, transcript: 'Agent: Someone from the office will call you back tomorrow.\nCaller: Thanks.', estimateQueued: true,
+    });
+    expect(out).toEqual({ found: 0, written: 0, sandbox: true });
+    expect(await db('call_commitments').where({ call_log_id: sandbox.id })).toHaveLength(0);
   });
 
   test('an untouched AI row the latest pass withdrew leaves the queue; a human-confirmed one stays', async () => {

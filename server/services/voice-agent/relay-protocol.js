@@ -18,9 +18,13 @@
  * Inbound (Twilio → us):
  *   { type: 'setup',     callSid, sessionId, from, to, ...customParameters }
  *   { type: 'prompt',    voicePrompt: '<caller speech>', lang, last }
- *   { type: 'interrupt', ... }
+ *   { type: 'interrupt', utteranceUntilInterrupt, durationUntilInterruptMs }
  *   { type: 'dtmf',      digit }
  *   { type: 'error',     description }
+ *   + the notifications the `events` attribute adds (speaker-events /
+ *     tokens-played). Twilio documents the attribute, not the payload, so
+ *     classifyRelayEvent() below reads them tolerantly and reports the shape
+ *     (key names only) for the first sandbox call to pin.
  *
  * Outbound (us → Twilio):
  *   { type: 'text', token: '<to speak>', last: <bool> }
@@ -28,6 +32,23 @@
  */
 
 const RELAY_WS_PATH = '/ws/voice-agent';
+
+// call_log.source for calls the sandbox route answers (the dead GA# number the
+// audio runner and manual test calls dial). Every reader that lists or syncs
+// calls filters on it — a sandbox call must never reach the Communications
+// inbox or the calls tab as a customer call.
+const VOICE_RELAY_SANDBOX_SOURCE = 'voice_relay_sandbox';
+
+// call_outcome values that are TERMINAL for a relay call: the session's
+// close-time reconcile (relay-conversation end()) never overwrites them with
+// 'ai_handled', whichever of Twilio's action callback and the socket close
+// lands last. 'voicemail' = the production failover recorded a message;
+// 'relay_failed' = a sandbox session failed (no voicemail on the sandbox).
+const RELAY_FAILED_OUTCOME = 'relay_failed';
+// 'ai_transferred' (PR 2A): the transfer tool stamped the handoff; a socket
+// close must not rewrite it as ai_handled (the transcript still lands
+// through end()'s salvage leg).
+const RELAY_TERMINAL_OUTCOMES = Object.freeze(['voicemail', RELAY_FAILED_OUTCOME, 'ai_transferred']);
 
 /**
  * Is the ConversationRelay WebSocket server enabled? Single source of truth for
@@ -294,6 +315,79 @@ function endFrame(handoffData) {
   });
 }
 
+// Speaker-event vocabulary. Matched against key names and string values one
+// level deep; direction words decide start vs end. A bare speaker mention
+// with no direction reads as a start (the conservative side for latency: it
+// can only make first-audio look EARLIER, never invent a late one).
+const AGENT_SPEAKER_RE = /agent[\s_-]?speak/i;
+const CALLER_SPEAKER_RE = /(?:client|caller|user)[\s_-]?speak/i;
+const START_RE = /\b(?:start|started|starting|begin|began|speaking|true)\b/i;
+const END_RE = /\b(?:stop|stopped|end|ended|finish|finished|silent|silence|false)\b/i;
+const PLAYED_KEY_RE = /^(?:[a-z]+\.)?(?:token|tokens|text|value|played|playedText|tokensPlayed|playedTokens)$/i;
+// Keys whose VALUE labels the event (Twilio's documented tokensPlayed
+// envelope is `{ type: 'info', name: 'tokensPlayed', value: '…' }` — the
+// label rides `name`, not a key, so the key-only shape never sees it).
+const LABEL_KEY_RE = /^(?:[a-z]+\.)?(?:name|event|kind)$/i;
+
+/**
+ * Classify a frame produced by the `events` attribute. Returns
+ * `{ kind, shape, text }` where kind ∈ agent_speaking_start |
+ * agent_speaking_end | caller_speaking_start | caller_speaking_end |
+ * tokens_played | unknown, `shape` is `type:sortedKeys` (names only — safe to
+ * log), and `text` is the played text for tokens_played (our own agent
+ * speech, never caller-authored). Never throws, never inspects deeper than
+ * one nested object.
+ *
+ * ⭐ THE LABEL DECIDES THE KIND. Only the frame's label fields vote — its
+ * `type` and key names (the shape) plus `name` / `event` / `kind` values —
+ * never an arbitrary value: a tokens-played VALUE is our own spoken sentence
+ * and may well say "the agent speaking".
+ */
+function classifyRelayEvent(frame) {
+  if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return { kind: 'unknown', shape: '', text: null };
+  const shape = `${typeof frame.type === 'string' ? frame.type : '?'}:${Object.keys(frame).sort().join(',')}`;
+  // Scalar values, one level deep, as [key, value] pairs.
+  const fields = [];
+  for (const [k, v] of Object.entries(frame)) {
+    const nested = v && typeof v === 'object' ? Object.entries(v).map(([k2, v2]) => [`${k}.${k2}`, v2]) : [[k, v]];
+    for (const [key, val] of nested) {
+      if (typeof val === 'string' || typeof val === 'boolean') fields.push([key, String(val)]);
+    }
+  }
+  const label = [shape, ...fields.filter(([k]) => LABEL_KEY_RE.test(k)).map(([, v]) => v)].join(' ');
+  if (/token|played/i.test(label)) {
+    const played = fields.filter(([k]) => PLAYED_KEY_RE.test(k)).map(([, v]) => v).filter((v) => v.trim());
+    return played.length
+      ? { kind: 'tokens_played', shape, text: played.sort((a, b) => b.length - a.length)[0] }
+      : { kind: 'unknown', shape, text: null };
+  }
+  const agent = AGENT_SPEAKER_RE.test(label);
+  const caller = !agent && CALLER_SPEAKER_RE.test(label);
+  if (!agent && !caller) return { kind: 'unknown', shape, text: null };
+  // Direction is decided on VALUES only (a key like `speaking: false` must
+  // not vote "start"), camelCase split, with the speaker label itself
+  // removed so "agentSpeakingStopped" reads as "stopped" and a bare
+  // "agentSpeaking" reads as nothing.
+  const directional = fields
+    .map(([, v]) => v.replace(/([a-z])([A-Z])/g, '$1 $2').replace(AGENT_SPEAKER_RE, ' ').replace(CALLER_SPEAKER_RE, ' '))
+    .join(' ');
+  const ended = END_RE.test(directional) && !START_RE.test(directional);
+  return { kind: `${agent ? 'agent' : 'caller'}_speaking_${ended ? 'end' : 'start'}`, shape, text: null };
+}
+
+/**
+ * Knex modifier: drop voice-agent sandbox calls (the dead GA# test number)
+ * from a call_log query. Every call metric and inbox that counts inbound
+ * calls applies it — a profile bake-off persists each test as an ordinary
+ * inbound row, and those rows must never reach a KPI.
+ */
+function whereNotSandboxCall(qb, column = 'source') {
+  return qb.whereRaw("COALESCE(??, '') <> ?", [column, VOICE_RELAY_SANDBOX_SOURCE]);
+}
+
+// A relay profile may tune the relay, never re-point or re-voice it.
+const RESERVED_RELAY_ATTRS = new Set(['url', 'welcomeGreeting', 'welcomeGreetingInterruptible', 'ttsProvider', 'language', 'voice']);
+
 function escapeXmlAttr(value) {
   return String(value == null ? '' : value)
     .replace(/&/g, '&amp;')
@@ -326,7 +420,14 @@ function buildRelayTwiML({
   // values are hints only: relay-server treats every setup-frame field as
   // unverified input, so the session mode is re-proven server-side against
   // the call_log row for the AUTHENTICATED CallSid before anything acts on it.
-  parameters = null,
+  parameters,
+  // Tuning attributes from a relay profile (relay-profiles.js is the only
+  // chooser and has already validated them). ABSENT ⇒ byte-identical TwiML.
+  // The profile id rides a <Parameter> so the session can stamp it into the
+  // call's version record; the rendered voice rides alongside for the same
+  // reason (the Spanish leg's voice differs from the env default).
+  relayAttrs,
+  relayProfileId,
 } = {}) {
   if (!wsUrl) throw new Error('buildRelayTwiML: wsUrl is required');
   // Authenticate the upgrade with a token minted for THIS CallSid — validated
@@ -345,14 +446,30 @@ function buildRelayTwiML({
     `ttsProvider="${escapeXmlAttr(ttsProvider)}"`,
     `language="${escapeXmlAttr(language)}"`,
   ];
-  if (voice) attrs.push(`voice="${escapeXmlAttr(voice)}"`);
+  const voiceAttr = voice || '';
+  if (voiceAttr) attrs.push(`voice="${escapeXmlAttr(voiceAttr)}"`);
+  // Defense in depth on the tuning attrs: only attribute-shaped names, never
+  // one of the fixed attributes above (an array or a string has index keys,
+  // which the name pattern already rejects).
+  const tuning = Object.entries(relayAttrs || {})
+    .filter(([k, v]) => /^[a-zA-Z][a-zA-Z0-9]{0,40}$/.test(k) && !RESERVED_RELAY_ATTRS.has(k) && v != null && String(v) !== '');
+  for (const [k, v] of tuning) attrs.push(`${k}="${escapeXmlAttr(v)}"`);
   // <Connect action> lets Twilio hit a fallback URL when the relay session ends
   // or fails (e.g. a rejected upgrade or transient WS error) instead of
   // stranding the call — the live backstop points it at /relay-complete.
   const connectAttrs = action ? ` action="${escapeXmlAttr(action)}" method="POST"` : '';
-  const paramEntries = parameters && typeof parameters === 'object'
-    ? Object.entries(parameters).filter(([k, v]) => k && v != null)
-    : [];
+  // The stamps assume the env default voice when no parameter arrives, so
+  // the parameter is emitted whenever that assumption would be WRONG (a
+  // Spanish leg's configured voice, or none at all = Twilio's default) and
+  // whenever a profile is active. An untuned English leg on the default
+  // voice therefore stays the exact self-closing element it always was.
+  const telemetryParams = {};
+  if (relayProfileId) telemetryParams.relay_profile = String(relayProfileId);
+  if (relayProfileId || voiceAttr !== defaultTtsVoice()) telemetryParams.tts_voice = voiceAttr;
+  // Parameter names must be name-shaped (a spread string or array would
+  // contribute index keys).
+  const paramEntries = Object.entries({ ...telemetryParams, ...(parameters || {}) })
+    .filter(([k, v]) => /^[a-zA-Z_]/.test(k) && v != null);
   const relayElement = paramEntries.length
     ? `<ConversationRelay ${attrs.join(' ')}>`
       + paramEntries
@@ -370,6 +487,11 @@ function buildRelayTwiML({
 
 module.exports = {
   RELAY_WS_PATH,
+  VOICE_RELAY_SANDBOX_SOURCE,
+  whereNotSandboxCall,
+  RELAY_FAILED_OUTCOME,
+  RELAY_TERMINAL_OUTCOMES,
+  classifyRelayEvent,
   DEFAULT_WELCOME_GREETING,
   defaultWelcomeGreeting,
   greetingDayPart,

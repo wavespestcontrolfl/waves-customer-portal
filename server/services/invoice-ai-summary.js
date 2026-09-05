@@ -171,6 +171,7 @@ function hasUsableContext({ input, serviceLines, context, sources }) {
 
 async function aiSummary(prompt) {
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    laneId: 'invoice_summary',
     text: prompt,
     jsonMode: false,
     maxTokens: 320,

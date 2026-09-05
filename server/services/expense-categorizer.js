@@ -62,6 +62,7 @@ Rules:
   // FLAGSHIP first, Sol on a miss. A two-leg miss throws like the old SDK
   // path did — callers decide whether that blocks the insert.
   const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+    laneId: 'expense_categorize',
     text: prompt,
     jsonMode: true,
     jsonSchema: CATEGORIZE_SCHEMA,
