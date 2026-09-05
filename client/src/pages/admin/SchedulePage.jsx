@@ -4781,7 +4781,7 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
       <div style={{ fontSize: 13, color: D.text, marginTop: 10 }}>
         {f ? (
           <div>
-            Next {sprayCheck.windowHours} h: {range || "temp n/a"}, wind {f.windMph} mph, rain {f.rainPct}%
+            Next {sprayCheck.windowHours} h: {range || "temp n/a"}, wind {f.windMph != null ? `${f.windMph} mph` : "n/a"}, rain {f.rainPct != null ? `${f.rainPct}%` : "n/a"}
             {f.shortForecast ? `, ${f.shortForecast.toLowerCase()}` : ""}
           </div>
         ) : (
@@ -5042,7 +5042,7 @@ function JobCardTank({ tank, serviceId, D }) {
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
-            {mix && mix.ratePer1000 != null && (
+            {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${mix.ratePerGallon.lo}${mix.ratePerGallon.hi > mix.ratePerGallon.lo ? `–${mix.ratePerGallon.hi}` : ""} ${fmtUnit(mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>

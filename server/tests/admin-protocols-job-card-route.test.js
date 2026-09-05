@@ -108,6 +108,24 @@ describe('job-card routes', () => {
     expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID })).statusCode).toBe(200);
   });
 
+  test('a technician sees no vendor pricing; an admin does; a catalog outage is 503 on both routes (PR r4 P1/P2)', async () => {
+    process.env.GATE_JOB_CARD = 'true';
+    jobCard.buildJobCard.mockResolvedValue({ enabled: true, strip: { access: { codes: [] } } });
+    jobCard.mixForProduct.mockResolvedValue({ amount: 1 });
+    db.ownedRow = { id: SERVICE_ID };
+    await run('/job-card/:serviceId', { serviceId: SERVICE_ID, __tech: true });
+    expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: false });
+    await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1', __tech: true });
+    expect(jobCard.mixForProduct).toHaveBeenLastCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: false });
+    await run('/job-card/:serviceId', { serviceId: SERVICE_ID });
+    expect(jobCard.buildJobCard).toHaveBeenLastCalledWith(SERVICE_ID, { includePricing: true });
+    const outage = Object.assign(new Error('Product catalog unavailable'), { statusCode: 503 });
+    jobCard.mixForProduct.mockRejectedValue(outage);
+    jobCard.buildJobCard.mockRejectedValue(outage);
+    expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1' })).statusCode).toBe(503);
+    expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID })).statusCode).toBe(503);
+  });
+
   test('mix validates gallons and productId', async () => {
     process.env.GATE_JOB_CARD = 'true';
     jobCard.mixForProduct.mockResolvedValue({ amount: 0.75, unit: 'oz' });
@@ -117,6 +135,6 @@ describe('job-card routes', () => {
     expect((await run('/job-card/mix', { productId: SERVICE_ID, gallons: '1' })).statusCode).toBe(400);
     const ok = await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1' });
     expect(ok.body).toEqual({ enabled: true, amount: 0.75, unit: 'oz' });
-    expect(jobCard.mixForProduct).toHaveBeenCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID });
+    expect(jobCard.mixForProduct).toHaveBeenCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID, includePricing: true });
   });
 });

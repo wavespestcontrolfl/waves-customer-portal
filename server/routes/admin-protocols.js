@@ -2511,6 +2511,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // must not hand them to the former technician.
 const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
 const TECH_ACCESS_WINDOW_DAYS = 7;
+// Vendor pricing is owner-only (admin-inventory's technician projection):
+// a technician's card and mix answers carry no lastPrice.
+function viewerSeesPricing(req) {
+  return req.techRole !== 'technician';
+}
 async function techOwnsVisit(req, serviceId) {
   if (req.techRole !== 'technician') return true;
   const row = await db('scheduled_services')
@@ -2530,10 +2535,13 @@ router.get('/job-card/mix', async (req, res, next) => {
     const gallons = Number(req.query.gallons);
     if (![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
     if (!(await techOwnsVisit(req, serviceId))) return res.status(404).json({ error: 'Product or visit not found' });
-    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId });
+    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req) });
     if (!mix) return res.status(404).json({ error: 'Product or visit not found' });
     res.json({ enabled: true, ...mix });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode === 503) return res.status(503).json({ error: err.message });
+    next(err);
+  }
 });
 
 router.get('/job-card/:serviceId', async (req, res, next) => {
@@ -2541,12 +2549,13 @@ router.get('/job-card/:serviceId', async (req, res, next) => {
     if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
     if (!UUID_RE.test(req.params.serviceId)) return res.status(400).json({ error: 'Invalid service id' });
     if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
-    const card = await jobCard.buildJobCard(req.params.serviceId);
+    const card = await jobCard.buildJobCard(req.params.serviceId, { includePricing: viewerSeesPricing(req) });
     if (!card) return res.status(404).json({ error: 'Service not found' });
     if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
     res.json(card);
   } catch (err) {
-    // A safety-data outage (preferences) fails the card instead of rendering it incomplete.
+    // A safety-data outage (preferences, open requests, catalog) fails the
+    // card instead of rendering it incomplete.
     if (err.statusCode === 503) return res.status(503).json({ error: err.message });
     next(err);
   }

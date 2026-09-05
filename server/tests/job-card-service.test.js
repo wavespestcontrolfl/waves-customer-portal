@@ -629,3 +629,85 @@ describe('mixForProduct', () => {
     expect(out).toMatchObject({ amount: 6.215, unit: 'oz', gallons: 110, rateVerified: true, tankMixable: true });
   });
 });
+
+describe('PR review r4', () => {
+  const failing = (fail, rows = []) => {
+    const chain = {};
+    for (const m of ['where', 'whereNotIn', 'orderBy', 'select', 'limit', 'modify', 'whereIn']) chain[m] = () => chain;
+    chain.catch = (fn) => (fail ? Promise.resolve(fn(new Error('db down'))) : Promise.resolve(rows));
+    return chain;
+  };
+
+  test('a failed open-requests read fails the card (503), never "nothing open" (P1)', async () => {
+    const dbh = (table) => failing(table === 'service_requests');
+    await expect(jobCard._test.loadOpenIssues(dbh, 'c1')).rejects.toMatchObject({ statusCode: 503, message: 'Open requests unavailable' });
+    const complaints = (table) => failing(table === 'customer_interactions');
+    await expect(jobCard._test.loadOpenIssues(complaints, 'c1')).rejects.toMatchObject({ statusCode: 503 });
+  });
+
+  test('a complaint is recent history with its date, never an open issue (P2)', async () => {
+    const dbh = (table) => failing(false, table === 'customer_interactions' ? [{ subject: 'Ants came back', created_at: new Date('2026-08-20T15:00:00Z') }] : []);
+    const out = await jobCard._test.loadOpenIssues(dbh, 'c1');
+    expect(out).toEqual({ issues: [], recentComplaints: [{ date: '2026-08-20', text: 'Ants came back' }] });
+    const text = jobCard.buildTemplateParagraph({ ...baseFacts(), ...out });
+    expect(text).toBe('First visit on record, recent complaints: 2026-08-20 Ants came back.');
+    expect(text).not.toContain('open:');
+  });
+
+  test('calls come from the canonical reader, since the last visit; a failed read is said, not "no calls" (P1)', async () => {
+    const getRecentCalls = jest.fn(async () => [
+      { call_summary: 'Asked about ants', direction: 'inbound', created_at: new Date('2026-08-20T15:00:00Z') },
+      { call_summary: 'Old call', direction: 'inbound', created_at: new Date('2026-08-01T15:00:00Z') },
+    ]);
+    const calls = await jobCard._test.loadCallsSince('c1', '2026-08-12', { getRecentCalls });
+    expect(getRecentCalls).toHaveBeenCalledWith('c1', { sentinelOnError: true });
+    expect(calls).toEqual([{ summary: 'Asked about ants', direction: 'inbound', date: '2026-08-20' }]);
+    expect(await jobCard._test.loadCallsSince('c1', null, { getRecentCalls: async () => null })).toBeNull();
+    expect(jobCard.buildTemplateParagraph({ ...baseFacts(), calls: null })).toBe('First visit on record, call history unavailable right now.');
+  });
+
+  test('the template is bounded to 60 words and keeps the safety-critical facts (P2)', () => {
+    const long = (w) => Array.from({ length: 14 }, (_, i) => `${w}${i}`).join(' ');
+    const facts = {
+      ...baseFacts(),
+      pets: 'two dogs',
+      petsSecured: 'crated in garage',
+      chemicalSensitivity: 'asthma',
+      entry: long('entry'),
+      parking: long('park'),
+      instructions: long('inst'),
+      visitNotes: long('note'),
+      lastVisit: { date: '2026-08-12', summary: long('sum'), callback: true },
+      issues: [{ text: 'Ants in kitchen', urgent: true }, { text: long('issue'), urgent: false }],
+      recentComplaints: [{ date: '2026-08-20', text: long('cmp') }],
+      calls: [{ date: '2026-08-21', summary: long('call') }],
+    };
+    const text = jobCard.buildTemplateParagraph(facts, { isLawn: true });
+    expect(text.split(/\s+/).length).toBeLessThanOrEqual(60);
+    expect(jobCard.validateParagraph(text, text, [], jobCard._test.criticalFacts(facts))).toBeNull();
+    expect(text).toContain('Pets: two dogs (crated in garage)');
+    expect(text).toContain('chemical sensitivity: asthma');
+    expect(text).toContain('open: URGENT Ants in kitchen');
+    expect(text).toContain('Last visit 2026-08-12 (callback)');
+    expect(text).toContain('No irrigation on file');
+    expect(text).not.toContain('park0');
+    // Short facts are untouched.
+    expect(jobCard.buildTemplateParagraph({ ...baseFacts(), pets: 'dog' })).toBe('Pets: dog. First visit on record.');
+  });
+
+  test('a failed catalog read is an outage (503), not an empty protocol (P2)', async () => {
+    const dbh = () => failing(true);
+    await expect(jobCard._test.loadCatalog(dbh)).rejects.toMatchObject({ statusCode: 503, message: 'Product catalog unavailable' });
+  });
+
+  test('precautions include the product-specific pet / child guidance (P2)', () => {
+    const text = jobCard._test.precautionText({ customer_safety_summary: 'Keep off until dry.', pet_kid_guidance_text: 'Do not disturb bait stations.', reentry_text: 'Re-entry 2 h.' });
+    expect(text).toBe('Keep off until dry. Do not disturb bait stations. Re-entry 2 h.');
+  });
+
+  test('the cached best price is owner-only: absent unless the viewer may see pricing (P1)', () => {
+    const product = { inventory_unit: 'gal', best_price_amount_cached: '129.5' };
+    expect(jobCard._test.orderFor(product, null, null)).not.toHaveProperty('lastPrice');
+    expect(jobCard._test.orderFor(product, null, null, { includePricing: true }).lastPrice).toBe(129.5);
+  });
+});

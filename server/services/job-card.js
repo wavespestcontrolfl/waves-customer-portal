@@ -29,7 +29,9 @@ const { getHourlyRainOutlook } = require('./weather-forecast');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { SEVERITY_RANK } = require('./service-report/pressure-trend');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
-const { redactAccessCodes } = require('./context-aggregator');
+const contextAggregator = require('./context-aggregator');
+
+const { redactAccessCodes } = contextAggregator;
 const { matchServiceProtocol } = require('./protocol-matcher');
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
@@ -190,6 +192,13 @@ async function loadLastVisit(dbh, customerId, serviceLine, beforeDate = null) {
   };
 }
 
+/**
+ * Open service requests plus the last 90 days of complaints. Both reads fail
+ * closed (503, like preferences): an URGENT open request is a safety-critical
+ * fact the paragraph must carry, so a failed read must never render as
+ * "nothing open". customer_interactions has no resolution state, so a
+ * complaint is recent history — reported with its date, never as open.
+ */
 async function loadOpenIssues(dbh, customerId) {
   const [requests, complaints] = await Promise.all([
     dbh('service_requests')
@@ -198,33 +207,39 @@ async function loadOpenIssues(dbh, customerId) {
       .orderBy('created_at', 'desc')
       .select('subject', 'category', 'urgency', 'created_at')
       .limit(3)
-      .catch(() => []),
+      .catch((err) => { throw unavailable('Open requests unavailable', err); }),
     dbh('customer_interactions')
       .where({ customer_id: customerId, interaction_type: 'complaint' })
       .where('created_at', '>', new Date(Date.now() - 90 * 86400000))
       .orderBy('created_at', 'desc')
       .select('subject', 'body', 'created_at')
       .limit(2)
-      .catch(() => []),
+      .catch((err) => { throw unavailable('Complaint history unavailable', err); }),
   ]);
-  return [
-    ...requests.map((r) => ({ kind: 'request', text: clean(r.subject || r.category, 80), urgent: r.urgency === 'urgent' })),
-    ...complaints.map((c) => ({ kind: 'complaint', text: clean(c.subject || c.body, 80), urgent: false })),
-  ].filter((i) => i.text);
+  return {
+    issues: requests.map((r) => ({ text: clean(r.subject || r.category, 80), urgent: r.urgency === 'urgent' })).filter((i) => i.text),
+    recentComplaints: complaints.map((c) => ({ date: etDateString(c.created_at), text: clean(c.subject || c.body, 80) })).filter((c) => c.text),
+  };
 }
 
-async function loadCallsSince(dbh, customerId, sinceDate) {
-  const query = dbh('call_log')
-    .where({ customer_id: customerId })
-    .whereNotNull('call_summary')
-    .whereRaw('length(trim(call_summary)) > 0')
-    .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
-    .where('created_at', '>', sinceDate ? parseETDateTime(`${sinceDate}T00:00`) : new Date(Date.now() - 60 * 86400000))
-    .orderBy('created_at', 'desc')
-    .select('call_summary', 'direction', 'created_at')
-    .limit(3);
-  const rows = await query.catch(() => []);
-  return rows.map((r) => ({ summary: clean(r.call_summary, 140), direction: r.direction || null, date: etDateString(r.created_at) }));
+/**
+ * Calls since the last visit, through the canonical reader
+ * (context-aggregator.getRecentCalls): sandbox, spam, wrong-number, robocall
+ * and vendor calls are excluded on every signal the processor persists
+ * (source, processing_status, legacy extraction, validated V2 call_nature)
+ * and summaries arrive code-redacted — a test call must never be rewritten
+ * into the briefing. Its 60-day / 4-call window bounds the read. Null when
+ * the lookup failed: the template says so instead of "no calls".
+ */
+async function loadCallsSince(customerId, sinceDate, deps = {}) {
+  const read = deps.getRecentCalls || ((id, opts) => contextAggregator.getRecentCalls(id, opts));
+  const rows = await read(customerId, { sentinelOnError: true });
+  if (!Array.isArray(rows)) return null;
+  const since = sinceDate ? parseETDateTime(`${sinceDate}T00:00`).getTime() : 0;
+  return rows
+    .filter((r) => new Date(r.created_at).getTime() > since)
+    .slice(0, 3)
+    .map((r) => ({ summary: clean(r.call_summary, 140), direction: r.direction || null, date: etDateString(r.created_at) }));
 }
 
 /**
@@ -239,7 +254,7 @@ function unavailable(message, cause) {
   return err;
 }
 
-async function loadJobCardFacts(serviceId, dbh = db) {
+async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
   const svc = await dbh('scheduled_services as ss')
     .join('customers as c', 'ss.customer_id', 'c.id')
     .where('ss.id', serviceId)
@@ -258,7 +273,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
   if (!svc) return null;
 
   const serviceLine = detectServiceLine(svc.service_type);
-  const [prefs, lastVisit, issues] = await Promise.all([
+  const [prefs, lastVisit, { issues, recentComplaints }] = await Promise.all([
     // A failed preferences read is NOT an empty safety profile: the card
     // fails (503) rather than render without sensitivities, pet plan, codes.
     dbh('property_preferences').where({ customer_id: svc.customer_id }).first().catch((err) => { throw unavailable('Property preferences unavailable', err); }),
@@ -266,7 +281,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     loadOpenIssues(dbh, svc.customer_id),
   ]);
   const [calls, rain7d] = await Promise.all([
-    loadCallsSince(dbh, svc.customer_id, lastVisit?.date || null),
+    loadCallsSince(svc.customer_id, lastVisit?.date || null, deps),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc) : Promise.resolve(null),
   ]);
 
@@ -304,6 +319,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
       visitNotes: clean(svc.notes, 140),
       lastVisit,
       issues,
+      recentComplaints,
       calls,
       irrigation: serviceLine === 'lawn' ? wateringLine(prefs) : null,
       rain7d,
@@ -315,42 +331,75 @@ async function loadJobCardFacts(serviceId, dbh = db) {
 // ── Paragraph ───────────────────────────────────────────────────────────────
 
 /**
- * Deterministic 1–3 sentences from the facts. Used verbatim when the model
- * leg misses and as the grounding the model is allowed to rephrase.
+ * Deterministic 1–3 sentences from the facts, bounded to MAX_PARAGRAPH_WORDS
+ * the same way the validator bounds model output: when populated records run
+ * long, the lowest-value parts go first (drop rank, highest first; a part
+ * with an `alt` shrinks to it before it goes). Pets, the pet plan, codes on
+ * file, chemical sensitivity, away mode, urgent requests, the visit-history
+ * line and the lawn irrigation line are never dropped — if those alone
+ * exceed the limit the paragraph runs long rather than lose one. Used
+ * verbatim when the model leg misses and as the grounding the model may
+ * rephrase.
  */
 function buildTemplateParagraph(facts, { isLawn = false } = {}) {
-  const s1 = [];
-  if (facts.pets) s1.push(`Pets: ${facts.pets}${facts.petsSecured ? ` (${facts.petsSecured})` : ''}`);
-  else if (facts.petsSecured) s1.push(`Pets secured: ${facts.petsSecured}`);
-  if (facts.gates.length) s1.push(`${facts.gates.join(' and ').toLowerCase()} code on file, tap to show`);
-  if (facts.entry) s1.push(facts.entry);
-  if (facts.parking) s1.push(facts.parking);
-  if (facts.chemicalSensitivity) s1.push(`chemical sensitivity${facts.chemicalSensitivity !== 'yes' ? `: ${facts.chemicalSensitivity}` : ''}`);
-  if (facts.awayUntil) s1.push(`customer away until ${facts.awayUntil}`);
-  if (facts.contactPreference && facts.contactPreference !== 'text') s1.push(`prefers ${facts.contactPreference}`);
+  const parts = [];
+  const add = (s, text, drop = null, alt = null) => { if (text) parts.push({ s, text, drop, alt }); };
 
-  const s2 = [];
+  if (facts.pets) add(1, `Pets: ${facts.pets}${facts.petsSecured ? ` (${facts.petsSecured})` : ''}`);
+  else if (facts.petsSecured) add(1, `Pets secured: ${facts.petsSecured}`);
+  if (facts.gates.length) add(1, `${facts.gates.join(' and ').toLowerCase()} code on file, tap to show`);
+  add(1, facts.entry, 4);
+  add(1, facts.parking, 9);
+  if (facts.chemicalSensitivity) add(1, `chemical sensitivity${facts.chemicalSensitivity !== 'yes' ? `: ${facts.chemicalSensitivity}` : ''}`);
+  if (facts.awayUntil) add(1, `customer away until ${facts.awayUntil}`);
+  if (facts.contactPreference && facts.contactPreference !== 'text') add(1, `prefers ${facts.contactPreference}`);
+
   if (facts.lastVisit?.unavailable) {
-    s2.push('Visit history unavailable right now');
+    add(2, 'Visit history unavailable right now');
   } else if (facts.lastVisit) {
-    s2.push(`Last visit ${facts.lastVisit.date}${facts.lastVisit.summary ? `: ${facts.lastVisit.summary}` : ''}${facts.lastVisit.callback ? ' (callback)' : ''}`);
+    const bare = `Last visit ${facts.lastVisit.date}${facts.lastVisit.callback ? ' (callback)' : ''}`;
+    if (facts.lastVisit.summary) add(2, `Last visit ${facts.lastVisit.date}: ${facts.lastVisit.summary}${facts.lastVisit.callback ? ' (callback)' : ''}`, 5, bare);
+    else add(2, bare);
   } else {
-    s2.push('First visit on record');
+    add(2, 'First visit on record');
   }
-  if (facts.issues.length) s2.push(`open: ${facts.issues.map((i) => `${i.urgent ? 'URGENT ' : ''}${i.text}`).join('; ')}`);
-  if (facts.calls.length) s2.push(`called ${facts.calls[0].date}: ${facts.calls[0].summary}`);
-  if (facts.visitNotes) s2.push(`note: ${facts.visitNotes}`);
-  if (facts.instructions) s2.push(facts.instructions);
+  const issueText = (list) => `open: ${list.map((i) => `${i.urgent ? 'URGENT ' : ''}${i.text}`).join('; ')}`;
+  const urgent = facts.issues.filter((i) => i.urgent);
+  if (urgent.length === facts.issues.length) add(2, facts.issues.length ? issueText(facts.issues) : '');
+  else add(2, issueText(facts.issues), 2, urgent.length ? issueText(urgent) : null);
+  const complaints = facts.recentComplaints || [];
+  if (complaints.length) add(2, `recent complaints: ${complaints.map((c) => `${c.date} ${c.text}`).join('; ')}`, 7);
+  if (facts.calls === null) add(2, 'call history unavailable right now');
+  else if (facts.calls.length) add(2, `called ${facts.calls[0].date}: ${facts.calls[0].summary}`, 8);
+  if (facts.visitNotes) add(2, `note: ${facts.visitNotes}`, 6);
+  add(2, facts.instructions, 3);
 
-  const s3 = [];
   if (isLawn) {
-    if (facts.irrigation) s3.push(`Irrigation ${facts.irrigation}`);
-    else s3.push('No irrigation on file — ask the customer');
-    if (facts.rain7d != null) s3.push(`${facts.rain7d}" rain in the last 7 days`);
+    add(3, facts.irrigation ? `Irrigation ${facts.irrigation}` : 'No irrigation on file — ask the customer');
+    if (facts.rain7d != null) add(3, `${facts.rain7d}" rain in the last 7 days`, 1);
   }
 
-  const sentence = (parts) => (parts.length ? `${parts.join(', ').replace(/^./, (c) => c.toUpperCase())}.` : '');
-  return [sentence(s1), sentence(s2), sentence(s3)].filter(Boolean).join(' ');
+  const sentence = (n) => {
+    const texts = parts.filter((p) => p.s === n).map((p) => p.text);
+    return texts.length ? `${texts.join(', ').replace(/^./, (c) => c.toUpperCase())}.` : '';
+  };
+  const render = () => [1, 2, 3].map(sentence).filter(Boolean).join(' ');
+  let text = render();
+  while (wordCount(text) > MAX_PARAGRAPH_WORDS) {
+    const droppable = parts.filter((p) => p.drop != null);
+    if (!droppable.length) break;
+    const victim = droppable.reduce((a, b) => (b.drop > a.drop ? b : a));
+    if (victim.alt) Object.assign(victim, { text: victim.alt, alt: null, drop: null });
+    else parts.splice(parts.indexOf(victim), 1);
+    text = render();
+  }
+  return text;
+}
+
+// The validator's own count (whitespace tokens of the trimmed text).
+function wordCount(text) {
+  const body = String(text || '').trim();
+  return body ? body.split(/\s+/).length : 0;
 }
 
 const SYSTEM_PROMPT = [
@@ -379,7 +428,7 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   if (EMOJI_RE.test(body)) return 'emoji';
   const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
   if (sentences.length < 1 || sentences.length > 3) return 'sentence_count';
-  if (body.split(/\s+/).length > MAX_PARAGRAPH_WORDS) return 'too_long';
+  if (wordCount(body) > MAX_PARAGRAPH_WORDS) return 'too_long';
   const lower = body.toLowerCase();
   for (const { code } of codes) {
     if (code && lower.includes(String(code).toLowerCase())) return 'code_leak';
@@ -635,11 +684,13 @@ const PRODUCT_COLUMNS = [
   'best_price_amount_cached', 'best_price_updated_at', 'label_verified_at',
 ];
 
+// A failed catalog read is an outage (503), never an empty protocol: "no
+// products matched" would hide every precaution and spray verdict.
 async function loadCatalog(dbh = db) {
   const products = await dbh('products_catalog')
     .where(function activeOrUnknown() { this.where({ active: true }).orWhereNull('active'); })
     .select(PRODUCT_COLUMNS)
-    .catch(() => []);
+    .catch((err) => { throw unavailable('Product catalog unavailable', err); });
   if (!products.length) return [];
   const aliases = await dbh('product_aliases')
     .whereIn('product_id', products.map((p) => p.id))
@@ -736,7 +787,9 @@ function isTankMixable(product = {}) {
 }
 
 function precautionText(product) {
-  const parts = [clean(product.customer_safety_summary, 160), clean(product.reentry_text, 100)].filter(Boolean);
+  // The product-specific pet / child guidance carries the actionable detail
+  // (bait stations, keep pets off treated turf) the generic summary omits.
+  const parts = [clean(product.customer_safety_summary, 160), clean(product.pet_kid_guidance_text, 160), clean(product.reentry_text, 100)].filter(Boolean);
   const ppe = parseJson(product.ppe_required);
   const ppeText = Array.isArray(ppe) ? ppe.map((p) => clean(p, 30)).filter(Boolean).join(', ') : clean(ppe, 80);
   if (ppeText) parts.push(`PPE: ${ppeText}`);
@@ -858,7 +911,7 @@ function linesFromProtocolText(visit, catalog) {
   return out;
 }
 
-async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, dbh = db }) {
+async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, includePricing = false, dbh = db }) {
   // One card per catalog product: two protocol lines can resolve to the same
   // row (a base line plus a conditional). The selected line wins the card;
   // the other line's text rides along.
@@ -908,7 +961,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       labelUrl: p.label_url || null,
       sdsUrl: p.sds_url || null,
       rotation,
-      order: orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null),
+      order: orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null, { includePricing }),
     });
   }
   return cards;
@@ -917,9 +970,11 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
 /**
  * What "Order more" asks for, in the product's inventory unit: the visit's
  * shortage when there is one, else one distributor pack converted to that
- * unit, else a single unit.
+ * unit, else a single unit. The cached best price is owner-only (the same
+ * role line admin-inventory's technician projection draws): it is carried
+ * only when the caller says the viewer may see pricing.
  */
-function orderFor(product, packSize, shortage) {
+function orderFor(product, packSize, shortage, { includePricing = false } = {}) {
   const unit = product.inventory_unit || product.rate_unit || null;
   let quantity = null;
   if (shortage > 0) quantity = Math.ceil(shortage * 100) / 100;
@@ -932,7 +987,7 @@ function orderFor(product, packSize, shortage) {
   }
   return {
     packSize: packSize || null,
-    lastPrice: product.best_price_amount_cached != null ? Number(product.best_price_amount_cached) : null,
+    ...(includePricing ? { lastPrice: product.best_price_amount_cached != null ? Number(product.best_price_amount_cached) : null } : {}),
     unit,
     quantity: quantity > 0 ? quantity : 1,
   };
@@ -952,8 +1007,8 @@ async function rotationNote(dbh, facts, product) {
 
 // ── Orchestrator ────────────────────────────────────────────────────────────
 
-async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() } = {}) {
-  const facts = await loadJobCardFacts(serviceId, dbh);
+async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
+  const facts = await loadJobCardFacts(serviceId, dbh, deps);
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 
@@ -973,7 +1028,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
-  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, dbh });
+  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, includePricing, dbh });
 
   return {
     enabled: true,
@@ -995,9 +1050,9 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
  * product for 110 or 1 gallons of water on the visit's rig (the
  * appointment's assigned equipment, else the one active rig).
  */
-async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date() } = {}) {
+async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
+    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
     serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
@@ -1056,7 +1111,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     ...mix,
     planBlocks,
     tank,
-    order: orderFor(product, packSizes[product.id], null),
+    order: orderFor(product, packSizes[product.id], null, { includePricing }),
   };
 }
 
@@ -1092,5 +1147,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant },
 };
