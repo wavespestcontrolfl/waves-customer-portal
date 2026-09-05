@@ -9,7 +9,7 @@ const logger = require('./logger');
 // produced invalid E.164 strings on bad input.
 const { normalizePhone } = require('../utils/phone');
 const { startOfETMonth, etDateString } = require('../utils/datetime-et');
-const { bridgeLeadFunnelStage, stampLeadFunnelRow } = require('./lead-funnel-bridge');
+const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
 
 // ---------------------------------------------------------------------------
 // 1. attributeInboundContact
@@ -243,8 +243,10 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 // lead-stage funnel row when it was filed as a repeat — is settled by
 // settleRepeatFunnelRow: its root's row advances to booked when the root is
 // still this customer's open opportunity, else the repeat's own row is
-// rebuilt here from its stored touch, at booked (codex #3834 r14 P2, r22 P2,
-// r27 P1/P2). ONLY a repeat (quote_wizard row carrying the marker): every
+// rebuilt from its stored touch, at booked — inside the settlement's own
+// transaction, under its lock on the repeat still being won (codex #3834
+// r14 P2, r22 P2, r27 P1/P2; pre-push P1 on 28489d7). ONLY a repeat
+// (quote_wizard row carrying the marker): every
 // other lead with no row has none on purpose — an inbound call on the Ads
 // bridge number leaves its slot empty for the delayed bridge to claim as
 // paid, and a generic rebuild would stamp it organic first (codex r24 P1).
@@ -261,8 +263,7 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 async function settleWonFunnelRow(leadId, customerId = null, estimateId = null) {
   const bridged = await bridgeLeadFunnelStage(leadId, 'won');
   try {
-    const rebuild = await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId, estimateId });
-    if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId, funnelStage: 'booked' });
+    await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId, estimateId });
   } catch (err) {
     logger.warn(`[LeadAttribution] funnel-row settlement failed for lead ${leadId}: ${err.message}`);
   }

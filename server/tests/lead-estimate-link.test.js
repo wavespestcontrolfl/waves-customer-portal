@@ -1392,7 +1392,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       return database;
     };
     const ROOT_CLAIM = { onlyIfLead: { customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'contacted' } };
-    beforeEach(() => { bridgeLeadFunnelStage.mockClear(); });
+    beforeEach(() => { bridgeLeadFunnelStage.mockClear(); stampLeadFunnelRow.mockClear(); });
 
     test('only a quote_wizard row carrying the duplicate marker is a repeat — a call lead or a plain wizard row is never rebuilt', async () => {
       const database = dbOf({
@@ -1424,7 +1424,8 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });
       const database = dbOf(rows, { root: 'lead' });
-      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(database._deleted).toEqual([]);
       expect(database._updated).toEqual([]);
     });
@@ -1462,8 +1463,17 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const database = dbOf(rows, { root: 'lead', rep: 'lead' }, { leadsNow: { rep: { ...repeat('rep'), status: 'lost' } } });
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).not.toHaveBeenCalled();
       expect(database._deleted).toEqual([]);
       expect(database._updated).toEqual([]);
+    });
+
+    test('a repeat closed after its conversion committed is not rebuilt either — the rebuild runs inside the settlement under the won lock, never in the caller (pre-push P1 on 28489d7)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'lost', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, {}, { leadsNow: { rep: { ...repeat('rep'), status: 'lost' } } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+      expect(database._locks).toEqual([{ table: 'leads', where: { id: 'rep', status: 'won' } }]);
     });
 
     test.each([
@@ -1475,7 +1485,8 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const root = { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null };
       const rows = { rep: repeat('rep'), root };
       const database = dbOf(rows, { root: 'lead' }, { leadsNow: { root: { ...root, ...change } } });
-      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
       expect(database._deleted).toEqual([]);
     });
@@ -1509,14 +1520,17 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });
       const database = dbOf(rows, { root: 'booked' }, { rootChanged: true });
-      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(database._deleted).toEqual([]);
     });
 
     test('an unlinked open root whose CURRENT contact matches the repeat is ours (the accept path\'s rule); a root with NO funnel row at all falls back to the repeat\'s own row', async () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'new', customer_id: null, phone: '(941) 555-0142', estimate_id: null } };
       bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });
-      await expect(settleRepeatFunnelRow(dbOf(rows), 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      const database = dbOf(rows);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', expect.any(Function), expect.objectContaining({ onlyIfLead: expect.objectContaining({ customer_id: null, phone: '(941) 555-0142', status: 'new' }) }));
     });
 
@@ -1529,14 +1543,17 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       ['soft-deleted', { status: 'new', customer_id: 'c1', phone: '9415550142', deleted_at: '2026-09-04T00:00:00Z' }],
     ])('a root %s is not ours to book: the repeat\'s own row is rebuilt and the root\'s funnel is untouched', async (_label, root) => {
       const rows = { rep: repeat('rep', { estimate_id: 'e-accepted' }), root: { id: 'root', ...root } };
-      await expect(settleRepeatFunnelRow(dbOf(rows), 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      const database = dbOf(rows);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
     });
 
     test('an UNLINKED repeat converted by a deposit on estimate B: a root linked to estimate A is that deal\'s lead — the event\'s estimate scopes the settlement, and the repeat carries its own row (pre-push P1 on 1ea5d47)', async () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'estimate_sent', customer_id: 'c1', phone: '9415550142', estimate_id: 'e-A' } };
       const database = dbOf(rows, { root: 'estimate_sent' });
-      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-B' })).resolves.toBe(rows.rep);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-B' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
       expect(database._deleted).toEqual([]);
       // ...and the same root IS the deal when the deposit is on ITS estimate.
@@ -1553,7 +1570,9 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
 
     test('a vanished root (dead marker) leaves the repeat to carry its own row', async () => {
       const rows = { rep: repeat('rep') };
-      await expect(settleRepeatFunnelRow(dbOf(rows), 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      const database = dbOf(rows);
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
     });
   });

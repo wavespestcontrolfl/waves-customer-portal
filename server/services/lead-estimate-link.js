@@ -3,7 +3,7 @@ const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString } = require('../utils/datetime-et');
-const { bridgeLeadFunnelStage, FUNNEL_STAGE_RANK } = require('./lead-funnel-bridge');
+const { bridgeLeadFunnelStage, stampLeadFunnelRow, FUNNEL_STAGE_RANK } = require('./lead-funnel-bridge');
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
 
 const CLOSED_LEAD_STATUSES = new Set(['won', 'lost', 'unresponsive', 'disqualified', 'duplicate']);
@@ -85,11 +85,13 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // rebuilt from its stored touch. One decision for every conversion path
 // (accept fallback, self-booking stand-in, admin convert of a repeat whose
 // root is still open — codex r27 P2), so a deal never books two rows.
-// Returns the row to rebuild, or null (the root carries the win — advanced
-// now, or already at booked / completed from an earlier settlement, so a
-// replayed conversion never inserts a second row for the deal, codex r28
-// P1 — or the lead is not a wizard repeat: every other lead with no row has
-// none on purpose, codex r22 P2 / r24 P1). The root's advance is conditioned
+// The rebuild is the settlement's own, under the same lock as every other
+// write here (pre-push P1 on 28489d7); the root carries the win when it is
+// advanced now, or already at booked / completed from an earlier settlement,
+// so a replayed conversion never inserts a second row for the deal (codex
+// r28 P1). A lead that is not a wizard repeat settles nothing: every other
+// lead with no row has none on purpose (codex r22 P2 / r24 P1). Resolves
+// null either way. The root's advance is conditioned
 // in SQL on the root still being the row validated here — identity, status,
 // estimate link — so a staff edit between the read and the write makes it
 // lose and the repeat carries its own row (codex r29 P1); and once the root's
@@ -110,8 +112,7 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null, esti
   const rootOurs = !!root && !root.deleted_at && OPEN_LEAD_STATUSES.includes(root.status)
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && scope && String(root.estimate_id) !== String(scope));
-  if (!rootOurs) return repeat;
-  const onlyIfLead = { ...identityOf(root), status: root.status };
+  const onlyIfLead = rootOurs ? { ...identityOf(root), status: root.status } : null;
   // Every read or write on the root's row below carries the lead claim the
   // advance carried: the root, as validated, still open, not deleted.
   const rootStillOurs = function leadStillMatches() {
@@ -134,12 +135,17 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null, esti
   // commit and this settlement must not book its root or rebuild its row
   // (r35 P1). Both are SELECT ... FOR UPDATE, so a writer on either lead
   // blocks until this commits instead of racing it.
+  // The repeat's own row, rebuilt from its stored touch at booked, when the
+  // root cannot carry the win — inside the same transaction, so the won lock
+  // above still holds when the row is inserted (pre-push P1 on 28489d7).
   const KEEP_OWN_ROW = Symbol('keep-own-row');
+  const rebuild = async (trx) => { await stampLeadFunnelRow(trx, repeat, { customerId, funnelStage: 'booked' }); return null; };
   return database.transaction(async (trx) => {
     const stillWon = await trx('leads').where({ id: repeat.id, status: 'won' }).whereNull('deleted_at').forUpdate().first('id');
     if (!stillWon) return null;
+    if (!rootOurs) return rebuild(trx);
     const rootHeld = await trx('leads').where({ id: root.id, ...onlyIfLead }).whereNull('deleted_at').forUpdate().first('id');
-    if (!rootHeld) return repeat;
+    if (!rootHeld) return rebuild(trx);
     const own = await trx('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
     if (own && own.funnel_stage === 'completed') return null;
     const bridged = await bridgeLeadFunnelStage(root.id, 'won', trx, { onlyIfLead });
@@ -148,7 +154,7 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null, esti
     // accept an old stage on a root staff re-identified since (codex r30 P1).
     const rootRow = bridged.updated ? null : await trx('ad_service_attribution').where({ lead_id: root.id }).whereExists(rootStillOurs).first('funnel_stage');
     const settled = !!bridged.updated || (!!rootRow && FUNNEL_STAGE_RANK[rootRow.funnel_stage] >= FUNNEL_STAGE_RANK.booked);
-    if (!settled) return repeat;
+    if (!settled) return rebuild(trx);
     // The root's row now carries this customer's win: an unlinked root
     // (matched by contact) leaves the bridge's COALESCE-from-lead customer
     // NULL, and the revenue sync loads rows by customer_id — so the accepting

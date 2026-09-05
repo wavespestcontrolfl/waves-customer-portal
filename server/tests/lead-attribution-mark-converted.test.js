@@ -43,17 +43,16 @@ const claimCalls = () => mockCalls.slice(0, mockCalls.findIndex((c) => c[1] === 
 describe('markConverted claims', () => {
   beforeEach(() => { mockCalls.length = 0; mockUpdateRows = 1; mockFirstRow = null; mockRepeatRow = null; jest.clearAllMocks(); });
 
-  test('a win the bridge lands on no row is settled AFTER the conversion write (root re-read then), and a repeat left to carry its own row gets it rebuilt at booked (codex r22 P2, r27 P1)', async () => {
-    mockRepeatRow = { id: 'lead-manual', status: 'won', customer_id: 'c1', lead_type: 'quote_wizard', extracted_data: { duplicate_of_lead_id: 'lead-root' }, first_contact_at: '2026-09-01T12:00:00Z' };
+  test('a win the bridge lands on no row is settled AFTER the conversion write (root re-read then); the settlement owns the rebuild — nothing is stamped here (codex r22 P2, r27 P1; pre-push P1 on 28489d7)', async () => {
+    mockRepeatRow = null;
     const ok = await markConverted('lead-manual', { customerId: 'c1' });
     expect(ok).toBe(true);
     expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-manual', 'won');
     expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-manual', { customerId: 'c1', estimateId: null });
-    expect(stampLeadFunnelRow).toHaveBeenCalledWith(db, mockRepeatRow, { customerId: 'c1', funnelStage: 'booked' });
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
     const statusWrite = mockCalls.findIndex((c) => c[1] === 'update');
     expect(statusWrite).toBeGreaterThanOrEqual(0);
     expect(bridgeLeadFunnelStage.mock.invocationCallOrder[0]).toBeLessThan(settleRepeatFunnelRow.mock.invocationCallOrder[0]);
-    expect(settleRepeatFunnelRow.mock.invocationCallOrder[0]).toBeLessThan(stampLeadFunnelRow.mock.invocationCallOrder[0]);
   });
 
   test('an estimate-scoped conversion (deposit_paid / acceptance) hands the estimate to the settlement so a root linked to another estimate is never booked for it (pre-push P1 on 1ea5d47)', async () => {
@@ -77,12 +76,13 @@ describe('markConverted claims', () => {
     expect(mockCalls.some((c) => c[0] === 'lead_activities')).toBe(true);
   });
 
-  test('settleWonFunnelRow is the shared won-funnel mechanism (the admin book route calls it post-commit): bridge, then settle, then stamp what settlement hands back (codex r32 P1)', async () => {
-    mockRepeatRow = { id: 'lead-booked', lead_type: 'quote_wizard', extracted_data: { duplicate_of_lead_id: 'root' } };
-    await settleWonFunnelRow('lead-booked', 'c1');
+  test('settleWonFunnelRow is the shared won-funnel mechanism (the admin book route calls it post-commit): bridge, then settle; the bridge result is returned for callers that surface it (codex r32 P1, r34 P1)', async () => {
+    mockRepeatRow = null;
+    bridgeLeadFunnelStage.mockResolvedValueOnce({ reason: 'error' });
+    await expect(settleWonFunnelRow('lead-booked', 'c1')).resolves.toEqual({ reason: 'error' });
     expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-booked', 'won');
     expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-booked', { customerId: 'c1', estimateId: null });
-    expect(stampLeadFunnelRow).toHaveBeenCalledWith(db, mockRepeatRow, { customerId: 'c1', funnelStage: 'booked' });
+    expect(stampLeadFunnelRow).not.toHaveBeenCalled();
     expect(mockCalls.some((c) => c[0] === 'leads' && c[1] === 'update')).toBe(false);
   });
 
