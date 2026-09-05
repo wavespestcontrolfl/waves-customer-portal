@@ -7,28 +7,38 @@
 // Alert thresholds preserved: drive% > 25, callback% > 6, variance < 0 all trigger
 // alert-fg. Everything else renders neutral zinc — no green/blue success color.
 import { useState, useEffect } from 'react';
-import { Card, CardBody, cn } from '../ui';
+import { Button, Card, CardBody, cn } from '../ui';
 
 const authHeader = () => ({ Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` });
 
 const PERIOD_BTN = 'h-7 px-3 text-11 uppercase tracking-label font-medium u-focus-ring transition-colors';
 
 export default function InsightsPanelV2() {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
   const [days, setDays] = useState(30);
+  const [reload, setReload] = useState(0);
+  const [request, setRequest] = useState({ days: 30, loading: true, data: null, error: false });
 
-  async function load(d = days) {
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/dispatch/insights?days=${d}`, { headers: authHeader() });
-      setData(await res.json());
-    } catch { setData(null); }
-    setLoading(false);
-  }
+  useEffect(() => {
+    let active = true;
+    setRequest({ days, loading: true, data: null, error: false });
+    fetch(`/api/dispatch/insights?days=${days}`, { headers: authHeader() })
+      .then(res => {
+        if (!res.ok) throw new Error('Failed to load insights');
+        return res.json();
+      })
+      .then(data => {
+        if (active) setRequest({ days, loading: false, data, error: false });
+      })
+      .catch(() => {
+        if (active) setRequest({ days, loading: false, data: null, error: true });
+      });
+    return () => { active = false; };
+  }, [days, reload]);
 
-  useEffect(() => { load(); }, []);
-
+  // Never label the previous period's values as the newly selected period,
+  // even on the render before the effect starts its next request.
+  const loading = request.loading || request.days !== days;
+  const data = request.data;
   const s = data?.summary || {};
   const techs = data?.techMetrics || [];
   const forecast = data?.forecast || [];
@@ -46,7 +56,7 @@ export default function InsightsPanelV2() {
           {[7, 30, 90].map((d) => (
             <button
               key={d}
-              onClick={() => { setDays(d); load(d); }}
+              onClick={() => { setDays(d); setReload(value => value + 1); }}
               className={cn(
                 PERIOD_BTN,
                 days === d
@@ -60,13 +70,21 @@ export default function InsightsPanelV2() {
         </div>
       </div>
 
+      {loading ? (
+        <div role="status" className="text-14 text-ink-secondary py-6 text-center">Loading insights…</div>
+      ) : request.error ? (
+        <Card><CardBody className="p-4 text-center">
+          <div role="alert" className="text-14 text-alert-fg mb-3">Failed to load insights</div>
+          <Button variant="secondary" onClick={() => setReload(value => value + 1)}>Retry</Button>
+        </CardBody></Card>
+      ) : <>
       {/* Summary metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5">
         <Card>
           <CardBody className="p-4">
             <div className="u-label text-ink-secondary">Rev / route hr</div>
             <div className="u-nums text-22 font-medium tracking-tight text-ink-primary mt-2 leading-none">
-              ${s.avgRevPerHr || '—'}
+              ${s.avgRevPerHr ?? '—'}
             </div>
             <div className="text-11 text-ink-tertiary mt-1">target $100+</div>
           </CardBody>
@@ -78,7 +96,7 @@ export default function InsightsPanelV2() {
               'u-nums text-22 font-medium tracking-tight mt-2 leading-none',
               driveAlert ? 'text-alert-fg' : 'text-ink-primary'
             )}>
-              {s.avgDrivePct || '—'}%
+              {s.avgDrivePct ?? '—'}%
             </div>
             <div className="text-11 text-ink-tertiary mt-1">target &lt;25%</div>
           </CardBody>
@@ -87,7 +105,7 @@ export default function InsightsPanelV2() {
           <CardBody className="p-4">
             <div className="u-label text-ink-secondary">Completion rate</div>
             <div className="u-nums text-22 font-medium tracking-tight text-ink-primary mt-2 leading-none">
-              {s.completionRate || '—'}%
+              {s.completionRate ?? '—'}%
             </div>
             <div className="text-11 text-ink-tertiary mt-1">last {days} days</div>
           </CardBody>
@@ -99,7 +117,7 @@ export default function InsightsPanelV2() {
               'u-nums text-22 font-medium tracking-tight mt-2 leading-none',
               callbackAlert ? 'text-alert-fg' : 'text-ink-primary'
             )}>
-              {s.callbackRate || '—'}%
+              {s.callbackRate ?? '—'}%
             </div>
             <div className="text-11 text-ink-tertiary mt-1">target &lt;5%</div>
           </CardBody>
@@ -108,7 +126,7 @@ export default function InsightsPanelV2() {
           <CardBody className="p-4">
             <div className="u-label text-ink-secondary">Actual revenue</div>
             <div className="u-nums text-22 font-medium tracking-tight text-ink-primary mt-2 leading-none">
-              ${s.actualRevenue ? s.actualRevenue.toLocaleString() : '—'}
+              ${s.actualRevenue != null ? s.actualRevenue.toLocaleString() : '—'}
             </div>
             {s.revenueVariance != null && s.revenueVariance !== 0 && (
               <div className={cn(
@@ -121,7 +139,7 @@ export default function InsightsPanelV2() {
             )}
             {(!s.revenueVariance && s.revenueVariance !== 0) && (
               <div className="text-11 text-ink-tertiary mt-1">
-                vs {s.expectedRevenue ? `$${s.expectedRevenue.toLocaleString()} forecast` : 'no forecast'}
+                vs {s.expectedRevenue != null ? `$${s.expectedRevenue.toLocaleString()} forecast` : 'no forecast'}
               </div>
             )}
           </CardBody>
@@ -133,9 +151,6 @@ export default function InsightsPanelV2() {
         <Card>
           <CardBody className="p-4">
             <div className="u-label text-ink-secondary mb-3">Performance by tech</div>
-            {loading ? (
-              <div className="text-13 text-ink-secondary py-6 text-center">Loading…</div>
-            ) : (
               <div className="divide-y divide-zinc-200">
                 {techs.map((t) => {
                   const techCallbackAlert = t.callbackRate > 5;
@@ -175,7 +190,6 @@ export default function InsightsPanelV2() {
                 })}
                 {!techs.length && <div className="text-13 text-ink-tertiary py-6 text-center">No tech data yet</div>}
               </div>
-            )}
           </CardBody>
         </Card>
 
@@ -206,6 +220,7 @@ export default function InsightsPanelV2() {
           </CardBody>
         </Card>
       </div>
+      </>}
     </div>
   );
 }
