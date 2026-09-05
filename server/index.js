@@ -997,7 +997,9 @@ try {
 // requests already display real service identities instead of the lossy
 // regex fallback (service-catalog-names.js). Bounded: a slow/failed prime
 // falls back to today's behavior rather than delaying boot.
-const primeCatalogNames = config.nodeEnv === 'test' || process.env.WAVES_LOCAL_DEV === '1'
+// Keep this read-only cache in managed dev too: its canonical names are
+// application behavior, unlike the mutating recovery workers below.
+const primeCatalogNames = config.nodeEnv === 'test'
   ? Promise.resolve()
   : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
 
