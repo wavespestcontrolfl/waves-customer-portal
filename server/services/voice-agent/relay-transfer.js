@@ -217,9 +217,19 @@ function withTimeout(promise, ms, fallback) {
  */
 async function transferToOfficeText(input = {}, ctx = {}) {
   const officeOpen = typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
-  if (!isTransferAvailable(officeOpen)) {
-    return 'Transfer is not available right now — the office is closed. Do NOT try again. Offer a callback: '
-      + 'take their details with capture_lead and say a Waves team member will call them back when the office opens.';
+  if (!isTransferGateOn()) {
+    // The live kill switch flipped mid-call (the frozen tool list still
+    // carries the tool): refuse without a word about the office's hours
+    // (codex r6 P2).
+    return 'Transfer is not available on this call. Do NOT try again and do not say the office is open or closed. '
+      + 'Offer a callback: take their details with capture_lead and say a Waves team member will call them back.';
+  }
+  if (officeOpen !== true) {
+    return officeOpen === false
+      ? 'Transfer is not available right now — the office is closed. Do NOT try again. Offer a callback: '
+        + 'take their details with capture_lead and say a Waves team member will call them back when the office opens.'
+      : 'Transfer is not available right now. Do NOT try again and do not say the office is open or closed. '
+        + 'Offer a callback: take their details with capture_lead and say a Waves team member will call them back.';
   }
   if (typeof ctx.transferRequested === 'function' && ctx.transferRequested() === true) {
     return 'The transfer is already in progress. Say nothing further.';

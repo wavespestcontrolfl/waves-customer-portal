@@ -77,13 +77,19 @@ function ctxFor(over = {}) {
 describe('executeTool transfer_to_office', () => {
   test('refuses when the gate is off or the office is closed/unknown — offers the callback instead', async () => {
     const { ctx } = ctxFor();
-    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, ctx)).toMatch(/office is closed.*capture_lead/s);
+    // Gate off mid-call (the frozen tool list still carries the tool): refused WITHOUT a word about the hours (codex r6 P2).
+    const gateOff = await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, ctx);
+    expect(gateOff).toMatch(/not available on this call.*capture_lead/s);
+    expect(gateOff).not.toMatch(/office is closed/);
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
-    for (const officeOpen of [false, null]) {
-      const { ctx: c } = ctxFor({ officeOpenNow: () => officeOpen });
-      expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, c)).toMatch(/office is closed/);
-      expect(c.endForTransfer).not.toHaveBeenCalled();
-    }
+    const { ctx: closed } = ctxFor({ officeOpenNow: () => false });
+    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, closed)).toMatch(/office is closed/);
+    expect(closed.endForTransfer).not.toHaveBeenCalled();
+    const { ctx: unknown } = ctxFor({ officeOpenNow: () => null });
+    const unknownOut = await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, unknown);
+    expect(unknownOut).toMatch(/do not say the office is open or closed/);
+    expect(unknownOut).not.toMatch(/office is closed/);
+    expect(unknown.endForTransfer).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
   });
 
@@ -527,7 +533,7 @@ describe('codex r5 follow-ups', () => {
   test('the CSR coach is skipped when the recorded leg was rejected (P1)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('const csrTranscript = recordedPartOfComposite(transcription) || transcription;');
-    expect(src).toContain("if (transcription && transcription.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {");
+    expect(src).toContain("if (csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {"); // the length gate reads the HUMAN leg (codex r6 P1)
     expect(src).toContain('transcript: csrTranscript,');
   });
 });

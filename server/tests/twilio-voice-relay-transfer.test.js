@@ -112,6 +112,24 @@ describe('/relay-complete', () => {
     // recorder's /voicemail-complete never does, so an unconfirmed ring
     // must not stay reported as a successful transfer (codex r2 P1).
     expect(builder.update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
+    // The deadline cannot cancel the queued claim: when it LANDS later (rows > 0) voicemail is re-stamped, fenced (codex r6 P1).
+    jest.useFakeTimers();
+    const { builder: bl } = primeDb();
+    let settleClaim;
+    let calls = 0;
+    bl.update = jest.fn(() => (++calls === 1 ? new Promise((r) => { settleClaim = r; }) : Promise.resolve(1)));
+    const resL = mockRes();
+    const pl = handlerFor('/relay-complete')({ body: { CallSid: 'CA-late', HandoffData: TRANSFER }, query: {} }, resL);
+    await jest.advanceTimersByTimeAsync(4000);
+    await pl;
+    expect(resL.body).toContain('<Record');
+    expect(bl.update).toHaveBeenCalledTimes(2); // claim (hung) + the bounded voicemail stamp
+    settleClaim(1); // the claim lands after the recorder started
+    await jest.advanceTimersByTimeAsync(0);
+    jest.useRealTimers();
+    await new Promise((r) => setImmediate(r));
+    expect(bl.update).toHaveBeenCalledTimes(3);
+    expect(bl.update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
     // A DB error on the claim takes the same non-duplicating path.
     const { builder: b2 } = primeDb();
     b2.update = jest.fn(async () => { throw new Error('pool down'); });
@@ -231,6 +249,13 @@ describe('/call-complete AI backstop → Sandy → transfer (codex hook r21)', (
     await handlerFor('/call-complete')({ body: { CallSid: 'CA-backstop', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res);
     expect(res.body).toContain('ConversationRelay');
     expect(callLog.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null }));
+    // The reset must CONFIRM before Sandy renders: 0 rows / an error ⇒ voicemail, never a live Sandy call on a terminal status (codex r6 P2).
+    getCallRoutingConfig.mockResolvedValueOnce({ agentEndpoint: 'wss://portal.wavespestcontrol.com/ws/voice-agent' });
+    callLog.update = jest.fn(async () => 0);
+    const res2 = mockRes();
+    await handlerFor('/call-complete')({ body: { CallSid: 'CA-backstop-2', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res2);
+    expect(res2.body).not.toContain('ConversationRelay');
+    expect(res2.body).toContain('<Record');
     // The packet write's status fence lets a live (in-progress) call through and refuses a closed one.
     const fence = "(status IS NULL OR status NOT IN ('completed', 'failed', 'busy', 'no-answer', 'canceled'))";
     expect(fence).not.toMatch(/in-progress/);

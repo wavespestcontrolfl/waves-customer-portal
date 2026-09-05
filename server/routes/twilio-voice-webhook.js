@@ -790,6 +790,13 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
   }
   // The frame names the socket's claim owner (owner-bound writes below).
   const owner = typeof handoff.owner === 'string' && handoff.owner ? handoff.owner.slice(0, 128) : null;
+  // The one voicemail stamp every fallback on this callback takes: owner +
+  // eligible-state fenced, so a reconnect that took the row meanwhile keeps
+  // its own reconcile (hook / codex r3 P1).
+  const stampTransferVoicemail = () => db('call_log').where('twilio_call_sid', callSid)
+    .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
+    .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
+    .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() });
   if (callSid) {
     // ONE staff ring per call, claimed atomically: Twilio may retry this
     // action callback, and every retry would otherwise render a fresh
@@ -807,8 +814,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
     // OWNER-BOUND (hook P1): the frame names the socket's claim owner; a
     // row now owned by a reconnect (or claimed while this frame says
     // unclaimed) matches 0 rows, so a superseded socket cannot ring staff.
-    const claimed = await withDeadline(
-      db('call_log').where('twilio_call_sid', callSid)
+    const claimPromise = db('call_log').where('twilio_call_sid', callSid)
         .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''")
         .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
         // A row already sent to voicemail (the fallback below, or a failed
@@ -820,10 +826,8 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
           metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text)", [new Date().toISOString()]),
           updated_at: new Date(),
         })
-        .catch((err) => { logger.warn(`[relay-complete] transfer ring claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; }),
-      STAMP_DEADLINE_MS,
-      'timeout',
-    );
+        .catch((err) => { logger.warn(`[relay-complete] transfer ring claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
+    const claimed = await withDeadline(claimPromise, STAMP_DEADLINE_MS, 'timeout');
     if (claimed === 0) {
       logger.warn(`[relay-complete] transfer ring already claimed for ${maskSid(callSid)} — retry gets a bare response`);
       return;
@@ -833,17 +837,21 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       // re-classifies: stamp voicemail here (bounded, best-effort) so a
       // transfer that reached nobody is not reported as a success (codex r2 P1).
       logger.error(`[relay-complete] transfer ring claim ${claimed} for ${maskSid(callSid)} — voicemail instead of an unconfirmed ring`);
-      // Same owner + eligible-state fence as the claim (codex r3 P1): a
-      // superseded socket's callback racing a reconnect must not stamp the
-      // replacement session's live row.
       await withDeadline(
-        db('call_log').where('twilio_call_sid', callSid)
-          .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
-          .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
-          .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
-          .catch((err) => logger.warn(`[relay-complete] unconfirmed-ring voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        stampTransferVoicemail().catch((err) => logger.warn(`[relay-complete] unconfirmed-ring voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
         STAMP_DEADLINE_MS,
       );
+      // The deadline does not cancel the queued claim (codex r6 P1): if it
+      // lands later — the row then reads ai_transferred + ring claimed while
+      // the caller is in voicemail — re-stamp voicemail when it does
+      // (detached, same fence; the claim's CASE keeps an already-landed
+      // voicemail, and the claim itself skips voicemail rows).
+      if (claimed === 'timeout') {
+        void claimPromise
+          .then((rows) => (Number(rows) > 0 ? stampTransferVoicemail() : 0))
+          .then((rows) => { if (Number(rows) > 0) logger.warn(`[relay-complete] late ring claim for ${maskSid(callSid)} re-stamped as voicemail`); })
+          .catch((err) => logger.warn(`[relay-complete] late-claim voicemail re-stamp failed for ${maskSid(callSid)}: ${err.message}`));
+      }
       queueVoiceMessageSync(callSid);
       appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
       return;
@@ -859,13 +867,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       // Bounded like every other stamp on this callback: a stalled pool must
       // not hold the voicemail TwiML past Twilio's timeout (hook P1).
       await withDeadline(
-        db('call_log').where('twilio_call_sid', callSid)
-          // Same owner + eligible-state fence as the claim above: a reconnect
-          // that took the row meanwhile keeps its own reconcile (hook P1).
-          .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
-          .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
-          .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
-          .catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        stampTransferVoicemail().catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
         STAMP_DEADLINE_MS,
       );
       queueVoiceMessageSync(callSid);
@@ -1604,17 +1606,29 @@ router.post('/call-complete', async (req, res) => {
               // Sandy — a terminal status here would read as a closed call
               // to the transfer packet's fence (PR 2A). /call-status stamps
               // completed on the real hangup.
-              await db('call_log').where('twilio_call_sid', CallSid)
-                .update({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
-                .catch(() => {});
-              // CallSid binds the upgrade token to THIS call (relay-protocol).
-              // Profile stamped before the relay opens — same reason as /voice.
-              const relayOpts = activeRelayTwiMLOptions();
-              await withDeadline(stampRelayProfile(CallSid, relayOpts));
-              return res.type('text/xml').send(buildRelayTwiML({
-                wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
-                ...relayOpts,
-              }));
+              // CONFIRMED before the relay renders (codex r6 P2): a reset that
+              // failed would leave the terminal status on a live Sandy call
+              // and every later transfer refused; with the DB down the
+              // session could not claim the row either — voicemail is the
+              // coherent fallback.
+              const reset = await withDeadline(
+                db('call_log').where('twilio_call_sid', CallSid)
+                  .update({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
+                  .catch((err) => { logger.warn(`[call-complete] backstop status reset failed for ${maskSid(CallSid)}: ${err.message}`); return 0; }),
+                STAMP_DEADLINE_MS,
+                0,
+              );
+              if (Number(reset) > 0) {
+                // CallSid binds the upgrade token to THIS call (relay-protocol).
+                // Profile stamped before the relay opens — same reason as /voice.
+                const relayOpts = activeRelayTwiMLOptions();
+                await withDeadline(stampRelayProfile(CallSid, relayOpts));
+                return res.type('text/xml').send(buildRelayTwiML({
+                  wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
+                  ...relayOpts,
+                }));
+              }
+              logger.warn(`[call-complete] backstop relay skipped for ${maskSid(CallSid)} — status reset unconfirmed; voicemail`);
             }
             if (handoffKind === 'dial') {
               logger.info(`[call-complete] AI backstop dial (${decision.reason}) for ${maskSid(CallSid)}`);
