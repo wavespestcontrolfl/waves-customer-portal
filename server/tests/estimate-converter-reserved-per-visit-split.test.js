@@ -135,3 +135,69 @@ describe('reservedAcceptPerVisitSplit — codex #3938 r1', () => {
     })).toEqual({ reserved: 91.8, promoted: [120] });
   });
 });
+
+describe('reservedAcceptPerVisitSplit — codex #3938 r2', () => {
+  const bait = { service: 'termite_bait', name: 'Termite Bait Stations', annualAfterDiscount: 480, visitsPerYear: 4 };
+
+  test('a reserved row the combined route rewrites (pest + bait) takes the pair\'s sum; the lawn promotion its own', () => {
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 271.8,
+      reservedService: [pestLine, bait],
+      promotedServices: [lawnLine],
+      acceptedPlanFrequency: 'quarterly',
+    })).toEqual({ reserved: 211.8, promoted: [60] });
+  });
+
+  test('a promoted COMBO unit (gate on) prices the two lines it performs', () => {
+    const tree = { service: 'tree_shrub', name: 'Tree & Shrub', annualAfterDiscount: 360, visitsPerYear: 9 };
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 191.8,
+      reservedService: pestLine,
+      promotedServices: [[lawnLine, tree]],
+      acceptedPlanFrequency: 'quarterly',
+    })).toEqual({ reserved: 91.8, promoted: [100] });
+  });
+
+  test('the accept route\'s per-row amounts are the authority when present (preference credit on pest)', () => {
+    // Customer declined interior spraying: the route priced the pest row at
+    // 81.80, not the line's 91.80 — the reserved total is 141.80.
+    const rowAmounts = [
+      { service: 'pest_control', name: 'Pest Control', amount: 81.8 },
+      { service: 'lawn_care', name: 'Every 6 Weeks Lawn Care Service', amount: 60 },
+    ];
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 141.8,
+      reservedService: pestLine,
+      promotedServices: [lawnLine],
+      acceptedPlanFrequency: 'quarterly',
+      rowAmounts,
+    })).toEqual({ reserved: 81.8, promoted: [60] });
+    // Reconstruction alone would have declined this shape.
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 141.8, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly',
+    })).toBeNull();
+  });
+
+  test('route rows must map one-to-one onto the seeded lines — an unmatched row or a missing row declines', () => {
+    const extra = [
+      { service: 'pest_control', name: 'Pest Control', amount: 91.8 },
+      { service: 'lawn_care', name: 'Every 6 Weeks Lawn Care Service', amount: 60 },
+      { service: 'mosquito', name: 'Mosquito', amount: 40 },
+    ];
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 191.8, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly', rowAmounts: extra,
+    })).toBeNull();
+    const missingLawn = [{ service: 'pest_control', name: 'Pest Control', amount: 91.8 }];
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 91.8, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly', rowAmounts: missingLawn,
+    })).toBeNull();
+    // Unrounded route figures reconcile the way the route rounds them: at the total.
+    const cents = [
+      { service: 'pest_control', name: 'Pest Control', amount: 91.804 },
+      { service: 'lawn_care', name: 'Every 6 Weeks Lawn Care Service', amount: 60.004 },
+    ];
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 151.81, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly', rowAmounts: cents,
+    })).toEqual({ reserved: 91.8, promoted: [60] });
+  });
+});

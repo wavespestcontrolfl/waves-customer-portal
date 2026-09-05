@@ -9949,6 +9949,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const sameDayVisitTotal = !treatAsOneTime && !selectedServiceTierBillsMonthly
       ? sameDayVisitTotalForPricingFrequency(pricingVisitFrequency, { preferences: acceptPrefs, services: recurringSvcList })
       : null;
+    // The per-row figures that total summed (WaveGuard-net, preference-
+    // adjusted) — handed to the converter so a multi-program reserved accept
+    // can split the reserved row's price back into per-line follow-up prices
+    // from the SAME authority (codex #3938 r2 P1: the converter cannot
+    // reconstruct a preference credit). null when the total came from a
+    // fallback with no per-row composition.
+    const firstApplicationRowAmounts = !treatAsOneTime && !selectedServiceTierBillsMonthly
+      ? (sameDayVisitRowAmounts(pricingVisitFrequency, { preferences: acceptPrefs, services: recurringSvcList }) || [])
+        .map(({ row, amount }) => ({
+          service: row?.service ?? row?.serviceKey ?? row?.service_key ?? row?.key ?? null,
+          name: row?.name ?? row?.label ?? row?.displayName ?? null,
+          amount,
+        }))
+      : [];
     // Multi-service plan-credit slices (owner GO 2026-08-04, codex #3183 P0:
     // shown == accepted == billed). Only when the visit total came from the
     // per-row derivation (the slice base) — a fallback-priced total has no
@@ -11354,6 +11368,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which
           // cannot see this transaction's uncommitted customer/appointment
