@@ -83,7 +83,9 @@ async function apiPost(path, body) {
 async function apiGet(path) {
   const token = getAdminAuthToken();
   const res = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${token}` } });
-  return res.ok ? res.json() : { notifications: [] };
+  // A failed poll is skipped, not treated as an empty feed: the visit-card
+  // reconcile below would otherwise clear every persistent card on a 5xx.
+  return res.ok ? res.json() : Promise.reject(new Error(`${res.status}`));
 }
 
 function getPosition() {
@@ -105,9 +107,19 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     try {
       const { notifications = [] } = await apiGet('/api/tech/notifications');
       const fresh = notifications.filter((n) => !seenIds.current.has(n.id));
-      if (fresh.length === 0) return;
       fresh.forEach((n) => seenIds.current.add(n.id));
-      setActive((prev) => [...prev, ...fresh]);
+      // Visit cards never auto-dismiss, so the server feed is their only
+      // source of truth: one the feed no longer lists (tapped "Got it" on
+      // the tech's other device, or pushed out of the feed window by a
+      // burst) leaves this screen too — and is forgotten, so it can come
+      // back if the feed lists it again. Timed cards stay client-owned.
+      const listed = new Set(notifications.map((n) => n.id));
+      setActive((prev) => {
+        const gone = prev.filter((n) => VISIT_TYPES.has(n.type) && !listed.has(n.id));
+        gone.forEach((n) => seenIds.current.delete(n.id));
+        if (gone.length === 0 && fresh.length === 0) return prev;
+        return [...prev.filter((n) => !gone.includes(n)), ...fresh];
+      });
     } catch {
       // network hiccups are fine; next poll will retry
     }

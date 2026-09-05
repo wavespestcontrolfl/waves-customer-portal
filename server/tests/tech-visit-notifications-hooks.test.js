@@ -274,19 +274,57 @@ describe('direct creators tell the tech (source order)', () => {
 });
 
 describe('cancel-flow plan hold (source order)', () => {
-  test('every per-move notice is suppressed (forward AND revert); the holders hear only after the hold write committed', () => {
+  test('every per-move notice is suppressed (forward AND revert); startHold RETURNS the notices and the action emits them only once every family + Away Mode stand', () => {
     const fs = require('fs');
     const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/holds.js'), 'utf8');
-    expect(src).toContain("}, 'plan_hold', 'customer', { suppressTechNotice: true });");
-    expect(src).toContain("'plan_hold_revert', 'customer', { suppressTechNotice: true });");
-    const holdWrite = src.indexOf("await trx('plan_holds').insert({");
-    const compensate = src.indexOf("throw codedError('hold_setup_failed'");
-    const notice = src.indexOf('void techNotices.notifyVisitRescheduled({');
-    expect(holdWrite).toBeGreaterThan(-1);
-    expect(notice).toBeGreaterThan(compensate);
+    const holds = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/holds.js'), 'utf8');
+    expect(holds).toContain("}, 'plan_hold', 'customer', { suppressTechNotice: true });");
+    expect(holds).toContain("'plan_hold_revert', 'customer', { suppressTechNotice: true });");
+    // startHold never emits: the notices are built after the last
+    // compensation point and handed back to the caller.
+    expect(holds).not.toContain('void techNotices.notifyVisitRescheduled(');
+    const compensate = holds.indexOf("throw codedError('hold_setup_failed'");
+    const built = holds.indexOf('const techNotices = moved');
+    expect(built).toBeGreaterThan(compensate);
+    expect(holds).toContain('moved: moved.length, techNotices };');
     // The recipient is the holder on the COMMITTED move (rebooker result).
-    expect(src).toContain("movedTechIds.set(String(visit.id), moveResult?.technicianId || null);");
+    expect(holds).toContain("movedTechIds.set(String(visit.id), moveResult?.technicianId || null);");
+    // The action emits after its own compensation catch (multi-family) …
+    const actions = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/actions.js'), 'utf8');
+    const holdCatch = actions.indexOf("try { await cancelHold(done.holdId, { compensateVisits: true }); }");
+    const holdEmit = actions.indexOf('if (!deferTechNotices) emitHoldTechNotices(techNotices);');
+    expect(holdEmit).toBeGreaterThan(holdCatch);
+    // … and the away pairing defers past Away Mode's own compensation catch.
+    expect(actions).toContain('await executeHold({ ...ctx, deferTechNotices: true });');
+    const awayCatch = actions.indexOf("try { await cancelHold(holdId, { compensateVisits: true }); }");
+    const awayEmit = actions.indexOf("require('./holds').emitHoldTechNotices(techNotices);");
+    expect(awayEmit).toBeGreaterThan(awayCatch);
+  });
+});
+
+describe('Codex r7 writers (source order)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('the admin-schedule status route confirms voice-agent bookings too and sends the same assigned card, post-commit', () => {
+    const src = read('../routes/admin-schedule.js');
+    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id");
+    expect(hook).toBeGreaterThan(-1);
+    expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,");
+    // After the status transaction's catch block, before the activation helper.
+    expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
+    expect(src.lastIndexOf('// ===== Post-success side effects =====', hook)).toBeGreaterThan(-1);
+    expect(src.indexOf("runOfficeConfirmActivation(db, svc, 'admin-schedule'", hook)).toBeGreaterThan(hook);
+  });
+
+  test('Office Combine suppresses every tentative move (forward and rollback) and tells the holders after tryGroup() stands', () => {
+    const src = read('../services/visit-combine.js');
+    expect(src).toContain('    suppressTechNotice: true,\n    expect,');
+    const group = src.indexOf('const visit = await tryGroup();');
+    const notice = src.indexOf('void techNotices.notifyVisitRescheduled({');
+    expect(notice).toBeGreaterThan(group);
+    expect(src.indexOf('} catch (err) {', group)).toBeGreaterThan(notice);
   });
 });
 

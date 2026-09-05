@@ -243,21 +243,19 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
     throw codedError('hold_setup_failed', 'We could not set the hold up — nothing changed. Call our office and we will do it by hand');
   }
 
-  // The hold stands and nothing can revert the moves now — tell each
-  // visit's holder (tech-visit-notifications.js: post-commit, best-effort,
-  // never awaited, gate-dark; actor "the customer online").
-  {
-    const techNotices = require('../tech-visit-notifications');
-    for (const m of moved) {
-      const technicianId = movedTechIds.get(String(m.id));
-      if (!technicianId) continue;
-      void techNotices.notifyVisitRescheduled({
-        visitId: m.id, technicianId, actorId: 'customer',
-        previous: { date: m.from, windowStart: m.window.start, windowEnd: m.window.end },
-        snapshot: { date: m.to, windowStart: m.window.start, windowEnd: m.window.end },
-      });
-    }
-  }
+  // The hold stands, but the ENCLOSING action may not yet: a later family
+  // in a multi-family hold, or the Away Mode write paired with it, can
+  // still fail and cancelHold(compensateVisits) every hold this accept
+  // made — and those compensating moves are silent. So the per-visit
+  // notices are RETURNED, not emitted; the action emits them
+  // (emitHoldTechNotices) once every family and Away Mode succeeded.
+  const techNotices = moved
+    .map((m) => ({
+      visitId: m.id, technicianId: movedTechIds.get(String(m.id)) || null, actorId: 'customer',
+      previous: { date: m.from, windowStart: m.window.start, windowEnd: m.window.end },
+      snapshot: { date: m.to, windowStart: m.window.start, windowEnd: m.window.end },
+    }))
+    .filter((n) => n.technicianId);
 
   try {
     await db('customer_interactions').insert({
@@ -268,7 +266,18 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
     });
   } catch (err) { logger.warn(`[holds] hold note failed for ${customerId}: ${err.message}`); }
 
-  return { holdId, familyKey, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length };
+  return { holdId, familyKey, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length, techNotices };
+}
+
+/**
+ * Tell each moved visit's holder, once nothing can revert the moves
+ * (tech-visit-notifications.js: post-commit, best-effort, never awaited,
+ * gate-dark; actor "the customer online"). A notice whose row has since
+ * moved on is dropped at write time.
+ */
+function emitHoldTechNotices(techNotices) {
+  const notices = require('../tech-visit-notifications');
+  for (const n of techNotices || []) void notices.notifyVisitRescheduled(n);
 }
 
 /**
@@ -495,4 +504,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, startHold, cancelHold, shiftHoldResume, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, startHold, cancelHold, emitHoldTechNotices, shiftHoldResume, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

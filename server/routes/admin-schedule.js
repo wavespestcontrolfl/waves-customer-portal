@@ -12651,6 +12651,21 @@ router.put('/:id/status', async (req, res, next) => {
     // best-effort with try/catch + log + continue; a failure in one
     // doesn't block the others.
 
+    // A voice-agent booking is inserted SILENT (relay-booking.js: a pending
+    // office-review row is not yet real); the office confirm is when it
+    // becomes a visit on the tech's route, and no assignment write follows —
+    // so the "new visit" card fires here, post-commit, exactly as it does on
+    // the admin-dispatch status route (the other surface staff confirm
+    // from). Call-created office-review rows were announced at insert
+    // (call-proc) and stay quiet. A technician confirming their own visit is
+    // the actor AND the recipient, so that stays silent too.
+    if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,
+        snapshot: { date: svc.scheduled_date, windowStart: svc.window_start || null, windowEnd: svc.window_end || null },
+      });
+    }
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch

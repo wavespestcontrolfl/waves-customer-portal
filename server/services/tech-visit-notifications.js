@@ -145,7 +145,8 @@ function placeLabel(visit) {
 /**
  * Compose the card's headline / message / payload for one kind. Pure.
  * `previous` is { date, windowStart, windowEnd } for rescheduled;
- * `newTechnicianName` names who now holds an unassigned visit.
+ * `newTechnicianName` names who holds an unassigned visit NOW (read off
+ * the locked row, never the hook's own destination).
  */
 function composeCard({ kind, visit, actorText, previous, newTechnicianName }) {
   const who = customerLabel(visit);
@@ -195,25 +196,58 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName }) {
   };
 }
 
-async function loadVisit(visitId, conn) {
-  return conn('scheduled_services as s')
+// The visit + its customer. Inside the card transaction the visit row is
+// locked FOR SHARE (of s only — the customer row stays free) so the
+// contradiction check below and the feed insert see ONE committed state:
+// a writer's UPDATE on the same row waits for the card to land, and a
+// writer that already holds the row makes this read wait for its commit.
+async function loadVisit(visitId, conn, { lock = false } = {}) {
+  let q = conn('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
-    .where('s.id', visitId)
-    .first(
-      's.id', 's.service_type', 's.scheduled_date', 's.window_start', 's.window_end', 's.technician_id', 's.status',
-      's.service_address_line1', 's.service_address_city',
-      'c.first_name as cust_first_name', 'c.last_name as cust_last_name',
-      'c.address_line1 as cust_address', 'c.city as cust_city',
-    );
+    .where('s.id', visitId);
+  if (lock) q = q.forShare('s');
+  return q.first(
+    's.id', 's.service_type', 's.scheduled_date', 's.window_start', 's.window_end', 's.technician_id', 's.status',
+    's.service_address_line1', 's.service_address_city',
+    'c.first_name as cust_first_name', 'c.last_name as cust_last_name',
+    'c.address_line1 as cust_address', 'c.city as cust_city',
+  );
+}
+
+// Does the committed row still agree with the card? The per-visit queue
+// orders notices within ONE process; during a deploy two app instances
+// overlap (cron-lock.js), so an A→B card prepared on the old instance can
+// run after B→C committed through the new one. A card the row already
+// contradicts is dropped — the writer of the later change tells the tech
+// the current state, and the newest feed row is never stale. Returns the
+// row's holder (technicians.id or null) when the card stands, else false.
+function cardStands({ kind, technicianId, snapshot }, row) {
+  const holder = row.technician_id ? String(row.technician_id) : null;
+  const recipient = String(technicianId);
+  if (kind === 'assigned' || kind === 'rescheduled') {
+    if (holder !== recipient) return false;
+    // A visit that has since ended (cancelled, completed, …) has no
+    // "new visit" / "moved" card left to deliver.
+    if (TERMINAL_VISIT_STATUSES.has(String(row.status))) return false;
+    // The schedule this hook committed must still be the row's schedule:
+    // two same-tech moves prepared out of order (deploy overlap, a
+    // deferred hold notice) would otherwise leave the OLDER "Now …" as
+    // the newest card. The later move's own card is the one that lands.
+    if (snapshotSuperseded(snapshot, row)) return false;
+  }
+  if (kind === 'unassigned' && holder === recipient) return false;
+  if (kind === 'cancelled' && String(row.status) !== 'cancelled') return false;
+  return { holder };
 }
 
 /**
- * Resolve one notice without writing anything: the silent rules, the
- * recipient, the visit, the composed card. Returns { ok: false, skipped }
- * or { ok: true, ...notice }. Never throws.
+ * Resolve the parts of one notice that do not depend on the visit row:
+ * the silent rules, the recipient, who acted. Returns { ok: false, skipped }
+ * or { ok: true, ...notice }; the row itself is read — and checked — under
+ * lock when the card is written (writeCard). Never throws.
  */
 async function prepareNotice({
-  visitId, kind, technicianId, actorId = null, previous = null, newTechnicianId = null, snapshot = null, conn = db,
+  visitId, kind, technicianId, actorId = null, previous = null, snapshot = null, conn = db,
 } = {}) {
   try {
     if (!enabled()) return { ok: false, skipped: 'gate_off' };
@@ -225,55 +259,16 @@ async function prepareNotice({
       .first('id', 'name', 'employment_status', 'field_dispatchable');
     if (!isAssignable(tech)) return { ok: false, skipped: 'not_assignable' };
 
-    const row = await loadVisit(visitId, conn);
-    if (!row) return { ok: false, skipped: 'no_visit' };
-    // The committed row must still agree with the card. The per-visit queue
-    // orders notices within ONE process; during a deploy two app instances
-    // overlap (cron-lock.js), so an A→B card prepared on the old instance
-    // can run after B→C committed through the new one. A card the row
-    // already contradicts is dropped — the writer of the later change tells
-    // the tech the current state, and the newest feed row is never stale.
-    const holder = row.technician_id ? String(row.technician_id) : null;
-    const recipient = String(technicianId);
-    if (kind === 'assigned' || kind === 'rescheduled') {
-      if (holder !== recipient) return { ok: false, skipped: 'stale' };
-      // A visit that has since ended (cancelled, completed, …) has no
-      // "new visit" / "moved" card left to deliver.
-      if (TERMINAL_VISIT_STATUSES.has(String(row.status))) return { ok: false, skipped: 'stale' };
-      // The schedule this hook committed must still be the row's schedule:
-      // two same-tech moves prepared out of order (deploy overlap, a
-      // deferred hold notice) would otherwise leave the OLDER "Now …" as
-      // the newest card. The later move's own card is the one that lands.
-      if (snapshotSuperseded(snapshot, row)) return { ok: false, skipped: 'stale' };
-    }
-    if (kind === 'unassigned' && holder === recipient) return { ok: false, skipped: 'stale' };
-    if (kind === 'cancelled' && String(row.status) !== 'cancelled') return { ok: false, skipped: 'stale' };
-    // The card describes the schedule the hook COMMITTED, not whatever the
-    // row holds by the time delivery runs (a later move must not rewrite
-    // this card's "Now …"). Callers pass what they wrote; the row supplies
-    // the rest (customer, service, address).
-    const visit = {
-      ...row,
-      ...(snapshot?.date !== undefined ? { scheduled_date: snapshot.date } : {}),
-      ...(snapshot?.windowStart !== undefined ? { window_start: snapshot.windowStart } : {}),
-      ...(snapshot?.windowEnd !== undefined ? { window_end: snapshot.windowEnd } : {}),
-    };
-
     const actorText = await describeActor(actorId, conn);
-    let newTechnicianName = null;
-    if (kind === 'unassigned' && newTechnicianId) {
-      const next = await conn('technicians').where({ id: newTechnicianId }).first('name');
-      newTechnicianName = next?.name || null;
-    }
-    const card = composeCard({ kind, visit, actorText, previous, newTechnicianName });
     return {
       ok: true,
       visitId,
       kind,
       technicianId,
+      actorText,
+      previous,
+      snapshot,
       type: TYPE_BY_KIND[kind],
-      message: card.message,
-      payload: card.payload,
       pushTitle: PUSH_TITLE_BY_KIND[kind],
     };
   } catch (err) {
@@ -282,19 +277,41 @@ async function prepareNotice({
   }
 }
 
-// The feed row: same insert helper the geofence prompts use (lazy — the
-// handler module is heavy and this module is required from writers). The
-// helper logs and returns false on a failed insert; that card is then NOT
-// pushed — a push with no card behind it would send the tech to an empty
-// feed.
+// The feed row (same columns the geofence prompts insert). The visit row
+// is read under FOR SHARE and checked against the card in the SAME
+// transaction as the insert, so no other transition can commit between
+// the check and the card (deploy overlap, two instances): a stale card is
+// dropped (returns false), never written as the newest row. The card
+// describes the schedule the hook COMMITTED (the caller's snapshot), not
+// whatever the row holds by delivery time; the row supplies the rest
+// (customer, service, address) and — for a moved-off card — who holds the
+// visit NOW, so rapid A→B→C never tells A "Now with B".
 async function writeCard(notice) {
-  const { sendTechNotification } = require('./geofence-handler');
-  const ok = await sendTechNotification(notice.technicianId, {
-    type: notice.type,
-    message: notice.message,
-    payload: notice.payload,
+  return db.transaction(async (trx) => {
+    const row = await loadVisit(notice.visitId, trx, { lock: true });
+    if (!row) return false;
+    const stands = cardStands(notice, row);
+    if (!stands) return false;
+    const visit = {
+      ...row,
+      ...(notice.snapshot?.date !== undefined ? { scheduled_date: notice.snapshot.date } : {}),
+      ...(notice.snapshot?.windowStart !== undefined ? { window_start: notice.snapshot.windowStart } : {}),
+      ...(notice.snapshot?.windowEnd !== undefined ? { window_end: notice.snapshot.windowEnd } : {}),
+    };
+    let newTechnicianName = null;
+    if (notice.kind === 'unassigned' && stands.holder) {
+      const next = await trx('technicians').where({ id: stands.holder }).first('name');
+      newTechnicianName = next?.name || null;
+    }
+    const card = composeCard({ kind: notice.kind, visit, actorText: notice.actorText, previous: notice.previous, newTechnicianName });
+    await trx('tech_notifications').insert({
+      technician_id: notice.technicianId,
+      type: notice.type,
+      message: card.message,
+      payload: JSON.stringify(card.payload),
+    });
+    return true;
   });
-  if (ok === false) throw new Error(`feed insert failed for tech ${notice.technicianId}`);
 }
 
 // Best-effort push; the card is already durable when this runs.
@@ -318,16 +335,17 @@ async function pushCard(notice) {
 // B→C) must never let B's stale "new visit" land after its "moved off".
 async function deliver(notices) {
   const written = [];
+  let dropped = 0;
   for (const n of notices.filter((x) => x && x.ok)) {
     try {
-      await writeCard(n);
-      written.push(n);
+      if (await writeCard(n)) written.push(n);
+      else dropped += 1;
     } catch (err) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId}: ${err.message}`);
     }
   }
   for (const n of written) await pushCard(n);
-  return written.length;
+  return { written: written.length, dropped };
 }
 
 /**
@@ -342,13 +360,13 @@ async function deliver(notices) {
  *                                       system label ('auto_dispatch', …)
  * @param {object|null} [args.previous]  { date, windowStart, windowEnd } —
  *                                       rescheduled only
- * @param {string|null} [args.newTechnicianId]  unassigned only: who has it now
  */
 async function runNotice(args = {}) {
   const notice = await prepareNotice(args);
   if (!notice.ok) return { sent: false, skipped: notice.skipped };
-  const written = await deliver([notice]);
-  return written ? { sent: true } : { sent: false, skipped: 'error' };
+  const { written, dropped } = await deliver([notice]);
+  if (written) return { sent: true };
+  return { sent: false, skipped: dropped ? 'stale' : 'error' };
 }
 
 // Public single-notice entry (creation hooks call it directly): it rides
@@ -414,7 +432,7 @@ function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, a
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
     const notices = [];
-    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, newTechnicianId: to, snapshot }));
+    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, snapshot }));
     if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot }));
     await deliver(notices);
   }, visitId);

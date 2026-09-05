@@ -28,11 +28,18 @@ const GONE = notification('visit_cancelled', {
   when: 'Thu Sep 10, 9–11 AM', actor: 'by the office',
 });
 
+// `notifications` may be a function of the poll number (1-based) to vary
+// the feed across polls; a poll may also be `{ error: status }`.
 function stubFeed(notifications) {
   const calls = [];
+  let polls = 0;
   vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method || 'GET' });
-    if (!init.method) return { ok: true, json: async () => ({ notifications }) };
+    if (!init.method) {
+      const feed = typeof notifications === 'function' ? notifications(++polls) : notifications;
+      if (feed && feed.error) return { ok: false, status: feed.error, json: async () => ({}) };
+      return { ok: true, json: async () => ({ notifications: feed }) };
+    }
     return { ok: true, json: async () => ({}) };
   }));
   return calls;
@@ -97,6 +104,29 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     await act(async () => { await Promise.resolve(); });
     expect(screen.getAllByTestId('visit-notice')[1]).toHaveTextContent('Customer 3');
     expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('2 more schedule changes');
+  });
+
+  it('a visit card the feed no longer lists (dismissed on the tech\'s other device) leaves this screen without a dismiss call, and comes back if the feed lists it again; a failed poll changes nothing', async () => {
+    const calls = stubFeed((poll) => {
+      if (poll === 2) return [MOVED]; // ASSIGNED was dismissed elsewhere
+      if (poll === 3) return { error: 503 }; // a bad poll is not an empty feed
+      return [ASSIGNED, MOVED]; // poll 4: the feed lists it again (it had only been pushed out of the window)
+    });
+    render(<GeofenceArrivalPrompt />);
+    await act(async () => { await Promise.resolve(); });
+    expect(await screen.findAllByTestId('visit-notice')).toHaveLength(2);
+
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    const after = await screen.findAllByTestId('visit-notice');
+    expect(after).toHaveLength(1);
+    expect(after[0]).toHaveTextContent('Visit moved');
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    expect(screen.getAllByTestId('visit-notice')).toHaveLength(1);
+
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    expect(await screen.findAllByTestId('visit-notice')).toHaveLength(2);
   });
 
   it('stays until "Got it" (dismiss) — the 5-minute reminder timer never marks it read', async () => {
