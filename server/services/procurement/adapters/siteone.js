@@ -63,6 +63,11 @@ const { uploadEvidence } = require('../../seo/signup-evidence');
 let chromium;
 try { ({ chromium } = require('playwright')); } catch { chromium = null; }
 
+// Every label + qualifier the confirmation parser (`orderNumbersIn`) reads a
+// number after; `:has-text()` is case-insensitive, and "ref" covers
+// "reference". Mirrored by the selector test.
+const CONFIRMATION_LABELS = Object.freeze(['Order #', 'Order number', 'Order no', 'Order ID', 'Order ref', 'Order confirmation', 'Confirmation #', 'Confirmation number', 'Confirmation no', 'Confirmation ID', 'Confirmation ref']);
+
 const SELECTORS = Object.freeze({
   loginUser: 'input[name="username"], input[name="email"], input[type="email"], input#username, input#j_username',
   loginPass: 'input[name="password"], input[type="password"]',
@@ -111,10 +116,12 @@ const SELECTORS = Object.freeze({
   // ancestor's text — and place() requires exactly ONE match (pre-push P0).
   checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .checkout .payment-method.selected .account-number, .checkout [data-test="bill-to-account"] .account-number',
   checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, .checkout [data-test="shipping-address"]',
-  // The confirmation node: dedicated number elements, plus the textual
-  // formats `orderNumbersIn` accepts ("Order #", "order number is",
-  // "confirmation number") in ordinary headings / paragraphs (Codex #3900 P2).
-  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, :is(h1, h2, h3, p, strong):has-text("Order #"), :is(h1, h2, h3, p, strong):has-text("order number"), :is(h1, h2, h3, p, strong):has-text("confirmation number"), :is(h1, h2, h3, p, strong):has-text("Confirmation #"), :is(h1, h2, h3, p, strong):has-text("Order ID"), :is(h1, h2, h3, p, strong):has-text("Order no"), :is(h1, h2, h3, p, strong):has-text("Order ref"), :is(h1, h2, h3, p, strong):has-text("Confirmation ID")',
+  // The confirmation node: dedicated number elements, plus every textual
+  // label `orderNumbersIn` accepts (order / confirmation + #, number, no,
+  // ID, ref[erence], confirmation) in ordinary headings / paragraphs — one
+  // list drives both, so the selector never lags the parser (Codex #3900
+  // P2, r5 P2, r6 P2).
+  orderNumber: ['[data-test="order-number"]', '.order-number', '.confirmation-number', '.order-confirmation-number', ...CONFIRMATION_LABELS.map((label) => `:is(h1, h2, h3, p, strong):has-text("${label}")`)].join(', '),
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   // Confirmation-number element only — never a bare :has-text() that an
   // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
