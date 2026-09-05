@@ -386,6 +386,8 @@ describe('order quantity (PR r1 P2)', () => {
     expect(orderFor({ inventory_unit: 'fl_oz' }, '2.5 gal', null).quantity).toBe(320);
     expect(orderFor({ inventory_unit: 'gal' }, '2.5 gal', null).quantity).toBe(2.5);
     expect(orderFor({ inventory_unit: 'each' }, null, null).quantity).toBe(1);
+    // An unconvertible pack unit withholds ordering (hook P1 on the add-ons PR).
+    expect(orderFor({ inventory_unit: 'fl_oz' }, '1 each', null).quantity).toBeNull();
   });
 });
 

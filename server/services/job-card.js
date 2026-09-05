@@ -1060,13 +1060,18 @@ function orderFor(product, packSize, shortage, { includePricing = false } = {}) 
     if (m && unit) {
       const packUnit = m[2].trim().toLowerCase().replace(/\s+/g, '_');
       quantity = packUnit === String(unit).toLowerCase() ? Number(m[1]) : convertInventoryQuantity(Number(m[1]), packUnit, unit);
+      // A pack whose unit cannot be converted withholds ordering (quantity
+      // null → button disabled) rather than requesting one unit of it.
+      if (!(quantity > 0)) quantity = null;
+    } else {
+      quantity = 1;
     }
   }
   return {
     packSize: packSize || null,
     ...(includePricing ? { lastPrice: product.best_price_amount_cached != null ? Number(product.best_price_amount_cached) : null } : {}),
     unit,
-    quantity: quantity > 0 ? quantity : 1,
+    quantity,
   };
 }
 
