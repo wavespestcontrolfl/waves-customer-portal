@@ -7,13 +7,14 @@
 
 const db = require('../../../models/db');
 const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
+const { whereNotSandboxCall } = require('../../voice-agent/relay-protocol');
 
 const SOURCE = 'call_log';
 const LANE = 'call_extraction';
 // Sort / page key = the run's startedAt in fromRow, at ms precision.
-const START = db.raw("date_trunc('milliseconds', COALESCE(processing_started_at, created_at))");
+const START = () => db.raw("date_trunc('milliseconds', COALESCE(processing_started_at, created_at))");
 const ID = 'id';
-const COLUMNS = [
+const COLUMNS = () => [
   'id', 'direction', 'status', 'duration_seconds', 'processing_status', 'transcription_status', 'v2_extraction_status',
   'classification', 'disposition', 'call_outcome', 'processing_started_at', 'processing_heartbeat_at',
   db.raw('(ai_extraction_enriched IS NOT NULL) AS enriched'),
@@ -94,13 +95,15 @@ function fromRow(c) {
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(db('call_log')
-      .select(COLUMNS)
+      .select(COLUMNS())
       .whereNotNull('processing_status')
+      // a voice-agent sandbox call is not a run anyone supervises
+      .modify((qb) => whereNotSandboxCall(qb))
       .where((q) => {
         // queued and in-flight calls stay listed however old (a stuck queue is the point)
         q.whereIn('processing_status', ['pending', 'processing']);
-        q.orWhere(START, '>=', from);
-      }), { source: SOURCE, idColumn: 'call_log.id' }), { start: START, id: ID, cursor, limit });
+        q.orWhere(START(), '>=', from);
+      }), { source: SOURCE, idColumn: 'call_log.id' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };
@@ -110,7 +113,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
 
 async function get(id) {
   try {
-    const row = await db('call_log').select(COLUMNS).where({ id }).first();
+    const row = await db('call_log').select(COLUMNS()).where({ id }).modify((qb) => whereNotSandboxCall(qb)).first();
     return row ? { run: fromRow(row) } : null;
   } catch (err) {
     if (isMissingSchema(err)) return null;

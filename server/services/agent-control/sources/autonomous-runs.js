@@ -11,9 +11,9 @@ const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require
 const SOURCE = 'autonomous_runs';
 const LANE = 'blog_draft';
 // Sort / page key = the run's startedAt in fromRow, at ms precision.
-const START = db.raw("date_trunc('milliseconds', COALESCE(claimed_at, created_at))");
+const START = () => db.raw("date_trunc('milliseconds', COALESCE(claimed_at, created_at))");
 const ID = 'id';
-const COLUMNS = [
+const COLUMNS = () => [
   'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
   db.raw("draft_payload->>'title' AS draft_title"),
   db.raw("draft_payload->'frontmatter'->>'title' AS draft_frontmatter_title"),
@@ -123,12 +123,12 @@ function fromRow(run) {
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(db('autonomous_runs')
-      .select(COLUMNS)
+      .select(COLUMNS())
       .where((q) => {
         q.whereNull('completed_at');
         q.orWhereRaw(PARKED);
-        q.orWhere(START, '>=', from);
-      }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: START, id: ID, cursor, limit });
+        q.orWhere(START(), '>=', from);
+      }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };
@@ -138,7 +138,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
 
 async function get(id) {
   try {
-    const row = await db('autonomous_runs').select(COLUMNS).where({ id }).first();
+    const row = await db('autonomous_runs').select(COLUMNS()).where({ id }).first();
     return row ? { run: fromRow(row) } : null;
   } catch (err) {
     if (isMissingSchema(err)) return null;

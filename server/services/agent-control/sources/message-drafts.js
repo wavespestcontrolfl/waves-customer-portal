@@ -8,9 +8,9 @@ const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema
 
 const SOURCE = 'message_drafts';
 const LANE = 'sms_draft';
-const START = db.raw("date_trunc('milliseconds', d.created_at)");
+const START = () => db.raw("date_trunc('milliseconds', d.created_at)");
 const ID = 'd.id';
-const COLUMNS = [
+const COLUMNS = () => [
   'd.id', 'd.intent', 'd.drafter', 'd.draft_ms', 'd.created_at', 'd.approved_at', 'd.sent_at', 'd.status',
   'd.campaign_type', 'd.purpose', 'd.customer_id', 'd.sms_log_id', 'd.model', 'd.prompt_version',
   db.raw("NULLIF(TRIM(CONCAT_WS(' ', c.first_name, c.last_name)), '') AS customer_name"),
@@ -79,7 +79,7 @@ function fromRow(d) {
 }
 
 function baseQuery() {
-  return db('message_drafts as d').leftJoin('customers as c', 'c.id', 'd.customer_id').select(COLUMNS);
+  return db('message_drafts as d').leftJoin('customers as c', 'c.id', 'd.customer_id').select(COLUMNS());
 }
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
@@ -87,8 +87,8 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
     const rows = await keyset(notMirrored(baseQuery()
       .where((q) => {
         q.whereIn('d.status', LIVE_STATUSES);
-        q.orWhere(START, '>=', from);
-      }), { source: SOURCE, idColumn: 'd.id' }), { start: START, id: ID, cursor, limit });
+        q.orWhere(START(), '>=', from);
+      }), { source: SOURCE, idColumn: 'd.id' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

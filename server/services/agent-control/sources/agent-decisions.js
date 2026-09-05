@@ -9,7 +9,7 @@ const db = require('../../../models/db');
 const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'agent_decisions';
-const START = db.raw("date_trunc('milliseconds', created_at)");
+const START = () => db.raw("date_trunc('milliseconds', created_at)");
 const ID = 'id';
 const COLUMNS = [
   'id', 'workflow', 'agent_name', 'mode', 'status', 'entity_type', 'entity_id', 'customer_id', 'lead_id',
@@ -114,8 +114,8 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .select(COLUMNS)
       .where((q) => {
         q.whereIn('status', LIVE_STATUSES);
-        q.orWhere(START, '>=', from);
-      }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: START, id: ID, cursor, limit });
+        q.orWhere(START(), '>=', from);
+      }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

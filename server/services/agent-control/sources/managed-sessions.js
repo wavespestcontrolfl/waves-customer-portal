@@ -16,9 +16,9 @@ const SOURCE = 'managed_sessions';
 // projected start so the cursor and the rows agree. A session the
 // assistant re-records per turn keeps its first turn's created_at and its
 // longest turn's latency — an approximation, stated in the subtitle.
-const START = db.raw("date_trunc('milliseconds', created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))");
+const START = () => db.raw("date_trunc('milliseconds', created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))");
 const ID = 'provider_ref';
-const COLUMNS = [
+const COLUMNS = () => [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',
   'latency_ms', 'input_tokens', 'output_tokens', 'created_at', 'run_id', 'trace_id', 'workload',
   db.raw("(SELECT count(*) FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref) AS turns"),
@@ -56,14 +56,14 @@ function fromRow(s) {
 }
 
 function baseQuery() {
-  return db('llm_dispatch_log').select(COLUMNS).where({ row_kind: 'session' }).whereNotNull('provider_ref')
+  return db('llm_dispatch_log').select(COLUMNS()).where({ row_kind: 'session' }).whereNotNull('provider_ref')
     .where((q) => q.whereNull('workload').orWhere('workload', 'live'));
 }
 
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(baseQuery()
-      .where(START, '>=', from), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: START, id: ID, cursor, limit });
+      .where(START(), '>=', from), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };
