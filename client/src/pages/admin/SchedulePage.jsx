@@ -78,6 +78,7 @@ import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 
 import BestTimeHint from "../../components/schedule/BestTimeHint";
+import IntelligenceBarShell from "../../components/admin/IntelligenceBarShell";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
 import {
@@ -4638,6 +4639,443 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 // =========================================================================
 // PROTOCOL PANEL — shows all 5 protocol layers for a service
 // =========================================================================
+// ── Job card (GATE_JOB_CARD) ────────────────────────────────────────────────
+// The drawer's cliff-notes tab. Same inline-style + shadowed-D system as the
+// rest of ProtocolPanel; the shared IntelligenceBarShell mounted under the
+// header is the one imported component. Server shape: GET
+// /admin/protocols/job-card/:serviceId (services/job-card.js).
+
+const JOB_CARD_CHIP = {
+  ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
+  hold: { label: "Hold", bg: "#C8312F", fg: "#FFFFFF" },
+  unknown: { label: "No limit on file", bg: "#F4F4F5", fg: "#71717A" },
+};
+
+function JobCardChip({ tone = "unknown", label, D }) {
+  const c = JOB_CARD_CHIP[tone] || JOB_CARD_CHIP.unknown;
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "2px 8px",
+        borderRadius: 2,
+        background: c.bg,
+        color: c.fg,
+        fontSize: 11,
+        fontWeight: 500,
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+        border: `1px solid ${tone === "hold" ? "#C8312F" : D.border}`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label || c.label}
+    </span>
+  );
+}
+
+function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          padding: "12px 14px",
+          minHeight: 44,
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          textAlign: "left",
+          color: D.heading,
+          fontSize: 14,
+          fontWeight: 500,
+        }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span style={{ color: D.muted, fontSize: 12, width: 10, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+        </span>
+        {right && <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{right}</span>}
+      </button>
+      {open && <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${D.border}` }}>{children}</div>}
+    </div>
+  );
+}
+
+function JobCardStrip({ strip, D }) {
+  const [shown, setShown] = useState({});
+  const phoneHref = strip?.phone ? strip.phone.replace(/[^\d+]/g, "") : "";
+  const btn = {
+    flex: 1,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 44,
+    padding: "0 12px",
+    borderRadius: 2,
+    border: `1px solid ${D.heading}`,
+    background: D.heading,
+    color: D.white,
+    fontSize: 12,
+    fontWeight: 500,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    textDecoration: "none",
+  };
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>{strip?.name || "Customer"}</div>
+      {strip?.program && <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>{strip.program}</div>}
+      {phoneHref && (
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <a href={`tel:${phoneHref}`} style={btn}>Call</a>
+          <a href={`sms:${phoneHref}`} style={{ ...btn, background: D.card, color: D.heading }}>Text</a>
+        </div>
+      )}
+      {(strip?.access?.codes || []).length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+          {strip.access.codes.map((c) => (
+            <button
+              key={c.label}
+              type="button"
+              onClick={() => setShown((s) => ({ ...s, [c.label]: !s[c.label] }))}
+              style={{
+                minHeight: 36,
+                padding: "0 10px",
+                borderRadius: 2,
+                border: `1px solid ${D.inputBorder}`,
+                background: D.card,
+                color: D.text,
+                fontSize: 13,
+                cursor: "pointer",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {c.label}: {shown[c.label] ? c.code : "tap to show"}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JobCardSprayCheck({ sprayCheck, products, D }) {
+  const f = sprayCheck?.forecast;
+  const range = f?.tempF && f.tempF[0] != null ? `${f.tempF[0]}–${f.tempF[1]}°F` : null;
+  return (
+    <JobCardCollapsible
+      title="Spray check"
+      defaultOpen
+      D={D}
+      right={sprayCheck?.hold ? <JobCardChip tone="hold" D={D} /> : null}
+    >
+      <div style={{ fontSize: 13, color: D.text, marginTop: 10 }}>
+        {f ? (
+          <div>
+            Next {sprayCheck.windowHours} h: {range || "temp n/a"}, wind {f.windMph} mph, rain {f.rainPct}%
+            {f.shortForecast ? `, ${f.shortForecast.toLowerCase()}` : ""}
+            {sprayCheck.coordsSource === "office" ? " (office forecast, no property pin)" : ""}
+          </div>
+        ) : (
+          <div style={{ color: D.muted }}>No forecast right now.</div>
+        )}
+        {products.length > 0 && (
+          <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
+            {products.map((p) => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                  {p.verdict === "hold" && p.verdictReason && (
+                    <span style={{ fontSize: 12, color: "#C8312F" }}>{p.verdictReason}</span>
+                  )}
+                  <JobCardChip tone={p.verdict} D={D} />
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+function fmtUnit(unit) {
+  return unit ? String(unit).replace(/_/g, " ") : "";
+}
+
+function fmtAmount(amount, unit) {
+  if (amount == null) return null;
+  const n = Number(amount);
+  const txt = n >= 100 ? Math.round(n).toString() : n.toFixed(2).replace(/\.?0+$/, "");
+  const u = fmtUnit(unit);
+  return `${txt}${u ? ` ${u}` : ""}`;
+}
+
+function JobCardOrderButton({ productId, name, order, D, compact = false }) {
+  const [state, setState] = useState("idle");
+  const [msg, setMsg] = useState("");
+  const submit = async () => {
+    if (state === "confirm") {
+      setState("sending");
+      try {
+        const data = await adminFetch(`/admin/inventory/waveguard-forecast/${productId}/restock-request`, {
+          method: "POST",
+          body: JSON.stringify({ requestedQuantity: 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}` }),
+        });
+        setState("done");
+        setMsg(data?.existing ? "Already on the order list" : "Added to the order list");
+      } catch (err) {
+        setState("idle");
+        setMsg(err?.message || "Could not add");
+      }
+      return;
+    }
+    setState("confirm");
+  };
+  const detail = [order?.packSize, order?.lastPrice != null ? "$" + Number(order.lastPrice).toFixed(2) : null].filter(Boolean).join(" · ");
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <button
+        type="button"
+        onClick={submit}
+        disabled={state === "sending" || state === "done"}
+        style={{
+          minHeight: compact ? 36 : 44,
+          padding: "0 12px",
+          borderRadius: 2,
+          border: `1px solid ${D.heading}`,
+          background: state === "confirm" ? D.heading : D.card,
+          color: state === "confirm" ? D.white : D.heading,
+          fontSize: 12,
+          fontWeight: 500,
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+          cursor: state === "done" ? "default" : "pointer",
+          opacity: state === "done" ? 0.6 : 1,
+        }}
+      >
+        {state === "confirm" ? "Tap again to order" : state === "sending" ? "Adding…" : state === "done" ? "Ordered" : "Order more"}
+      </button>
+      {detail && <span style={{ fontSize: 12, color: D.muted }}>{detail}</span>}
+      {msg && <span style={{ fontSize: 12, color: D.muted }}>{msg}</span>}
+    </div>
+  );
+}
+
+function JobCardProduct({ p, D }) {
+  const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+  const right = (
+    <>
+      {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
+      {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
+      <JobCardChip tone={p.verdict} D={D} />
+      {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
+    </>
+  );
+  return (
+    <JobCardCollapsible title={p.name} right={right} D={D}>
+      <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
+        {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
+        {p.precautions && <div>{p.precautions}</div>}
+        {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
+        {p.short && (
+          <div style={{ color: "#C8312F" }}>
+            On hand {fmtAmount(p.onHand, p.onHandUnit)} vs {amount} planned.
+          </div>
+        )}
+        {!p.short && p.onHand != null && (
+          <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
+        )}
+        {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
+        {(p.labelUrl || p.sdsUrl) && (
+          <div style={{ display: "flex", gap: 12 }}>
+            {p.labelUrl && <a href={p.labelUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>Label</a>}
+            {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
+          </div>
+        )}
+        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} D={D} compact />
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+function JobCardTank({ tank, D }) {
+  const [gallons, setGallons] = useState(110);
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState([]);
+  const [picked, setPicked] = useState(null);
+  const [mix, setMix] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const term = q.trim();
+    if (term.length < 2) {
+      setResults([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const data = await adminFetch(`/admin/protocols/lawn/substitution-products?q=${encodeURIComponent(term)}&limit=8`);
+        if (!cancelled) setResults(data?.products || []);
+      } catch {
+        if (!cancelled) setResults([]);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [q]);
+
+  useEffect(() => {
+    if (!picked) {
+      setMix(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setBusy(true);
+    adminFetch(`/admin/protocols/job-card/mix?productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
+      .then((data) => { if (!cancelled) setMix(data); })
+      .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
+      .finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [picked, gallons]);
+
+  const pill = (g) => ({
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 2,
+    border: `1px solid ${gallons === g ? D.heading : D.inputBorder}`,
+    background: gallons === g ? D.heading : D.card,
+    color: gallons === g ? D.white : D.text,
+    fontSize: 12,
+    fontWeight: 500,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    cursor: "pointer",
+  });
+
+  return (
+    <JobCardCollapsible
+      title="Tank"
+      defaultOpen
+      D={D}
+      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label="Not calibrated" D={D} /> : null}
+    >
+      <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+        {tank && !tank.calibrated && (
+          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Amounts are withheld until the rig is recalibrated.</div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>
+          <button type="button" style={pill(1)} onClick={() => setGallons(1)}>1 gal</button>
+        </div>
+        <input
+          value={q}
+          onChange={(e) => { setQ(e.target.value); setPicked(null); }}
+          placeholder="Search a product to mix"
+          inputMode="search"
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            minHeight: 44,
+            padding: "0 12px",
+            borderRadius: 2,
+            border: `1px solid ${D.inputBorder}`,
+            background: D.input,
+            color: D.text,
+            fontSize: 14,
+          }}
+        />
+        {!picked && results.length > 0 && (
+          <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, overflow: "hidden" }}>
+            {results.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => { setPicked(r); setQ(r.name); setResults([]); }}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  minHeight: 44,
+                  padding: "0 12px",
+                  background: D.card,
+                  border: "none",
+                  borderBottom: `1px solid ${D.border}`,
+                  color: D.text,
+                  fontSize: 14,
+                  cursor: "pointer",
+                }}
+              >
+                {r.name}
+              </button>
+            ))}
+          </div>
+        )}
+        {picked && (
+          <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: 12, display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{picked.name}</div>
+            {busy ? (
+              <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
+            ) : mix?.amount != null ? (
+              <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
+                {fmtAmount(mix.amount, mix.unit)} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {gallons} gal{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
+            )}
+            {mix && mix.ratePer1000 != null && (
+              <div style={{ fontSize: 12, color: D.muted }}>
+                Label rate {fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft{mix.rateVerified ? "" : " (not yet verified)"}
+              </div>
+            )}
+            <JobCardOrderButton productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
+          </div>
+        )}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+function JobCardTab({ card, loading, error, D }) {
+  if (loading) {
+    return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
+  }
+  if (error || !card) {
+    return <div style={{ padding: 24, textAlign: "center", color: D.muted }}>Job card unavailable right now.</div>;
+  }
+  const products = card.products || [];
+  return (
+    <div>
+      <JobCardStrip strip={card.strip} D={D} />
+      {card.paragraph?.text && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
+      )}
+      <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
+      <JobCardTank tank={card.tank} D={D} />
+      {products.length > 0 && (
+        <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
+          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}
+        </div>
+      )}
+      {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
+      {products.length === 0 && (
+        <div style={{ fontSize: 13, color: D.muted }}>No protocol products matched this visit.</div>
+      )}
+    </div>
+  );
+}
+
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
@@ -4677,6 +5115,10 @@ export function ProtocolPanel({ service, onClose }) {
   const [protocolMatchReason, setProtocolMatchReason] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Job card (GATE_JOB_CARD): { enabled:false } from the server hides the tab.
+  const [jobCard, setJobCard] = useState(null);
+  const [jobCardLoading, setJobCardLoading] = useState(true);
+  const [jobCardError, setJobCardError] = useState(false);
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -4684,13 +5126,45 @@ export function ProtocolPanel({ service, onClose }) {
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
   const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
-  const [activeSection, setActiveSection] = useState(
-    isLawn ? "lawn_protocol" : "overview",
-  );
+  const jobCardEnabled = Boolean(jobCard?.enabled);
+  const defaultSection = jobCardEnabled
+    ? "job_card"
+    : isLawn
+      ? "lawn_protocol"
+      : "overview";
+  const [activeSection, setActiveSection] = useState(defaultSection);
 
   useEffect(() => {
-    setActiveSection(isLawn ? "lawn_protocol" : "overview");
-  }, [service?.id, isLawn]);
+    setActiveSection(defaultSection);
+  }, [service?.id, defaultSection]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setJobCard(null);
+    setJobCardError(false);
+    if (!service?.id) {
+      setJobCardLoading(false);
+      return undefined;
+    }
+    setJobCardLoading(true);
+    adminFetch(`/admin/protocols/job-card/${service.id}`)
+      .then((data) => {
+        if (cancelled) return;
+        setJobCard(data && data.enabled ? data : { enabled: false });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // A failed read must not hide the tab behind a silent "gate off".
+        setJobCard({ enabled: true, failed: true });
+        setJobCardError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setJobCardLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [service?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4796,6 +5270,7 @@ export function ProtocolPanel({ service, onClose }) {
   }, [service, isLawn, serviceCategory]);
 
   const SECTIONS = [
+    ...(jobCardEnabled ? [{ id: "job_card", label: " Job card", count: null }] : []),
     ...(isLawn
       ? [
           {
@@ -4879,9 +5354,6 @@ export function ProtocolPanel({ service, onClose }) {
           <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Service Protocol
           </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-            {service.serviceType} — {service.customerName}
-          </div>{" "}
         </div>{" "}
         <button
           onClick={onClose}
@@ -4896,15 +5368,33 @@ export function ProtocolPanel({ service, onClose }) {
           ×
         </button>{" "}
       </div>
-      {/* Section tabs */}
+      {/* Ask bar — the dispatch IB context, scoped to this stop */}
+      {jobCardEnabled && (
+        <div style={{ padding: "12px 16px 0" }}>
+          <IntelligenceBarShell
+            context="dispatch"
+            buildPageData={() => ({
+              scheduledServiceId: service.id,
+              customerId: service.customerId,
+              serviceType: panelServiceType,
+              date: service.scheduledDate || service.date || null,
+            })}
+            placeholder="Ask about this stop…"
+            responseMaxHeight="320px"
+          />
+        </div>
+      )}
+      {/* Section tabs — equal pills, same look as the mobile Schedule/More
+          row on Dispatch (h-11, uppercase label, zinc-900 active). */}
       <div
         style={{
           display: "flex",
-          gap: 16,
-          padding: "0 16px",
+          gap: 8,
+          padding: "0 16px 12px",
           borderBottom: `1px solid ${D.border}`,
           overflowX: "auto",
           WebkitOverflowScrolling: "touch",
+          scrollbarWidth: "none",
           flexWrap: "nowrap",
         }}
       >
@@ -4915,20 +5405,20 @@ export function ProtocolPanel({ service, onClose }) {
               key={s.id}
               onClick={() => setActiveSection(s.id)}
               style={{
-                padding: "12px 2px",
-                marginBottom: -1,
-                background: "transparent",
-                border: "none",
-                borderBottom: `2px solid ${active ? D.heading : "transparent"}`,
+                flex: "1 0 auto",
+                minWidth: 96,
+                height: 44,
+                padding: "0 12px",
+                borderRadius: 2,
+                border: `1px solid ${active ? D.heading : D.inputBorder}`,
+                background: active ? D.heading : D.card,
+                color: active ? D.white : D.muted,
                 cursor: "pointer",
                 whiteSpace: "nowrap",
                 fontSize: 11,
                 fontWeight: 500,
                 textTransform: "uppercase",
                 letterSpacing: "0.06em",
-                flexShrink: 0,
-                minHeight: 44,
-                color: active ? D.heading : D.muted,
               }}
             >
               {s.label.trim()}
@@ -4939,7 +5429,9 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {loading ? (
+        {activeSection === "job_card" && jobCardEnabled ? (
+          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError || jobCard?.failed} D={D} />
+        ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
           </div>

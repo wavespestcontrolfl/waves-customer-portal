@@ -246,4 +246,5 @@ function managerApprovalSummary(approval, blocks, actor) {
 module.exports = {
   evaluateWaveGuardManagerApprovals,
   managerApprovalSummary,
+  latestComparableGroupApplication,
 };
