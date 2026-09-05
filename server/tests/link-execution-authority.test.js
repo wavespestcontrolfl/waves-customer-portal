@@ -135,3 +135,23 @@ test('owner confirmation refuses an active acquisition lease', async () => {
   const s = scenario();
   expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, status: 'placed' })).toMatchObject({ ok: false });
 });
+
+
+test('negative owner verdict releases exactly the reviewed hold, preserves evidence and refuses replay', async () => {
+  const s = scenario();
+  s.db._tables.audit_log = [];
+  s.db._tables.seo_link_prospects[0].claimed_at = null;
+  const auth = await authorize(s);
+  await E.reserveSlot(s.db, s.placement, s.path, auth, s.token, new Date());
+  const attempt = s.db._tables.seo_link_attempts[0];
+  Object.assign(attempt, { outcome: 'submit_ambiguous', evidence_url: 'synthetic/evidence.png' });
+  const args = { prospectId: s.placement.id, notSubmittedAttemptId: attempt.id };
+  expect(await E.reconcileOwnerPlacement(s.db, { ...args, notSubmittedAttemptId: uid() })).toMatchObject({ ok: false });
+  expect(await E.reconcileOwnerPlacement(s.db, args)).toEqual({ ok: true });
+  expect(attempt).toMatchObject({ outcome: 'slot_released', evidence_url: 'synthetic/evidence.png', idempotency_key: null });
+  expect(s.db._tables.seo_link_placement_authorities[0].satisfied_at).toBeUndefined();
+  const retry = await E.reserveSlot(s.db, s.placement, s.path, auth, s.token, new Date());
+  expect(retry.id).not.toBe(attempt.id);
+  expect(await E.reconcileOwnerPlacement(s.db, args)).toMatchObject({ ok: false });
+  expect(s.db._tables.audit_log).toHaveLength(1);
+});

@@ -487,6 +487,8 @@ function movePatch(row, target, now, { syncUrl = false } = {}) {
 async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
   const movable = async (rows) => {
     if (!rows.length) return rows;
+    // Every unleased settlement also settles its durable submission slot before path movement.
+    await require('./link-execution-authority').releaseSlots(q, rows.map((r) => r.id), now);
     const held = await q('seo_link_attempts').whereIn('prospect_id', rows.map((r) => r.id)).where({ action: 'submit', outcome: 'submit_ambiguous' }).select('prospect_id');
     const pinned = new Set(held.map((a) => a.prospect_id));
     return rows.filter((r) => !pinned.has(r.id));

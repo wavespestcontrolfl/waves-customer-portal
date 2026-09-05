@@ -27,8 +27,7 @@ async function authorize(trx, placement, path, provider, { lock = true } = {}) {
   const query = trx(AUTH).where({ prospect_id: placement.id, path_id: path.id }).whereNull('ended_at');
   const rows = await (lock ? query.forUpdate() : query);
   const row = rows.find((r) => r.dimension === 'execution' && r.instance_kind === '-');
-  if (!row) return null;
-  if (row.satisfied_at) return null;
+  if (!row || row.satisfied_at) return null;
   if (sendFirst && !rows.some((r) => [r.dimension === 'communication', r.instance_kind === '-', r.satisfied_at, r.satisfied_reason === 'sent'].every(Boolean))) return null;
   const { policy } = await P.loadPolicy(trx, { lock });
   if ((path.provider_override || policy.preferred_provider) !== provider) return null;
@@ -114,17 +113,25 @@ async function releaseSlots(trx, ids, now = new Date()) {
 }
 
 // The existing owner board status edit confirms placement truth and settles its held execution in the same transaction.
-async function reconcileOwnerPlacement(trx, { prospectId, status, actorId = null, now = new Date() }) {
-  if (!['placed', 'live', 'indexed'].includes(status)) return { ok: false, error: 'A confirmed placement status is required' };
+async function reconcileOwnerPlacement(trx, { prospectId, status, notSubmittedAttemptId = null, actorId = null, now = new Date() }) {
+  if (!notSubmittedAttemptId && !['placed', 'live', 'indexed'].includes(status)) return { ok: false, error: 'A confirmed placement status is required' };
   const prospect = await trx('seo_link_prospects').where({ id: prospectId }).forUpdate().first();
   if (!prospect || prospect.claimed_at) return { ok: false, error: 'Submission is still leased; retry after it settles' };
   const held = await trx(ATTEMPTS).where({ prospect_id: prospectId, action: 'submit', outcome: 'submit_ambiguous' }).forUpdate();
+  if (notSubmittedAttemptId && (held.length !== 1 || held[0].id !== notSubmittedAttemptId)) return { ok: false, error: 'Held submission changed; reload before recording a verdict' };
   if (!held.length) return { ok: true };
   const authorities = await trx(AUTH).where({ prospect_id: prospectId, dimension: 'execution', instance_kind: '-' }).forUpdate();
   for (const attempt of held) {
     if (attempt.path_id !== prospect.path_id || !authorities.some((r) => r.id === attempt.detail?.authority_id && r.path_id === attempt.path_id)) {
       return { ok: false, error: 'Held submission no longer matches this acquisition path; review its original authority' };
     }
+  }
+  if (notSubmittedAttemptId) {
+    const attempt = held[0];
+    await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'slot_released', idempotency_key: null, detail: { ...attempt.detail, owner_verdict: 'not_submitted', owner_confirmed_at: now.toISOString() }, updated_at: now });
+    await trx('seo_link_prospects').where({ id: prospectId }).update({ attempts: 0, updated_at: now });
+    await require('../audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: 'backlink.submission.not_submitted', resource_type: 'seo_link_prospect', resource_id: prospectId, metadata: { attempt_id: attempt.id }, critical: true, trx });
+    return { ok: true };
   }
   for (const attempt of held) {
     await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'placed', detail: { ...attempt.detail, owner_confirmed_at: now.toISOString() }, updated_at: now });

@@ -866,3 +866,16 @@ test('an unsent contacted placement cannot approve a deferred execution', async 
   placement.status = 'contacted'; placement.outreach_status = 'none';
   await expect(Q.approveRow(db, { authorityId: execution.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409 });
 });
+
+
+test('an exhausted automatic initial draft becomes an owner card without undoing the acquired placement', async () => {
+  const s = scenario({ make: outreachPath, domain: { agent_state: 'acquired' } });
+  const id = uid();
+  placements(s.db).push({ id, domain_id: s.d.id, path_id: s.p.id, status: 'live', link_type: 'resource', outreach_status: 'none', outreach_draft_attempts: 4 });
+  rows(s.db).push({ id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'communication', instance_kind: '-', level: 'AUTO_OUTREACH', satisfied_at: null });
+  const result = await Q.listOwnerQueue(s.db);
+  expect(result.cards).toHaveLength(1);
+  expect(result.cards[0]).toMatchObject({ outreach_draft_exhausted: true, placement: { status: 'live' } });
+  placements(s.db)[0].outreach_status = 'sent';
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+});

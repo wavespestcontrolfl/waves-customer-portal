@@ -224,13 +224,15 @@ const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v))
 async function listOwnerQueue(db) {
   const { policy } = await P.loadPolicy(db);
   const candidates = await db('seo_link_prospects').whereIn('status', [...CARD_STATUSES]).whereNotNull('domain_id')
-    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at', 'quality_signals'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
+    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_draft_attempts', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at', 'quality_signals'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
   const uncertain = candidates.length ? await db('seo_link_attempts').whereIn('prospect_id', candidates.map((p) => p.id)).where({ action: 'submit', outcome: 'submit_ambiguous' }).select('id', 'prospect_id', 'evidence_url', 'updated_at') : [];
   const uncertainById = new Map(uncertain.map((a) => [a.prospect_id, a]));
   const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
   // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
   // here exists — otherwise every placed link would be a card with nothing to click
-  const parked = candidates.filter((p) => (uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
+  const exhaustedDraft = (p) => Number(p.outreach_draft_attempts) >= require('./link-prospect-worker').MAX_ATTEMPTS
+    && !['drafted', 'sending', 'sent', 'send_error'].includes(p.outreach_status);
+  const parked = candidates.filter((p) => (exhaustedDraft(p) || uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
     : liveRows.some((r) => r.prospect_id === p.id && !r.satisfied_at && isOwner(r.level) && whyNotHere(p, r) === null))));
   if (!parked.length) return { cards: [] };
   const domains = await db('seo_link_domains').whereIn('id', [...new Set(parked.map((p) => p.domain_id))]).whereIn('agent_state', [...BRIDGE_STATES])
@@ -364,6 +366,7 @@ async function listOwnerQueue(db) {
     });
     return {
       submission_ambiguity: uncertainById.get(p.id) || null,
+      outreach_draft_exhausted: exhaustedDraft(p),
       placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {

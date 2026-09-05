@@ -271,7 +271,6 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
     }
 
     const nap = napFromLocation(profile, loc); // per-location NAP (Venice/Parrish/… address+phone)
-    nap.website = p.target_page || nap.website;
     const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic,
       beforeSubmit: () => require('./link-execution-authority').beginSubmission(db, { prospectId: p.id, leaseToken: p.lease_token }) });
 
@@ -297,7 +296,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // verifier must reconcile THIS row against the homepage (not its money-page
       // target_page). A durable flag scopes the homepage rule to runner-created rows only —
       // manual/strategy directory rows keep target_page.
-      const rep = await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, ...(worker.SIGNUP_TYPES.includes(p.link_type) ? { location: loc.id } : p.location_key && p.location_key !== '-' ? { location: p.location_key } : {}), notes: 'auto-submitted placement' });
+      const rep = await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, cited_homepage: true, location: loc.id, notes: 'auto-submitted citation' });
       if (rep && rep.ok) { counts.placed++; }
       else {
         // report rejected (e.g. stale lease) — don't claim success; the row stays
@@ -327,7 +326,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       counts.skipped++;
     } else {
       // The worker retries only failures before submit; uncertainty after submit is quarantined.
-      await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'failed', lease_token: p.lease_token, evidence_url: evidenceKey || null, notes: `runner: ${result.errorCode || 'failed'}` });
+      await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'failed', lease_token: p.lease_token, evidence_url: evidenceKey || null, error_code: result.errorCode || 'failed', notes: `runner: ${result.errorCode || 'failed'}` });
       counts.failed++;
     }
   }

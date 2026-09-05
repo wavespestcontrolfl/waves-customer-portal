@@ -339,12 +339,12 @@ test.each([undefined, '-'])('unscoped signup location %s reports the actual GBP 
   expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', location: 'bradenton' }));
 });
 
-test('unscoped content submission preserves its domain-wide identity', async () => {
-  worker.claim.mockResolvedValue([prospect({ link_type: 'editorial', location_key: '-' })]);
+test('citation execution submits and verifies the homepage even on a service-page board row', async () => {
+  worker.claim.mockResolvedValue([prospect({ target_page: 'https://wavespestcontrol.com/pest-control/' })]);
   fillCitationForm.mockResolvedValue({ outcome: 'placed', pending: true });
   await runner.run();
-  expect(worker.report).toHaveBeenCalledTimes(1);
-  expect(worker.report.mock.calls[0][0]).not.toHaveProperty('location');
+  expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ cited_homepage: true, location: 'bradenton' }));
+  expect(fillCitationForm.mock.calls[0][0].nap.website).toBe('https://wavespestcontrol.com');
 });
 
 

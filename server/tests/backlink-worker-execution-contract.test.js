@@ -17,10 +17,9 @@ test('a report cannot replace the authenticated provider with a body field', asy
   expect((await call('post', '/report', { body: { prospect_id: 'p', outcome: 'placed', provider: 'deterministic_runner', lease_token: 'lease', pending: true } })).status).toBe(200);
   expect(worker.report).toHaveBeenCalledWith({ prospect_id: 'p', outcome: 'placed', provider: 'hermes', lease_token: 'lease', pending: true });
 });
-test('claim forwards the explicit execution mode and authenticated provider', async () => {
-  mockProvider = 'deterministic_runner';
+test('HTTP acquisition stays empty because only the in-process runner executes', async () => {
   expect((await call('get', '/claim', { query: { type: 'outreach', mode: 'acquire' } })).status).toBe(200);
-  expect(worker.claim).toHaveBeenCalledWith(expect.objectContaining({ type: 'outreach', mode: 'acquire', provider: 'deterministic_runner' }));
+  expect(worker.claim).not.toHaveBeenCalled();
 });
 test('unknown claim modes are rejected without leasing', async () => {
   expect((await call('get', '/claim', { query: { mode: 'send' } })).status).toBe(400);

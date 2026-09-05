@@ -736,9 +736,10 @@ public by protocol).
 `/api/health` (GET; liveness probe, no data).
 `/api/integrations/backlink-worker/claim` (GET) accepts `mode=draft|acquire`:
 `outreach` defaults to drafting and `signup` to acquisition. Drafting requires
-`GATE_OUTREACH_DRAFTER`; acquisition requires the authenticated
-`deterministic_runner` provider, both authority/runner gates, a current executable
-free-path authority and a reserved daily slot. `/report` (POST) binds new leases
+`GATE_OUTREACH_DRAFTER`; acquisition requests return an empty claim because
+execution is restricted to the in-process signup runner. That runner requires
+both authority/runner gates, a current executable free-path authority and a
+reserved daily slot; its citation executor claims signup lanes only. `/report` (POST) binds new leases
 to that authenticated provider and mode; a draft lease cannot report placement.
 The in-process browser must atomically begin the reserved submission before a
 placement report is accepted. Existing unstamped leases retain their report

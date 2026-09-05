@@ -22,6 +22,11 @@ router.get('/claim', async (req, res, next) => {
     const type = req.query.type === 'outreach' ? 'outreach' : 'signup';
     const mode = req.query.mode || (type === 'outreach' ? 'draft' : 'acquire');
     if (!['draft', 'acquire'].includes(mode)) return res.status(400).json({ error: 'mode must be draft or acquire' });
+    // Acquisition is in-process only; external credentials retain their empty signup response.
+    if (mode === 'acquire') {
+      await finalizeWorkerRequest(req, 'empty_claim');
+      return res.json({ prospects: [], note: 'acquisition runs through the in-process signup runner' });
+    }
     if (mode === 'draft' && !isEnabled('outreachDrafter')) {
       await finalizeWorkerRequest(req, 'empty_claim');
       return res.json({ prospects: [], note: 'outreach drafting is disabled' });

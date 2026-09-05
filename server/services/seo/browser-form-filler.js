@@ -388,13 +388,13 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       }
     }
 
-    // The submit click is the point of no return. Split ACTIONABILITY (was the button
-    // found/enabled — auto-waited before dispatch) from the triggered NAVIGATION
-    // (noWaitAfter:true so click() does NOT wait for, and cannot throw on, the POST's
-    // redirect being aborted/timing out). So: click() throws ONLY if the button was
-    // never actionable → nothing dispatched → genuinely retryable. Once it dispatches
-    // (no throw), the POST may have landed — we NEVER auto-retry; any later navigation
-    // /verification error becomes placed+pending below.
+    // Check actionability without dispatch before reserving the mutation boundary.
+    try {
+      await page.click(last.selector, { trial: true });
+    } catch {
+      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: 'submit not actionable (nothing dispatched)' };
+    }
+    // Once the real click starts, an exception cannot establish whether requests landed.
     if (typeof beforeSubmit !== 'function' || !(await beforeSubmit())) {
       return { outcome: 'failed', errorCode: 'not_authorized', notes: 'submission authority refused before mutation' };
     }
@@ -403,7 +403,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       await page.click(last.selector, { noWaitAfter: true });
     } catch (e) {
       submitPhase = false;
-      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit not actionable (nothing dispatched): ${e.message}` };
+      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit dispatch uncertain: ${e.message}` };
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {}); // best-effort settle; never fatal post-dispatch
     // Keep the pinned-host mutation window open for asynchronous validation/POSTs.

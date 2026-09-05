@@ -33,7 +33,7 @@ function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel 
     fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); if (fillRequest) await fireSubmitReq(); },
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
     check: async (sel) => actionsLog.push(['check', sel]),
-    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); actionsLog.push(['click', sel]); clicked = true; if (!delayedSubmit) await fireSubmitReq(); },
+    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); if (opts?.trial) return; actionsLog.push(['click', sel]); clicked = true; if (!delayedSubmit) await fireSubmitReq(); },
   };
   const ctx = { newPage: async () => page, route: async (_p, handler) => { routeHandler = handler; } };
   if (wsLog) ctx.routeWebSocket = async (pattern) => { wsLog.push(pattern); };
@@ -301,19 +301,22 @@ describe('fillCitationForm', () => {
       launchBrowser: async () => fakeBrowser([], { clickOptsLog }),
       anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
     }));
-    const submitClick = clickOptsLog.find((c) => c[0] === '#go');
+    const submitClick = clickOptsLog.find((c) => c[0] === '#go' && !c[1].trial);
     expect(submitClick).toBeDefined();
     expect(submitClick[1]).toMatchObject({ noWaitAfter: true });
   });
 
   test('P1: a non-actionable submit button (click throws pre-dispatch) → submit_failed (retryable, nothing sent)', async () => {
     const log = [];
+    const beforeSubmit = jest.fn(async () => true);
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      beforeSubmit,
       launchBrowser: async () => fakeBrowser(log, { failClickSel: '#go' }),
       anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
     }));
     expect(r.outcome).toBe('failed');
     expect(r.errorCode).toBe('submit_failed');
+    expect(beforeSubmit).not.toHaveBeenCalled();
     expect(log).toContainEqual(['fill', '#n', 'W']); // fields filled, but submit never dispatched
   });
 

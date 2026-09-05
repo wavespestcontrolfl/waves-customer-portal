@@ -71,10 +71,10 @@ function parseQuality(q) {
 async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null, preview = false, followUp = false, mode = type === 'outreach' ? 'draft' : 'acquire', provider = 'hermes' } = {}) {
   const execution = mode === 'acquire';
   const E = require('./link-execution-authority');
-  if (execution && provider !== 'deterministic_runner') return [];
+  if (execution && (provider !== 'deterministic_runner' || type !== 'signup')) return [];
   if (!execution && (mode !== 'draft' || type !== 'outreach')) return [];
   if (!execution && !require('../../config/feature-gates').isEnabled('outreachDrafter')) return [];
-  const types = execution ? [...SIGNUP_TYPES, ...OUTREACH_TYPES] : OUTREACH_TYPES;
+  const types = execution ? SIGNUP_TYPES : OUTREACH_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
   // the §6.4 follow-up lane: a DRAFT lease over sent conversations whose follow-up is due — its own predicate
   if (followUp) return execution ? [] : db.transaction((trx) => claimFollowUps(trx, { limit, preview, provider }));
@@ -158,6 +158,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       return q
         .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
         .orderBy('domain_rating', 'desc')
+        .orderBy('id')
         .limit(n2);
     };
 
@@ -214,8 +215,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     const out = [];
     const consumed = [];
     const now = new Date();
-    // Acquire every candidate domain before any policy/row lock. Taking a new domain
-    // in a later batch while holding the policy row can deadlock a sender on that domain.
+    // Acquire candidate domains before policy/row locks; later batches cannot invert that order.
     const candidateRows = await candidates().select('id', 'target_domain');
     const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-domain-lock');
     for (const domain of [...new Set(candidateRows.map((r) => canonicalProspectDomain(r.target_domain)))].sort()) await lockProspectDomain(trx, domain);
@@ -597,7 +597,10 @@ async function reportAcquisition({ prospect, outcome, leaseDate, provider, body 
     if (outcome === 'placed' && slot.outcome !== 'submitting') return { ok: false, code: 'submit_not_started' };
     const now = new Date();
     const ambiguous = slot.outcome === 'submitting' && outcome !== 'placed';
-    await trx('seo_link_attempts').where({ id: slot.id }).update({ outcome: ambiguous ? 'submit_ambiguous' : outcome === 'placed' ? (body.pending ? 'pending' : 'placed') : 'slot_released', evidence_url: body.evidence_url || null, updated_at: now });
+    await trx('seo_link_attempts').where({ id: slot.id }).update({ outcome: ambiguous ? 'submit_ambiguous' : outcome === 'placed' ? (body.pending ? 'pending' : 'placed') : outcome,
+      ...(!ambiguous && outcome !== 'placed' ? { idempotency_key: null } : {}),
+      detail: { ...parseQuality(slot.detail), error_code: body.error_code || null, notes: body.notes || null },
+      evidence_url: body.evidence_url || null, updated_at: now });
     const release = { claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, updated_at: now };
     const patch = ambiguous ? {} : mapReportToPatch(outcome, { ...body, cost: 0 }, row.quality_signals);
     const attempts = (row.attempts || 0) + 1;
