@@ -327,8 +327,11 @@ async function assertManualActionAllowed(trx, requestId, action) {
 // strips it: a delivery in flight (park / re-ring) that lands afterwards
 // fails deliverBell's version check instead of resurrecting the
 // instruction (hook P1).
+// The ledger row is LOCKED before its notifications — the order deliverBell
+// and the manual restock actions take, so a caller that holds no ledger lock
+// yet (the sweep's hand-off) cannot deadlock against them (hook r31 P1).
 async function settleRequestLedgerBells(trx, requestId) {
-  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id');
+  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
   if (!row) return;
   await retireLedgerBells(trx, row.id);
   await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
