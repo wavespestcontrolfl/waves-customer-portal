@@ -330,14 +330,29 @@ describe('automation runner prep sequence delivery stamp', () => {
     expect(await sendStep('enrollment-1')).toEqual({ sent: false, skipped: true, reason: 'lease_held' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
 
-    // The re-read finds the row already settled (advanced past step 0 to a
-    // step index the enabled steps do not have): no send, the enrolment
-    // completes as the runner always does for a missing step.
+    // The re-read finds the row already settled — advanced onto its
+    // follow-up step with next_send_at days out: the follow-up is NOT sent
+    // now (the tick picked the row when step 0 was due), and nothing is
+    // written.
     sendgrid.sendOne.mockClear();
-    const q = queuesForSend({ templateKey: 'flea', lockedRow: { ...ENROLLMENT('flea'), current_step: 1 } });
+    const settled = { ...ENROLLMENT('flea'), current_step: 1, next_send_at: new Date(Date.now() + 72 * 3600 * 1000) };
+    const q = queuesForSend({ templateKey: 'flea', lockedRow: settled });
+    q.automation_steps = [chain({ result: [
+      { id: 'step-1', step_order: 0, enabled: true, subject: 'Prep', html_body: '<p>a</p>', text_body: 'a', from_email: 'automations@wavespestcontrol.com' },
+      { id: 'step-2', step_order: 1, delay_hours: 72, enabled: true, subject: 'Follow-up', html_body: '<p>b</p>', text_body: 'b', from_email: 'automations@wavespestcontrol.com' },
+    ] })];
+    const [, , enrollmentWrite] = q.automation_enrollments;
+    const [sendInsert] = q.automation_step_sends;
     setDbQueues(q);
-    expect(await sendStep('enrollment-1')).toEqual({ done: true });
+    expect(await sendStep('enrollment-1')).toEqual({ sent: false, skipped: true, reason: 'not_due' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(enrollmentWrite.update).not.toHaveBeenCalled();
+    expect(sendInsert.insert).not.toHaveBeenCalled();
+
+    // A test send keeps ignoring the schedule.
+    setDbQueues(queuesForSend({ templateKey: 'flea', lockedRow: { ...ENROLLMENT('flea'), next_send_at: new Date(Date.now() + 72 * 3600 * 1000) } }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-t' });
+    expect((await sendStep('enrollment-1', { testRecipient: 'qa@wavespestcontrol.com' })).sent).toBe(true);
   });
 
   test('a failed send marks the enrolment failed only on the step this attempt was for', async () => {

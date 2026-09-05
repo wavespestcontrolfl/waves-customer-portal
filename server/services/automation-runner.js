@@ -380,6 +380,12 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
     const enrollment = await db('automation_enrollments').where({ id: enrollmentId }).first();
     if (!enrollment) throw new Error('enrollment not found');
     if (enrollment.status !== 'active') throw new Error(`enrollment status is ${enrollment.status}`);
+    // …and still due: a settle that advanced it since the tick's pick
+    // scheduled the follow-up from its own delay — that step is not sent
+    // now. An explicit test send ignores the schedule as it always did.
+    if (!testRecipient && enrollment.next_send_at && new Date(enrollment.next_send_at).getTime() > Date.now()) {
+      return { sent: false, skipped: true, reason: 'not_due' };
+    }
     return sendStepLocked(enrollment, { testRecipient });
   }, { recordHealth: false, waitForSlot: false });
   if (wasLockSkipped(outcome)) {
