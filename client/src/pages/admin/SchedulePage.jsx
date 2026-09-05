@@ -4883,6 +4883,8 @@ function JobCardOrderButton({ productId, name, order, D, compact = false }) {
 
 function JobCardProduct({ p, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+  // The shortage line names the plan's requirement even while the dose is withheld.
+  const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
   const right = (
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
@@ -4902,8 +4904,8 @@ function JobCardProduct({ p, D }) {
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
         {p.short && (
           <div style={{ color: "#C8312F" }}>
-            {amount
-              ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${amount} planned.`
+            {demand
+              ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
               : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
           </div>
         )}
@@ -4961,6 +4963,8 @@ function JobCardTank({ tank, serviceId, D }) {
     }
     let cancelled = false;
     setBusy(true);
+    // Never show the previous product's verdict beside the new one.
+    setMix(null);
     adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
@@ -5041,7 +5045,14 @@ function JobCardTank({ tank, serviceId, D }) {
         )}
         {picked && (
           <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: 12, display: "grid", gap: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{picked.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+              <span>{picked.name}</span>
+              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.verdict} D={D} />}
+            </div>
+            {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
+              <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
+            )}
+            {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}{mix.context.conditional ? " · if needed" : ""}</div>}
             {busy ? (
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
@@ -5100,12 +5111,15 @@ function JobCardTab({ card, loading, error, D }) {
       )}
       {products.length > 0 && (
         <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
-          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}
+          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}{card.addons?.length ? ` · + ${card.addons.map((a) => (a.visit?.number ? `${a.name} (visit ${a.visit.number})` : a.name)).join(", ")}` : ""}
         </div>
       )}
+      {(card.addons || []).filter((a) => a.note).map((a) => (
+        <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
+      ))}
       {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
       {products.length === 0 && (
-        <div style={{ fontSize: 13, color: D.muted }}>No protocol products matched this visit.</div>
+        <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
     </div>
   );

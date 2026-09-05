@@ -281,6 +281,76 @@ async function loadCallsSince(customerId, sinceInstant, deps = {}, untilInstant 
 }
 
 /**
+ * The visit's add-on lines (dispatch stores them per appointment). Fails
+ * closed: a silently missing line would drop its products and precautions.
+ */
+async function loadAddons(dbh, serviceId) {
+  const rows = await dbh('scheduled_service_addons as a')
+    .leftJoin('services as s', 'a.service_id', 's.id')
+    .where({ 'a.scheduled_service_id': serviceId })
+    .orderBy('a.created_at', 'asc')
+    .orderBy('a.id', 'asc')
+    // Identity, not the display name: the category snapshot taken at booking,
+    // else the live catalog row's category. No identity → no protocol. The
+    // service key (same rule) fixes the protocol visit where a matcher rule
+    // claims it.
+    .select('a.service_name', dbh.raw('COALESCE(a.service_category_snapshot, s.category) as category'), dbh.raw('COALESCE(a.service_key_snapshot, s.service_key) as service_key'))
+    .catch((err) => { throw unavailable('Add-on lines unavailable', err); });
+  return rows.map((r) => ({ name: clean(r.service_name, 80), category: r.category || null, serviceKey: r.service_key || null })).filter((a) => a.name);
+}
+
+// Catalog category → the treatment programs it may resolve to (the
+// matcher's pick is honoured only inside `any`, else the category's
+// `fallback`), so "Initial German Roach Knockdown" under pest_control
+// resolves the cockroach program and "Quarterly Pest + Termite Bait
+// Station" the termite-bait protocol (the matcher's deliberate composite
+// pick — the tech needs the station steps), while "Pest Inspection
+// Service" — inspection by identity, pest by name — resolves nothing. Specialty is a
+// grab-bag (tick, wildlife, bee/wasp, the general appointment …) with no
+// category default: its treatments are admitted by catalog identity
+// (`keys`: fire ant, flea, tick → the pest program's matcher visit; the
+// bed-bug treatment → its own program) or, for the bed-bug rows booked
+// before the catalog link, by name. Inspection / other and an unknown
+// category resolve no products. `nonChemical` service keys — the mechanical
+// lawn services (core aeration, dethatching, plugging, top dressing) and
+// the rodent rows whose catalog scope has no bait or rodenticide (trapping
+// and its follow-ups, the trap-only retainers, exclusion / wire mesh / bird
+// box, the trapping + exclusion + sanitation bundles, the paid inspection,
+// the guarantee, sanitation) — are work without a chemical program: the
+// catalog classifies them lawn_care / rodent, so the category alone would
+// hand them the program's lines (rodent visit 2 mixes trap setup with
+// Contrac Blox bait stations) and let the tank search dose any pesticide
+// on them. The bait-station services keep the program.
+const ADDON_PROGRAMS = Object.freeze({
+  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
+  lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
+  mosquito: { any: ['mosquito'], fallback: 'mosquito' },
+  termite: { any: ['termite'], fallback: 'termite' },
+  rodent: {
+    any: ['rodent'],
+    fallback: 'rodent',
+    nonChemical: [
+      'rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
+      'rodent_trapping', 'rodent_trapping_followup', 'rodent_trapping_followup_3pack',
+      'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
+      'rodent_exclusion_only', 'rodent_wire_mesh', 'rodent_bird_box',
+      'rodent_trapping_exclusion', 'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation',
+      'rodent_inspection', 'rodent_guarantee',
+    ],
+  },
+  tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },
+  specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
+});
+function addonProgramKey(category, name, protocols, serviceKey = null) {
+  const rule = ADDON_PROGRAMS[category];
+  if (!rule) return null;
+  if (serviceKey && rule.nonChemical?.includes(serviceKey)) return null;
+  if (serviceKey && rule.keys?.[serviceKey]) return rule.keys[serviceKey];
+  const picked = matchServiceProtocol(protocols, name, { serviceKey })?.programKey;
+  return rule.any.includes(picked) ? picked : rule.fallback;
+}
+
+/**
  * Everything the card needs about the visit, customer and property. Raw
  * access codes are returned under `access.codes` only.
  */
@@ -295,9 +365,14 @@ function unavailable(message, cause) {
 async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
   const svc = await dbh('scheduled_services as ss')
     .join('customers as c', 'ss.customer_id', 'c.id')
+    .leftJoin('services as s', 'ss.service_id', 's.id')
     .where('ss.id', serviceId)
     .select(
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes',
+      // The primary line's catalog identity (booking snapshot, else the live
+      // row); null on legacy rows booked before the catalog link existed.
+      dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
+      dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
       'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
       'c.first_name', 'c.last_name', 'c.phone', 'c.lawn_water_area_id',
       // The booked property's pin: the visit's own lat/lng first; the
@@ -316,12 +391,13 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
   if (!svc) return null;
 
   const serviceLine = detectServiceLine(svc.service_type);
-  const [prefs, lastVisit, { issues, recentComplaints }] = await Promise.all([
+  const [prefs, lastVisit, { issues, recentComplaints }, addons] = await Promise.all([
     // A failed preferences read is NOT an empty safety profile: the card
     // fails (503) rather than render without sensitivities, pet plan, codes.
     dbh('property_preferences').where({ customer_id: svc.customer_id }).first().catch((err) => { throw unavailable('Property preferences unavailable', err); }),
     loadLastVisit(dbh, svc.customer_id, serviceLine, etCalendarDayOf(svc.scheduled_date)),
     loadOpenIssues(dbh, svc.customer_id),
+    loadAddons(dbh, svc.id),
   ]);
   const [calls, rain7d] = await Promise.all([
     loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null),
@@ -345,8 +421,11 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     customerId: svc.customer_id,
     scheduledDate: etCalendarDayOf(svc.scheduled_date),
     serviceType: svc.service_type,
+    serviceCategory: svc.service_category || null,
+    serviceKey: svc.service_key || null,
     serviceLine,
     isLawn: serviceLine === 'lawn',
+    addons,
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     rig: rigAssignment(svc),
     windowStart: svc.window_start || null,
@@ -937,7 +1016,14 @@ function productBlocksUnderPlan({ plan }, product) {
 const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
 
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
-  if (facts.isLawn) {
+  // Identity gates the primary line before any branch — a catalog
+  // inspection or assessment resolves no treatment products even when its
+  // name reads as lawn or pest. A legacy row without identity keeps the
+  // name-based classification.
+  const identityKey = facts.serviceCategory ? addonProgramKey(facts.serviceCategory, facts.serviceType, protocols, facts.serviceKey) : undefined;
+  if (identityKey === null) return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
+  const isLawn = identityKey === undefined ? facts.isLawn : identityKey === 'lawn';
+  if (isLawn) {
     if (facts.facts?.alternateAddress) return { visit: null, lines: [], blocks: [ALTERNATE_ADDRESS_BLOCK] };
     const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now });
     const plan = loaded.plan;
@@ -963,9 +1049,23 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const blocks = planBlocksOf(loaded);
     return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
   }
-  const match = matchServiceProtocol(protocols, facts.serviceType);
-  const visit = seasonalVisit(match?.program, facts.scheduledDate) || match?.matchedVisit || match?.program?.visits?.[0] || null;
-  if (!visit) return { visit: null, lines: [], blocks: [] };
+  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null }), blocks: [] };
+}
+
+/**
+ * One protocol service line (non-lawn) → its matched visit and product
+ * lines. programKey (add-ons): the program is fixed by the add-on's catalog
+ * identity; the matcher's rule-picked visit is used only when it agrees on
+ * the program, so a display name can never swap the protocol. serviceKey:
+ * the booking's catalog service key — a matcher rule that claims it fixes
+ * the visit regardless of the display name.
+ */
+function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { programKey = null, serviceKey = null } = {}) {
+  const match = matchServiceProtocol(protocols, serviceType, { serviceKey });
+  const program = programKey ? (protocols?.[programKey] || null) : match?.program;
+  const ruleVisit = !programKey || match?.programKey === programKey ? match?.matchedVisit : null;
+  const visit = seasonalVisit(program, scheduledDate) || ruleVisit || program?.visits?.[0] || null;
+  if (!visit) return { visit: null, lines: [] };
   const lines = linesFromLineMeta(visit, catalog);
   // Protocol visits without lineMeta (tree & shrub, termite …) name their
   // products in the text itself — the same parse + catalog match the plan
@@ -973,7 +1073,37 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   for (const line of linesFromProtocolText(visit, catalog)) {
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
-  return { visit, lines, blocks: [] };
+  return { visit, lines };
+}
+
+/**
+ * The primary line plus every add-on line attached to the visit. Add-ons
+ * resolve through the protocol path with their own seasonal pick; a product
+ * already on the card from the primary line is not repeated. A lawn add-on
+ * has no per-appointment plan of its own (the plan engine keys on the
+ * appointment's service type), so it is reported, never dosed.
+ */
+async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
+  const primary = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+  const lines = [...primary.lines];
+  const addons = [];
+  for (const { name, category, serviceKey = null } of facts.addons || []) {
+    const programKey = addonProgramKey(category, name, protocols, serviceKey);
+    if (!programKey) { addons.push({ name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` }); continue; }
+    if (programKey === 'lawn') { addons.push({ name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' }); continue; }
+    const resolved = resolveProtocolLines(name, facts.scheduledDate, protocols, catalog, { programKey, serviceKey });
+    // Every add-on line rides through buildProductCards' per-product merger:
+    // a product the primary lists as conditional and the add-on as selected
+    // base work renders ONE card, and the selected line wins it.
+    for (const line of resolved.lines) lines.push({ ...line, source: name });
+    addons.push({
+      name,
+      products: resolved.lines.length,
+      visit: resolved.visit ? { number: resolved.visit.visit || null, month: resolved.visit.month || null } : null,
+      note: resolved.visit ? null : 'No protocol matched this add-on',
+    });
+  }
+  return { ...primary, lines, addons };
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1005,11 +1135,59 @@ function linesFromLineMeta(visit, catalog) {
     for (const hint of meta?.catalogProductHints || []) {
       const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
       if (!product || lines.some((l) => l.raw === raw && l.product.id === product.id)) continue;
-      const conditional = raw && secondary.includes(raw);
+      // Conditional when the line sits in the visit's secondary text OR is
+      // phrased as a condition (isConditionalLine).
+      const conditional = Boolean(raw && (secondary.includes(raw) || isConditionalLine(raw)));
       lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
     }
   }
   return lines;
+}
+
+// A protocol line that hangs on a diagnosis or a judgement call — "if
+// rotation calls for IRAC 7C", "only when plant/weather safe", "where
+// root/oomycete risk is justified", "for labeled leaf spot", "premium
+// accounts only", "where target pest fits", "for premium/stressed
+// accounts", "for high-pH chlorosis" (an account tier or a diagnosis, not
+// a target pest). Placement, legality and target phrasing ("where label
+// allows", "where ordinance allows", "where pets rest", "for whitefly/scale
+// nymphs") is how base work is described, not a condition on it.
+const CONDITIONAL_LINE_RE = /\b(?:if|only|as needed|where (?:needed|appropriate|justified|[^,;()]*?\b(?:justif\w*|fits?|supports?|warrants?|exists?))|for (?:confirmed|documented|diagnosed|labell?ed|premium|stressed|high-?ph|chlorosis)|when [^,;()]*?\b(?:active|present|safe|justif\w*|fits?|supports?|warrants?))\b/i;
+// The clauses of a line: "TriTek spray oil: 1.0% standard, 1.5% only with
+// active scale/mites" is a standard portion and a conditional step-up.
+function lineClauses(raw) {
+  return String(raw || '').split(/[,;]/).map((c) => c.trim()).filter(Boolean);
+}
+function isConditionalLine(raw) {
+  const text = String(raw || '');
+  if (!CONDITIONAL_LINE_RE.test(text)) return false;
+  // A line that declares a standard portion beside its condition is base
+  // work — the condition gates the step-up, not the product.
+  return !lineClauses(text).some((clause) => /\bstandard\b/i.test(clause) && !CONDITIONAL_LINE_RE.test(clause));
+}
+
+// The tank rate a protocol line states, as a per-gallon band in the
+// catalog's unit vocabulary: "6-8 fl oz/100 gal", "0.1-0.2 fl oz/gal",
+// "1-2 qt/100 gal", "1-2 tsp/gal", "1.0%" (v/v of the spray: 1 % = 1.28 fl
+// oz/gal). Read from the line's unconditional clauses only (the standard
+// rate, never the step-up), with parenthesised text dropped first (prices,
+// "(Southern Ag 27.15%)"). Null when the line states no per-gallon rate —
+// "label rate", a dry weight, a per-1,000 sq ft rate.
+const LINE_RATE_RE = /(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*(%|(?:fl\.?\s?oz|oz|qts?|pts?|tsp|tbsp|ml)\b\.?)(\s*(?:\/|per)\s*(100\s*)?gal(?:lons?)?\b)?/i;
+const FL_OZ_PER = { floz: 1, qt: 32, pt: 16, tbsp: 0.5, tsp: 1 / 6 };
+function lineRate(raw) {
+  const text = lineClauses(String(raw || '').replace(/\([^)]*\)/g, ' ')).filter((clause) => !CONDITIONAL_LINE_RE.test(clause)).join(', ');
+  const m = LINE_RATE_RE.exec(text);
+  if (!m) return null;
+  const [, lo, hi, unitRaw, perGal, per100] = m;
+  const unit = unitRaw.toLowerCase().replace(/[.\s]/g, '').replace(/s$/, '');
+  if (unit !== '%' && !perGal) return null;
+  const factor = unit === '%' ? 1.28 : (FL_OZ_PER[unit] ?? 1) / (per100 ? 100 : 1);
+  const round = (v) => Math.round(v * 100000) / 100000;
+  const a = round(Number(lo) * factor);
+  const b = hi != null ? round(Number(hi) * factor) : a;
+  if (!(a > 0)) return null;
+  return { lo: a, hi: Math.max(a, b), unit: unit === '%' || unit in FL_OZ_PER ? 'fl_oz' : unit };
 }
 
 // A line may name more than one product ("Distance or Talus", "Iron Plus
@@ -1044,11 +1222,36 @@ function linesFromProtocolText(visit, catalog) {
   const parsed = [...parseProtocolLines(visit?.primary, 'base'), ...parseProtocolLines(visit?.secondary, 'conditional')];
   const out = [];
   for (const line of parsed) {
+    // The parser's own flag (secondary text, "if …") plus the wider
+    // condition phrasing the protocols use: a primary line the tech has to
+    // justify is conditional work, never selected base work.
+    const conditional = Boolean(line.conditional) || isConditionalLine(line.raw);
     for (const product of productsOnLine(line, catalog)) {
-      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: line.role, selected: line.role === 'base' });
+      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
     }
   }
   return out;
+}
+
+// Dosing values never ride in the descriptive line text: a rate shown there
+// would survive every withhold (unverified, held, blocked). Rates come only
+// from the resolved, permitted mix (`planned`).
+const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(?:%|(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
+// Owner-only unit prices the protocol text carries ("($6.08)") never reach a
+// technician's card either.
+const PRICE_TOKEN_RE = /\(\s*\$\s*\d[\d.,]*\s*\)/g;
+function describeLine(raw) {
+  return String(raw || '')
+    .replace(PRICE_TOKEN_RE, ' ')
+    .replace(RATE_TOKEN_RE, ' ')
+    .replace(/\(\s*\)/g, ' ')
+    .replace(/\s+\)/g, ')')
+    .replace(/:\s*,/g, ':')
+    .replace(/,\s*,/g, ',')
+    .replace(/\s+([,;.)])/g, '$1')
+    .replace(/[,;:]\s*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
@@ -1076,7 +1279,10 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // No usable rig (none on file, ambiguous) withholds every planned
     // amount here too, with the Tank section's own reason.
     const demandMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
-    const plannedMix = !blocked && !tankReason && !unverified ? demandMix : null;
+    // A spray-check Hold withholds the amount on the card exactly as it does
+    // in the tank search — a held product is not dosed anywhere.
+    const held = verdict.verdict === 'hold';
+    const plannedMix = !blocked && !tankReason && !unverified && !held ? demandMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
     const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
@@ -1095,11 +1301,16 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       name: p.name,
       role: line.role || 'base',
       conditional: line.selected === false,
-      line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.raw, ...line.extraLines].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
+      line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.source ? `${line.source}: ${describeLine(line.raw)}` : describeLine(line.raw), ...line.extraLines.map(describeLine)].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
-      amountNote: unverified ? 'Label rate not yet verified — amount withheld' : (tankReason && demandMix ? `${tankReason} — amount withheld` : null),
+      // The plan's requirement for the shortage line — never an actionable
+      // dose (it survives every withhold so "On hand X vs Y" stays whole).
+      demand: demandMix ? { amount: Number(demandMix.amount), unit: demandMix.amountUnit || p.rate_unit || null } : null,
+      amountNote: unverified
+        ? 'Label rate not yet verified — amount withheld'
+        : (tankReason && demandMix ? `${tankReason} — amount withheld` : (held && demandMix ? `Spray check: ${verdict.reason} — amount withheld` : null)),
       short,
       stockNote,
       onHand,
@@ -1166,24 +1377,34 @@ async function rotationNote(dbh, facts, product) {
 
 // ── Orchestrator ────────────────────────────────────────────────────────────
 
+/**
+ * The spray check is a same-day call: a visit on another day is judged on
+ * that day (the next 4 h of weather say nothing about tomorrow). Shared by
+ * the card and the tank search so both judge the same forecast.
+ */
+async function forecastAt({ coords, scheduledDate, now = new Date(), deps = {} }) {
+  const isToday = scheduledDate === etDateString(now);
+  const hourly = isToday && coords?.lat != null
+    ? await (deps.getHourly || getHourlyRainOutlook)(coords.lat, coords.lng).catch(() => null)
+    : null;
+  return { isToday, hourly };
+}
+
 async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const facts = await loadJobCardFacts(serviceId, dbh, deps);
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 
-  // The spray check is a same-day call: a visit on another day is judged
-  // on that day (the next 4 h of weather say nothing about tomorrow), and
-  // the limits are judged from the appointment start.
-  const isToday = facts.scheduledDate === etDateString(now);
+  // The spray-check limits are judged from the appointment start.
   const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
-  const [paragraph, catalog, calibrations, hourly] = await Promise.all([
+  const [paragraph, catalog, calibrations, { isToday, hourly }] = await Promise.all([
     paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
     loadRigCalibrations(dbh, facts.rig),
-    isToday && facts.coords.lat != null ? (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null) : Promise.resolve(null),
+    forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
   const tank = tankFromCalibrations(calibrations);
-  const { visit, lines, blocks } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+  const { visit, lines, blocks, addons, note } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   // Limits are judged from the appointment start (now once the window has
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
@@ -1207,6 +1428,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     products: cards,
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
+    lineNote: note || null,
+    addons,
   };
 }
 
@@ -1230,33 +1453,67 @@ function unselectedBaseBlock(plan, product) {
 
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
+    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'rainfast_minutes').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
     serviceId
       ? dbh('scheduled_services as ss')
-        .join('customers as c', 'c.id', 'ss.customer_id')
+        .join('customers as c', 'ss.customer_id', 'c.id')
+        .leftJoin('services as s', 'ss.service_id', 's.id')
         .where('ss.id', serviceId)
-        .select('ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`))
-        .first().catch(() => null)
+        .select(
+          'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
+          // The primary line's catalog identity, by the card's own rule.
+          dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
+          dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
+          // The booked property's pin, by the card's own rule (see loadJobCardFacts).
+          dbh.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
+          dbh.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`),
+          dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
+        )
+        .first()
+        .catch(() => null)
       : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
   const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)));
+  // The non-lawn protocol line (primary visit or add-on) that names this
+  // product: an add-on's product is judged under that add-on's protocol,
+  // not the primary lawn plan (an off-protocol / blackout block of the lawn
+  // plan says nothing about a pest or tree & shrub mix), and a line the
+  // protocol lists as "if needed" is withheld exactly as the card does.
+  const { line: addonLine, treatment, primaryIsLawn, lawnAddon } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
-  const isLawn = detectServiceLine(svc.service_type) === 'lawn';
   // Same rule as the card: no plan at a non-primary address.
-  const plan = isLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
-  const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
+  const lawnPlan = primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
+  const planned = lawnPlan?.plan ? [...(lawnPlan.plan.mixCalculator?.items || []), ...(lawnPlan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
+  // The lawn plan governs every product it names (rate, blocks, approvals)
+  // even when a non-lawn add-on's line names it too — Iron Plus on a lawn
+  // plan with a Tree & Shrub add-on doses at the plan's rate, as the card
+  // shows it, and the add-on's "if needed" never withholds a plan-selected
+  // product. An add-on line governs only a product the plan does not name,
+  // and then the plan's blocks say nothing about that mix. A plan that
+  // failed to load names nothing knowably: it keeps governing (its
+  // plan_unavailable block, no dose). An alternate-address visit is not an
+  // outage — its plan is known not to apply — so the add-on line governs.
+  const protocolLine = planned || lawnPlan?.error ? null : addonLine;
+  const plan = protocolLine ? null : lawnPlan;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
   // Pest / tree products whose label rate is per gallon of finished spray
   // (default_rate "X" or "X-Y" + default_unit "<unit>/gal") dilute straight
   // into the tank — no carrier calibration involved.
-  const perGallon = ratePer1000 == null ? perGallonRate(product) : null;
+  const labelPerGallon = ratePer1000 == null ? perGallonRate(product) : null;
+  // The matched protocol line's own band narrows the verified label band —
+  // recognising the line can never widen the dose (March Tree & Shrub's
+  // Distance IGR: 6-8 fl oz/100 gal on the protocol, 0.06-0.12 fl oz/gal on
+  // the label → 0.06-0.08). A band outside the label, or on another unit,
+  // leaves the label band standing.
+  const protocolPerGallon = labelPerGallon && protocolLine?.rate ? narrowBand(labelPerGallon, protocolLine.rate) : null;
+  const perGallon = protocolPerGallon || labelPerGallon;
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
@@ -1282,29 +1539,110 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     : [];
   const planBlocks = [...planWide, ...productBlocks];
   const tankMixable = isTankMixable(product);
-  let mix;
-  if (planWide.length) mix = { amount: null, unit: rateUnit || null, reason: 'Lawn plan blocked — amounts withheld' };
-  else if (productBlocks.length) mix = { amount: null, unit: rateUnit || null, reason: clean(productBlocks[0].message, 160) };
-  else if (!tankMixable) mix = { amount: null, unit: rateUnit || null, reason: 'Not a tank mix — apply as labeled' };
-  // The catalog contract: no dose from a label value whose provenance is
-  // not verified (label_verified_at), on either rate basis.
-  else if (!product.label_verified_at) mix = { amount: null, unit: rateUnit || null, reason: 'Label rate not yet verified' };
-  else if (perGallon) mix = buildPerGallonAmount(perGallon, gallons);
-  else mix = buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
+  // The same spray check as a card product, at the same forecast.
+  const coords = propertyCoords(svc.latitude, svc.longitude);
+  const { isToday, hourly } = await forecastAt({ coords, scheduledDate: etCalendarDayOf(svc.scheduled_date || now), now, deps });
+  // Limits are judged from the appointment start, as on the card.
+  const sprayVerdict = buildSprayCheck({ products: [product], hourly, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
+  const sprayCheck = !isToday
+    ? { verdict: 'unknown', reason: 'Judged on the visit day' }
+    : (!coords ? { verdict: 'unknown', reason: 'No property pin on file — no forecast' } : { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason });
+  // Withhold reasons in guard order — the first that applies wins; the
+  // catalog contract (label_verified_at) and a spray Hold sit among them.
+  const withheld = [
+    // The visit's catalog identity is not a treatment (inspection,
+    // assessment, the specialty grab-bag) and no booked add-on's protocol
+    // names the product: the search is not a way to dose on an inspection.
+    [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category})`],
+    // A booked lawn add-on has no plan on this visit: a product no primary /
+    // add-on protocol names is not dosed off the catalog past the lawn
+    // plan's turf, ordinance, stress and approval guards.
+    [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
+    [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
+    [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
+    // The protocol lists this product as "if needed": no dose until the
+    // call is made, exactly as the card withholds its amount.
+    [protocolLine?.selected === false, `Listed as "if needed" on ${protocolLine?.addon || "this visit's protocol"} — confirm the call before mixing`],
+    [!tankMixable, 'Not a tank mix — apply as labeled'],
+    [!product.label_verified_at, 'Label rate not yet verified'],
+    [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
+  ].find(([applies]) => applies);
+  const mix = withheld
+    ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
+    : (perGallon ? buildPerGallonAmount(perGallon, gallons) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons }));
   const packSizes = await loadPackSizes(dbh, [product.id]);
+  // The label rate is itself a dosing instruction: it rides only with a
+  // permitted amount, never alongside a withheld one.
+  const permitted = mix.amount != null;
   return {
     productId: product.id,
     name: product.name,
-    ratePer1000: ratePer1000 != null ? Number(ratePer1000) : null,
-    ratePerGallon: perGallon,
-    rateSource: planned ? 'plan' : 'catalog',
+    ratePer1000: permitted && ratePer1000 != null ? Number(ratePer1000) : null,
+    ratePerGallon: permitted ? perGallon : null,
+    rateSource: planned ? 'plan' : (protocolPerGallon ? 'protocol' : 'catalog'),
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
+    sprayCheck,
+    context: protocolLine ? { line: protocolLine.addon, conditional: !protocolLine.selected } : { line: null },
     ...mix,
     planBlocks,
     tank,
     order: packSizes ? orderFor(product, packSizes[product.id], null, { includePricing }) : null,
   };
+}
+
+/**
+ * The non-lawn protocol line that names this product — the primary visit's
+ * (by catalog identity, name for a legacy row: resolveVisitProducts' rule)
+ * or an add-on's — if any. The product is matched the way the card matched
+ * it (the full catalog against that program's visit, then the id); `addon` is the add-on's
+ * name (null for the primary line) and `selected` says whether the line is
+ * booked work or the visit's "if needed" (a selected line anywhere wins
+ * over a conditional one) and `rate` the line's own per-gallon band when it
+ * states one; `line` is null when no non-lawn protocol names the product. `treatment` is the primary line's own eligibility (false
+ * for an inspection / assessment / specialty grab-bag identity) and
+ * `primaryIsLawn` whether the lawn plan governs it; `lawnAddon` names a
+ * booked lawn add-on, which has no plan on this visit.
+ */
+async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
+  const protocols = deps.protocols || require('../config/protocols.json');
+  const primaryKey = svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined;
+  const treatment = primaryKey !== null;
+  const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
+  const addons = (await loadAddons(dbh, serviceId))
+    .map((a) => ({ addon: a.name, name: a.name, programKey: addonProgramKey(a.category, a.name, protocols, a.serviceKey), serviceKey: a.serviceKey }));
+  // A lawn add-on has no plan of its own on this visit (the plan engine keys
+  // on the appointment's service type) — the search must not dose lawn
+  // products off the catalog past the plan's guards.
+  const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
+  const found = (line) => ({ line, treatment, primaryIsLawn, lawnAddon });
+  const candidates = [
+    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null }] : []),
+    ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
+  ];
+  if (!candidates.length) return found(null);
+  // The lines resolve against the full catalog, exactly as on the card: a
+  // one-product catalog would let a reverse-alias / first-two-word match
+  // accept the wrong formulation ("Headway G" for Headway) and skip the
+  // lawn plan on that false line.
+  const catalog = await loadCatalog(dbh);
+  let conditional = null;
+  for (const c of candidates) {
+    const { lines } = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null });
+    const hit = lines.find((l) => l.product.id === product.id);
+    if (!hit) continue;
+    if (hit.selected !== false) return found({ addon: c.addon, selected: true, rate: lineRate(hit.raw) });
+    conditional = conditional || { addon: c.addon, selected: false, rate: null };
+  }
+  return found(conditional);
+}
+
+// The protocol band clipped to the verified label band, on one unit.
+function narrowBand(label, line) {
+  if (String(label.unit).toLowerCase() !== String(line.unit).toLowerCase()) return null;
+  const lo = Math.max(label.lo, line.lo);
+  const hi = Math.min(label.hi, line.hi);
+  return lo <= hi ? { lo, hi, unit: label.unit } : null;
 }
 
 function perGallonRate(product) {
@@ -1337,7 +1675,8 @@ module.exports = {
   buildMixAmount,
   tankFromCalibrations,
   resolveVisitProducts,
+  resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
+  _test: { accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine },
 };
