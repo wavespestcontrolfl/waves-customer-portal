@@ -277,13 +277,26 @@ async function loadAddons(dbh, serviceId) {
   return rows.map((r) => ({ name: clean(r.service_name, 80), category: r.category || null })).filter((a) => a.name);
 }
 
-// Catalog category → treatment program. Inspection / specialty / other and
-// an unknown category resolve no products: a name match is not proof that
-// chemicals were booked (a "Pest Inspection Service" add-on is pest_control-
-// adjacent by name and inspection by identity).
-const ADDON_PROGRAM = Object.freeze({
-  pest_control: 'pest', lawn_care: 'lawn', mosquito: 'mosquito', termite: 'termite', rodent: 'rodent', tree_shrub: 'tree_shrub',
+// Catalog category → the treatment programs it may resolve to (first = the
+// category's default; the matcher's pick is honoured only inside this set,
+// so "Initial German Roach Knockdown" under pest_control resolves the
+// cockroach program while "Pest Inspection Service" — inspection by
+// identity, pest by name — resolves nothing). Inspection / specialty /
+// other and an unknown category resolve no products.
+const ADDON_PROGRAMS = Object.freeze({
+  pest_control: ['pest', 'cockroach', 'bed_bug'],
+  lawn_care: ['lawn'],
+  mosquito: ['mosquito'],
+  termite: ['termite'],
+  rodent: ['rodent'],
+  tree_shrub: ['tree_shrub', 'palm_injection'],
 });
+function addonProgramKey(category, name, protocols) {
+  const allowed = ADDON_PROGRAMS[category];
+  if (!allowed) return null;
+  const picked = matchServiceProtocol(protocols, name)?.programKey;
+  return allowed.includes(picked) ? picked : allowed[0];
+}
 
 /**
  * Everything the card needs about the visit, customer and property. Raw
@@ -981,7 +994,7 @@ async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {
   const lines = [...primary.lines];
   const addons = [];
   for (const { name, category } of facts.addons || []) {
-    const programKey = ADDON_PROGRAM[category] || null;
+    const programKey = addonProgramKey(category, name, protocols);
     if (!programKey) { addons.push({ name, products: 0, visit: null, note: `No treatment protocol for this add-on (${category || 'no catalog identity'})` }); continue; }
     if (programKey === 'lawn') { addons.push({ name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' }); continue; }
     const resolved = resolveProtocolLines(name, facts.scheduledDate, protocols, catalog, { programKey });
@@ -1358,14 +1371,16 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
  */
 async function addonLineForProduct(dbh, serviceId, product, scheduledDate, deps = {}) {
   const addons = await loadAddons(dbh, serviceId);
-  const candidates = addons.filter((a) => ADDON_PROGRAM[a.category] && ADDON_PROGRAM[a.category] !== 'lawn');
+  const protocols = deps.protocols || require('../config/protocols.json');
+  const candidates = addons
+    .map((a) => ({ ...a, programKey: addonProgramKey(a.category, a.name, protocols) }))
+    .filter((a) => a.programKey && a.programKey !== 'lawn');
   if (!candidates.length) return null;
   const aliases = await dbh('product_aliases').where({ product_id: product.id }).select('alias_name')
     .catch((err) => { throw unavailable('Product catalog unavailable', err); });
   const catalog = [{ ...product, aliases: aliases.map((r) => r.alias_name) }];
-  const protocols = deps.protocols || require('../config/protocols.json');
   for (const addon of candidates) {
-    const { lines } = resolveProtocolLines(addon.name, scheduledDate, protocols, catalog, { programKey: ADDON_PROGRAM[addon.category] });
+    const { lines } = resolveProtocolLines(addon.name, scheduledDate, protocols, catalog, { programKey: addon.programKey });
     if (lines.some((l) => l.product.id === product.id)) return addon.name;
   }
   return null;

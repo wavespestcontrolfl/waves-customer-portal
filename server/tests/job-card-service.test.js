@@ -984,16 +984,25 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
         // a treatment category.
         { name: 'Pest Inspection Service', category: 'inspection' },
         { name: 'Bee/Wasp removal', category: null },
+        // A specialized program inside the category (hook P1): the matcher's
+        // cockroach pick is honoured because it is in pest_control's set.
+        { name: 'Initial German Roach Knockdown', category: 'pest_control' },
       ],
     };
-    const out = await jobCard.resolveVisitLines({ facts, protocols: { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Celsius WG 1 oz' }] }, tree_shrub: program }, catalog, dbh: () => ({}) });
-    expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['c', null], ['s', 'Tree & Shrub Care']]);
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Celsius WG 1 oz' }] },
+      tree_shrub: program,
+      cockroach: { visits: [{ visit: 1, month: 'Any', primary: 'Advion Gel 1 tube' }] },
+    };
+    const out = await jobCard.resolveVisitLines({ facts, protocols, catalog: [...catalog, { id: 'a', name: 'Advion Gel' }], dbh: () => ({}) });
+    expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['c', null], ['s', 'Tree & Shrub Care'], ['a', 'Initial German Roach Knockdown']]);
     expect(out.addons).toEqual([
       { name: 'Tree & Shrub Care', products: 1, visit: { number: 9, month: 'Sep' }, note: null },
       { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
       { name: 'Mosquito', products: 0, visit: null, note: 'No protocol matched this add-on' },
       { name: 'Pest Inspection Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (inspection)' },
       { name: 'Bee/Wasp removal', products: 0, visit: null, note: 'No treatment protocol for this add-on (no catalog identity)' },
+      { name: 'Initial German Roach Knockdown', products: 1, visit: { number: 1, month: 'Any' }, note: null },
     ]);
     const [, card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
     expect(card.line).toBe('Tree & Shrub Care: Speedzone Southern');
