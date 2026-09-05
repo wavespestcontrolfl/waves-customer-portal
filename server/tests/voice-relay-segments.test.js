@@ -26,7 +26,15 @@ describe('relay segment storage representation', () => {
     expect(segments.callerTurnsFromText(composed.text)).toEqual(['first', 'second']);
   });
 
-  // Unresolved #3910 review finding 3940598420. This split preserves the
-  // reviewed behavior; the prerequisite stays DRAFT until the privacy fix.
-  test.todo('scrub PAN fragments across socket segments before persistence and composition');
+  test('scrubs caller fragments across sockets despite intervening agent speech', () => {
+    const input = [
+      segments.buildSegment({ generation: 2, sessionKey: 'second', text: 'Agent: I can send a payment link.\nCaller: 1111 1111' }),
+      segments.buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: 4111 1111\nAgent: Please do not read your card.' }),
+    ];
+    const scrubbed = segments.scrubStoredSegments(input);
+    expect(scrubbed.map((s) => s.session_key)).toEqual(['first', 'second']);
+    expect(segments.segmentsText(scrubbed)).toContain('[card ending 1111]');
+    expect(JSON.stringify(scrubbed)).not.toContain('4111 1111');
+    expect(JSON.stringify(scrubbed)).not.toContain('1111 1111');
+  });
 });
