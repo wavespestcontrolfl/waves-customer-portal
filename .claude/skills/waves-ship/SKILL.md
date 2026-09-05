@@ -39,10 +39,15 @@ all final-HEAD CI and Codex requirements.
 - For implementation, use a task-owned worktree. Reuse the selected
   task-owned worktree when suitable; create another only when the authorized
   work requires isolation. Preserve unrelated changes.
-- When creating a worktree, resolve and record the user-selected base, or
+- When creating a new branch and worktree, resolve and record the user-selected base, or
   a refreshed `origin/main` when no base was selected. Pass that revision
   explicitly: `git worktree add <path> -b <branch> <base-sha>`; never rely
   on the current checkout's HEAD as the implicit base.
+- When attaching an existing selected branch, verify its recorded SHA and
+  check `git worktree list` before `git worktree add <path> <branch>`.
+  Do not recreate or reset the branch with `-b`/`-B`, or use `--force` to
+  bypass another worktree's checkout. If it is already checked out, reuse
+  only a suitable task-owned worktree or follow the §7 handoff rule.
 - Record whether this task created or reused the worktree. Selecting or
   reusing an existing worktree does not authorize removing it.
 - For audits and reviews, use the user's selected branch, worktree, diff,
