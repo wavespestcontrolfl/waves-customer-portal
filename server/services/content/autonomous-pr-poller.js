@@ -329,7 +329,7 @@ async function headRefreshFileContent(run, pr) {
 // referenced, so a branch push after approval cannot add products.
 async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
-  if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
+  if (content === null) return { ok: false, transient: true, reason: 'head blog file unavailable for the affiliate belt' };
   // Frontmatter is parsed FIRST and every affiliate scan runs on the BODY:
   // tag-shaped text in YAML (a comment documenting <AffiliateLink>) is not
   // rendered affiliate material and must not withhold an affiliate-free PR
@@ -407,19 +407,19 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
       : null;
   } catch (_) { registryBaseSha = null; }
   if (!registryBaseSha) {
-    return { ok: false, reason: 'cannot pin the astro base for the registry read — auto-merge withheld (fail closed)' };
+    return { ok: false, transient: true, reason: 'cannot pin the astro base for the registry read — auto-merge withheld (fail closed)' };
   }
   try {
     const f = await gh.getFile('packages/affiliate-registry/registry.json', registryBaseSha);
     if (f && typeof f.content === 'string') liveRegistry = JSON.parse(f.content);
   } catch (_) { liveRegistry = null; }
   if (!liveRegistry || typeof liveRegistry !== 'object') {
-    return { ok: false, reason: 'authoritative astro registry unreadable at merge time — auto-merge withheld (fail closed)' };
+    return { ok: false, transient: true, reason: 'authoritative astro registry unreadable at merge time — auto-merge withheld (fail closed)' };
   }
   let guard;
   try {
     guard = require('./content-guardrails');
-  } catch (_) { return { ok: false, reason: 'guardrails unavailable for the merge-time affiliate recheck' }; }
+  } catch (_) { return { ok: false, transient: true, reason: 'guardrails unavailable for the merge-time affiliate recheck' }; }
   const hard = guard._internals
     .affiliateComponentFindings(bodyHead, '', fmHead, { targetIsBlog: true, registry: liveRegistry })
     .filter((f) => f.severity === 'P0');
@@ -1432,7 +1432,7 @@ async function maybeAutoMerge(run, pr) {
         briefId = fresh.brief_id || null;
       }
     } catch (_) {
-      verdictFlagged = true; pinnedShaOk = false; approvedShaOk = false;
+      return { pending: true, transient: true, reason: 'publisher_head_pin_failed' };
     }
     // The SHA pin is UNIVERSAL on these lanes (PR r14 P1): even a
     // competitor-free run's head could gain named-competitor content
@@ -1570,7 +1570,7 @@ async function maybeAutoMerge(run, pr) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
           // Deterministic → park on this transaction (commits with the lock).
           if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason, trx);
-          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
+          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : { transient: true }) };
           return null;
         }
         // 3.8a Affiliate belt — see recheckAffiliateApproval. Withheld (not
@@ -1579,7 +1579,7 @@ async function maybeAutoMerge(run, pr) {
         const aff = await affiliateBeltVerdict(run, topic.content, pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
-          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}` };
+          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
           return null;
         }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
@@ -1625,7 +1625,7 @@ async function maybeAutoMerge(run, pr) {
         const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
-          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}` };
+          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
           return null;
         }
         if (!(await queueRowStillParkedLocked(run, trx))) {

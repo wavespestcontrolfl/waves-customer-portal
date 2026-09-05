@@ -768,6 +768,31 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(updates.some(u => u.updates.poll_pending_reason)).toBe(false);
   });
 
+  test.each(['registry', 'topic'])('a transient %s lookup after 49 hours never retires the PR', async (failure) => {
+    process.env.GATE_AFFILIATE_LINKS = 'true';
+    const blocker = failure === 'registry' ? 'affiliate_contract_blocked' : 'topic_targeting_blocked';
+    setupDb({ pending: [makeRun({ poll_pending_reason: blocker, poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValueOnce('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValueOnce(true);
+    if (failure === 'registry') {
+      gh.getBranchSha.mockResolvedValueOnce('regbase1');
+      gh.getFile.mockResolvedValueOnce({ content: '---\ntitle: Test\nslug: /pest-control/test-post/\n---\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>' });
+      gh.getFile.mockRejectedValueOnce(new Error('GitHub unavailable'));
+    } else {
+      topicGate.loadLiveIndex.mockRejectedValueOnce(new Error('Corpus unavailable'));
+    }
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ pending: true, transient: true });
+    expect(result.results[0].reason).toMatch(new RegExp(`^${blocker}`));
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('an affiliate gate disabled for 49 hours pauses without retiring', async () => {
     process.env.GATE_AFFILIATE_LINKS = 'false';
     setupDb({ pending: [makeRun({ poll_pending_reason: 'affiliate_autopublish_disabled', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
