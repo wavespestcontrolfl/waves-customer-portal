@@ -77,7 +77,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
     ? proposal.customerResponsibilities : [];
   const termRows = commercialTermRows(proposal.commercialTerms);
   const sectionTitle = {
-    fontSize: 14, fontWeight: 800, color: W.blueDeeper, marginTop: 14, marginBottom: 2,
+    fontSize: 14, fontWeight: 700, color: W.blueDeeper, marginTop: 14, marginBottom: 2,
   };
   // Taxable-line identification (codex #3281 r4) — parity with the PDF and
   // the pdfkit document it replaced: mark each taxed amount, show the rate,
@@ -129,7 +129,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
           </div>
           {programs.map((program, pIdx) => (
             <div key={`${program.label}-${pIdx}`} style={{ marginTop: pIdx === 0 ? 8 : 14 }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, marginBottom: 2 }}>{program.label}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: W.blueDeeper, marginBottom: 2 }}>{program.label}</div>
               {program.note ? (
                 <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 4, lineHeight: 1.5 }}>{program.note}</div>
               ) : null}
@@ -170,7 +170,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
       {buildingsList.map((building, bIdx) => (
         <div key={`${building.name || 'building'}-${bIdx}`} style={{ marginTop: bIdx === 0 ? 0 : 14 }}>
           {multiBuilding ? (
-            <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, marginBottom: 4 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: W.blueDeeper, marginBottom: 4 }}>
               {building.name || 'Service location'}
             </div>
           ) : null}
@@ -253,7 +253,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
             <span style={amtStyle}>{fmtMoney(totals.totalTax)}</span>
           </div>
         ) : null}
-        <div style={{ ...lineRow, borderBottom: 0, fontWeight: 800, color: W.blueDeeper, fontSize: 16 }}>
+        <div style={{ ...lineRow, borderBottom: 0, fontWeight: 700, color: W.blueDeeper, fontSize: 16 }}>
           <span>{grandTotalLabel}</span>
           <span style={{ ...amtStyle, fontSize: 18 }}>{fmtMoney(totals.firstYearTotal)}</span>
         </div>
@@ -294,7 +294,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
 
       {inclusions ? (
         <div style={estimateInnerBox({ marginTop: 16, padding: '16px 16px' })}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: W.blueDeeper, marginBottom: 6 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: W.blueDeeper, marginBottom: 6 }}>
             What your commercial pest service includes
           </div>
           <ul style={{ margin: 0, paddingLeft: 20 }}>

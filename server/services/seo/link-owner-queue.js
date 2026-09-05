@@ -232,11 +232,14 @@ async function listOwnerQueue(db) {
   // here exists — otherwise every placed link would be a card with nothing to click
   const exhaustedDraft = (p) => Number(p.outreach_draft_attempts) >= require('./link-prospect-worker').MAX_ATTEMPTS
     && !['drafted', 'sending', 'sent', 'send_error'].includes(p.outreach_status);
-  const parked = candidates.filter((p) => (exhaustedDraft(p) || uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
+  const parked = candidates.filter((p) => (p.quality_signals?.outreach_match_ambiguous || exhaustedDraft(p) || uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
     : liveRows.some((r) => r.prospect_id === p.id && !r.satisfied_at && isOwner(r.level) && whyNotHere(p, r) === null))));
   if (!parked.length) return { cards: [] };
   const domains = await db('seo_link_domains').whereIn('id', [...new Set(parked.map((p) => p.domain_id))]).whereIn('agent_state', [...BRIDGE_STATES])
     .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
+  const matchIds = [...new Set(parked.map((p) => p.quality_signals?.outreach_match_ambiguous).filter(Boolean))];
+  const matchRows = matchIds.length ? await db('seo_backlinks').whereIn('id', matchIds).where({ status: 'active' }).select('id', 'source_url') : [];
+  const matchById = new Map(matchRows.map((b) => [b.id, b]));
   const domainById = new Map(domains.map((d) => [d.id, d]));
   const cardsFor = parked.filter((p) => domainById.has(p.domain_id));
   if (!cardsFor.length) return { cards: [] };
@@ -367,6 +370,7 @@ async function listOwnerQueue(db) {
     return {
       submission_ambiguity: uncertainById.get(p.id) || null,
       outreach_draft_exhausted: exhaustedDraft(p),
+      backlink_match: matchById.get(p.quality_signals?.outreach_match_ambiguous) || null,
       placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {

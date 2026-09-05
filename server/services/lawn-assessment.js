@@ -432,9 +432,11 @@ function getSeason(month) {
  * Get full assessment history for a customer, ordered by date.
  */
 async function getCustomerHistory(customerId) {
-  return db('lawn_assessments')
-    .where({ customer_id: customerId })
-    .orderBy('service_date', 'asc');
+  return db('lawn_assessments as la')
+    .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
+    .select('la.*', 'ss.scheduled_date as appointment_date')
+    .where('la.customer_id', customerId)
+    .orderBy('la.service_date', 'asc');
 }
 
 /**

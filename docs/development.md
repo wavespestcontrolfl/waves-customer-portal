@@ -5,14 +5,25 @@ runner installs no packages and performs no migrations at startup.
 
 ## Fresh checkout
 
-Use the Node version selected in CI (currently Node 20), then:
+The root `.nvmrc` selects Node 20 for development and all jobs in the main CI
+workflow. Use your version manager to select it before installing dependencies.
+With nvm already installed, run:
 
 ```sh
+nvm install
+nvm use
 npm ci
 npm run worktree:setup
 npm run dev:doctor -- --frontend
 npm run dev:managed-client
 ```
+
+The file selects a major line, not an exact patch; Node 20.9 is the minimum.
+Doctor reports the actual Node version and rejects a different major or an older
+20.x runtime with instructions to switch and reinstall dependencies. Worktree
+setup and creation use the same check; creation checks before fetching or
+creating the checkout and again against the new checkout before `npm ci`.
+Status and stop remain usable after changing Node versions.
 
 The runner prints the URL, checkout path, commit SHA and assigned ports. Its API,
 Vite, debugger and control listener bind to loopback. Ports never silently move.
@@ -47,6 +58,12 @@ npm run dev:migrate
 npm run dev:doctor
 npm run dev
 ```
+
+`dev:migrate` prints an elapsed-time heartbeat every 30 seconds while the child
+process runs. Initial setup applies the full migration history and can take
+several minutes over a remote connection; the heartbeat indicates the process
+is still running, not a completed migration or a successful result. Wait for
+the command to exit, then run doctor.
 
 `dev:doctor` performs read-only migration readiness checks. `dev:migrate` is the
 explicit write step. Managed commands ignore the repository's `.env` and inherited
@@ -149,3 +166,60 @@ the report, screenshots and trace for seven days, then discards them.
 only the recorded run's owned records and refuses a changed database selection.
 The next E2E run also cleans its previous fixture before creating a new one.
 Cleanup retains the private database/schema for future runs.
+
+## Run migrations near the dev database
+
+`npm run dev:migrate -- --remote` runs the same Knex command over Railway SSH
+inside an existing matching dev/preview deployment. It reduces the serial
+public-network round trips of fresh setup. It does not create an execution
+service, deploy code, or change the app service's database selection.
+
+Requires Railway CLI 5.49 or newer, authenticated access, an authorized SSH key,
+and a successful portal deployment of the **exact committed checkout SHA**.
+The checkout must be clean. Use its PR preview; a newer/older staging deployment
+is refused. The execution service and Postgres must be in the same verified
+nonproduction environment. Production is refused by both its environment ID
+and the environment-name allowlist.
+
+After selecting the dev cluster and running `qa:database`, write the service IDs
+in the ignored `.tmp/dev/remote.json` (these are UUIDs from Railway):
+
+```json
+{
+  "environmentId": "<dev-or-preview-environment-uuid>",
+  "serviceId": "<portal-execution-service-uuid>",
+  "databaseServiceId": "<postgres-service-uuid>",
+  "identityFile": "<optional-path-to-your-SSH-private-key>",
+  "nodePath": "<optional-absolute-path-to-matching-remote-node>"
+}
+```
+
+Omit `identityFile` to use Railway's existing SSH key discovery. Omit `nodePath`
+to use the service's `node`. The remote binary must match `.nvmrc`; deployment
+runtimes may differ. A separately installed matching Node binary can be selected
+by absolute path. Runtime installation is explicit and is not performed by this
+command; a binary installed in a container's temporary directory is lost when
+that deployment is replaced. The project is
+fixed to this portal's Railway project. The selected database URL must use the
+verified Postgres service's public TCP proxy and the private database name
+created for this worktree. URL query parameters/fragments are refused; they can
+override the connection target. Credentials travel on SSH stdin, not argv, and
+only the migration child receives the private-network URL. Provider credentials,
+background jobs and `.env` loading are excluded.
+
+```sh
+npm run dev:migrate -- --remote
+npm run dev:doctor
+npm run qa:e2e
+npm run qa:cleanup
+```
+
+The command verifies deployment identity and runtime again inside the remote
+process before starting Knex. A successful SSH exit alone is insufficient:
+a per-invocation acknowledgment must confirm that Knex exited successfully.
+Raw remote diagnostics are suppressed because they can include SQL or bindings.
+On failure, check SSH access and inspect only the selected private database.
+The existing migration ledger and locks remain authoritative; do not force
+unlock an interrupted batch while a remote migration may still be running.
+A pending legacy placeholder still needs an explicit second pass. Local
+`dev:migrate` remains available without `--remote`.

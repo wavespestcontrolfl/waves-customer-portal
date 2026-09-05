@@ -195,8 +195,8 @@ async function executeAwayMode({ customerId, caseRow, params }) {
   ] };
 }
 
-async function executeHold({ customerId, caseRow, action, params, families }) {
-  const { startHold, cancelHold } = require('./holds');
+async function executeHold({ customerId, caseRow, action, params, families, deferTechNotices = false }) {
+  const { startHold, cancelHold, emitHoldTechNotices } = require('./holds');
   const holdable = families.filter((f) => ['lawn_care', 'mosquito', 'tree_shrub'].includes(f));
   if (!holdable.length) throw codedError('hold_family_required', 'Nothing on this plan can be held');
   // Multi-family holds commit ALL or NOTHING (codex P0): a later family's
@@ -217,17 +217,22 @@ async function executeHold({ customerId, caseRow, action, params, families }) {
     }
     throw err;
   }
+  // The techs hear about the moves only now — every family stands and no
+  // compensation can revert them (the compensating moves are silent). An
+  // away pairing defers further, until its Away Mode write also stands.
+  const techNotices = results.flatMap((r) => r.techNotices || []);
+  if (!deferTechNotices) emitHoldTechNotices(techNotices);
   const first = results[0];
   return { holds: results.map((r) => r.holdId), effects: [
     `${holdable.map(labelOf).join(' and ')} on hold until ${first.resumeDisplay}: no visits and no charges for ${holdable.length > 1 ? 'them' : 'it'} until then.`,
     `Your WaveGuard level and prices stay locked; we text you 7 days before the restart so you can move the date or cancel.`,
-  ] };
+  ], ...(deferTechNotices ? { techNotices } : {}) };
 }
 
 async function executeAwayPairing(ctx) {
   // Holds first (they can fail and fully compensate); Away Mode is a
   // single idempotent preference write, so nothing partial can linger.
-  const hold = await executeHold(ctx);
+  const { techNotices, ...hold } = await executeHold({ ...ctx, deferTechNotices: true });
   let away;
   try {
     away = await executeAwayMode(ctx);
@@ -242,6 +247,8 @@ async function executeAwayPairing(ctx) {
     }
     throw err;
   }
+  // Holds and Away Mode both stand: the moved visits' techs hear now.
+  require('./holds').emitHoldTechNotices(techNotices);
   return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
 }
 

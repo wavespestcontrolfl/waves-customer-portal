@@ -207,7 +207,8 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
   });
   // markPrTerminal's atomic upsert — record it like a normal
   // codex_remediation_state update so stamp assertions read one shape.
-  db.raw = jest.fn(async (sql, params) => {
+  db.raw = jest.fn(async (sql, params = []) => {
+    if (sql.startsWith('UPDATE opportunity_queue q')) return { rowCount: 0 };
     updates.push({ table: 'codex_remediation_state', filters: { pr_number: params[0] }, updates: { status: params[1] } });
     return { rowCount: 1 };
   });
@@ -404,12 +405,13 @@ describe('helpers', () => {
     expect(target.planLinks).toBe(false);
   });
 
-  test('auto-merge is OFF by default and honors conventional truthy values', () => {
-    expect(poller._internals.autoMergeEnabled()).toBe(false);
+  test('auto-merge defaults on only for supporting blogs and honors explicit configuration', () => {
+    expect(poller._internals.autoMergeEnabled('new_supporting_blog')).toBe(true);
+    expect(poller._internals.autoMergeEnabled('refresh_existing_page')).toBe(false);
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    expect(poller._internals.autoMergeEnabled()).toBe(true);
+    expect(poller._internals.autoMergeEnabled('refresh_existing_page')).toBe(true);
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = '0';
-    expect(poller._internals.autoMergeEnabled()).toBe(false);
+    expect(poller._internals.autoMergeEnabled('new_supporting_blog')).toBe(false);
   });
 });
 
@@ -748,14 +750,207 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     return { number: 42, state: 'open', merged: false, merged_at: null, title: 'Blog: Test Post', head: { ref: 'content/autonomous-test', sha: 'headsha1' } };
   }
 
-  test('env flag unset (default): open PR is left alone entirely', async () => {
+  test.each(['verdict', 'throw'])('a transient body-image %s after 49 hours never retires the PR', async (failure) => {
+    const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValueOnce('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValueOnce(true);
+    if (failure === 'throw') publisher.assertBodyImagesAtHead.mockRejectedValueOnce(new Error('GitHub unavailable'));
+    else publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, transient: true, reason: 'GitHub unavailable' });
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ pending: true, transient: true, reason: expect.stringMatching(/^body_images_required/) });
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(updates.some(u => u.updates.poll_pending_reason)).toBe(false);
+  });
+
+  test.each(['registry', 'topic'])('a transient %s lookup after 49 hours never retires the PR', async (failure) => {
+    process.env.GATE_AFFILIATE_LINKS = 'true';
+    const blocker = failure === 'registry' ? 'affiliate_contract_blocked' : 'topic_targeting_blocked';
+    setupDb({ pending: [makeRun({ poll_pending_reason: blocker, poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValueOnce('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValueOnce(true);
+    if (failure === 'registry') {
+      gh.getBranchSha.mockResolvedValueOnce('regbase1');
+      gh.getFile.mockResolvedValueOnce({ content: '---\ntitle: Test\nslug: /pest-control/test-post/\n---\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>' });
+      gh.getFile.mockRejectedValueOnce(new Error('GitHub unavailable'));
+    } else {
+      topicGate.loadLiveIndex.mockRejectedValueOnce(new Error('Corpus unavailable'));
+    }
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ pending: true, transient: true });
+    expect(result.results[0].reason).toMatch(new RegExp(`^${blocker}`));
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('an affiliate gate disabled for 49 hours pauses without retiring', async () => {
+    process.env.GATE_AFFILIATE_LINKS = 'false';
+    setupDb({ pending: [makeRun({ poll_pending_reason: 'affiliate_autopublish_disabled', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValueOnce('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test\n---\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>' });
+    const result = await poller.pollPending();
+    expect(result.results[0].reason).toBe('affiliate_autopublish_disabled');
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a blog blocked for 48 hours is retired automatically without merging', async () => {
+    const run = makeRun({ poll_pending_reason: 'preview_build_failed', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    setupDb({ pending: [run] });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'failed-deploy' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'failed' });
+    gh.getPr.mockResolvedValue(openPr());
+    const result = await poller.pollPending();
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(result.results[0].reason).toBe('automatic_retirement_pending');
+  });
+
+  test('retirement preserves the blocker across closure and branch-deletion retries', async () => {
+    const run = makeRun({ poll_pending_reason: 'preview_build_failed', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    let updates = setupDb({ pending: [run] });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'failed-deploy' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'failed' });
+    gh.getPr.mockResolvedValue(openPr());
+    await poller.pollPending();
+    expect(updates.some(u => u.updates.poll_pending_reason === 'automatic_retirement_pending')).toBe(false);
+
+    updates = setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue({ ...openPr(), state: 'closed' });
+    gh.retireBranch.mockResolvedValueOnce(false);
+    const retry = await poller.pollPending();
+    expect(retry.results[0]).toMatchObject({ pending: true, transient: true, reason: 'branch_retirement_pending' });
+    expect(runUpdates(updates)).toHaveLength(0);
+    expect(updates.some(u => u.updates.poll_pending_reason === 'branch_retirement_pending')).toBe(false);
+
+    updates = setupDb({ pending: [run] });
+    const done = await poller.pollPending();
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
+    expect(done.results[0].closed).toBe(true);
+    expect(runUpdates(updates)[0].updates.failure_message).toContain('Last blocker: preview_build_failed.');
+  });
+
+  test('a merge observed after branch cleanup wins over retirement', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValueOnce({ ...openPr(), state: 'closed' })
+      .mockResolvedValue({ ...openPr(), state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    await poller.pollPending();
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
+    expect(runUpdates(updates).some(u => u.updates.outcome === 'failed')).toBe(false);
+    expect(runUpdates(updates).some(u => u.updates.outcome === 'completed_published')).toBe(true);
+  });
+
+  test('a reopened PR remains pollable after branch cleanup', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValueOnce({ ...openPr(), state: 'closed' }).mockResolvedValue(openPr());
+    const result = await poller.pollPending();
+    expect(result.results[0]).toMatchObject({ pending: true, transient: true, reason: 'retirement_state_changed' });
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('retirement never closes a PR that merged while its queue lock was acquired', async () => {
+    const run = makeRun({ poll_pending_reason: 'preview_build_failed', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    setupDb({ pending: [run] });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'failed-deploy' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'failed' });
+    gh.getPr.mockResolvedValueOnce(openPr()).mockResolvedValue({ ...openPr(), state: 'closed', merged: true });
+    const result = await poller.pollPending();
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(result.results[0]).toMatchObject({ pending: true, reason: 'retirement_state_changed' });
+  });
+
+  test('a missing preview remains transient instead of retiring from stale evidence', async () => {
+    const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue(null);
+    const result = await poller.pollPending();
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(result.results[0].reason).toBe('preview_build_pending');
+  });
+
+  test('detailed blocker reasons retire after the same normalized blocker persists', async () => {
+    const run = makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '0 distinct images, minimum 2' });
+    const result = await poller.pollPending();
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(result.results[0].reason).toBe('automatic_retirement_pending');
+  });
+
+  test('the full poll path repairs supporting blogs by default and resets aged retirement evidence', async () => {
+    delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const updates = setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockRejectedValueOnce(Object.assign(new Error('findings remain'), { code: 'CODEX_REVIEW_REQUIRED' }));
+    const remediation = require('../services/content/codex-remediation');
+    const bar = jest.spyOn(remediation, 'p2OnlyMergeEligible').mockResolvedValueOnce({ eligible: false });
+    const repair = jest.spyOn(remediation, 'maybeRemediateAutonomousPr').mockResolvedValueOnce({ remediated: true, round: 1 });
+    try {
+      const result = await poller.pollPending();
+      expect(result.results[0].reason).toBe('remediation_review_pending');
+      expect(gh.closePr).not.toHaveBeenCalled();
+      const reset = updates.find(x => x.table === 'autonomous_runs' && x.updates.poll_pending_reason === 'remediation_review_pending');
+      expect(reset.updates.poll_pending_since.getTime()).toBeGreaterThan(Date.now() - 60000);
+      expect(repair).toHaveBeenCalledWith(expect.objectContaining({ number: 42 }), expect.objectContaining({ action_type: 'new_supporting_blog' }), expect.any(Object));
+    } finally { bar.mockRestore(); repair.mockRestore(); }
+  });
+
+  test.each(['throw', 'return'])('a remediation outage (%s) preserves an aged Codex blocker without retirement', async (failure) => {
+    delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const updates = setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockRejectedValueOnce(Object.assign(new Error('findings remain'), { code: 'CODEX_REVIEW_REQUIRED' }));
+    const remediation = require('../services/content/codex-remediation');
+    const bar = jest.spyOn(remediation, 'p2OnlyMergeEligible').mockResolvedValueOnce({ eligible: false });
+    const repair = jest.spyOn(remediation, 'maybeRemediateAutonomousPr');
+    if (failure === 'throw') repair.mockRejectedValueOnce(new Error('provider unavailable'));
+    else repair.mockResolvedValueOnce({ skipped: true, transient: true, reason: 'publisher pin lookup unavailable' });
+    try {
+      const result = await poller.pollPending();
+      expect(result.results[0]).toMatchObject({ pending: true, transient: true, reason: expect.stringMatching(/^codex_review_pending/) });
+      expect(gh.closePr).not.toHaveBeenCalled();
+      expect(updates.some(x => x.updates.poll_pending_reason)).toBe(false);
+      expect(repair).toHaveBeenCalledWith(expect.objectContaining({ number: 42 }), expect.objectContaining({ action_type: 'new_supporting_blog' }), expect.any(Object));
+    } finally { bar.mockRestore(); repair.mockRestore(); }
+  });
+
+  test('explicit kill switch leaves the open PR alone', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
     const updates = setupDb({ pending: [makeRun()] });
     gh.getPr.mockResolvedValue(openPr());
 
     const res = await poller.pollPending();
 
     expect(res.results[0].pending).toBe(true);
-    expect(res.results[0].reason).toBe('awaiting_human_merge');
+    expect(res.results[0].reason).toBe('auto_merge_disabled');
     expect(pagesPoll.latestDeploymentForBranch).not.toHaveBeenCalled();
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
@@ -1129,7 +1324,8 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
     // Terminal bookkeeping done → the row leaves the reconcile set (marker), no state change.
     const retiredMark = updates.find((u) => u.table === 'autonomous_runs');
-    expect(retiredMark.updates).toEqual(expect.objectContaining({ poll_pending_reason: 'topic_block_pr_retired' }));
+    expect(retiredMark.updates).toEqual(expect.objectContaining({ poll_pending_reason: 'topic_block_pr_retired', outcome: 'skipped' }));
+    expect(updates.some((u) => u.table === 'opportunity_queue' && u.updates.status === 'skipped')).toBe(true);
     expect(retiredMark.updates.skip_reason).toBeUndefined();
 
     // A lost queue CAS rolls the un-park back (nothing changes; retried next tick).
@@ -1175,7 +1371,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
   test('a busy topic-merge lock defers the merge to the next tick (hook, PR codex r11 push)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
+    setupDb({ pending: [makeRun({ poll_pending_reason: 'topic_merge_lock_busy', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
     gh.getPr.mockResolvedValue(openPr());
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
@@ -1186,8 +1382,9 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(gh.closePr).not.toHaveBeenCalled();
     expect(topicGate.evaluateDraftTargeting).not.toHaveBeenCalled();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'topic_merge_lock_busy' });
+    expect(res.results[0]).toMatchObject({ pending: true, transient: true, reason: 'topic_merge_lock_busy' });
   });
 
   test('the recheck adopts the flat-path file the publisher updated in place (codex r20)', async () => {
@@ -1211,7 +1408,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getFile.mock.calls.map((c) => c[0])).toEqual(['src/content/blog/pest-control/test-post.mdx', 'src/content/blog/pest-control/test-post.md', 'src/content/blog/test-post.mdx']);
   });
 
-  test('affiliate belt (full polling path): a head carrying <AffiliateLink> is withheld without the owner approval stamp and merges with it (Codex PR3 r6)', async () => {
+  test('affiliate blogs merge after current-head and live-registry checks without owner approval', async () => {
     const affiliateFile = { content: '---\ntitle: Affiliate Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\npost_type: protocol\ndisclosure:\n  type: affiliate\n---\n\n## Sec\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>\n' };
     const arm = () => {
       process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
@@ -1225,12 +1422,12 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       gh.getBranchSha.mockResolvedValue('regbase1');
       gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/test-post.mdx' ? affiliateFile : path === 'packages/affiliate-registry/registry.json' ? __liveRegFile : null));
     };
-    // 1. No approval stamp → withheld, never merged.
+    // No approval stamp is needed for an autonomous blog.
     arm();
     setupDb({ pending: [makeRun({ trust_build_approved_by: null })] });
     let res = await poller.pollPending();
-    expect(gh.mergePr).not.toHaveBeenCalled();
-    expect(JSON.stringify(res)).toMatch(/affiliate_approval_required/);
+    expect(gh.mergePr).toHaveBeenCalled();
+    expect(JSON.stringify(res)).not.toMatch(/affiliate_contract_blocked/);
     // 2. Approved, and the approved draft referenced the same product → merges.
     jest.clearAllMocks();
     arm();
@@ -1267,7 +1464,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     setupDb({ pending: [refresh()], briefs });
     let res = await poller.pollPending();
     expect(gh.mergePr).not.toHaveBeenCalled();
-    expect(JSON.stringify(res)).toMatch(/affiliate_approval_required/);
+    expect(JSON.stringify(res)).toMatch(/affiliate_contract_blocked/);
     expect(publisher.resolveExistingAstroFileForTarget).toHaveBeenCalledWith('https://www.wavespestcontrol.com/blog/legacy-post/', { ref: openPr().head.ref });
     // 2. approved at this head with the same product → merges
     jest.clearAllMocks(); arm();
@@ -1281,7 +1478,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     setupDb({ pending: [refresh()], briefs });
     res = await poller.pollPending();
     expect(gh.mergePr).not.toHaveBeenCalled();
-    expect(JSON.stringify(res)).toMatch(/affiliate_approval_required/);
+    expect(JSON.stringify(res)).toMatch(/affiliate_contract_blocked/);
   });
 
   test('a same-leaf flat file under ANOTHER category is not this post (fails closed like an unreadable file)', async () => {
@@ -1460,15 +1657,20 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     });
   });
 
-  test('governed run: pinned head but a kill switch is OFF → withheld (revoke works on open PRs)', async () => {
+  test('governed run: a kill switch OFF for 49 hours pauses without retiring', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
+    setupDb({ pending: [makeRun({ brief_id: 'brief-1', poll_pending_reason: 'named_competitor_autopublish_revoked', poll_pending_since: new Date(Date.now() - 49 * 3600000) })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
     greenMergePath();
 
+    const fg = require('../config/feature-gates');
+    const real = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((key) => key === 'namedCompetitorAutopublish' ? false : real(key));
     const res = await poller.pollPending();
+    fg.isEnabled.mockRestore();
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
     expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(gh.closePr).not.toHaveBeenCalled();
   });
 
   test('HUMAN-APPROVED head merges without eligibility while it matches; a later push is withheld (PR r1+r7)', async () => {

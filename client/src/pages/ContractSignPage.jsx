@@ -72,7 +72,7 @@ export default function ContractSignPage() {
   const tokenRef = useRef(token);
   tokenRef.current = token;
   // BrandCard / BrandButton / WavesShell already emit their own data-glass markup.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [contract, setContract] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -302,18 +302,18 @@ export default function ContractSignPage() {
           <BrandCard padding={24} style={{ position: 'sticky', top: 20 }}>
             {signed ? (
               <div>
-                <div style={{ fontSize: FS.sub, fontWeight: FW.heavy, color: DOC.ink }}>{isAutopay ? 'Authorization' : 'Document'} signed</div>
+                <div style={{ fontSize: FS.sub, fontWeight: FW.bold, color: DOC.ink }}>{isAutopay ? 'Authorization' : 'Document'} signed</div>
                 <p style={{ margin: '8px 0 0', color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
                   Signed on {fmtDate(contract.signedAt)} as {contract.signedName || contract.recipientName}. Waves has recorded your electronic signature{isAutopay ? ' and authorization' : ''}.
                 </p>
               </div>
             ) : !needsSignature ? (
               <div>
-                <div style={{ fontSize: FS.sub, fontWeight: FW.heavy, color: DOC.ink }}>No signature required</div>
+                <div style={{ fontSize: FS.sub, fontWeight: FW.bold, color: DOC.ink }}>No signature required</div>
                 <p style={{ margin: '8px 0 0', color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
                   This Waves document is ready to view. You can save this link or reply to the message that sent it if you have questions.
                 </p>
-                <div style={{ marginTop: SP.md, fontSize: FS.caption, color: DOC.muted, lineHeight: LH.snug }}>
+                <div style={{ marginTop: SP.md, fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug }}>
                   Need help? <HelpPhoneLink tone="dark" inline />
                 </div>
               </div>
@@ -321,7 +321,7 @@ export default function ContractSignPage() {
               <form onSubmit={submit}>
                 <div style={{ marginBottom: SP.md }}>
                   <div>
-                    <div style={{ fontSize: FS.h4, fontWeight: FW.heavy, color: DOC.ink }}>Sign {documentKind}</div>
+                    <div style={{ fontSize: FS.h4, fontWeight: FW.bold, color: DOC.ink }}>Sign {documentKind}</div>
                     <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>Both fields and agreements are required.</div>
                   </div>
                 </div>
@@ -370,7 +370,7 @@ export default function ContractSignPage() {
                 <BrandButton type="submit" disabled={!canSubmit} fullWidth style={{ marginTop: SP.md }}>
                   {submitting ? 'Signing...' : `Sign ${isAutopay ? 'Authorization' : 'Document'}`}
                 </BrandButton>
-                <div style={{ marginTop: SP.sm, fontSize: FS.caption, color: DOC.muted, lineHeight: LH.snug, textAlign: 'center' }}>
+                <div style={{ marginTop: SP.sm, fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug, textAlign: 'center' }}>
                   Need help before signing? <HelpPhoneLink tone="dark" inline />
                 </div>
               </form>

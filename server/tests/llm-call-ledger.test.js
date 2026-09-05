@@ -642,8 +642,10 @@ describe('llm call ledger', () => {
       // a terminal status is sticky: ok only ever goes false, the first error and served model stay
       expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
       for (const col of ['error_code', 'error_class', 'served_model']) expect(String(updates[col])).toBe(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
+      // the session's start is its earliest recorded turn start (LEAST skips a null side)
+      expect(String(updates.started_at)).toBe('LEAST(llm_dispatch_log.started_at, EXCLUDED.started_at)');
       // the first write's identity and context stay: nothing else is merged
-      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
+      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model', 'started_at']);
     });
 
     it('writes one session_turn row per turn, keyed by (session, turn start), with that turn\'s delta of the counters — every re-record of the same turn upserts the SAME row monotonically', async () => {
@@ -657,6 +659,10 @@ describe('llm call ledger', () => {
       expect(turnRows()[0]).toMatchObject({ row_kind: 'session_turn', lane_id: 'agent_assistant', provider_ref: 'sess_9', ok: true, input_tokens: 250, output_tokens: 40, cached_input_tokens: null });
       expect(turnRows()[0].step_id).toMatch(/^[0-9a-f-]{36}$/);
       expect(turnRows()[0].latency_ms).toBeGreaterThanOrEqual(500);
+      // the runner's captured start is persisted on both rows: created_at is the recording time,
+      // after the usage GET, so a start derived from it would drift by the fetch (Codex r12 on #3891)
+      expect(turnRows()[0].started_at).toEqual(new Date(turnA));
+      expect(ledgerRows().at(-1)).toMatchObject({ row_kind: 'session', started_at: new Date(turnA) });
       // the same turn re-recorded (a runner's finally, a retry) carries the SAME key → the unique
       // partial index on step_id makes it an upsert, merged like the session row (monotone)
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, failure: 'streaming_failed' });
@@ -689,9 +695,10 @@ describe('llm call ledger', () => {
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, turnId: 't-2' });
       expect(turnRows()).toHaveLength(7);
       expect(new Set([turnRows()[0].step_id, turnRows()[5].step_id, turnRows()[6].step_id]).size).toBe(3);
-      // no turn start and no turn id → no turn row, the session row alone
+      // no turn start and no turn id → no turn row, the session row alone, with no start to persist
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
       expect(turnRows()).toHaveLength(7);
+      expect(ledgerRows().at(-1)).toMatchObject({ row_kind: 'session', started_at: null });
       expect(mergesFor('session')).toHaveLength(8);
       sessionPrev = null;
     });

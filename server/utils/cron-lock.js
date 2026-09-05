@@ -543,4 +543,4 @@ function wasLockSkipped(result) {
   return !!(result && result.skipped === true && LOCK_SKIP_REASONS.has(result.reason));
 }
 
-module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, wasLockSkipped };
+module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, wasLockSkipped, sanitizeJobError };

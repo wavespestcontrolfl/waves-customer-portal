@@ -699,17 +699,24 @@ async function runAuthorityBridge(db, {
   if (ran && ran.skipped) out.skipped = ran.reason || 'lease_held';
   // the §6.4 sweep runs even when the DECISION lease was held (a manual / inline run holds it with autoSend false, so
   // no other holder would send): the sender claims every row under its own locks and needs no bridge lease
-  if (autoSend) await dispatchAutoSends(db, out, { send, now });
+  if (autoSend) await dispatchAutoSends(db, out, { send, now, exclusive });
   await bellForParked(notify, out, parkedDomains, now);
   return out;
 }
 
 // §6.4 — every pending authorized draft (this run's and the ones the cap deferred); the outreach gate is the
 // sender's own first check. A failure is one error entry on the run, never a thrown nightly.
-async function dispatchAutoSends(db, out, { send, now }) {
+async function dispatchAutoSends(db, out, { send, now, exclusive }) {
   if (!isEnabled('linkProspectOutreach')) return;
   try {
-    out.autoSend = await autoSendDecided(db, { send, now });
+    // Share the scan lease through reconciliation AND dispatch: no weekly scan
+    // can still be publishing evidence while this bridge chooses a follow-up.
+    const result = await exclusive('backlink-scan', async () => {
+      await require('./link-prospect-verifier').reconcileOutreach({ now });
+      return autoSendDecided(db, { send, now });
+    }, { recordHealth: false });
+    out.autoSend = result?.skipped === true
+      ? { attempted: 0, sent: 0, skipped: [{ code: 'backlink_scan_busy' }] } : result;
     const skipped = out.autoSend.skipped.length ? ` (${out.autoSend.skipped.map((s) => s.code).join(', ')})` : '';
     if (out.autoSend.attempted) logger.info(`[link-authority] auto-outreach: ${out.autoSend.sent}/${out.autoSend.attempted} sent${skipped}`);
   } catch (err) {

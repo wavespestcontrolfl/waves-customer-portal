@@ -5470,6 +5470,20 @@ const EstimateConverter = {
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+              // Tech-facing "new visit" card (tech-visit-notifications.js,
+              // codex r9 P1): this promoted same-trip parent inherits the
+              // reserved start's technician and is inserted directly — no
+              // assignment write follows, and the reserved row's own
+              // graduation card names only itself. Rides `trx` so it waits
+              // for the enclosing commit; gate-dark, never awaited. Its
+              // seeded children stay silent (series fan-out, by design).
+              if (parentRow.technician_id) {
+                void require('./tech-visit-notifications').notifyTechVisitChange({
+                  visitId: parentRow.id, kind: 'assigned', technicianId: parentRow.technician_id, actorId: 'customer_estimate_accept',
+                  snapshot: { date: parentRow.scheduled_date, windowStart: parentRow.window_start || null, windowEnd: parentRow.window_end || null },
+                  trx,
+                });
+              }
               // Held-slot acceptance is a booking too (Codex #3178 r3 P1)
               // — the auto-schedule path below is not the only way an
               // accepted estimate becomes an appointment.
