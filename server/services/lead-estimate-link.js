@@ -993,7 +993,13 @@ async function markLinkedLeadEstimateAccepted({
       // r22 P1).
       if (stamped) {
         const identity = identityOf(lead);
-        const wonByThisAcceptance = { ...identity, status: 'won', customer_id: customerId === undefined ? identity.customer_id : (customerId || null) };
+        // ...judged on the customer THIS conversion wrote — the override
+        // when the fallback carried one (an acceptance without a customer
+        // preserves the row's own link), else the acceptance's — so a
+        // concurrent no-customer retry that won with the row's customer
+        // preserved keeps its link (codex #3883 r2 P1).
+        const wrote = 'customerId' in extra ? extra.customerId : customerId;
+        const wonByThisAcceptance = { ...identity, status: 'won', customer_id: wrote === undefined ? identity.customer_id : (wrote || null) };
         await database('leads').where({ id: lead.id }).where({ estimate_id: estimateId })
           .whereNot((q) => q.where(wonByThisAcceptance))
           .update({ estimate_id: null, updated_at: new Date() });

@@ -675,6 +675,20 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], onlyIfSoleLinkedRow: 'estimate-2f' }));
   });
 
+  test('a no-customer fallback whose status claim lost reverts its stamp on the predicate of the customer it WROTE (the row\'s own, preserved) — a concurrent no-customer retry that won keeps its link (codex #3883 r2 P1)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-16', estimate_data: { lead_id: 'lead-dup16' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: { 'lead-dup16': { id: 'lead-dup16', status: 'duplicate', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', extracted_data: { duplicate_of_lead_id: 'lead-gone16' } } },
+      raceRows: {},
+      afterStamp: { 'lead-dup16': { id: 'lead-dup16', status: 'won', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', estimate_id: 'estimate-16' } },
+    });
+    leadAttribution.markConverted.mockResolvedValueOnce(false);
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-16', customerId: null, database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup16', expect.objectContaining({ customerId: undefined, onlyIfStatusIn: ['duplicate'] }));
+    expect(database._claims[1]).toEqual({ id: 'lead-dup16', identity: { estimate_id: 'estimate-16' }, not: { status: 'won', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', estimate_id: 'estimate-16' } });
+  });
+
   test('the named-row fallback on an acceptance with NO customer: a named row linked to another customer converts only on a matching contact, with its link preserved (codex #3883 r1 P1)', async () => {
     const leadsById = {
       'lead-dup15': { id: 'lead-dup15', status: 'duplicate', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', extracted_data: { duplicate_of_lead_id: 'lead-gone15' } },
