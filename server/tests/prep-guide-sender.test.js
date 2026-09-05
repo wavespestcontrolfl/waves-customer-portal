@@ -1013,6 +1013,31 @@ describe('sprinkler timer guide', () => {
     expect(q.whereIn.mock.calls[0]).toEqual(['subject', ['sprinkler_timer prep info sent', 'Sprinkler Timer Guide prep sent (manual)']]);
   });
 
+  test('sent once, durably: the email ledger and the SMS log count as delivery even when the interaction marker was never written', async () => {
+    // Delivery, then the marker insert fails (logPrepInteraction is fail-soft).
+    interactionsInsert.mockRejectedValueOnce(new Error('marker insert failed'));
+    const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+    expect(first.ok).toBe(true);
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].idempotencyKey).toBe('prep_guide_once:cust-1:prep.sprinkler_timer');
+    // The library's own email row (queued / sent / uncertain — anything not refused) is enough…
+    jest.clearAllMocks();
+    manualEmailRow = { id: 'em-1', status: 'queued', created_at: '2026-09-02T10:00:00Z' };
+    const second = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+    expect(second).toMatchObject({ ok: false, reason: 'guide_already_sent', sentAt: '2026-09-02T10:00:00Z' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const emailQ = manualEmailQueries[manualEmailQueries.length - 1];
+    expect(emailQ.where).toHaveBeenCalledWith({ recipient_id: 'cust-1', template_key: 'prep.sprinkler_timer' });
+    expect(emailQ.whereNotIn).toHaveBeenCalledWith('status', ['blocked', 'failed']);
+    // …and so is a text that carried the hub link.
+    jest.clearAllMocks();
+    manualEmailRow = null;
+    manualSmsRow = { id: 'sms-1', created_at: '2026-09-03T10:00:00Z' };
+    const third = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(third).toMatchObject({ ok: false, reason: 'guide_already_sent', sentAt: '2026-09-03T10:00:00Z' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('an unreadable preference or history fails closed (no send)', async () => {
     db.mockImplementation((table) => {
       if (table === 'customers') return customersQuery();

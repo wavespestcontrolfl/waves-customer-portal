@@ -224,6 +224,9 @@ async function buildWateringBlock(customer) {
 // The text that carries the tokened guide page — one template for every
 // pest; {prep_label} names the guide, {prep_url} is the /prep/:token link.
 const SMS_GUIDE_LINK_KEY = 'auto_prep_guide_link';
+// The hub link every sprinkler timer guide text carries (auto_sprinkler_timer,
+// 20260905000011) — the durable SMS-log signature of a delivered guide.
+const GUIDE_SMS_LINK_SIGNATURE = 'wavespestcontrol.com/sprinkler-timers/';
 
 const CHANNELS = Object.freeze(['email', 'sms', 'both']);
 
@@ -588,6 +591,10 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
         suppressionGroupKey: SERVICE_GROUP,
         categories: ['manual_prep', `prep_${config.emailTemplateKey.replace(/\./g, '_')}`],
         triggerEventId: manualPrepTriggerId(customer.id, config.emailTemplateKey, null),
+        // Sent once: the ledger's unique key refuses a second email for this
+        // customer even if every read above missed (the library's own
+        // dedupe; a failed attempt may retry).
+        idempotencyKey: `prep_guide_once:${customer.id}:${config.emailTemplateKey}`,
         suppressProviderErrorLog: true,
         onQueued: () => { dispatched = true; },
         payload: {
@@ -807,12 +814,30 @@ async function guideRefusal(customer, config, pestType, { wantEmail = true } = {
     if (prefs && prefs.seasonal_tips === false) return { reason: 'seasonal_tips_off' };
     // History BEFORE the email opt-out: on Both, that opt-out only drops the
     // email leg, so a customer already sent the guide must be caught here
-    // or the text goes out twice (pre-push Codex P1 on 71346bab2).
-    const prior = await db('customer_interactions')
-      .where({ customer_id: customer.id })
-      .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
-      .orderBy('created_at', 'desc')
-      .first();
+    // or the text goes out twice (pre-push Codex P1 on 71346bab2). Three
+    // sources, any one is enough: the interaction marker (best-effort — its
+    // insert is swallowed after delivery), the email ledger for this
+    // template (every attempt not refused outright, queued / uncertain
+    // included), and the SMS log by the hub link the text carries (twilio.js
+    // keeps no caller metadata; pre-push Codex P1 on 1c5df4ec7).
+    const [marker, email, text] = await Promise.all([
+      db('customer_interactions')
+        .where({ customer_id: customer.id })
+        .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
+        .orderBy('created_at', 'desc')
+        .first(),
+      db('email_messages')
+        .where({ recipient_id: customer.id, template_key: config.emailTemplateKey })
+        .whereNotIn('status', ['blocked', 'failed'])
+        .orderBy('created_at', 'desc')
+        .first(),
+      db('sms_log')
+        .where({ customer_id: customer.id, direction: 'outbound' })
+        .whereRaw('message_body ILIKE ?', [`%${GUIDE_SMS_LINK_SIGNATURE}%`])
+        .orderBy('created_at', 'desc')
+        .first(),
+    ]);
+    const prior = marker || email || text;
     if (prior) return { reason: 'guide_already_sent', sentAt: prior.created_at || null };
     // The customer's email opt-out (the weekly irrigation sweep's own
     // np.email_enabled fence); a text-only send is unaffected by it.
