@@ -460,7 +460,9 @@ function basisFor(window) {
     rowKinds: ROW_KINDS,
     workloads: ['live'],
     // Managed Agents sessions are summed per turn (session_turn rows: each
-    // turn's delta of the counters, its own latency and outcome).
+    // turn's delta of the counters, its own latency and outcome). Totals per
+    // session are exact; when two turns of ONE session overlap, the later
+    // record carries the earlier turn's tokens (llm-dispatch-metrics).
     sessions: 'per_turn',
     // Off = no new rows are being written; what is shown is history.
     ledgerRecording: gateEnvValue('GATE_LLM_CALL_LEDGER'),
