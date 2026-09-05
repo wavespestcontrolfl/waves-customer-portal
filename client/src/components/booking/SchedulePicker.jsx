@@ -436,7 +436,14 @@ export default function SchedulePicker({
       {days.length > 0 ? (
         <PickerDayGrid frame={frame} availability={availability} selectedDate={selectedDay?.date || null} onSelectDay={onSelectDay} />
       ) : null}
-      {days.length === 0 ? empty : (
+      {days.length === 0 ? (
+        <>
+          {/* A SLOT_TAKEN refresh can come back empty — the reason must
+              outlive the list it emptied. */}
+          {submitError ? <div className="wpk-error" role="alert">{submitError}</div> : null}
+          {empty}
+        </>
+      ) : (
         <div className={pickedAction ? 'wpk-has-action' : undefined}>
           <PickerTimesPanel
             frame={frame}

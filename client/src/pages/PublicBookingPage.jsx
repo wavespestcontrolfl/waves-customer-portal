@@ -7,7 +7,7 @@ import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
 import { fireGlassConfetti, useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
-import SchedulePicker, { PickerTimesPanel, SchedulePickerStyles } from '../components/booking/SchedulePicker';
+import SchedulePicker from '../components/booking/SchedulePicker';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../utils/api';
@@ -1146,18 +1146,21 @@ export default function PublicBookingPage() {
             )}
 
             {/* The shared picker (best times → day grid → the day's windows).
-                A Waves AI search swaps its own days in; the reset link
-                restores the full window. */}
+                A Waves AI search or a custom-date browse swaps its own days
+                in — ONE picker, one selection; the reset link restores the
+                full window. */}
             {!loading && (
               <>
                 <SchedulePicker
-                  availability={searchResult ? { days: searchResult.days } : { days: availability }}
-                  rankedSlots={searchResult ? searchResult.slots : rankedSlots}
-                  selectedDate={selectedDate}
+                  availability={pickedDayObj ? { days: [pickedDayObj] } : searchResult ? { days: searchResult.days } : { days: availability }}
+                  rankedSlots={pickedDayObj ? null : searchResult ? searchResult.slots : rankedSlots}
+                  selectedDate={pickedDayObj ? pickedDayObj.date : selectedDate}
                   onSelectDay={(date) => { setSelectedDate(date); setSelectedSlot(null); }}
                   selectedSlot={selectedSlot}
                   onSelectSlot={(slot) => (slot ? selectSlot(slot.date, slot) : setSelectedSlot(null))}
-                  intro={`Tap a time — each is a ${slotLenLabel} window.`}
+                  intro={pickedDayObj && !pickedDayObj.nearby
+                    ? "No route near you that day yet — here's what's close."
+                    : `Tap a time — each is a ${slotLenLabel} window.`}
                   slotDetail={(slot) => slot.reason || null}
                   empty={searchResult ? (
                     <div style={{ marginBottom: 16, fontSize: 14, color: COLORS.slate600 }}>
@@ -1165,10 +1168,17 @@ export default function PublicBookingPage() {
                     </div>
                   ) : null}
                 />
-                {searchResult ? (
+                {searchResult || pickedDayObj ? (
                   <button
                     type="button"
-                    onClick={() => { setSearchResult(null); setSelectedDate(null); setSelectedSlot(null); setAiSession((n) => n + 1); }}
+                    onClick={() => {
+                      setSearchResult(null);
+                      setPickedDate(null);
+                      setBrowseDays(null);
+                      setSelectedDate(null);
+                      setSelectedSlot(null);
+                      setAiSession((n) => n + 1);
+                    }}
                     style={{
                       background: 'transparent', border: 'none', padding: 0, marginBottom: 16,
                       color: COLORS.wavesBlue, fontSize: 14, fontWeight: 700, cursor: 'pointer', textDecoration: 'underline',
@@ -1215,18 +1225,6 @@ export default function PublicBookingPage() {
                     >
                       Try again
                     </button>
-                  </div>
-                )}
-                {pickedDayObj && (
-                  <div style={{ marginTop: 14 }}>
-                    <SchedulePickerStyles />
-                    <PickerTimesPanel
-                      day={pickedDayObj}
-                      selectedSlot={selectedSlot}
-                      onSelect={(slot) => (slot ? selectSlot(slot.date, slot) : setSelectedSlot(null))}
-                      intro={pickedDayObj.nearby ? `Tap a time — each is a ${slotLenLabel} window.` : "No route near you that day yet — here's what's close."}
-                      slotDetail={(slot) => slot.reason || null}
-                    />
                   </div>
                 )}
                 {pickedDateHasNoOpenTimes && (

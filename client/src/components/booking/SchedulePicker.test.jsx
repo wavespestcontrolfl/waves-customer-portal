@@ -44,6 +44,14 @@ describe('SchedulePicker', () => {
   });
 });
 
+describe('empty availability', () => {
+  it('still shows the submit error when a refresh comes back with no days', () => {
+    render(<SchedulePicker availability={{ days: [] }} selectedDate={null} onSelectDay={() => {}} selectedSlot={null} onSelectSlot={() => {}} submitError="That time was just taken — here are the latest open times." empty={<p>Nothing open.</p>} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('just taken');
+    expect(screen.getByText('Nothing open.')).toBeInTheDocument();
+  });
+});
+
 describe('PickerBestTimes ordering', () => {
   it('orders same-nearby picks by engine rank, not list order, before slicing to three', () => {
     // /book hands the curated list chronologically; rank 1 sits last.
