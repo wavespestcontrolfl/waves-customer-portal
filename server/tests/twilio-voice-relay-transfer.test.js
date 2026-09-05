@@ -135,8 +135,11 @@ describe('/relay-complete', () => {
     await handlerFor('/relay-complete')({ body: { CallSid: 'CA-t2', HandoffData: TRANSFER }, query: {} }, res);
     expect(res.body).toContain('<Record');
     expect(res.body).not.toContain('<Dial');
-    // Re-classified as voicemail — /call-complete never runs on this recorder.
+    // Re-classified as voicemail — /call-complete never runs on this recorder — behind the claim's owner fence (hook P1).
     expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
+    const { builder: b0 } = primeDb();
+    await handlerFor('/relay-complete')({ body: { CallSid: 'CA-t2b', HandoffData: JSON.stringify({ reason: 'transfer', owner: 'nonce-X' }) }, query: {} }, mockRes());
+    expect(b0.whereRaw.mock.calls.filter(([sql, b]) => String(sql).includes('relay_session_claim_owner') && b && b[0] === 'nonce-X')).toHaveLength(2);
     // A stalled pool on the stamp (after a confirmed ring claim) still returns the recorder inside the deadline (hook P1).
     jest.useFakeTimers();
     const { builder } = primeDb();

@@ -788,6 +788,8 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
     twiml.hangup();
     return;
   }
+  // The frame names the socket's claim owner (owner-bound writes below).
+  const owner = typeof handoff.owner === 'string' && handoff.owner ? handoff.owner.slice(0, 128) : null;
   if (callSid) {
     // ONE staff ring per call, claimed atomically: Twilio may retry this
     // action callback, and every retry would otherwise render a fresh
@@ -805,7 +807,6 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
     // OWNER-BOUND (hook P1): the frame names the socket's claim owner; a
     // row now owned by a reconnect (or claimed while this frame says
     // unclaimed) matches 0 rows, so a superseded socket cannot ring staff.
-    const owner = typeof handoff.owner === 'string' && handoff.owner ? handoff.owner.slice(0, 128) : null;
     const claimed = await withDeadline(
       db('call_log').where('twilio_call_sid', callSid)
         .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''")
@@ -855,6 +856,10 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       // not hold the voicemail TwiML past Twilio's timeout (hook P1).
       await withDeadline(
         db('call_log').where('twilio_call_sid', callSid)
+          // Same owner + eligible-state fence as the claim above: a reconnect
+          // that took the row meanwhile keeps its own reconcile (hook P1).
+          .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
+          .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
           .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
           .catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
         STAMP_DEADLINE_MS,
