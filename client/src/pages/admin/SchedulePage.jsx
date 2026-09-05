@@ -5144,7 +5144,9 @@ export function ProtocolPanel({ service, onClose }) {
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
   const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
-  const jobCardEnabled = Boolean(jobCard?.enabled) || jobCardError;
+  // Fail closed: only an affirmative { enabled: true } opens the gated tab and
+  // ask bar. A failed request is shown as a notice under the header instead.
+  const jobCardEnabled = Boolean(jobCard?.enabled);
   const defaultSection = jobCardEnabled
     ? "job_card"
     : isLawn
@@ -5378,6 +5380,11 @@ export function ProtocolPanel({ service, onClose }) {
           {!jobCardEnabled && service && (
             <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
               {service.serviceType} — {service.customerName}
+            </div>
+          )}
+          {!jobCardEnabled && jobCardError && (
+            <div style={{ fontSize: 12, color: "#C8312F", marginTop: 2 }}>
+              Job card unavailable right now — safety facts, precautions and plan checks did not load.
             </div>
           )}
         </div>{" "}
