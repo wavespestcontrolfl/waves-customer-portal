@@ -1177,10 +1177,47 @@ async function ancestryFirstContactAt(database, repeat, ownedByUs) {
 // began with its ancestry (r15 P1). Anything else is an add-on for an
 // established customer — skip rather than guess which deal the event
 // closed. Returns { candidates } (possibly empty) or { reason }.
+// A lead is this customer's when it carries their link, or is unlinked and
+// still matches the verified contact; for an estimate-scoped event a lead
+// tied to a DIFFERENT estimate belongs to that deal (codex #3834 r22 P1).
+const leadOwnedBy = (row, { customerId, phone, email }) => (row.customer_id
+  ? String(row.customer_id) === String(customerId)
+  : leadMatchesEstimateContact(row, { customer_phone: phone, customer_email: email }));
+const inEstimateScope = (row, estimateId) => !estimateId || !row.estimate_id || row.estimate_id === estimateId;
+
+// A customer-link claim that lost because a concurrent /calculate relabelled
+// the open root as a repeat of an OLDER open lead is not a staff closure: the
+// refreshed row carries a marker that reaches further, so the hop follows it
+// — as acceptWizardNamedLead does on the accept path (r21 P1) — and returns
+// the root it reaches when that root is ours to convert (open by positive
+// membership, this customer's, in the event's estimate scope); null means the
+// loss was a genuine transition and the event converts nothing (codex #3834
+// r34 P1). One hop, on the identity the row was read with.
+async function relabelledRootOf(database, lead, scope) {
+  const now = await database('leads').where({ id: lead.id }).first();
+  if (!now || now.status !== 'duplicate' || !sameContactIdentity(identityOf(lead), now)) return null;
+  const marker = duplicateMarkerOf(now);
+  if (!marker || marker === duplicateMarkerOf(lead)) return null;
+  const root = await followDuplicateLink(database, now);
+  const ours = root.id !== now.id && !root.deleted_at && OPEN_LEAD_STATUSES.includes(root.status)
+    && leadOwnedBy(root, scope) && inEstimateScope(root, scope.estimateId);
+  return ours ? root : null;
+}
+
+// One tier-2 conversion: the claimed write on the row as read, and — when
+// the claim lost to a relabel rather than a closure — the same write on the
+// root the new marker reaches. Returns the id that converted, or null.
+async function convertCustomerLinkRow(database, leadAttributionService, lead, conversion, scope) {
+  const claim = lead.status === 'duplicate' ? DUPLICATE_LEAD_CLAIM : OPEN_LEAD_CLAIM;
+  if (await leadAttributionService.markConverted(lead.id, { ...conversion, onlyIfStatusIn: claim, onlyIfIdentity: identityOf(lead) })) return lead.id;
+  const root = await relabelledRootOf(database, lead, scope);
+  if (!root) return null;
+  const converted = await leadAttributionService.markConverted(root.id, { ...conversion, onlyIfStatusIn: OPEN_LEAD_CLAIM, onlyIfIdentity: identityOf(root) });
+  return converted ? root.id : null;
+}
+
 async function resolveCustomerLinkCandidates(database, { source, customerId, phone, email, estimateId }) {
-  const ownedByUs = (row) => (row.customer_id
-    ? String(row.customer_id) === String(customerId)
-    : leadMatchesEstimateContact(row, { customer_phone: phone, customer_email: email }));
+  const ownedByUs = (row) => leadOwnedBy(row, { customerId, phone, email });
   const linked = await findOpenLeadsForCustomer(database, customerId);
   const skip = (reason, why, leadIds) => {
     logger.warn(`[lead-trigger] ${source} customer-link skip — ${why}`, { source, customerId, leadIds });
@@ -1209,7 +1246,7 @@ async function resolveCustomerLinkCandidates(database, { source, customerId, pho
   // its repeats: the repeat stands in for it exactly as the accept path's
   // named-row fallback does (codex #3834 r22 P1). (Tier 1 already handled a
   // lead linked to THIS estimate.)
-  const inScope = (row) => !estimateId || !row.estimate_id || row.estimate_id === estimateId;
+  const inScope = (row) => inEstimateScope(row, estimateId);
   const keepers = new Map(); // ancestry key → keeper
   let wonAncestry = false;
   for (const repeat of repeats) {
@@ -1371,6 +1408,7 @@ async function convertLeadFromEvent({
       return { converted: false, reason: 'ambiguous_contact' };
     }
 
+    const convertedIds = [];
     for (const lead of open) {
       const conversion = { triggerSource: source };
       // An estimate-scoped event (deposit_paid) scopes the funnel settlement
@@ -1398,16 +1436,19 @@ async function convertLeadFromEvent({
       // markConverted settles where the win lands after the write — the
       // root's row when it is still ours, else the repeat's own at booked
       // (r14 P2, r27 P1) — inside the conversion, so the backfill's dry-run
-      // stub covers it (r18 P1).
-      const claim = resolution !== 'customer_link' ? null : (lead.status === 'duplicate' ? DUPLICATE_LEAD_CLAIM : OPEN_LEAD_CLAIM);
-      if (claim) {
-        conversion.onlyIfStatusIn = claim;
-        conversion.onlyIfIdentity = identityOf(lead);
+      // stub covers it (r18 P1). A claim lost to a concurrent relabel of the
+      // root follows the new marker one hop (convertCustomerLinkRow, r34 P1).
+      if (resolution !== 'customer_link') {
+        await leadAttributionService.markConverted(lead.id, conversion);
+        convertedIds.push(lead.id);
+        continue;
       }
-      const converted = await leadAttributionService.markConverted(lead.id, conversion);
-      if (claim && !converted) return { converted: false, reason: 'customer_link_claim_lost' };
+      const scope = { customerId: resolvedCustomerId, phone: resolvedPhone, email: resolvedEmail, estimateId };
+      const wonId = await convertCustomerLinkRow(database, leadAttributionService, lead, conversion, scope);
+      if (!wonId) return { converted: false, reason: 'customer_link_claim_lost' };
+      convertedIds.push(wonId);
     }
-    return { converted: true, count: open.length, leadIds: open.map((lead) => lead.id) };
+    return { converted: true, count: convertedIds.length, leadIds: convertedIds };
   } catch (err) {
     logger.error(`[lead-trigger] convertLeadFromEvent failed (${source || 'unknown'}): ${err.message}`);
     return { converted: false, reason: 'error' };

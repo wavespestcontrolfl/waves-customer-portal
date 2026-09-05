@@ -10,6 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
+const leadAttribution = require('../lead-attribution');
 
 const LEAD_STATUSES = [
   'new',
@@ -555,8 +556,12 @@ async function updateLeadStatus(input) {
   // Mirror the transition onto the lead's ad_service_attribution funnel row
   // (same guarded pattern as the admin-leads routes — monotonic, best-effort).
   // The card describes this as conditional on a linked row; a bridge ERROR
-  // still surfaces as a warning, never a silent Done (GH r13 P2).
-  const funnel = await bridgeLeadFunnelStage(lead.id, new_status);
+  // still surfaces as a warning, never a silent Done (GH r13 P2). A WON is a
+  // conversion and runs the shared settlement, so a wizard repeat's win lands
+  // on its root's row (codex #3834 r34 P1).
+  const funnel = new_status === 'won'
+    ? await leadAttribution.settleWonFunnelRow(lead.id, lead.customer_id || null)
+    : await bridgeLeadFunnelStage(lead.id, new_status);
   const funnelWarning = funnel?.reason === 'error'
     ? "Status updated, but mirroring it onto the lead's ad-attribution funnel row failed — attribution reporting may lag this transition."
     : null;
@@ -598,6 +603,18 @@ async function previewBulkLeadUpdate(input) {
   return bulkUpdateLeads({ ...input, dry_run: true });
 }
 
+// Every lead of a bulk WON runs the shared settlement (bridge + wizard-repeat
+// settlement, like the single-lead tool and the admin routes); the first
+// bridge ERROR among them is the card's warning.
+async function settleBulkWon(rows) {
+  let firstError = null;
+  for (const row of rows) {
+    const settled = await leadAttribution.settleWonFunnelRow(row.id, row.customer_id || null);
+    if (settled?.reason === 'error') firstError = firstError || settled;
+  }
+  return firstError;
+}
+
 async function bulkUpdateLeads(input) {
   const { current_status, older_than_days, new_status, lost_reason, dry_run = true, lead_ids } = input;
   if (!LEAD_STATUS_SET.has(new_status)) {
@@ -636,10 +653,10 @@ async function bulkUpdateLeads(input) {
   // move ALL N or none. Inside one transaction: lock the still-matching
   // rows, refuse if any pinned lead left current_status, then update the
   // locked set. Non-pinned callers keep the legacy intersect behavior.
-  let ids;
+  let rows;
   if (input._expect_full_set && Array.isArray(lead_ids) && lead_ids.length) {
     try {
-      ids = await db.transaction(async (trx) => {
+      rows = await db.transaction(async (trx) => {
         const rows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
           .transacting(trx).forUpdate().select('id');
         if (rows.length !== lead_ids.length) {
@@ -647,8 +664,7 @@ async function bulkUpdateLeads(input) {
           err.previewChanged = true;
           throw err;
         }
-        const updated = await trx('leads').whereIn('id', rows.map(r => r.id)).update(updates, ['id']);
-        return updated.map(r => r.id);
+        return trx('leads').whereIn('id', rows.map(r => r.id)).update(updates, ['id', 'customer_id']);
       });
     } catch (err) {
       if (err && err.previewChanged) {
@@ -660,16 +676,17 @@ async function bulkUpdateLeads(input) {
       throw err;
     }
   } else {
-    const updatedRows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
-      .update(updates, ['id']);
-    ids = updatedRows.map(r => r.id);
+    rows = await bulkLeadCriteriaQuery({ current_status, older_than_days, lead_ids })
+      .update(updates, ['id', 'customer_id']);
   }
+  const ids = rows.map(r => r.id);
   if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
   // same monotonic stage predicate as the single-lead bridge. Conditional
-  // on linked rows; an ERROR surfaces as a warning (GH r13 P2).
-  const funnel = await bridgeLeadsFunnelStage(ids, new_status);
+  // on linked rows; an ERROR surfaces as a warning (GH r13 P2). A bulk WON
+  // is a conversion per lead (settleBulkWon, codex #3834 r34 P1).
+  const funnel = new_status === 'won' ? await settleBulkWon(rows) : await bridgeLeadsFunnelStage(ids, new_status);
   const funnelWarning = funnel?.reason === 'error'
     ? "Statuses updated, but mirroring them onto the leads' ad-attribution funnel rows failed — attribution reporting may lag this transition."
     : null;

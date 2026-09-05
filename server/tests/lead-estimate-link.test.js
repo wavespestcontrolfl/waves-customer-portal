@@ -1564,6 +1564,49 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     await expect(resolveEstimateEventLeads(database, 'estimate-S')).resolves.toEqual({ leads: [], rescued: false });
   });
 
+  test('a customer-link claim lost to a concurrent /calculate RELABEL of the root follows the new marker one hop and converts the older open root it reaches (codex r34 P1)', async () => {
+    const markConverted = jest.fn()
+      .mockResolvedValueOnce(false) // the open-status claim on L-root loses
+      .mockResolvedValueOnce(true); // the hop's claim on L-older lands
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [{ id: 'L-root', status: 'new', customer_id: 'c1', phone: '9412269100', estimate_id: null, first_contact_at: '2026-08-30T12:00:00Z' }],
+      leadsById: {
+        // Re-read AFTER the claim lost: /calculate relabelled it a repeat of an older open lead.
+        'L-root': { id: 'L-root', status: 'duplicate', customer_id: 'c1', phone: '9412269100', estimate_id: null, extracted_data: { duplicate_of_lead_id: 'L-older' } },
+        'L-older': { id: 'L-older', status: 'contacted', customer_id: 'c1', phone: '9412269100', estimate_id: null, first_contact_at: '2026-08-20T12:00:00Z' },
+      },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: true, count: 1, leadIds: ['L-older'] });
+    expect(markConverted).toHaveBeenNthCalledWith(1, 'L-root', expect.objectContaining({ onlyIfStatusIn: expect.arrayContaining(['new']) }));
+    expect(markConverted).toHaveBeenNthCalledWith(2, 'L-older', expect.objectContaining({ onlyIfStatusIn: expect.arrayContaining(['contacted']), onlyIfIdentity: expect.objectContaining({ customer_id: 'c1' }) }));
+  });
+
+  test.each([
+    ['a genuine closure (lost)', { id: 'L-root', status: 'lost', customer_id: 'c1', phone: '9412269100', estimate_id: null }],
+    ['a relabel to a root that is another customer\'s', { id: 'L-root', status: 'duplicate', customer_id: 'c1', phone: '9412269100', estimate_id: null, extracted_data: { duplicate_of_lead_id: 'L-theirs' } }],
+    ['a relabel by a write that also re-identified the row', { id: 'L-root', status: 'duplicate', customer_id: 'c-OTHER', phone: '9412269100', estimate_id: null, extracted_data: { duplicate_of_lead_id: 'L-older' } }],
+  ])('a customer-link claim lost to %s converts nothing (codex r34 P1)', async (_label, rereadRow) => {
+    const markConverted = jest.fn().mockResolvedValue(false);
+    const database = makeConvertDb({
+      customer: { id: 'c1', phone: '+19412269100', member_since: '2026-09-01' },
+      customerOpenLeads: [{ id: 'L-root', status: 'new', customer_id: 'c1', phone: '9412269100', estimate_id: null, first_contact_at: '2026-08-30T12:00:00Z' }],
+      leadsById: {
+        'L-root': rereadRow,
+        'L-older': { id: 'L-older', status: 'contacted', customer_id: 'c1', phone: '9412269100', estimate_id: null },
+        'L-theirs': { id: 'L-theirs', status: 'contacted', customer_id: 'c-OTHER', phone: '9415550199', estimate_id: null },
+      },
+      customerWonLead: null,
+      contactLeads: [],
+    });
+    const result = await convertLeadFromEvent({ source: 'self_booking_estimate', customerId: 'c1', enforceOriginating: true, database, leadAttributionService: { markConverted } });
+    expect(result).toEqual({ converted: false, reason: 'customer_link_claim_lost' });
+    expect(markConverted).toHaveBeenCalledTimes(1);
+  });
+
   test('deposit_paid: a repeat whose open root is linked to a DIFFERENT estimate stands in for it — the root is out of scope, the repeat converts (codex r22 P1)', async () => {
     const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({

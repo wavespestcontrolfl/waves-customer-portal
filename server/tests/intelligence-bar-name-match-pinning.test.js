@@ -27,6 +27,9 @@ jest.mock('../services/lead-funnel-bridge', () => ({
   bridgeLeadFunnelStage: jest.fn().mockResolvedValue(undefined),
   bridgeLeadsFunnelStage: jest.fn().mockResolvedValue(undefined),
 }));
+jest.mock('../services/lead-attribution', () => ({
+  settleWonFunnelRow: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ success: true, message_sid: 'SM-test' }),
 }));
@@ -35,6 +38,8 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { resolveCustomer, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate } = require('../services/intelligence-bar/leads-tools');
+const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../services/lead-funnel-bridge');
+const { settleWonFunnelRow } = require('../services/lead-attribution');
 
 // Minimal knex chain: filter methods return the chain; terminal methods
 // resolve per-method results supplied by the test.
@@ -159,6 +164,19 @@ describe('update_lead_status (leads)', () => {
     expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
   });
 
+  test('a won through the single-lead tool runs the shared won settlement (bridge + wizard-repeat settlement), not the bare bridge (codex #3834 r34 P1)', async () => {
+    const leads = chain({ first: { ...LEAD_A, customer_id: 'c1' }, update: [{ id: 'lead-1' }] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+    settleWonFunnelRow.mockResolvedValueOnce({ reason: 'error' });
+
+    const res = await executeLeadsTool('update_lead_status', { lead_id: 'lead-1', new_status: 'won' });
+    expect(res.success).toBe(true);
+    expect(settleWonFunnelRow).toHaveBeenCalledWith('lead-1', 'c1');
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    expect(res.warning).toMatch(/attribution reporting may lag/);
+  });
+
   test('a zero-row guarded update (concurrent transition) refuses instead of claiming success', async () => {
     const leads = chain({ first: LEAD_A, update: [] });
     const activities = chain({ insert: undefined });
@@ -219,8 +237,26 @@ describe('bulk_update_leads (leads)', () => {
     expect(leads.whereIn).toHaveBeenCalledWith('id', ['lead-1', 'lead-2', 'lead-gone']);
     expect(leads.where).toHaveBeenCalledWith('status', 'contacted');
     expect(leads.whereNull).toHaveBeenCalledWith('deleted_at');
-    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
+    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id', 'customer_id']);
     expect(leads.select).not.toHaveBeenCalled();
+  });
+
+  test('a bulk WON runs the shared won settlement per lead (bridge + wizard-repeat settlement) instead of the bare set bridge (codex #3834 r34 P1)', async () => {
+    const leads = chain({ update: [{ id: 'lead-1', customer_id: 'c1' }, { id: 'lead-2', customer_id: null }] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+    settleWonFunnelRow.mockResolvedValueOnce({ reason: 'error' }).mockResolvedValueOnce({ updated: 1 });
+
+    const res = await executeLeadsTool('bulk_update_leads', {
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1', 'lead-2'],
+    });
+    expect(res.success).toBe(true);
+    expect(settleWonFunnelRow).toHaveBeenCalledTimes(2);
+    expect(settleWonFunnelRow).toHaveBeenNthCalledWith(1, 'lead-1', 'c1');
+    expect(settleWonFunnelRow).toHaveBeenNthCalledWith(2, 'lead-2', null);
+    expect(bridgeLeadsFunnelStage).not.toHaveBeenCalled();
+    // A bridge ERROR inside the settlement still surfaces as the card warning.
+    expect(res.warning).toMatch(/attribution reporting may lag/);
   });
 
   test('a confirmed run with dry_run:false actually updates (no silent no-op)', async () => {
@@ -233,6 +269,6 @@ describe('bulk_update_leads (leads)', () => {
     });
     expect(res.dry_run).toBeUndefined();
     expect(res.updated).toBe(1);
-    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
+    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id', 'customer_id']);
   });
 });

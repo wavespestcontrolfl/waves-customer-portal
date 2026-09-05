@@ -1073,9 +1073,13 @@ router.put('/:id', async (req, res, next) => {
 
     // Manual status edits (Kanban drags / detail-pane changes) mirror onto the
     // lead's ad_service_attribution funnel row. Monotonic + best-effort; a
-    // status with no funnel meaning no-ops inside the bridge.
+    // status with no funnel meaning no-ops inside the bridge. A manual WON is
+    // a conversion: it runs the shared settlement (bridge + wizard-repeat
+    // settlement) like the book route, so a repeat's win lands on its root's
+    // row instead of on the row /calculate deleted (codex #3834 r34 P1).
     if (updates.status && updates.status !== existingLead.status) {
-      await bridgeLeadFunnelStage(req.params.id, updates.status);
+      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, lead.customer_id || null);
+      else await bridgeLeadFunnelStage(req.params.id, updates.status);
     }
 
     await db('lead_activities').insert({

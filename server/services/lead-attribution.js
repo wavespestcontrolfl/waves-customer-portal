@@ -256,14 +256,17 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 // P2). Lazy require: the lead-estimate-link ⇄ lead-attribution cycle.
 // `estimateId` (the estimate the conversion closed, when it closed one)
 // scopes which root may take the win's row — see settleRepeatFunnelRow.
+// Returns the bridge's result so a caller that surfaces a bridge ERROR as a
+// warning (the Intelligence Bar cards) still can.
 async function settleWonFunnelRow(leadId, customerId = null, estimateId = null) {
-  await bridgeLeadFunnelStage(leadId, 'won');
+  const bridged = await bridgeLeadFunnelStage(leadId, 'won');
   try {
     const rebuild = await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId, estimateId });
     if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId, funnelStage: 'booked' });
   } catch (err) {
     logger.warn(`[LeadAttribution] funnel-row settlement failed for lead ${leadId}: ${err.message}`);
   }
+  return bridged;
 }
 
 // ---------------------------------------------------------------------------
