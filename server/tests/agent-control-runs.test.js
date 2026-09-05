@@ -309,6 +309,16 @@ describe('start / step / finish', () => {
     expect(store.agent_run_steps).toHaveLength(max + 2);
   });
 
+  test('budget: steps crossing the budget in parallel keep their own sequence numbers and share ONE marker (pre-push audit)', async () => {
+    const h = await runs.startRun(base);
+    const max = policyFor('blog_draft').budget.max_steps;
+    for (let i = 0; i < max - 1; i += 1) await h.step({ key: `s${i}` }, async () => i);
+    await Promise.all([h.step({ key: 'first' }, async () => 1), h.step({ key: 'second' }, async () => 2), h.step({ key: 'third' }, async () => 3)]);
+    const bySeq = store.agent_run_steps.filter((s) => ['first', 'second', 'third'].includes(s.step_key)).map((s) => s.seq).sort((a, b) => a - b);
+    expect(bySeq).toEqual([max, max + 1, max + 2]);
+    expect(events(h.id).filter((e) => e === 'budget_exceeded')).toHaveLength(1);
+  });
+
   test('budget: a marker whose write failed is retried by the next over-budget step, and still recorded once (Codex r13)', async () => {
     const h = await runs.startRun(base);
     const max = policyFor('blog_draft').budget.max_steps;

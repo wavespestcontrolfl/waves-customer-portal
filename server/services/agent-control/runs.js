@@ -339,6 +339,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   let stepsThisAttempt = 0; // the budget's unit: this attempt starts its budget over
   let toolCalls = 0;
   let budgetFlagged = false;
+  let budgetMarking = null; // the in-flight marker: parallel over-budget steps share ONE transition
   // this handle's attempt is the run's current one (see openAttempt) and
   // the run is still open: a terminal run is changed only by openAttempt,
   // and a QUEUED one (a retryable fail) awaits its next attempt — the
@@ -400,9 +401,15 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     // (a newer attempt opened) must not narrate a budget transition the
     // current attempt never made (Codex r3). Flagged once it persisted or
     // the fence refused it — a write that FAILED recorded nothing, so the
-    // next over-budget step tries again (Codex r13).
-    const moved = await transition('budget_exceeded', { summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]) }, { extendLease: false, metadata: { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls } });
-    budgetFlagged = moved !== null;
+    // next over-budget step tries again (Codex r13). Steps crossing the
+    // budget in parallel await the same in-flight marker, so the retry
+    // never becomes a second event (pre-push audit).
+    if (!budgetMarking) {
+      budgetMarking = transition('budget_exceeded', { summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]) }, { extendLease: false, metadata: { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls } })
+        .then((moved) => { budgetFlagged = moved !== null; })
+        .finally(() => { budgetMarking = null; });
+    }
+    await budgetMarking;
   }
 
   // Every step body runs under the handle's RESOLVED identity (a reopen
@@ -417,7 +424,11 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
 
   async function step({ key, label = null, toolName = null } = {}, fn) {
     if (spent()) return inScope(() => context.withStep(crypto.randomUUID(), () => fn()));
+    // this step's number is taken BEFORE any await: parallel steps each
+    // advance the shared counter, and one that read it after awaiting the
+    // budget marker would take a sibling's number (pre-push audit)
     seq += 1;
+    const stepSeq = seq;
     stepsThisAttempt += 1;
     if (toolName) toolCalls += 1;
     if (budget.max_steps && stepsThisAttempt > budget.max_steps) await flagBudget('steps');
@@ -433,8 +444,8 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         id: stepId,
         run_id: runId,
         attempt_id: attemptId,
-        seq,
-        step_key: clip(key || `step_${seq}`, 80),
+        seq: stepSeq,
+        step_key: clip(key || `step_${stepSeq}`, 80),
         label: clip(label, 200),
         status: 'running',
         tool_name: clip(toolName, 120),
