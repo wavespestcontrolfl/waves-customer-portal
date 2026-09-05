@@ -1061,7 +1061,7 @@ describe('buildReceiptLink', () => {
 });
 
 describe('buildPriceChangeNoticeLink', () => {
-  const NOTICE = { id: 'n1', notice_token: 'a'.repeat(32), effective_date: '2099-01-01', current_amount_cents: 6500, new_amount_cents: 7000, cadence_label: 'month', status: 'sent', sent_at: '2026-09-01T12:00:00Z' };
+  const NOTICE = { id: 'n1', notice_token: 'a'.repeat(32), effective_date: '2099-01-01', current_amount_cents: 6500, new_amount_cents: 7000, cadence_label: 'month', status: 'sent', sent_at: '2026-09-01T12:00:00Z', sms_sent: true };
 
   test('the phone owner\'s own newest upcoming DELIVERED notice (sent / viewed) — immediate-only, permanent token', async () => {
     mockBuilders = { price_change_notices: chainBuilder({ firstRow: NOTICE }) };
@@ -1074,6 +1074,9 @@ describe('buildPriceChangeNoticeLink', () => {
     // Status is not delivery evidence (the public page marks any row
     // 'viewed'); the lane's success stamp is required (r5 P1).
     expect(mockBuilders.price_change_notices.whereNotNull).toHaveBeenCalledWith('sent_at');
+    // A re-share of a TEXT the lane sent — an email-only delivery leaves
+    // sms_sent false and its first text stays the lane's (r6 P1).
+    expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ sms_sent: true });
     // Still ahead: effective today (ET) or later.
     expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith('effective_date', '>=', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     // Newest ISSUED wins — never the farthest-out effective date, so a later
@@ -2008,7 +2011,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
   describe('price change notice links are bound to the recipient\'s OWN row at the send', () => {
     const NOTICE_TOKEN = 'a'.repeat(32);
-    const notice = (over = {}) => ({ id: 'n1', customer_id: 'c1', status: 'sent', effective_date: '2099-01-01', sent_at: '2026-09-01T12:00:00Z', ...over });
+    const notice = (over = {}) => ({ id: 'n1', customer_id: 'c1', status: 'sent', effective_date: '2099-01-01', sent_at: '2026-09-01T12:00:00Z', sms_sent: true, ...over });
     function wireNotice({ row = notice(), owner = { id: 'c1', phone: '+1 (941) 555-0100' } } = {}) {
       wire({ owner });
       mockBuilders.price_change_notices = chainBuilder({ firstRow: row });
@@ -2035,6 +2038,10 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       // 'viewed' without the lane's success stamp = a failed-attempt link
       // opened from the audit log, not a delivered notice (r5 P1).
       wireNotice({ row: notice({ status: 'viewed', sent_at: null }) });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+      // Email-only delivery ('sent' + sent_at, sms_sent false): the first
+      // text is the lane's, with its template and opt-out footer (r6 P1).
+      wireNotice({ row: notice({ sms_sent: false }) });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
       wireNotice({ row: notice({ effective_date: '2020-01-01' }) });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);

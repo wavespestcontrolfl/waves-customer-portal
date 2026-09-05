@@ -1117,7 +1117,7 @@ async function checkPriceChangeLinks(ctx) {
     // Stored lowercase; the public route lowercases before its lookup, so a
     // pasted upper-cased token is the same working page and is judged the
     // same (pre-push Codex P1).
-    const notice = await db('price_change_notices').where({ notice_token: token.toLowerCase() }).first('id', 'customer_id', 'status', 'effective_date', 'sent_at');
+    const notice = await db('price_change_notices').where({ notice_token: token.toLowerCase() }).first('id', 'customer_id', 'status', 'effective_date', 'sent_at', 'sms_sent');
     if (!deliveredPriceChangeNotice(notice) || dateOnly(notice.effective_date) < etDateString()) {
       return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
     }
@@ -1935,14 +1935,18 @@ const PRICE_CHANGE_LINKABLE_STATUSES = ['sent', 'viewed'];
 // failed or blocked attempt keeps the full link in messaging_audit_log —
 // staff opening it while investigating must not turn the composer into the
 // notice's first send. sent_at is stamped only by the lane's success branch
-// (with the sms_sent / email_sent flags), so it is required too (GH Codex
-// #3893 r5 P1).
+// (GH Codex #3893 r5 P1) — and that branch also fires when only the EMAIL
+// leg delivered (sms_sent=false), so the SMS flag is required as well:
+// the composer re-shares a text the lane already sent, never sends the
+// first one without the price_change_notice template and its opt-out
+// footer (r6 P1). An email-only notice is re-attempted from Pricing →
+// Notices.
 function deliveredPriceChangeNotice(notice) {
-  return Boolean(notice && notice.sent_at && PRICE_CHANGE_LINKABLE_STATUSES.includes(notice.status));
+  return Boolean(notice && notice.sent_at && notice.sms_sent === true && PRICE_CHANGE_LINKABLE_STATUSES.includes(notice.status));
 }
 
 /**
- * Price-change notice link — the phone owner's OWN newest DELIVERED notice
+ * Price-change notice link — the phone owner's OWN newest TEXTED notice
  * for a change still ahead (effective today or later, ET): a "here it is
  * again" for a customer who asks. The page shows the customer's first name
  * and their price, so the route resolves the row strictly
@@ -1954,6 +1958,7 @@ async function buildPriceChangeNoticeLink(customerId) {
     .where({ customer_id: customerId })
     .whereIn('status', PRICE_CHANGE_LINKABLE_STATUSES)
     .whereNotNull('sent_at')
+    .where({ sms_sent: true })
     .where('effective_date', '>=', etDateString())
     // Newest ISSUED, not farthest-out: a later correction effective sooner
     // must not be shadowed by an older notice with a farther effective date
