@@ -446,6 +446,7 @@ const SYSTEM_PROMPT = [
 ].join(' ');
 
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
+const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|free of)\b|n't\b/;
 
 /**
  * Model output is accepted only when it is 1–3 sentences, ≤ 60 words, carries
@@ -478,9 +479,15 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   // record.", or an instruction lifted from a visit note) is an invented
   // fact, not a rephrase.
   if (ungroundedSentence(body, grounding)) return 'ungrounded_sentence';
-  // A rewrite that drops a safety-critical fact is not a rewrite.
+  // A rewrite that drops a safety-critical fact is not a rewrite — and one
+  // that restates it under a negation ("No chemical sensitivity is
+  // reported.") reverses it. The fact's own words are removed before the
+  // negation check so "asthma, no pyrethroids" keeps its "no".
   for (const fact of critical) {
-    if (fact && !lower.includes(String(fact).toLowerCase())) return 'critical_fact_dropped';
+    if (!fact) continue;
+    const needle = String(fact).toLowerCase();
+    if (!lower.includes(needle)) return 'critical_fact_dropped';
+    if (sentences.some((sentence) => sentence.toLowerCase().includes(needle) && NEGATION_RE.test(sentence.toLowerCase().split(needle).join(' ')))) return 'critical_fact_negated';
   }
   return null;
 }

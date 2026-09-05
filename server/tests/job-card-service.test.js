@@ -347,6 +347,11 @@ describe('safety-critical facts survive the rewrite (PR r1 P1)', () => {
     const grounding = 'Chemical sensitivity: asthma, no pyrethroids, pets: dog crated in garage. Open: URGENT wasps at the front door.';
     expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
     expect(jobCard.validateParagraph('Customer has a chemical sensitivity; dog crated in garage.', grounding, [], critical)).toBe('critical_fact_dropped');
+    // A critical fact restated under a negation is reversed, not kept (hook P1).
+    expect(jobCard.validateParagraph('No chemical sensitivity is reported. First visit on record.', 'Chemical sensitivity. First visit on record.', [], ['sensitiv'])).toBe('critical_fact_negated');
+    expect(jobCard.validateParagraph('The dog isn\'t crated in garage today.', 'Pets: dog (crated in garage).', [], ['crated in garage'])).toBe('critical_fact_negated');
+    // The fact's own "no" (asthma, no pyrethroids) is not a negation of the fact.
+    expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
     expect(jobCard._test.criticalFacts({ chemicalSensitivity: 'yes', issues: [] })).toEqual(['sensitiv']);
   });
 });
