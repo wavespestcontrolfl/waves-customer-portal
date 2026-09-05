@@ -620,6 +620,10 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
    Estimates had NO print path: grain printed over content, sticky bars
    repeated every page, translucent cards collapsed to faint washes. */
 @media print {
+  /* Paper keeps the pre-#3892 heading scale (h1 34 / h2 24) until batch D
+     rules on print typography — the screen tokens grew to 40 / 26. */
+  .waves-print-h1 { font-size: 34px !important; }
+  .waves-print-h2 { font-size: 24px !important; }
   .glass-scene-orbs,
   .glass-scene-grain,
   .gc-mbb,

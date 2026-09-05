@@ -87,7 +87,7 @@ export function PressureHistoryChart({ history, cadence }) {
   return (
     <div style={{ marginTop: 18 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-        <div style={{ fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 700 }}>
+        <div style={{ fontSize: 14, letterSpacing: '0.06em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 700 }}>
           Score history
         </div>
         <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted }}>{subtitle}</div>
@@ -110,7 +110,7 @@ export function PressureHistoryChart({ history, cadence }) {
                 const month = date.toLocaleDateString('en-US', { month: 'short' });
                 return `${month} '${String(date.getFullYear()).slice(-2)}`;
               }}
-              tick={{ fontSize: 10, fill: CUSTOMER_SURFACE.muted, fontFamily: "'Inter', system-ui, sans-serif" }}
+              tick={{ fontSize: 14, fill: CUSTOMER_SURFACE.muted, fontFamily: "'Inter', system-ui, sans-serif" }}
               tickLine={false}
               axisLine={false}
               interval="preserveStartEnd"
@@ -118,7 +118,7 @@ export function PressureHistoryChart({ history, cadence }) {
             <YAxis
               domain={[0, 5]}
               ticks={[1, 2, 3, 4, 5]}
-              tick={{ fontSize: 10, fill: CUSTOMER_SURFACE.muted, fontFamily: "'Inter', system-ui, sans-serif" }}
+              tick={{ fontSize: 14, fill: CUSTOMER_SURFACE.muted, fontFamily: "'Inter', system-ui, sans-serif" }}
               tickLine={false}
               axisLine={false}
               width={20}
@@ -187,7 +187,7 @@ export function MeterSvg({ score, label, noun = 'Pest Pressure' }) {
           }} />
         ) : null}
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 11, color: '#64748B', fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 14, color: '#64748B', fontFamily: "'Inter', system-ui, sans-serif" }}>
         <span>0</span>
         <span>2.5</span>
         <span>5</span>

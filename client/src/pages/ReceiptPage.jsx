@@ -344,7 +344,7 @@ export default function ReceiptPage() {
             }}
           >
             {/* Checkmark graphic removed (owner 2026-07-09 — no decorative icons on customer document pages). */}
-            <div style={{
+            <div className="waves-print-h2" style={{
               fontFamily: DOC_FONT,
               fontWeight: FW.bold,
               fontSize: FS.h2,
@@ -474,7 +474,7 @@ export default function ReceiptPage() {
           }}>
             <div>
               <div style={eyebrow}>{processing ? 'Submitted amount' : unpaid ? 'Amount due' : 'Receipt total'}</div>
-              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.bold, color: DOC.ink, fontFamily: DOC_FONT }}>
+              <div className="waves-print-h1" style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.bold, color: DOC.ink, fontFamily: DOC_FONT }}>
                 {fmtCurrency(chargedTotal)}
               </div>
               <div style={{ marginTop: SP.xs, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>

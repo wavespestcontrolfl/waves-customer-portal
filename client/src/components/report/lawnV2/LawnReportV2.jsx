@@ -14,6 +14,7 @@ import { useRef, useState, useEffect, createContext, useContext } from 'react';
 import { COLORS, FONTS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
 import { usePrintRequested } from '../usePrintRequested';
+import Icon from '../../Icon';
 
 // Print/PDF mode: components render a static variant (dropdowns open, photo grid
 // instead of a slider, no animations) so the Puppeteer PDF matches the screen.
@@ -192,7 +193,7 @@ export function StatusPill({ status, small = false }) {
       display: 'inline-flex', alignItems: 'center', gap: 7,
       padding: small ? '3px 9px' : '6px 12px', borderRadius: 999,
       background: CARD, border: `1px solid ${BORDER}`,
-      fontFamily: FONTS.heading, fontWeight: 700, fontSize: small ? 12 : 14, color: TEXT,
+      fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT,
     }}>
       {pulse ? (
         <style>{'@keyframes wavesPillPulse{0%,100%{opacity:1}50%{opacity:.25}}@media (prefers-reduced-motion: reduce){.waves-pill-pulse{animation:none !important}}'}</style>
@@ -323,7 +324,7 @@ export function LawnFollowUpCard({ followUp = null }) {
   return (
     <Card style={{ background: 'rgba(4, 57, 94, 0.10)', border: `1px solid ${COLORS.glassNavy}` }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-        <span style={{ flex: 'none', width: 30, height: 30, borderRadius: 999, background: COLORS.glassNavy, color: '#fff', display: 'grid', placeItems: 'center', fontSize: 16, fontWeight: 700 }}>✓</span>
+        <span style={{ flex: 'none', width: 30, height: 30, borderRadius: 999, background: COLORS.glassNavy, color: '#fff', display: 'grid', placeItems: 'center' }}><Icon name="check" size={16} strokeWidth={2.5} /></span>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16.5, color: TEXT }}>{followUp.headline || 'Follow-up already planned'}</div>
           {followUp.reason ? <p style={{ margin: '4px 0 0', fontSize: 14, color: BODY, lineHeight: 1.5 }}>{followUp.reason}</p> : null}
@@ -528,7 +529,7 @@ export function VisualDiagnosisCards({ categories = [] }) {
                   What this means
                   {/* listStyle:none removes the native disclosure triangle —
                       keep a visible expand affordance in its place. */}
-                  <span aria-hidden="true" style={{ marginLeft: 6, fontSize: 10 }}>▾</span>
+                  <span aria-hidden="true" style={{ marginLeft: 6, fontSize: 14 }}>▾</span>
                 </div>
               </summary>
               <div style={{ display: 'grid', gap: 8, padding: '2px 14px 12px' }}>
@@ -580,7 +581,7 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
                 {!it.customerAction && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} /> : null}
               </div>
               {it.confidence && INSIGHT_CONFIDENCE[it.confidence] ? (
-                <div style={{ marginTop: 8, fontSize: 11.5, color: MUTED, fontStyle: 'italic' }}>{INSIGHT_CONFIDENCE[it.confidence]}</div>
+                <div style={{ marginTop: 8, fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{INSIGHT_CONFIDENCE[it.confidence]}</div>
               ) : null}
             </div>
           );
@@ -683,7 +684,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
         </div>
       ) : null}
       {hasVisibleReading ? (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 14, color: MUTED }}>
           {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
           {hasIrr && irrOnFile ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
           {hasTarget ? <Legend color={TEXT} label="Target" /> : null}
@@ -852,13 +853,13 @@ export function RainLast7DaysChart({ days = [], confidence = null, source = null
               }}
               style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, cursor: 'pointer' }}
             >
-              <div style={{ fontSize: 10.5, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{(on || v) ? inchLabel(v) || '0"' : ''}</div>
+              <div style={{ fontSize: 14, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{(on || v) ? inchLabel(v) || '0"' : ''}</div>
               <div style={{
                 width: '100%', maxWidth: 26, height: Math.max(2, mounted ? h : 0),
                 background: v ? (on ? COLORS.glassNavy : COLORS.glassNavy) : BORDER, borderRadius: 4,
                 transition: `height 0.7s cubic-bezier(0.4,0,0.2,1) ${i * 45}ms, background 0.15s ease`,
               }} />
-              <div style={{ fontSize: 11, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{d.d}</div>
+              <div style={{ fontSize: 14, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{d.d}</div>
             </div>
           );
         })}
@@ -911,7 +912,7 @@ export function MowingHeightGauge({ mowing = {} }) {
               <div style={{ width: 3, height: 26, background: statusMeta(status).color, borderRadius: 2 }} />
             </div>
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: MUTED, marginTop: 4 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: MUTED, marginTop: 4 }}>
             <span>Too short</span><span>Ideal</span><span>Too tall</span>
           </div>
           <div style={{ marginTop: 12 }}><StatusPill status={status} small /></div>
@@ -1045,7 +1046,7 @@ export function LawnVisitTimeline({ timeline = {} }) {
         })}
       </div>
       {timeline.footnote || timeline.disclaimer ? (
-        <div style={{ fontSize: 11.5, color: MUTED, marginTop: 12, lineHeight: 1.45 }}>{timeline.footnote || timeline.disclaimer}</div>
+        <div style={{ fontSize: 14, color: MUTED, marginTop: 12, lineHeight: 1.45 }}>{timeline.footnote || timeline.disclaimer}</div>
       ) : null}
     </Card>
   );
@@ -1067,7 +1068,7 @@ function CornerLabel({ text, side }) {
     <div style={{
       position: 'absolute', top: 10, [side]: 10, zIndex: 3,
       background: 'rgba(0,0,0,0.42)', color: '#fff', borderRadius: 6, padding: '3px 8px',
-      fontSize: 11.5, fontWeight: 600, lineHeight: 1.2, maxWidth: '46%',
+      fontSize: 14, fontWeight: 600, lineHeight: 1.2, maxWidth: '46%',
     }}>{text}</div>
   );
 }

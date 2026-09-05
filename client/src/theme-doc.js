@@ -37,7 +37,8 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 export const DOC_FONT = FONTS.body; // "'Inter', system-ui, sans-serif"
 export const DOC_FONT_SERIF = FONTS.serif;
 
-// Fixed type scale. Nothing renders under 14px on a customer surface — the
+// Fixed SCREEN type scale (paper keeps h1 34 / h2 24 via .waves-print-h1/-h2
+// in glass-theme.css's print block). Nothing renders under 14px on a customer surface — the
 // runtime sheet in glass/glass-theme.css floors it and check-portal-brand
 // refuses smaller literals and tokens at build time (no micro/caption).
 export const FS = {

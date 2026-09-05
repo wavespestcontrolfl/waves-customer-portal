@@ -32,6 +32,9 @@ const SCAN_DIRS = [
   // it carries ~35 legacy violations (13px labels, star glyphs, W tokens)
   // that need their own cleanup pass before the gate can cover it.
   path.join(ROOT, 'client/src/components/booking'),
+  // The V2 report bodies (lawn / pest / mosquito / cockroach / tree & shrub)
+  // and the gauge primitives — swept onto the sheet with #3895.
+  path.join(ROOT, 'client/src/components/report'),
 ];
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([

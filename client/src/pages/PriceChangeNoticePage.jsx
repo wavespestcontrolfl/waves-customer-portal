@@ -121,7 +121,7 @@ export default function PriceChangeNoticePage() {
               padding: '28px 24px 32px',
             }}
           >
-            <h1 style={{
+            <h1 className="waves-print-h2" style={{
               fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
               color: SURFACE.text, margin: `0 0 ${SP.sm}px`, lineHeight: LH.heading,
             }}>

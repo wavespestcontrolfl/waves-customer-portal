@@ -105,7 +105,7 @@ function TrendArrow({ trend }) {
   const up = TREND_UP.has(trend);
   if (!up && !TREND_DOWN.has(trend)) return null;
   return (
-    <span style={{ color: up ? COLORS.red : COLORS.glassNavy, fontSize: 11, marginLeft: 4 }}>
+    <span style={{ color: up ? COLORS.red : COLORS.glassNavy, fontSize: 14, marginLeft: 4 }}>
       {up ? '▲' : '▼'}
     </span>
   );
@@ -301,7 +301,7 @@ function PestPressureRating({ metric, token, live, onRefreshed, onSettled }) {
             style={{ padding: '10px 0', borderRadius: 9, border: `1px solid ${BORDER}`, background: COLORS.white, color: TEXT, fontWeight: 700, fontSize: 16, cursor: busy ? 'wait' : 'pointer' }}>{n}</button>
         ))}
       </div>
-      <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
+      <div style={{ fontSize: 14, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
       {failed && (
         <div style={{ fontSize: 14, color: '#991B1B', marginTop: 8 }}>
           Couldn&rsquo;t save your rating — please tap a number to try again.
@@ -672,7 +672,7 @@ export function PestReceipt({ receipt }) {
           <div key={stat.label} style={{ background: '#F8FAFC', border: `1px solid ${BORDER}`, borderRadius: 12, padding: '12px 12px' }}>
             <div style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 18, color: TEXT }}>{stat.value}</div>
             <div style={{ fontSize: 14, color: MUTED, fontWeight: 600, marginTop: 2 }}>{stat.label}</div>
-            {stat.detail ? <div style={{ fontSize: 11, color: MUTED, marginTop: 2 }}>{stat.detail}</div> : null}
+            {stat.detail ? <div style={{ fontSize: 14, color: MUTED, marginTop: 2 }}>{stat.detail}</div> : null}
           </div>
         ))}
       </div>
@@ -692,7 +692,7 @@ export function PestBugFiles({ bugFiles = [], print = false }) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
               <span style={{ fontSize: 16, fontWeight: 700, color: TEXT }}>{bug.suspectLabel}</span>
               {bug.confirmedByTech ? (
-                <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.glassNavy, background: 'rgba(4, 57, 94, 0.08)', borderRadius: 999, padding: '2px 8px' }}>Identified on-site</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: COLORS.glassNavy, background: 'rgba(4, 57, 94, 0.08)', borderRadius: 999, padding: '2px 8px' }}>Identified on-site</span>
               ) : null}
             </div>
             {bug.whereSeen ? <div style={{ fontSize: 14, color: BODY, marginTop: 4 }}>Where: {bug.whereSeen}</div> : null}
@@ -714,7 +714,7 @@ export function PestBugFiles({ bugFiles = [], print = false }) {
 function Line({ label, value }) {
   return (
     <div>
-      <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</span>
+      <span style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</span>
       <div style={{ fontSize: 14, color: BODY, lineHeight: 1.45 }}>{value}</div>
     </div>
   );
@@ -744,12 +744,12 @@ export function PestSeasonForecast({ forecast }) {
               {p.note ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.4 }}>{p.note}</div> : null}
             </div>
             {p.level ? (
-              <span style={{ fontSize: 11, fontWeight: 700, color: LEVEL_COLOR[p.level] || COLORS.grayMid, textTransform: 'capitalize', flexShrink: 0 }}>{p.level}</span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: LEVEL_COLOR[p.level] || COLORS.grayMid, textTransform: 'capitalize', flexShrink: 0 }}>{p.level}</span>
             ) : null}
           </div>
         ))}
       </div>
-      {forecast.disclaimer ? <div style={{ fontSize: 11, color: MUTED, marginTop: 10, fontStyle: 'italic' }}>{forecast.disclaimer}</div> : null}
+      {forecast.disclaimer ? <div style={{ fontSize: 14, color: MUTED, marginTop: 10, fontStyle: 'italic' }}>{forecast.disclaimer}</div> : null}
     </section>
   );
 }
