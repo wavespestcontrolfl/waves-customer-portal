@@ -1282,6 +1282,7 @@ async function maybeAutoMerge(run, pr) {
 
      
     async function remediateAndWait() {
+      let transient = false;
       // Codex left findings → try to auto-fix them on the PR branch so the
       // post can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
       // is on; never merges (that still needs a genuine Codex-clean signal).
@@ -1320,8 +1321,9 @@ async function maybeAutoMerge(run, pr) {
         }
       } catch (remErr) {
         logger.warn(`[autonomous-pr-poller] codex remediation error for PR #${pr.number}: ${remErr.message}`);
+        transient = true;
       }
-      return { pending: true, reason: `codex_review_pending: ${err.message}${err.p2BarReason ? ` (p2 bar: ${err.p2BarReason})` : ''}` };
+      return { pending: true, transient, reason: `codex_review_pending: ${err.message}${err.p2BarReason ? ` (p2 bar: ${err.p2BarReason})` : ''}` };
     }
   }
 

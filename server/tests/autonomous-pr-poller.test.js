@@ -913,6 +913,27 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     } finally { bar.mockRestore(); repair.mockRestore(); }
   });
 
+  test('a remediation outage preserves an aged Codex blocker without retirement', async () => {
+    delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const updates = setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockRejectedValueOnce(Object.assign(new Error('findings remain'), { code: 'CODEX_REVIEW_REQUIRED' }));
+    const remediation = require('../services/content/codex-remediation');
+    const bar = jest.spyOn(remediation, 'p2OnlyMergeEligible').mockResolvedValueOnce({ eligible: false });
+    const repair = jest.spyOn(remediation, 'maybeRemediateAutonomousPr').mockRejectedValueOnce(new Error('provider unavailable'));
+    try {
+      const result = await poller.pollPending();
+      expect(result.results[0]).toMatchObject({ pending: true, transient: true, reason: expect.stringMatching(/^codex_review_pending/) });
+      expect(gh.closePr).not.toHaveBeenCalled();
+      expect(updates.some(x => x.updates.poll_pending_reason)).toBe(false);
+      expect(repair).toHaveBeenCalledWith(expect.objectContaining({ number: 42 }), expect.objectContaining({ action_type: 'new_supporting_blog' }), expect.any(Object));
+    } finally { bar.mockRestore(); repair.mockRestore(); }
+  });
+
   test('explicit kill switch leaves the open PR alone', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
     const updates = setupDb({ pending: [makeRun()] });
