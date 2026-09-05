@@ -103,6 +103,11 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
   if (!rootOurs) return repeat;
+  // A repeat whose own row already reached 'completed' (the revenue sync's
+  // sticky terminal) IS the deal's row: booking the root beside it would be
+  // two rows for one opportunity, so nothing settles (pre-push P1).
+  const own = await database('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
+  if (own && own.funnel_stage === 'completed') return null;
   const onlyIfLead = { ...identityOf(root), status: root.status };
   // Every read or write on the root's row below carries the lead claim the
   // advance carried: the root, as validated, still open, not deleted.
@@ -121,7 +126,7 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
   // revenue sync loads rows by customer_id — so the accepting customer is
   // stamped onto it, never over one already there (codex #3834 r32 P1).
   if (customerId) await database('ad_service_attribution').where({ lead_id: root.id }).whereNull('customer_id').whereExists(rootStillOurs).update({ customer_id: customerId, updated_at: new Date() });
-  await database('ad_service_attribution').where({ lead_id: repeat.id }).whereNot({ funnel_stage: 'completed' }).del();
+  await database('ad_service_attribution').where({ lead_id: repeat.id }).del();
   return null;
 }
 
