@@ -99,11 +99,41 @@ function appendSegmentSql(db, segment) {
  * generation order, separated by [Reconnected]. NULL when the row has no
  * segments — callers COALESCE to their local text.
  */
-function composeSegmentsSql(db) {
+function composeSegmentsSql(db, segment = null) {
+  // With `segment`, the not-yet-appended segment is unioned in (the UPDATE
+  // reads the old row) — the append statement composes this way.
+  const source = segment
+    ? "COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb"
+    : "COALESCE(metadata->'relay_segments', '[]'::jsonb)";
   return db.raw(
-    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord) FROM jsonb_array_elements(COALESCE(metadata->'relay_segments', '[]'::jsonb)) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
-    [SEGMENT_SEPARATOR],
+    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
+    segment ? [SEGMENT_SEPARATOR, JSON.stringify([segment])] : [SEGMENT_SEPARATOR],
   );
+}
+
+/**
+ * The append that also RECOMPOSES a call the other socket already finalized
+ * (hook P1): the old socket can still be draining when the resumed socket
+ * closes and composes; when its segment then lands, supersession skips every
+ * column write it would do — so the append itself refreshes the columns
+ * Sandy owns (transcription_provider = conversation_relay; a recording's
+ * transcript is never touched) and the relay_transcript stash when present.
+ * Deterministic whichever socket runs it: all segments, generation order.
+ */
+function appendSegmentPatch(db, segment) {
+  const compose = () => composeSegmentsSql(db, segment);
+  const appended = appendSegmentSql(db, segment);
+  return {
+    metadata: db.raw(
+      "CASE WHEN (metadata->'relay_transcript') IS NOT NULL AND ? IS NOT NULL THEN jsonb_set(?, '{relay_transcript,text}', to_jsonb(?::text), false) ELSE ? END",
+      [compose(), appended, compose(), appended],
+    ),
+    transcription: db.raw(
+      "CASE WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ? ELSE transcription END",
+      [require('./relay-transcript').TRANSCRIPTION_PROVIDER, compose(), compose()],
+    ),
+    updated_at: new Date(),
+  };
 }
 
 /** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
@@ -168,6 +198,7 @@ module.exports = {
   resumeGreeting,
   buildSegment,
   appendSegmentSql,
+  appendSegmentPatch,
   composeSegmentsSql,
   generationFenceSql,
   segmentsText,

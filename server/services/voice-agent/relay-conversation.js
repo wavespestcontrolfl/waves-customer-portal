@@ -1985,7 +1985,7 @@ class RelayConversation {
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
         });
         const appended = await withTimeout(
-          db('call_log').where('twilio_call_sid', this.callSid).update({ metadata: recovery.appendSegmentSql(db, segment), updated_at: new Date() }),
+          db('call_log').where('twilio_call_sid', this.callSid).update(recovery.appendSegmentPatch(db, segment)),
           WRITE_DRAIN_TIMEOUT_MS,
           0,
         );
@@ -2000,6 +2000,14 @@ class RelayConversation {
       : false;
     if (supersededAtClose) {
       logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
+      // …except that this socket's segment may just have RECOMPOSED a call
+      // the replacement already finalized (appendSegmentPatch): the unified
+      // message row follows it. Bounded, best-effort.
+      if (segmentAppended) {
+        try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
+          logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
+        }
+      }
     }
 
     if (!supersededAtClose) await this._runCaptureFloor(reason);
@@ -2193,9 +2201,22 @@ class RelayConversation {
             const { isEnabled } = require('../../config/feature-gates');
             if (isEnabled('callCommitments')) {
               const { recordRelayCommitments } = require('../call-commitments');
+              // PR 2B: on a reconnected call the persisted transcript is the
+              // composed one (all segments); the commitments pass reads THAT
+              // under the same owner fence, so segment 1's promises reach
+              // Owed even though its own socket's pass was skipped (hook P1).
+              let commitmentsTranscript = transcriptUpdate.transcription;
+              if (composedTranscription) {
+                const persisted = await withTimeout(
+                  fenceOwner(db('call_log').where('twilio_call_sid', this.callSid)).first('transcription').catch(() => null),
+                  2000,
+                  null,
+                );
+                if (persisted && typeof persisted.transcription === 'string' && persisted.transcription) commitmentsTranscript = persisted.transcription;
+              }
               const recorded = await recordRelayCommitments(db, {
                 callSid: this.callSid,
-                transcript: transcriptUpdate.transcription,
+                transcript: commitmentsTranscript,
                 estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,
                 estimateExpectation: this._promises.get('send_estimate')?.expectation || null,
                 estimatePromisedAt: this._promises.get('send_estimate')?.at || null,

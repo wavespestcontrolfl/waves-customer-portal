@@ -84,6 +84,18 @@ describe('relay-recovery module', () => {
     expect(q.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [99]);
   });
 
+  test('appendSegmentPatch: the append also recomposes Sandy-owned columns and the stash — a late old segment refreshes a call the resumed socket already finalized (hook P1)', () => {
+    const { db } = primeDb();
+    const seg = recovery.buildSegment({ generation: 1, text: 'Caller: first leg' });
+    const patch = recovery.appendSegmentPatch(db, seg);
+    expect(patch.transcription.sql).toBe("CASE WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ? ELSE transcription END");
+    expect(patch.transcription.bindings[0]).toBe('conversation_relay'); // a recording's transcript is never touched
+    expect(patch.transcription.bindings[1].sql).toContain("COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb"); // unioned with THIS segment
+    expect(patch.metadata.sql).toBe("CASE WHEN (metadata->'relay_transcript') IS NOT NULL AND ? IS NOT NULL THEN jsonb_set(?, '{relay_transcript,text}', to_jsonb(?::text), false) ELSE ? END");
+    expect(patch.metadata.bindings[1].sql).toContain("'relay_segments'"); // the append rides both branches
+    expect(patch.metadata.bindings[3].sql).toContain("'relay_segments'");
+  });
+
   test('loadResumeState proves the hint from the row: reconnects > 0 ⇒ state; otherwise null; bounded and fail-soft', async () => {
     const { db } = primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
     expect(await recovery.loadResumeState(db, 'CA-1')).toEqual({ reconnects: 1, segmentsText: 'Caller: ants', relayLeadId: 'L1' });
@@ -120,8 +132,10 @@ describe('the conversation side', () => {
     const convo = convoWithTurns();
     await convo.end('ws_close');
     // 1: the segment append — metadata only, no columns, no owner/generation fence on it
-    expect(updates[0]).toEqual({ metadata: expect.objectContaining({ sql: expect.stringContaining("'relay_segments'") }), updated_at: expect.any(Date) });
-    const seg = JSON.parse(updates[0].metadata.bindings[0])[0];
+    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'transcription', 'updated_at']); // no outcome / status / owner fence on the append
+    expect(updates[0].metadata.bindings[1].sql).toContain("'relay_segments'"); // the append (both CASE branches)
+    expect(updates[0].transcription.sql).toContain('transcription_provider = ?'); // recomposes only Sandy-owned columns
+    const seg = JSON.parse(updates[0].metadata.bindings[1].bindings[0])[0];
     expect(seg).toEqual(expect.objectContaining({ generation: 1725500001000, session_key: 'nonce-1', reason: 'ws_close', turns: 2, lead_captured: true }));
     expect(seg.text).toContain('Caller: my ants are back');
     // 2: the reconcile — the transcript column is composed from the row's segments (COALESCE to this socket's text), fenced by generation
@@ -152,15 +166,32 @@ describe('the conversation side', () => {
     expect(builder.whereRaw.mock.calls.some(([sql]) => String(sql).includes('relay_reconnect_ms'))).toBe(false);
   });
 
-  test('a superseded socket still appends its segment, then skips every column write', async () => {
+  test('a superseded socket still appends its segment (recomposing a finalized call), resyncs the message row, then skips every column write', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { syncVoiceMessageForCall } = require('../services/conversations');
     const { updates } = primeDb();
     const convo = convoWithTurns();
     convo._callerVerified = true;
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');
     expect(updates).toHaveLength(1);
-    expect(updates[0].metadata.sql).toContain("'relay_segments'");
+    expect(updates[0].metadata.sql).toContain('jsonb_set(?, \'{relay_transcript,text}\'');
+    expect(updates[0].transcription.sql).toContain('transcription_provider = ?');
+    expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-rec');
+  });
+
+  test('commitments on a reconnected call read the PERSISTED composed transcript under the owner fence (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => undefined) }));
+    const recordRelayCommitments = jest.fn(async () => ({ found: true, written: 1 }));
+    jest.doMock('../services/call-commitments', () => ({ recordRelayCommitments }));
+    const { builder } = primeDb({ firstRow: { transcription: 'Caller: first leg\n\n[Reconnected]\nCaller: my ants are back' } });
+    const convo = convoWithTurns({ sessionGeneration: 2 });
+    await convo.end('ws_close');
+    expect(builder.first).toHaveBeenCalledWith('transcription');
+    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ transcript: 'Caller: first leg\n\n[Reconnected]\nCaller: my ants are back' }));
+    jest.dontMock('../config/feature-gates');
+    jest.dontMock('../services/call-commitments');
   });
 
   test('a resumed session: the hint is proven from the row, the earlier turns are seeded ONCE as played text, and the floor is skipped when a lead is linked', async () => {

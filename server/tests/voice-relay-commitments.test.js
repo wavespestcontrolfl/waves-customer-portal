@@ -52,7 +52,8 @@ describe('relay session → owed commitments', () => {
     const site = conversation.slice(recordAt - 500, recordAt + 1000);
     expect(site).toContain('if ((updated || transferSalvaged) && transcriptUpdate?.transcription) {'); // the transfer's salvage qualifies too (PR 2A codex r2 P2)
     expect(site).toContain("isEnabled('callCommitments')");
-    expect(site).toContain('transcript: transcriptUpdate.transcription,');
+    expect(site).toContain('let commitmentsTranscript = transcriptUpdate.transcription;'); // the scrubbed transcript the reconcile wrote…
+    expect(site).toContain('transcript: commitmentsTranscript,'); // …or, on a reconnected call, the persisted composed one (PR 2B)
     expect(site).toContain("estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,");
     expect(site).toContain("estimateExpectation: this._promises.get('send_estimate')?.expectation || null,");
     // The deadline runs from the moment the tool spoke the expectation, not from the close.
@@ -66,7 +67,7 @@ describe('relay session → owed commitments', () => {
     // message-sync failure line, and the three telemetry lines (per-turn
     // stats, relay event shape, relay_failed salvage) carry a masked CallSid.
     expect(conversation).toContain("const { maskSid } = require('../twilio-failure-alerts');");
-    expect(conversation.match(/callSid=\$\{maskSid\(this\.callSid\)\}/g)).toHaveLength(16); // PR 2A stash +1; PR 2B recovery (resume proof, handoff, floor skip, segment append) +8
+    expect(conversation.match(/callSid=\$\{maskSid\(this\.callSid\)\}/g)).toHaveLength(17); // PR 2A stash +1; PR 2B recovery (resume proof, handoff, floor skip, segment append, late-segment sync) +9
   });
 
   test('the promises are recorded even when the voice-message sync rejects: the sync has its own catch ahead of the commitments block (codex #3725 r18 P2)', () => {
