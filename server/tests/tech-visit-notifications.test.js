@@ -26,10 +26,10 @@ const VISIT = {
   technician_id: 'tech-1', cust_first_name: 'Ana', cust_last_name: 'Ruiz', cust_address: '4312 Cortez Rd W', cust_city: 'Bradenton',
 };
 
-function chain(first) {
+function chain(first, firstImpl = null) {
   const c = {};
   for (const m of ['where', 'leftJoin', 'select']) c[m] = jest.fn(() => c);
-  c.first = jest.fn(async () => first);
+  c.first = jest.fn(firstImpl || (async () => first));
   return c;
 }
 
@@ -168,6 +168,33 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
     expect(order).toEqual(['card:tech-1:visit_unassigned', 'card:tech-2:visit_assigned', 'push:tech-1', 'push:tech-2']);
     mockSendTechNotification.mockResolvedValue(undefined);
     mockSendToAdminUser.mockResolvedValue({ sent: 1 });
+  });
+
+  test('two changes to the same visit apply in call order even when the first one reads slower (A→B, then B→C)', async () => {
+    const order = [];
+    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`${techId}:${row.type}`); });
+    // The first hook's visit read is slow; the second's is instant.
+    let visitReads = 0;
+    db.mockImplementation((table) => {
+      if (table === 'technicians') {
+        const c = { where: jest.fn((arg) => { c.first = jest.fn(async () => ({ ...TECH, id: arg.id, name: arg.id })); return c; }), first: jest.fn() };
+        return c;
+      }
+      if (table === 'scheduled_services as s') {
+        const slow = visitReads++ === 0;
+        return chain(null, slow ? () => new Promise((r) => setTimeout(() => r(VISIT), 20)) : () => Promise.resolve(VISIT));
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const first = notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID });
+    const second = notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-2', toTechId: 'tech-3', actorId: ADAM_ID });
+    await Promise.all([first, second]);
+    expect(order).toEqual([
+      'tech-1:visit_unassigned', 'tech-2:visit_assigned',
+      'tech-2:visit_unassigned', 'tech-3:visit_assigned',
+    ]);
+    expect(notices._test.visitQueues.size).toBe(0);
+    mockSendTechNotification.mockResolvedValue(undefined);
   });
 
   test('notifyVisitCancelled without a technicianId reads the assigned tech from the row', async () => {

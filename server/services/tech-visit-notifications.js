@@ -291,17 +291,35 @@ async function notifyTechVisitChange(args = {}) {
   }
 }
 
+// Notices for one visit apply in the order their changes committed. Two
+// hooks for the same visit (A→B, then B→C seconds later) each read the
+// tech, the visit, and the actor before writing; without a queue the later
+// change's reads can finish first and B would see "moved off" before its
+// stale "new visit". A per-visit promise chain (in-process — the portal
+// runs as one server) makes each visit's batch write, then push, before
+// the next batch starts. Entries clear themselves when the chain drains.
+const visitQueues = new Map();
+function enqueueForVisit(visitId, fn) {
+  const key = String(visitId);
+  const prior = visitQueues.get(key) || Promise.resolve();
+  const next = prior.then(fn, fn).catch((err) => {
+    logger.warn(`[tech-visit-notifications] queued notice failed for visit ${key}: ${err.message}`);
+  });
+  visitQueues.set(key, next);
+  next.finally(() => { if (visitQueues.get(key) === next) visitQueues.delete(key); });
+  return next;
+}
+
 // Run `fn` after the caller's OUTERMOST commit (a savepoint's own promise
 // resolves at savepoint release — same rule as dispatch-assignment's
-// broadcast hook); with no trx, start it now. Errors never reach the
-// caller, and callers do not await the returned promise: push delivery
-// (APNs / FCM / web-push round trips) stays off every response path.
-function afterCommit(trx, fn) {
+// broadcast hook); with no trx, start it now — in either case through the
+// visit's queue. Errors never reach the caller, and callers do not await the
+// returned promise: push delivery (APNs / FCM / web-push round trips) stays
+// off every response path.
+function afterCommit(trx, fn, visitId) {
   const { commitPromiseOf } = require('../utils/trx-commit-promise');
   const commitPromise = trx ? commitPromiseOf(trx) : null;
-  const run = () => Promise.resolve().then(fn).catch((err) => {
-    logger.warn(`[tech-visit-notifications] post-commit notice failed: ${err.message}`);
-  });
+  const run = () => enqueueForVisit(visitId, fn);
   if (commitPromise) {
     // A rolled-back transaction has nothing to announce.
     commitPromise.then(run).catch(() => {});
@@ -325,14 +343,14 @@ function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, a
     if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, newTechnicianId: to }));
     if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId }));
     await deliver(notices);
-  });
+  }, visitId);
 }
 
 /** Same visit, same tech, new date or window. Post-commit, best-effort. */
 function notifyVisitRescheduled({ visitId, technicianId, actorId = null, previous = null, trx = null } = {}) {
   if (!visitId || !technicianId) return null;
   if (!enabled()) return null;
-  return afterCommit(trx, () => notifyTechVisitChange({ visitId, kind: 'rescheduled', technicianId, actorId, previous }));
+  return afterCommit(trx, () => notifyTechVisitChange({ visitId, kind: 'rescheduled', technicianId, actorId, previous }), visitId);
 }
 
 /**
@@ -352,7 +370,7 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, tr
     }
     if (!recipient) return;
     await notifyTechVisitChange({ visitId, kind: 'cancelled', technicianId: recipient, actorId });
-  });
+  }, visitId);
 }
 
 module.exports = {
@@ -365,5 +383,5 @@ module.exports = {
   notifyAssignmentChange,
   notifyVisitRescheduled,
   notifyVisitCancelled,
-  _test: { formatWhen, composeCard, describeActor },
+  _test: { formatWhen, composeCard, describeActor, visitQueues },
 };
