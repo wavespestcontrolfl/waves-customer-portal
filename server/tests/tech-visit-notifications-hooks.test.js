@@ -90,6 +90,15 @@ describe('assignDispatchJob → tech notice', () => {
     expect(mockNotifyAssignmentChange).toHaveBeenCalledWith(expect.objectContaining({ fromTechId: 't-old', toTechId: null, trx }));
   });
 
+  test('noticeActorId names the card\'s actor while actorId (resolved_by / broadcast) stays the staff row or null', async () => {
+    await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: null, noticeActorId: 'customer_self_serve' });
+    expect(mockNotifyAssignmentChange).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'customer_self_serve' }));
+    // Only an explicit noticeActorId overrides — an omitted one falls back to the staff actor.
+    mockNotifyAssignmentChange.mockClear();
+    await assignDispatchJob({ jobId: 'job-1', technicianId: 't-new', actorId: 'adam' });
+    expect(mockNotifyAssignmentChange).toHaveBeenCalledWith(expect.objectContaining({ actorId: 'adam' }));
+  });
+
   test('a no-op assignment (same tech) never notifies', async () => {
     const jobChain = { where: jest.fn(() => jobChain), first: jest.fn(async () => ({ ...JOB, technician_id: 't-new' })) };
     const techChain = { where: jest.fn(() => techChain), first: jest.fn(async () => ASSIGNABLE) };
@@ -305,6 +314,40 @@ describe('cancel-flow plan hold (source order)', () => {
   });
 });
 
+describe('Codex r9 writers (source order)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('both voice-confirm hooks name the holder from the COMMITTED transition payload, not the pre-transaction read', () => {
+    for (const rel of ['../routes/admin-dispatch.js', '../routes/admin-schedule.js']) {
+      const src = read(rel);
+      const hook = src.indexOf("const confirmedRow = transition?.adminPayload || null;");
+      expect(hook).toBeGreaterThan(-1);
+      expect(src.lastIndexOf('transition = await transitionJobStatus({', hook)).toBeGreaterThan(src.lastIndexOf('let transition = null;', hook));
+      expect(src.slice(hook, hook + 900)).toContain('snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },');
+      expect(src.slice(hook, hook + 900)).not.toContain('technicianId: svc.technician_id');
+    }
+  });
+
+  test('a same-trip parent promoted during estimate acceptance is announced on the seeding transaction; its seeded children are not', () => {
+    const src = read('../services/estimate-converter.js');
+    const hook = src.indexOf("visitId: parentRow.id, kind: 'assigned', technicianId: parentRow.technician_id, actorId: 'customer_estimate_accept',");
+    expect(hook).toBeGreaterThan(-1);
+    expect(src.slice(hook, hook + 400)).toContain('trx,');
+    // Announced before the follow-up seeding, on the same trx.
+    expect(src.indexOf('seedResult = await seedRecurringFollowUpsForParent(trx, parentRow', hook)).toBeGreaterThan(hook);
+    expect(src.match(/notifyTechVisitChange\(/g)).toHaveLength(1);
+  });
+
+  test('a grouped move re-pointed to another technician names the customer on the card, never on dispatch_alerts.resolved_by', () => {
+    const src = read('../services/visit-groups.js');
+    expect(src).toContain("actorId: options.actorId || null,\n              // The card's actor");
+    expect(src).toContain('noticeActorId: options.actorId || initiatedBy || null,');
+    expect(src).toContain("...(noticeActorId !== undefined ? { noticeActorId } : {}),");
+  });
+});
+
 describe('Codex r7 writers (source order)', () => {
   const fs = require('fs');
   const path = require('path');
@@ -312,9 +355,9 @@ describe('Codex r7 writers (source order)', () => {
 
   test('the admin-schedule status route confirms voice-agent bookings too and sends the same assigned card, post-commit', () => {
     const src = read('../routes/admin-schedule.js');
-    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id");
+    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id");
     expect(hook).toBeGreaterThan(-1);
-    expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,");
+    expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,");
     // After the status transaction's catch block, before the activation helper.
     expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
     expect(src.lastIndexOf('// ===== Post-success side effects =====', hook)).toBeGreaterThan(-1);
@@ -355,9 +398,9 @@ describe('Codex r6 writers (source order)', () => {
 
   test('office confirm of a voice-agent booking (pending → confirmed) sends the assigned card, post-commit', () => {
     const src = read('../routes/admin-dispatch.js');
-    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id");
+    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id");
     expect(hook).toBeGreaterThan(-1);
-    expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,");
+    expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,");
     // After the status transaction's catch block, before the activation helper.
     expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
     expect(src.indexOf("runOfficeConfirmActivation(db, svc, 'admin-dispatch'", hook)).toBeGreaterThan(hook);

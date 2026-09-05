@@ -3891,6 +3891,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // proof, and passing skipCardRequest for an unowned confirm permanently
     // suppressed the card funnel (customer_confirmed stamps, no retry rail).
     let fieldConfirmVerified = false;
+    // The transition's committed payload — the voice-confirm card below
+    // must name the holder as WRITTEN, not as read.
+    let transition = null;
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -3959,7 +3962,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // (customer:job_update, dispatch:job_update, dispatch:alert_resolved)
         // chain on trx.executionPromise — fire post-commit, suppressed
         // on rollback.
-        await transitionJobStatus({
+        transition = await transitionJobStatus({
           jobId: svc.id,
           fromStatus,
           toStatus,
@@ -4008,11 +4011,18 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // becomes a visit on the tech's route, and no assignment write follows —
     // so the "new visit" card fires here, post-commit. Call-created
     // office-review rows were announced at insert (call-proc) and stay quiet.
-    if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id
+    // Recipient and schedule come from the COMMITTED row the transition
+    // returned (codex r9 P1): the status CAS pins only the status, so a
+    // reassignment that lands between this route's `svc` read and the
+    // transition confirms the NEW holder's row — the earlier read would
+    // name a technician the write-time guard then drops, leaving the real
+    // holder with no card at all.
+    const confirmedRow = transition?.adminPayload || null;
+    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
       && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
       void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,
-        snapshot: { date: svc.scheduled_date, windowStart: svc.window_start || null, windowEnd: svc.window_end || null },
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
       });
     }
     if (isOfficeReviewConfirm) {

@@ -317,11 +317,18 @@ async function assertRowMovableAlone(t, rowId, observedVisitId) {
   }
 }
 
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
-  // actorId: the staff row (or system label) behind a unit move, so the
-  // tech notices name them and their own move stays silent.
-  await assignDispatchJob({ jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
+  // actorId: the staff row behind a unit move (dispatch_alerts.resolved_by
+  // + the broadcast). noticeActorId: who the tech's card names when that is
+  // not a staff row — the customer moving the stop online — so their own
+  // move stays silent and the card never says "by the office" for a
+  // customer move (codex r9 P2).
+  await assignDispatchJob({
+    jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
+    ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
+    ...(noticeActorId !== undefined ? { noticeActorId } : {}),
+  });
 }
 
 /**
@@ -2799,6 +2806,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // Staff UUID only — assignDispatchJob's actorId also stamps
               // dispatch_alerts.resolved_by; a system label never goes there.
               actorId: options.actorId || null,
+              // The card's actor: the staff row when there is one, else the
+              // rebooker's initiatedBy label (a customer's online move reads
+              // "by the customer online", as the moved-off card below does).
+              noticeActorId: options.actorId || initiatedBy || null,
             });
           });
           return;

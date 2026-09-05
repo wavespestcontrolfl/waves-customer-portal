@@ -12566,6 +12566,9 @@ router.put('/:id/status', async (req, res, next) => {
       && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
 
+    // The transition's committed payload — the voice-confirm card below
+    // must name the holder as WRITTEN, not as read.
+    let transition = null;
     try {
       await db.transaction(async (trx) => {
         // Re-validate technician ownership INSIDE the transaction, row-
@@ -12613,7 +12616,7 @@ router.put('/:id/status', async (req, res, next) => {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
         }
 
-        await transitionJobStatus({
+        transition = await transitionJobStatus({
           jobId: svc.id,
           fromStatus,
           toStatus,
@@ -12659,11 +12662,18 @@ router.put('/:id/status', async (req, res, next) => {
     // from). Call-created office-review rows were announced at insert
     // (call-proc) and stay quiet. A technician confirming their own visit is
     // the actor AND the recipient, so that stays silent too.
-    if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id
+    // Recipient and schedule come from the COMMITTED row the transition
+    // returned (codex r9 P1): the status CAS pins only the status, so a
+    // reassignment that lands between this route's `svc` read and the
+    // transition confirms the NEW holder's row — the earlier read would
+    // name a technician the write-time guard then drops, leaving the real
+    // holder with no card at all.
+    const confirmedRow = transition?.adminPayload || null;
+    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
       && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
       void require('../services/tech-visit-notifications').notifyTechVisitChange({
-        visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,
-        snapshot: { date: svc.scheduled_date, windowStart: svc.window_start || null, windowEnd: svc.window_end || null },
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
       });
     }
     // Outbound-callback booking confirmed by the office → arm the deferred

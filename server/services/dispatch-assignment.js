@@ -116,7 +116,7 @@ async function emitDispatchJobUpdate({ jobId, actorId }) {
   return payload;
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -234,10 +234,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // schedule after this call (the edit modal: tech + date in one save)
   // passes the final date/window it is about to write, so the new tech's
   // card names the schedule that will commit, not the row as it stood here.
+  // `noticeActorId`: who the CARD names when that is not the staff row in
+  // `actorId` — a customer moving a grouped stop online (visit-groups).
+  // `actorId` also stamps dispatch_alerts.resolved_by and the broadcast, so
+  // a system label must never ride it (codex r9 P2).
   const rowSnapshot = { date: updatedRow.scheduled_date, windowStart: updatedRow.window_start, windowEnd: updatedRow.window_end };
   const overrides = Object.fromEntries(Object.entries(noticeSnapshot || {}).filter(([, v]) => v !== undefined));
   void require('./tech-visit-notifications').notifyAssignmentChange({
-    visitId: jobId, fromTechId, toTechId: newTechId, actorId, trx,
+    visitId: jobId, fromTechId, toTechId: newTechId, actorId: noticeActorId === undefined ? actorId : noticeActorId, trx,
     snapshot: { ...rowSnapshot, ...overrides },
   });
 
