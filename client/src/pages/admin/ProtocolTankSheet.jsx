@@ -52,6 +52,8 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
         const hasAmount = quantityChecks.every(Boolean);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
+          ["Application instruction", item.raw],
+          ["Application scope", item.scope],
           ["Signal word", product.signalWord],
           ["PPE", ppe || "Not on file — consult the product label"],
           ["Re-entry", product.reentryText || "Consult the product label"],

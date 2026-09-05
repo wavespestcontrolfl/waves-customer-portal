@@ -21,6 +21,18 @@ function fixture() {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("110-gallon tank reference", () => {
+  it("preserves product-specific triggers and application scope on screen and in print", () => {
+    const plan = fixture();
+    Object.assign(plan.items[0], { conditional: true, raw: "Spot treat only if the synthetic threshold is met", scope: "spot" });
+    const { container } = render(<ProtocolTankSheet plan={plan} calibration={calibration} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Spot treat only if the synthetic threshold is met")).toBeInTheDocument();
+      expect(within(surface).getByText("Application scope")).toBeInTheDocument();
+      expect(within(surface).getByText("spot")).toBeInTheDocument();
+      expect(within(surface).getByText("12.5 oz / 110 gal")).toBeInTheDocument();
+    }
+  });
+
   it("uses the server tank amount and includes safety documents in the printable sheet", () => {
     const { container } = render(<ProtocolTankSheet plan={fixture()} calibration={calibration} safetyRules={["Test seasonal restriction"]} />);
     expect(within(container).getByText("12.5 oz / 110 gal")).toBeInTheDocument();
