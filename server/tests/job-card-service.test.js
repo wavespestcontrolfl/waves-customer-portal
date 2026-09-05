@@ -66,6 +66,15 @@ describe('validateParagraph', () => {
     expect(jobCard.validateParagraph('One dog on site. Irrigation runs Mon and Thu for 20 min, with 1.2" of rain over the last 7 days.', lawn, [])).toBeNull();
   });
 
+  test('a sentence the grounding never mentions is rejected, even without numbers (Codex r10 P1)', () => {
+    expect(jobCard.validateParagraph('No pets are present.', 'First visit on record.', [])).toBe('ungrounded_sentence');
+    expect(jobCard.validateParagraph('First visit here. The side gate is unlocked.', 'First visit on record.', [])).toBe('ungrounded_sentence');
+    // An instruction lifted from a visit note is not in the grounding either.
+    expect(jobCard.validateParagraph('Skip the back yard today.', 'Pets: dog. First visit on record.', [])).toBe('ungrounded_sentence');
+    expect(jobCard.validateParagraph('This is the first visit on record.', 'First visit on record.', [])).toBeNull();
+    expect(jobCard.validateParagraph('Two dogs on site.', 'Pets: 2 dogs.', [])).toBeNull();
+  });
+
   test('accepts a faithful 1–3 sentence rewrite', () => {
     expect(jobCard.validateParagraph('There is a dog and a gate code on file you can show. Last visit on 2026-08-12 found chinch bugs on the east side.', grounding, codes)).toBeNull();
   });
@@ -366,6 +375,16 @@ describe('lineMeta hints keep the secondary line\'s role (pre-push P1)', () => {
       expect.objectContaining({ product: catalog[0], role: 'conditional', selected: false }),
     ]);
   });
+
+  test('a product on two treatment lines keeps both lines (Codex r10 P2)', () => {
+    const catalog = [{ id: 'al', name: 'Alpine WSG', cost_per_unit: 1 }];
+    const visit = {
+      primary: 'Perimeter band with Alpine WSG\nInterior cracks and crevices',
+      secondary: '',
+      lineMeta: { 'Perimeter band with Alpine WSG': { catalogProductHints: ['Alpine WSG'] }, 'Interior cracks and crevices': { catalogProductHints: ['Alpine WSG'] } },
+    };
+    expect(jobCard._test.linesFromLineMeta(visit, catalog).map((l) => l.raw)).toEqual(['Perimeter band with Alpine WSG', 'Interior cracks and crevices']);
+  });
 });
 
 describe('serviceDayInstant (PR r3 P2)', () => {
@@ -376,6 +395,14 @@ describe('serviceDayInstant (PR r3 P2)', () => {
     expect(jobCard._test.serviceDayInstant('2026-09-04', now)).toBe(now);
     expect(jobCard._test.serviceDayInstant('2026-09-04', new Date('2026-09-04T12:00:00Z')).toISOString()).toBe('2026-09-04T16:00:00.000Z');
     expect(jobCard._test.serviceDayInstant('2026-08-01', now)).toBe(now);
+  });
+  test('a booked window judges the rig at the appointment start, not noon (Codex r10 P1)', () => {
+    const now = new Date('2026-09-04T12:00:00Z');
+    expect(jobCard._test.serviceDayInstant('2026-09-10', now, '15:00:00').toISOString()).toBe('2026-09-10T19:00:00.000Z');
+    expect(jobCard._test.serviceDayInstant('2026-09-10', now, '08:30').toISOString()).toBe('2026-09-10T12:30:00.000Z');
+    // Already past the start → now; garbage window → noon.
+    expect(jobCard._test.serviceDayInstant('2026-09-04', new Date('2026-09-04T20:00:00Z'), '15:00:00').toISOString()).toBe('2026-09-04T20:00:00.000Z');
+    expect(jobCard._test.serviceDayInstant('2026-09-10', now, 'later').toISOString()).toBe('2026-09-10T16:00:00.000Z');
   });
 });
 
@@ -545,6 +572,17 @@ describe('mixForProduct', () => {
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: pest, deps: { buildPlan, evaluateApprovals }, ...at })).amount).toBe(6.215);
     expect(buildPlan).not.toHaveBeenCalled();
     expect(evaluateApprovals).not.toHaveBeenCalled();
+  });
+
+  test('a rig that lapses before the booked window start gives no searched dose (Codex r10 P1)', async () => {
+    const lapsing = { ...live, expires_at: '2026-09-04T17:30:00Z' }; // 13:30 ET, after noon, before the 3 pm start
+    const dbh = makeDb({ scheduled_services: [{ ...visit, window_start: '15:00:00' }], products_catalog: [product], equipment_calibrations: [lapsing] });
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, ...at });
+    expect(out.tank.calibrated).toBe(false);
+    expect(out.amount).toBeNull();
+    // No window booked → judged at noon → still valid.
+    const noon = makeDb({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [lapsing] });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: noon, ...at })).amount).toBe(6.215);
   });
 
   test('a base line the resolver left unselected is withheld by the search, not dosed at the catalog rate (Codex r9 P1)', async () => {
@@ -813,6 +851,16 @@ describe('PR review r5', () => {
     expect(note).toBe('MOA 3A last used 2026-06-10 (Bifen IT)');
     expect(seen).toContain('service_products as sp');
   });
+
+  test('a failed history read is said on the card, never "no history" (Codex r10 P2)', async () => {
+    const dbh = () => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'modify', 'orderBy', 'select', 'limit']) chain[m] = () => chain;
+      chain.catch = async (fn) => fn(new Error('db down'));
+      return chain;
+    };
+    await expect(jobCard._test.rotationNote(dbh, { customerId: 'c1', scheduledDate: '2026-09-04' }, { name: 'Talstar P', moa_group: '3A' })).resolves.toBe('MOA 3A rotation check unavailable — verify before applying');
+  });
 });
 
 describe('PR review r6', () => {
@@ -888,7 +936,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     dbh.raw = (sql) => sql;
     return dbh;
   };
-  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', watering_days: '["Mon"]' };
+  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', watering_days: '["Mon"]' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
@@ -896,16 +944,16 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
     expect(away.access.codes).toEqual([]);
     // Pets and the securing plan are the primary home's as well (Codex r9 P1).
-    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '' });
+    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '', instructions: '' });
     const awayText = jobCard.buildTemplateParagraph(away.facts);
     expect(awayText).toMatch(/visit at a non-primary address — the home's pets and access details are not shown/i);
-    expect(awayText).not.toMatch(/dog|crated/);
+    expect(awayText).not.toMatch(/dog|crated|north side/);
     // The primary home's code is still scrubbed from notes and still a leak check for the rewrite (hook P1).
     expect(away.facts.visitNotes).toBe('Try [code] first');
     expect(away.knownCodes).toEqual([{ label: 'Property gate', code: '4545#' }]);
     const home = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs }), deps);
     expect(home.access.codes).toEqual([{ label: 'Property gate', code: '4545#' }]);
-    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage' });
+    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage', instructions: 'Enter from the north side' });
   });
 
   test('pet presence is a critical fact even without a securing plan (P1)', () => {

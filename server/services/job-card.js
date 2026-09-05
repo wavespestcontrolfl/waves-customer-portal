@@ -278,7 +278,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     .where('ss.id', serviceId)
     .select(
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes',
-      'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
+      'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
       'c.first_name', 'c.last_name', 'c.phone', 'c.lawn_water_area_id',
       // The booked property's pin: the visit's own lat/lng first; the
       // customer's primary pin only when the stamped address does not
@@ -329,6 +329,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     isLawn: serviceLine === 'lawn',
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     rig: rigAssignment(svc),
+    windowStart: svc.window_start || null,
     access: { codes },
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
@@ -345,7 +346,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       entry: clean(propertyPrefs?.access_notes || propertyPrefs?.side_gate_access, 120),
       parking: clean(propertyPrefs?.parking_notes, 80),
       alternateAddress,
-      instructions: clean(prefs?.special_instructions, 120),
+      instructions: clean(propertyPrefs?.special_instructions, 120),
       contactPreference: prefs?.contact_preference || null,
       chemicalSensitivity: prefs?.chemical_sensitivities ? clean(prefs.chemical_sensitivity_details, 80) || 'yes' : '',
       awayUntil: awayUntil(prefs),
@@ -448,8 +449,8 @@ const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 
 /**
  * Model output is accepted only when it is 1–3 sentences, ≤ 60 words, carries
- * no emoji, no bullet/heading markup, no code-looking token, and no number
- * that the grounding does not contain.
+ * no emoji, no bullet/heading markup, no code-looking token, no number the
+ * grounding does not contain, and no sentence the grounding does not mention.
  */
 function validateParagraph(text, grounding, codes = [], critical = []) {
   // Raw text on purpose: the code check below must see a code as written.
@@ -472,6 +473,11 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   // three words of the same token in the grounding (a "20" moved from
   // "runs 20 min" to "20 dogs" is an invented fact, not a rephrase).
   if (numbersOutOfContext(body, grounding)) return 'ungrounded_number';
+  // Every sentence must share a content word with the grounding: a sentence
+  // the notes never mention ("No pets are present." over "First visit on
+  // record.", or an instruction lifted from a visit note) is an invented
+  // fact, not a rephrase.
+  if (ungroundedSentence(body, grounding)) return 'ungrounded_sentence';
   // A rewrite that drops a safety-critical fact is not a rewrite.
   for (const fact of critical) {
     if (fact && !lower.includes(String(fact).toLowerCase())) return 'critical_fact_dropped';
@@ -496,7 +502,9 @@ function criticalFacts(facts) {
   return out;
 }
 
-const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next']);
+const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next', 'no', 'not', 'there', 'you', 'your', 'can', 'will', 'any', 'all', 'so', 'if', 'but', 'also', 'then', 'they', 'them', 'their', 'one']);
+// Loose stem so "dogs" grounds "dog" and "sprayed" grounds "spray".
+const stem = (w) => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w).slice(0, 6);
 function contextWords(text) {
   return String(text || '').toLowerCase().split(/\s+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
 }
@@ -507,6 +515,10 @@ function neighbours(words, i) {
 // borrow "irrigation" from the next sentence.
 function sentenceWords(text) {
   return String(text || '').split(/(?<=[.!?])\s+/).map(contextWords).filter((w) => w.length);
+}
+function ungroundedSentence(body, grounding) {
+  const src = new Set(sentenceWords(grounding).flat().filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem));
+  return sentenceWords(body).some((words) => !words.some((w) => !CONTEXT_STOPWORDS.has(w) && src.has(stem(w))));
 }
 function numbersOutOfContext(body, grounding) {
   const src = sentenceWords(grounding);
@@ -784,10 +796,13 @@ async function loadRigCalibrations(dbh, rig) {
 }
 
 // The instant a calibration must still be valid at: the later of now and
-// noon ET on the service day.
-function serviceDayInstant(serviceDate, now = new Date()) {
-  const noon = serviceDate ? parseETDateTime(`${serviceDate}T12:00`) : null;
-  return noon && noon.getTime() > now.getTime() ? noon : now;
+// the appointment start — window_start on the service day, noon ET when no
+// window is booked. Expiry is an exact timestamp, so a rig lapsing between
+// noon and a 3 pm start is expired when treatment begins.
+function serviceDayInstant(serviceDate, now = new Date(), windowStart = null) {
+  const wall = /^\d{2}:\d{2}/.exec(String(windowStart || ''));
+  const start = serviceDate ? parseETDateTime(`${serviceDate}T${wall ? wall[0] : '12:00'}`) : null;
+  return start && start.getTime() > now.getTime() ? start : now;
 }
 
 function tankFromCalibrations(rows, now = new Date()) {
@@ -956,18 +971,17 @@ function seasonalVisit(program, scheduledDate) {
  */
 function linesFromLineMeta(visit, catalog) {
   const secondary = String(visit?.secondary || '');
-  const hints = new Map();
+  const lines = [];
+  // One line per (raw line, product): a product on two treatment lines
+  // (Alpine WSG perimeter + interior) keeps both — buildProductCards folds
+  // them onto one card as extraLines.
   for (const [raw, meta] of Object.entries(visit?.lineMeta || {})) {
     for (const hint of meta?.catalogProductHints || []) {
-      if (!hints.has(hint)) hints.set(hint, raw);
+      const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
+      if (!product || lines.some((l) => l.raw === raw && l.product.id === product.id)) continue;
+      const conditional = raw && secondary.includes(raw);
+      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
     }
-  }
-  const lines = [];
-  for (const [hint, raw] of hints) {
-    const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
-    if (!product || lines.some((l) => l.product.id === product.id)) continue;
-    const conditional = raw && secondary.includes(raw);
-    lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
   }
   return lines;
 }
@@ -1086,11 +1100,14 @@ async function rotationNote(dbh, facts, product) {
   const group = ['frac', 'irac', 'hrac', 'moa'].find((g) => product[`${g}_group`]);
   if (!group) return null;
   try {
-    const last = await latestComparableGroupApplication(dbh, facts.customerId, product, group, product[`${group}_group`], facts.scheduledDate);
+    // strict: a failed history read must not read as "no history".
+    const last = await latestComparableGroupApplication(dbh, facts.customerId, product, group, product[`${group}_group`], facts.scheduledDate, { strict: true });
     if (!last) return null;
     return `${group.toUpperCase()} ${product[`${group}_group`]} last used ${etCalendarDayOf(last.service_date)}${last.product_name && last.product_name !== product.name ? ` (${clean(last.product_name, 40)})` : ''}`;
   } catch {
-    return null;
+    // Non-lawn cards have no strict plan pass to surface the outage, so the
+    // card says it: the group may repeat and nobody checked.
+    return `${group.toUpperCase()} ${product[`${group}_group`]} rotation check unavailable — verify before applying`;
   }
 }
 
@@ -1103,9 +1120,9 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
 
   // The spray check is a same-day call: a visit on another day is judged
   // on that day (the next 4 h of weather say nothing about tomorrow), and
-  // the rig must still be in calibration ON the service day.
+  // the rig must still be in calibration at the appointment start.
   const isToday = facts.scheduledDate === etDateString(now);
-  const serviceInstant = serviceDayInstant(facts.scheduledDate, now);
+  const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
   const [paragraph, catalog, calibrations, hourly] = await Promise.all([
     paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
@@ -1155,12 +1172,12 @@ function unselectedBaseBlock(plan, product) {
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
-    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
+    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'window_start', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
-  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now));
+  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start));
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
@@ -1255,5 +1272,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, ungroundedSentence, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
 };
