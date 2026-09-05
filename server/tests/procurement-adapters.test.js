@@ -222,14 +222,18 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
       // cartTotalHiddenFirst: a hidden responsive copy carrying a stale figure precedes the visible total
       if (sel === S.cartTotal) return st.cartTotalHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: '$999.00' }) : el({ count: 1, visible: true, text: '$99.00' })) }) : el({ count: 1, visible: true, text: '$99.00' });
-      if (sel === S.checkoutButton) return el({ count: 1 });
+      // checkoutHiddenFirst: a hidden responsive copy of the checkout button precedes the visible one
+      if (sel === S.checkoutButton) return st.checkoutHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : el({ count: 1, visible: true });
       // mfaHiddenFirst: a responsive duplicate — the first matching node is hidden, the second is the visible prompt
-      if (sel === S.mfaField) return st.mfaHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : el();
+      // mfaAfterTender: the verification step appears only once bill-to-account is selected
+      if (sel === S.mfaField) return st.mfaHiddenFirst ? el({ count: 2, nth: (i) => el({ count: 1, visible: i === 1 }) }) : st.mfaAfterTender && st.accountChecked ? el({ count: 1, visible: true }) : el();
       // cardUntilBillTo: the checkout defaults to card entry and hides the field once bill-to-account is selected
       if (sel === S.cardField) return st.cardUntilBillTo ? el({ count: 1, visible: !st.accountChecked }) : el();
       if (sel === S.termsCheckbox) {
         // termsHiddenCheckedFirst: a hidden CHECKED copy precedes the visible UNCHECKED checkbox the checkout shows
         if (st.termsHiddenCheckedFirst) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, checked: true }) : el({ count: 1, visible: true, checked: false })) });
+        // termsAfterTender: an account-specific terms box appears (unchecked) only once bill-to-account is selected
+        if (st.termsAfterTender) return st.accountChecked ? el({ count: 1, visible: true, checked: false }) : el();
         return el(st.termsUnreadable ? { count: 1 } : {}); // count 1 with no `checked` → isChecked throws
       }
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
@@ -252,7 +256,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       if (sel === S.checkoutTotal) return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: 'Order total $105.93' });
-      if (sel === S.placeOrder) return el({ count: 1, onClick: () => { st.placeClicked += 1; } });
+      // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
+      const placeBtn = () => el({ count: 1, visible: true, onClick: () => { st.placeClicked += 1; } });
+      if (sel === S.placeOrder) return st.placeOrderHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } }) : placeBtn()) }) : placeBtn();
       if (sel === S.orderNumber) return el({ count: 1, text: st.orderNumberText || 'Order # SO-778899' });
       return el();
     };
@@ -426,6 +432,23 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const dup = fakeSiteOne({ billVisibleCopies: 2 });
     await expect(s1.place(args(), dup.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
     expect(dup.st.placeClicked).toBe(0);
+  });
+
+  test.each([
+    ['mfa_required', { mfaAfterTender: true }],
+    ['terms_required', { termsAfterTender: true }],
+  ])('a blocker revealed by the tender change (%s) is caught by the post-click scan — no Place Order click (r14 P1)', async (reason, patch) => {
+    const { st, deps } = fakeSiteOne(patch);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: reason });
+    expect(st.accountChecked).toBe(true); // the tender WAS switched — the blocker appeared afterwards
+    expect(st.placeClicked).toBe(0);
+  });
+
+  test('the checkout and Place Order clicks target the ONE visible control — hidden responsive copies are never clicked (r14 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutHiddenFirst: true, placeOrderHiddenFirst: true });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
+    expect(st.hiddenPlaceClicked).toBeUndefined();
   });
 
   test('a visible radio and its visible label are ONE bill-to option — counted by the associated radio, the order places (r13 P1)', async () => {

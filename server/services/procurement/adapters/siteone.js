@@ -181,6 +181,15 @@ async function matches(page, selector) {
   return { all, shown };
 }
 
+// The ONE visible control for a click: a hidden responsive copy ahead of the
+// visible button would time out and park the one-shot claim as failed
+// (Codex #3853 r14 P2). Refuses BEFORE clicking — nothing has been sent.
+async function visibleControl(page, selector, what, evidence) {
+  const { shown } = await matches(page, selector);
+  if (shown.length !== 1) throw new RefusedError(shown.length ? `${what}_ambiguous` : `no_${what}`, `${shown.length} visible ${what.replace(/_/g, ' ')} controls — expected exactly one`, evidence);
+  return shown[0];
+}
+
 // Any visible match (the MFA / card / unavailable blockers fail closed).
 async function visible(page, selector) {
   try { return (await matches(page, selector)).shown.length > 0; } catch { return false; }
@@ -467,19 +476,26 @@ async function associatedRadio(page, option) {
 // The card field is judged AFTER the bill-to option is selected: a checkout
 // that defaults to card entry shows the field until the tender is switched,
 // and only a field still demanded afterwards refuses (Codex r6 P1).
-async function verifyBillToAccount(page, { evidence, upload }) {
-  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+// The blockers the bot never answers: an MFA challenge, and every terms
+// checkbox the checkout SHOWS must be accepted — a hidden checked copy ahead
+// of a visible unchecked one is not acceptance (r12 P1); with no visible copy
+// at all the hidden ones are judged (never skipped); an unreadable state fails
+// CLOSED (Codex r4 P2): unknown ≠ accepted. Scanned BEFORE and AFTER the
+// tender change — selecting bill-to-account can reveal an account-specific
+// terms box or verification step (Codex #3853 r14 P1).
+async function scanCheckoutBlockers(page, refuse) {
   if (await visible(page, SELECTORS.mfaField)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
-  // Every terms checkbox the checkout SHOWS must be accepted; a hidden checked
-  // copy ahead of a visible unchecked one is not acceptance (r12 P1). With no
-  // visible copy at all, the hidden ones are judged (never skipped). Fail
-  // CLOSED on an unreadable state (Codex r4 P2): unknown ≠ accepted.
   const terms = await matches(page, SELECTORS.termsCheckbox);
   for (const box of terms.shown.length ? terms.shown : terms.all) {
     let accepted = null;
     try { accepted = await box.isChecked(); } catch { await refuse('terms_unreadable', 'SiteOne checkout shows a terms checkbox whose state could not be read — owner action'); }
     if (accepted !== true) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
   }
+}
+
+async function verifyBillToAccount(page, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  await scanCheckoutBlockers(page, refuse);
   // The tender is the ONE visible bill-to option; a hidden responsive copy
   // ahead of it is neither refused on nor clicked (r12 P2).
   const billOptions = await matches(page, SELECTORS.billToAccount);
@@ -491,6 +507,7 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   try { await bill.click({ timeout: 5000 }); }
   catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
   await page.waitForTimeout(1500);
+  await scanCheckoutBlockers(page, refuse); // the tender change may have revealed a terms box / MFA step (r14 P1)
   if (await visible(page, SELECTORS.cardField)) await refuse('card_required', 'SiteOne checkout still asks for card entry with bill-to-account selected — bot never supplies it');
   // Proof is on the radio ASSOCIATED with the option just clicked (the
   // click target may be its label — Codex PR3 r1 + r3 P1): that radio's own
@@ -555,8 +572,9 @@ async function readCheckoutTotal(page, { evidence, upload }) {
 // The click and its confirmation number. Anything thrown after the click is
 // `ambiguous`: the order may exist — the dispatcher parks, never re-submits.
 async function submitAndReadOrderNumber(page, { evidence, upload }) {
+  const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
   try {
-    await page.locator(SELECTORS.placeOrder).first().click();
+    await placeOrder.click();
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
     await page.waitForTimeout(2500);
   } catch (e) {
@@ -619,7 +637,7 @@ async function place(
     await gate(amountCents, 'order');
     if (dryRun) return { dryRun: true, amountCents, externalOrderNumber: null, evidence };
 
-    await page.locator(SELECTORS.checkoutButton).first().click();
+    await (await visibleControl(page, SELECTORS.checkoutButton, 'checkout_button', evidence)).click();
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
     await page.waitForTimeout(2000);
     if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
