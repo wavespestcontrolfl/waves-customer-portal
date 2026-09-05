@@ -130,6 +130,12 @@ describe('notifyTechVisitChange', () => {
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('card not written'));
   });
 
+  test('the card names the visit\'s stamped service address when one exists (a different property than the address on file)', async () => {
+    prime({ visit: { ...VISIT, service_address_line1: '88 Palm Ave', service_address_city: 'Parrish' } });
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(mockSendTechNotification.mock.calls[0][1].payload.address).toBe('88 Palm Ave, Parrish');
+  });
+
   test('the committed snapshot wins over the row (a later move cannot rewrite this card)', async () => {
     await notices.notifyTechVisitChange({
       visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID,

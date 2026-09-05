@@ -116,8 +116,14 @@ function customerLabel(visit) {
   return String(visit.cust_last_name || visit.cust_first_name || 'Customer').trim();
 }
 
+// Where the truck goes: the visit's stamped service address when the
+// booking stamped one (phone bookings always do, and it may be a different
+// property than the customer's address on file), else the customer's.
 function placeLabel(visit) {
-  return [visit.cust_address, visit.cust_city].filter(Boolean).join(', ') || null;
+  const stamped = visit.service_address_line1
+    ? [visit.service_address_line1, visit.service_address_city].filter(Boolean)
+    : [visit.cust_address, visit.cust_city].filter(Boolean);
+  return stamped.join(', ') || null;
 }
 
 /**
@@ -179,6 +185,7 @@ async function loadVisit(visitId, conn) {
     .where('s.id', visitId)
     .first(
       's.id', 's.service_type', 's.scheduled_date', 's.window_start', 's.window_end', 's.technician_id',
+      's.service_address_line1', 's.service_address_city',
       'c.first_name as cust_first_name', 'c.last_name as cust_last_name',
       'c.address_line1 as cust_address', 'c.city as cust_city',
     );
