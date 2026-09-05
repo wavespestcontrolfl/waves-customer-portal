@@ -40,6 +40,15 @@ const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const SERVICE_GROUP = 'service_operational';
 
+// A mixed identity that still APPLIES product keeps its treatment prep: an
+// inspection-word exclusion below is lifted when any treatment cue is also
+// in the name ("Termite Liquid Treatment & Inspection", "Termite Inspection
+// & Spot Treatment" — service-line-configs.js TERMITE_TREATMENT_SERVICE_TYPE_RE
+// draws the same line; GH Codex #3856 r28 P1). Only an inspection-ONLY
+// name is excluded.
+const TREATMENT_CUES = Object.freeze(['treatment', 'liquid', 'foam', 'trench', 'spot', 'drill', 'pretreat', 'pre treat', 'pre-treat', 'applic']);
+const inspectionOnly = (keyword) => ({ keyword, unless: TREATMENT_CUES });
+
 const PREP_CONFIG = Object.freeze({
   flea: {
     label: 'Flea Treatment',
@@ -79,7 +88,7 @@ const PREP_CONFIG = Object.freeze({
     // Inspection Service" (20260507000002) is a diagnostic walkthrough and
     // gets none of it, like the lawn and termite matchers (GH Codex #3856
     // r26 P1). prep.rodent covers inspections itself, so rodent stays.
-    excludeKeywords: ['lawn pest', { keyword: 'rodent', unless: 'pest%rodent' }, 'inspect', 'assess'],
+    excludeKeywords: ['lawn pest', { keyword: 'rodent', unless: 'pest%rodent' }, inspectionOnly('inspect'), inspectionOnly('assess')],
     emailTemplateKey: 'prep.interior_pest',
     smsStandaloneKey: null,
   },
@@ -90,7 +99,7 @@ const PREP_CONFIG = Object.freeze({
     // children and pets off treated turf — a "Lawn Health Inspection" /
     // "Lawn Inspect" evaluation (service library) or a lawn assessment
     // applies nothing, so it gets no treatment prep (GH Codex #3856 r22 P1).
-    excludeKeywords: ['inspect', 'assess'],
+    excludeKeywords: [inspectionOnly('inspect'), inspectionOnly('assess')],
     emailTemplateKey: 'prep.lawn',
     smsStandaloneKey: null,
   },
@@ -114,7 +123,7 @@ const PREP_CONFIG = Object.freeze({
     // prep. Mirrors appointment-tagger classifyAppointmentType: wdo /
     // wood destroying / inspection outrank the termite-treatment tag
     // (GH Codex #3856 r20 P1).
-    excludeKeywords: ['inspect', 'monitor', 'wdo', 'wood destroying'],
+    excludeKeywords: ['inspect', 'monitor', 'wdo', 'wood destroying'].map(inspectionOnly),
     emailTemplateKey: 'prep.termite',
     smsStandaloneKey: null,
   },
@@ -162,10 +171,12 @@ async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywo
       .whereIn('customer_id', ids)
       .whereRaw(`(${serviceKeywords.map(() => 'LOWER(service_type) LIKE ?').join(' OR ')})`, serviceKeywords.map((kw) => `%${kw}%`));
     // An exclusion is a keyword, or { keyword, unless } when a wider LIKE
-    // pattern keeps the row anyway (a pest-primary "pest ... rodent" name).
+    // pattern (or any of several) keeps the row anyway — a pest-primary
+    // "pest ... rodent" name, a treatment cue beside an inspection word.
     for (const ex of excludeKeywords) {
-      if (typeof ex === 'string') q.whereRaw('LOWER(service_type) NOT LIKE ?', [`%${ex}%`]);
-      else q.whereRaw('(LOWER(service_type) NOT LIKE ? OR LOWER(service_type) LIKE ?)', [`%${ex.keyword}%`, `%${ex.unless}%`]);
+      if (typeof ex === 'string') { q.whereRaw('LOWER(service_type) NOT LIKE ?', [`%${ex}%`]); continue; }
+      const unless = [].concat(ex.unless);
+      q.whereRaw(`(LOWER(service_type) NOT LIKE ? OR ${unless.map(() => 'LOWER(service_type) LIKE ?').join(' OR ')})`, [`%${ex.keyword}%`, ...unless.map((u) => `%${u}%`)]);
     }
     const rows = await q
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])

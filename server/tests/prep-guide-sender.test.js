@@ -679,30 +679,37 @@ describe('sendPrepToCustomer', () => {
     expect(excluded).toBe(true);
   });
 
+  // An inspection-word exclusion lifted by any treatment cue (r28 P1): the
+  // SQL is "(NOT LIKE ?kw OR LIKE ?cue OR …)" with the keyword first.
+  const inspectionOnlyExclusions = () => scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
+    .filter(([sql]) => sql.startsWith('(LOWER(service_type) NOT LIKE ? OR LOWER(service_type) LIKE ?'))
+    .map(([, args]) => ({ keyword: args[0], unless: args.slice(1) })));
+
   test('the interior-pest visit match excludes a "Pest Inspection Service" — a diagnostic walkthrough gets no treatment prep (GH Codex #3856 r26 P1)', async () => {
     upcomingVisitRow = { ...VISIT, service_type: 'Pest Inspection Service' };
     await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'interior_pest', channel: 'email' });
-    const q = scheduledQueries.find((sq) => sq.whereRaw.mock.calls.some(([sql]) => sql.includes('LIKE ?')));
-    const patterns = q.whereRaw.mock.calls.filter(([sql]) => sql.startsWith('LOWER(service_type) NOT LIKE')).map(([, b]) => b[0]);
-    expect(patterns).toEqual(expect.arrayContaining(['%inspect%', '%assess%']));
+    const ex = inspectionOnlyExclusions();
+    expect(ex.map((e) => e.keyword)).toEqual(expect.arrayContaining(['%inspect%', '%assess%']));
+    expect(ex.find((e) => e.keyword === '%inspect%').unless).toEqual(expect.arrayContaining(['%treatment%', '%liquid%', '%spot%']));
   });
 
   test('the termite visit match excludes inspection, monitoring and WDO visits (treatment prep only)', async () => {
     upcomingVisitRow = VISIT;
     await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'email' });
-    const excludedArgs = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
-      .filter(([sql]) => sql === 'LOWER(service_type) NOT LIKE ?')
-      .map(([, args]) => args[0]));
-    expect(excludedArgs).toEqual(expect.arrayContaining(['%inspect%', '%monitor%', '%wdo%', '%wood destroying%']));
+    // Inspection-ONLY: each exclusion is lifted by a treatment cue, so
+    // "Termite Liquid Treatment & Inspection" / "Termite Inspection & Spot
+    // Treatment" keep their prep (GH Codex #3856 r28 P1).
+    const ex = inspectionOnlyExclusions();
+    expect(ex.map((e) => e.keyword)).toEqual(expect.arrayContaining(['%inspect%', '%monitor%', '%wdo%', '%wood destroying%']));
+    for (const e of ex) expect(e.unless).toEqual(expect.arrayContaining(['%treatment%', '%liquid%', '%foam%', '%trench%', '%spot%', '%drill%', '%applic%']));
   });
 
   test('the lawn visit match excludes inspection and assessment visits — a "Lawn Health Inspection" gets no mow / irrigation / keep-off prep (GH Codex #3856 r22 P1)', async () => {
     upcomingVisitRow = VISIT;
     await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'email' });
-    const excludedArgs = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
-      .filter(([sql]) => sql === 'LOWER(service_type) NOT LIKE ?')
-      .map(([, args]) => args[0]));
-    expect(excludedArgs).toEqual(expect.arrayContaining(['%inspect%', '%assess%']));
+    const ex = inspectionOnlyExclusions();
+    expect(ex.map((e) => e.keyword)).toEqual(expect.arrayContaining(['%inspect%', '%assess%']));
+    expect(ex.every((e) => e.unless.includes('%treatment%'))).toBe(true);
   });
 
   test('losing the prep-page claim (another guide keyed the row after the read) refuses the text', async () => {
