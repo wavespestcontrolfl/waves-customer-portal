@@ -3339,6 +3339,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     if (!['mark_ordered', 'receive', 'cancel'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
     const actor = req.technicianId || req.technician?.id || null;
     const result = await db.transaction(async (trx) => {
+      // LOCK ORDER: the request's ledger row first, then the request — the
+      // order the dispatcher's record transaction and the revoke CLI use, so
+      // a receive racing a revoke waits instead of deadlocking (hook r27 P1).
+      await trx('vendor_orders').where({ restock_request_id: req.params.id }).forUpdate().first('id');
       // Lock the request row so a double-click / stale tab cannot receive the
       // same request twice (double stock + duplicate restock movement).
       const request = await trx('product_restock_requests').where({ id: req.params.id }).forUpdate().first();

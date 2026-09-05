@@ -1448,6 +1448,10 @@ async function updateRestockRequest(input) {
   }
 
   const result = await db.transaction(async (trx) => {
+    // LOCK ORDER: the request's ledger row first, then the request — the
+    // order the dispatcher's record transaction and the revoke CLI use, so
+    // a receive racing a revoke waits instead of deadlocking (hook r27 P1).
+    await trx('vendor_orders').where('restock_request_id', request.id).forUpdate().first('id');
     // Re-check under lock: a concurrent confirm can close this request
     // between the unlocked pre-check above and this transaction. Without
     // the request-row lock, two receives would both add stock.

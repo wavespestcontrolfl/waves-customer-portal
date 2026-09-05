@@ -257,8 +257,13 @@ function vendorOrderQuantity({ adapter, request, pricing }) {
  * through dispatch (pre-push P0). Throws { statusCode: 409, code:
  * 'auto_order_live' } with a message that points at the Restock tab.
  */
-async function assertNoLiveAutoOrder(trx, productId) {
-  const live = await trx('product_restock_requests as prr')
+// The product's unreconciled automatic order, if any: a claim being placed,
+// or a dispatched order (placed_at set — placed, or any post-submit park)
+// not yet received or revoked. The one read behind the manual-action guard
+// below and the sweep's stand-down (hook r27 P0: a gate closing must not
+// turn an outstanding order into an "order manually" bell).
+function findLiveAutoOrder(conn, productId) {
+  return conn('product_restock_requests as prr')
     .join('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('prr.product_id', productId)
@@ -266,6 +271,10 @@ async function assertNoLiveAutoOrder(trx, productId) {
     .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
     .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .first('vo.status', 'vo.external_order_number', 'v.name as vendor_name');
+}
+
+async function assertNoLiveAutoOrder(trx, productId) {
+  const live = await findLiveAutoOrder(trx, productId);
   if (!live) return;
   const vendor = live.vendor_name || 'vendor';
   const err = new Error(live.status === 'placing'
@@ -1282,6 +1291,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
 
 module.exports = {
   RECEIVED_SETTLES_SQL,
+  findLiveAutoOrder,
   landedAfterReceiveFor,
   settleLandedAfterReceive,
   runVendorOrderDispatch,
