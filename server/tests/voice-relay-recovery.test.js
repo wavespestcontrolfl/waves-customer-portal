@@ -106,8 +106,13 @@ describe('relay-recovery module', () => {
     const { db } = primeDb();
     const patch = recovery.appendSegmentPatch(db, recovery.buildSegment({ generation: 1, text: 'Caller: first leg' }));
     expect(patch.transcription.sql).toMatch(/WHEN transcription LIKE '\[AI segment\]%' AND transcription ~ \? AND \? IS NOT NULL\s+THEN '\[AI segment\]' \|\| E'\\n' \|\| \? \|\| substring\(transcription from \?\)/);
-    expect(patch.transcription.bindings[3]).toBe('\\n\\n\\[(Staff|Voicemail) segment\\]\\n[\\s\\S]*$');
-    expect(patch.transcription.bindings[6]).toBe(patch.transcription.bindings[3]);
+    expect(patch.transcription.bindings[5]).toBe('\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$'); // non-capturing: substring(from) returns the whole match
+    expect(patch.transcription.bindings[8]).toBe(patch.transcription.bindings[5]);
+    // …and an EMPTY unowned column (the resumed socket closed silently first) is filled and claimed
+    expect(patch.transcription.sql).toContain("WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ?");
+    expect(patch.transcription_provider.sql).toBe("CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ? ELSE transcription_provider END");
+    expect(patch.transcription_provider.bindings[1]).toBe('conversation_relay');
+    expect(patch.transcription_status.sql).toContain("THEN 'completed' ELSE transcription_status END");
   });
 
   test('loadResumeState proves the hint from the row: reconnects > 0 ⇒ state; otherwise null; bounded and fail-soft', async () => {
@@ -146,7 +151,7 @@ describe('the conversation side', () => {
     const convo = convoWithTurns();
     await convo.end('ws_close');
     // 1: the segment append — metadata only, no columns, no owner/generation fence on it
-    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'transcription', 'updated_at']); // no outcome / status / owner fence on the append
+    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'transcription', 'transcription_provider', 'transcription_status', 'updated_at']); // no outcome / status / owner fence on the append
     expect(updates[0].metadata.bindings[1].sql).toContain("'relay_segments'"); // the append (both CASE branches)
     expect(updates[0].transcription.sql).toContain('transcription_provider = ?'); // recomposes only Sandy-owned columns
     const seg = JSON.parse(updates[0].metadata.bindings[1].bindings[0])[0];

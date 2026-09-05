@@ -129,23 +129,39 @@ function appendSegmentPatch(db, segment) {
       [compose(), appended, compose(), appended],
     ),
     transcription: db.raw(
-      // Sandy-owned column ⇒ the whole composed call. A COMPOSITE the
-      // recording processor already wrote ("[AI segment]…[Staff|Voicemail
-      // segment]…") ⇒ only its AI portion is refreshed; the recorded
-      // portion is preserved verbatim. Anything else is left alone.
+      // Sandy-owned column ⇒ the whole composed call. An EMPTY, unowned
+      // column (the resumed socket closed silently before this segment
+      // landed) ⇒ filled. A COMPOSITE the recording processor already wrote
+      // ("[AI segment]…[Staff|Voicemail segment]…") ⇒ only its AI portion is
+      // refreshed; the recorded portion is preserved verbatim
+      // (substring(from) with a NON-capturing group returns the whole
+      // match — a capturing group would return just the word, hook P0).
+      // A recording's own transcript is never touched.
       `CASE
          WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ?
+         WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ?
          WHEN transcription LIKE '[AI segment]%' AND transcription ~ ? AND ? IS NOT NULL
            THEN '[AI segment]' || E'\\n' || ? || substring(transcription from ?)
          ELSE transcription
        END`,
-      [require('./relay-transcript').TRANSCRIPTION_PROVIDER, compose(), compose(), COMPOSITE_RECORDED_RE, compose(), compose(), COMPOSITE_RECORDED_RE],
+      [RELAY_PROVIDER, compose(), compose(), compose(), compose(), COMPOSITE_RECORDED_RE, compose(), compose(), COMPOSITE_RECORDED_RE],
+    ),
+    // The fill above also claims provider/status for the row; every other
+    // branch leaves them as they are.
+    transcription_provider: db.raw(
+      "CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ? ELSE transcription_provider END",
+      [compose(), RELAY_PROVIDER],
+    ),
+    transcription_status: db.raw(
+      "CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN 'completed' ELSE transcription_status END",
+      [compose()],
     ),
     updated_at: new Date(),
   };
 }
-// The recorded half of a processor composite, from its segment header to the end.
-const COMPOSITE_RECORDED_RE = '\\n\\n\\[(Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
+const RELAY_PROVIDER = require('./relay-transcript').TRANSCRIPTION_PROVIDER;
+// The recorded half of a processor composite, from its segment header to the end (non-capturing!).
+const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
 
 /** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
 function generationFenceSql(q, generation) {
