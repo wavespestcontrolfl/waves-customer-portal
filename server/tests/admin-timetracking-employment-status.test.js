@@ -43,6 +43,16 @@ function makeChain({ rows = [], first, returning = [] } = {}) {
   return chain;
 }
 
+// createTechnician seeds technician_capabilities on the same trx
+// (insert → onConflict → ignore); the chain resolves to nothing.
+function capabilityChain() {
+  const chain = makeChain();
+  chain.onConflict = jest.fn(() => chain);
+  chain.ignore = jest.fn(async () => undefined);
+  chain.merge = jest.fn(async () => undefined);
+  return chain;
+}
+
 function response() {
   return { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
 }
@@ -65,12 +75,14 @@ function installTransaction(techChains, { history = {}, futureVisits = [] } = {}
     if (table === 'service_records') return makeChain({ first: history.service_records });
     if (table === 'review_incentive_payouts') return makeChain({ first: history.review_incentive_payouts });
     if (table === 'scheduled_services as s') return makeChain({ rows: futureVisits });
+    if (table === 'technician_capabilities') return capabilityChain();
     if (table !== 'technicians') throw new Error(`Unexpected transaction table: ${table}`);
     const chain = queue.shift();
     if (!chain) throw new Error('Unexpected technicians query');
     return chain;
   });
   trx.raw = jest.fn(async () => undefined);
+  trx.fn = { now: jest.fn(() => 'NOW') };
   db.transaction = jest.fn(async (cb) => cb(trx));
   return trx;
 }

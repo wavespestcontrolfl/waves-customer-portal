@@ -2381,6 +2381,7 @@ export function TeamTab({ showToast }) {
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
+  const [capabilitiesTech, setCapabilitiesTech] = useState(null);
   // Photo upload state. fileInputRef is shared across rows because
   // mounting one <input type=file>per tech is needless DOM. Uploads
   // are serialized: while uploadingId is non-null, every row's Photo
@@ -3173,6 +3174,14 @@ export function TeamTab({ showToast }) {
                       Field dispatchable
                     </div>
                   )}
+                  {/* Capability counts matter only for someone who takes (or will
+                      take) field work — an office-only admin never reaches
+                      auto-dispatch, so the line would be noise there. */}
+                  {t.capability_summary && (t.field_dispatchable || t.employment_status === "prospective") && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                      {summarizeCapabilityCounts(t.capability_summary)}
+                    </div>
+                  )}
                 </td>{" "}
                 <td
                   style={{
@@ -3210,6 +3219,20 @@ export function TeamTab({ showToast }) {
                       }}
                     >
                       Earnings
+                    </button>{" "}
+                    <button
+                      onClick={() => setCapabilitiesTech(t)}
+                      style={{
+                        padding: "4px 10px",
+                        background: "transparent",
+                        border: `1px solid ${D.border}`,
+                        borderRadius: 6,
+                        color: D.teal,
+                        fontSize: 11,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Capabilities
                     </button>{" "}
                     <button
                       onClick={() => handlePhotoClick(t.id)}
@@ -3273,7 +3296,279 @@ export function TeamTab({ showToast }) {
           showToast={showToast}
         />
       )}
+      {capabilitiesTech && (
+        <CapabilitiesModal
+          tech={capabilitiesTech}
+          onClose={() => setCapabilitiesTech(null)}
+          onSaved={load}
+          showToast={showToast}
+        />
+      )}
     </div>
+  );
+}
+
+// Roster sublabel for the Team table: "5 qualified", "2 need review · 1 off",
+// or "Capabilities not set" when the row predates the editor.
+function summarizeCapabilityCounts(summary) {
+  const parts = [];
+  if (summary.qualified) parts.push(`${summary.qualified} qualified`);
+  if (summary.review_required) parts.push(`${summary.review_required} need${summary.review_required === 1 ? "s" : ""} review`);
+  if (summary.off) parts.push(`${summary.off} off`);
+  if (!parts.length) return "Capabilities not set";
+  if (summary.unset) parts.push(`${summary.unset} not set`);
+  return parts.join(" \u00b7 ");
+}
+
+const CAPABILITY_STATE_OPTIONS = [
+  { value: "qualified", label: "Qualified", hint: "Auto-dispatch offers this work freely." },
+  { value: "review_required", label: "Needs review", hint: "Offered, but scored lower until verified." },
+  { value: "off", label: "Off", hint: "Never auto-dispatched; existing visits stay put." },
+];
+
+// Capabilities editor (Field Team Program, Phase 0 item 4) — the five dispatch
+// categories auto-dispatch reads from technician_capabilities. Saving stamps
+// the signed-in admin as verifier. A category turned Off never moves a visit;
+// anything already assigned in that category is named in the toast for
+// manual reassignment on the Schedule.
+function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
+  const isMobile = useIsMobile(640);
+  const [rows, setRows] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const showToastRef = useRef(showToast);
+  useEffect(() => {
+    showToastRef.current = showToast;
+  }, [showToast]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const res = await adminFetch(
+          `/admin/timetracking/technicians/${tech.id}/capabilities`,
+        );
+        if (!cancelled) {
+          setRows(
+            (res.capabilities || []).map((c) => ({
+              ...c,
+              // Editing starts every unset category at "Needs review" so a
+              // save without touching a row still gives auto-dispatch a
+              // real answer instead of the 'unset' half-credit.
+              state: c.state === "unset" ? "review_required" : c.state,
+              notes: c.notes || "",
+            })),
+          );
+        }
+      } catch (e) {
+        if (!cancelled) showToastRef.current("Capabilities failed: " + e.message);
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tech.id]);
+
+  const setRow = (category, patch) =>
+    setRows((prev) =>
+      prev.map((r) => (r.service_category === category ? { ...r, ...patch } : r)),
+    );
+
+  const handleSave = async () => {
+    if (!rows) return;
+    setSaving(true);
+    try {
+      const res = await adminFetch(
+        `/admin/timetracking/technicians/${tech.id}/capabilities`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            capabilities: rows.map((r) => ({
+              service_category: r.service_category,
+              state: r.state,
+              notes: r.notes.trim() || null,
+            })),
+          }),
+        },
+      );
+      const pending = (res && res.futureAssignedVisits) || [];
+      showToast(
+        pending.length
+          ? `Capabilities saved — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} in a category now off; reassign on the Schedule`
+          : "Capabilities saved",
+      );
+      onSaved();
+      onClose();
+    } catch (e) {
+      showToast("Failed: " + e.message);
+    }
+    setSaving(false);
+  };
+
+  const fmtVerified = (r) => {
+    if (!r.verified_at) return r.source === "system_default" ? "Default — not yet verified" : "Not verified";
+    const when = new Date(r.verified_at).toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    return `Verified ${when}${r.verified_by_name ? ` by ${r.verified_by_name}` : ""}`;
+  };
+
+  return createPortal(
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 200,
+        padding: 16,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 12,
+          width: "100%",
+          maxWidth: 640,
+          maxHeight: "90vh",
+          overflowY: "auto",
+          padding: isMobile ? 16 : 24,
+          boxSizing: "border-box",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 4 }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+            Capabilities — {tech.name}
+          </div>
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", border: "none", color: D.muted, fontSize: 14, cursor: "pointer" }}
+          >
+            Close
+          </button>
+        </div>
+        <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
+          What auto-dispatch may place on this technician's route. Nothing
+          here moves a visit that is already scheduled.
+        </div>
+
+        {loading || !rows ? (
+          <div style={{ padding: 24, textAlign: "center", color: D.muted, fontSize: 14 }}>
+            Loading…
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {rows.map((r) => (
+              <div
+                key={r.service_category}
+                style={{
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 8,
+                  padding: 12,
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "180px 1fr",
+                  gap: 10,
+                  alignItems: "start",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
+                    {r.label}
+                  </div>
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                    {fmtVerified(r)}
+                  </div>
+                </div>
+                <div>
+                  <div
+                    role="radiogroup"
+                    aria-label={`${r.label} capability`}
+                    style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
+                  >
+                    {CAPABILITY_STATE_OPTIONS.map((opt) => {
+                      const selected = r.state === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          title={opt.hint}
+                          onClick={() => setRow(r.service_category, { state: opt.value })}
+                          style={{
+                            padding: "6px 12px",
+                            borderRadius: 6,
+                            border: `1px solid ${selected ? D.teal : D.border}`,
+                            background: selected ? D.teal : "transparent",
+                            color: selected ? D.white : D.text,
+                            fontSize: 13,
+                            fontWeight: 500,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <input
+                    value={r.notes}
+                    onChange={(e) => setRow(r.service_category, { notes: e.target.value })}
+                    placeholder="Note (optional) — e.g. ride-along completed 9/4"
+                    maxLength={500}
+                    style={{ ...sInput, marginTop: 8 }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: "8px 14px",
+              background: "transparent",
+              border: `1px solid ${D.border}`,
+              borderRadius: 8,
+              color: D.text,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || loading || !rows}
+            style={{
+              padding: "8px 14px",
+              background: D.teal,
+              border: `1px solid ${D.teal}`,
+              borderRadius: 8,
+              color: D.white,
+              fontSize: 13,
+              fontWeight: 500,
+              cursor: saving ? "wait" : "pointer",
+              opacity: saving || loading ? 0.6 : 1,
+            }}
+          >
+            {saving ? "Saving…" : "Save capabilities"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

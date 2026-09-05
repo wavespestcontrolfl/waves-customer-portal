@@ -6,6 +6,14 @@ const timeTracking = require('../services/time-tracking');
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
+const {
+  listCapabilities,
+  normalizeCapabilityEntries,
+  seedNewHireCapabilities,
+  summarizeCapabilities,
+  writeCapabilities,
+} = require('../services/technician-capabilities');
+const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 const {
   addStaffWorkDays,
@@ -61,7 +69,7 @@ router.use(adminAuthenticate);
 const TECH_ROSTER_RESPONSE_FIELDS = [
   'id', 'name', 'phone', 'email', 'role',
   'active', 'employment_status', 'field_dispatchable', 'auto_flip_enabled',
-  'avatar_url',
+  'avatar_url', 'capability_summary',
   'created_at', 'updated_at',
 ];
 
@@ -510,10 +518,15 @@ async function listTechnicians(req, res, next) {
     // This route is admin-authed so presigning is safe.
     const { resolveTechPhotoUrl } = require('../services/tech-photo');
     const callerIsAdmin = isAdminCaller(req);
+    // One grouped read for the roster's capability counts (qualified /
+    // needs review / off / not set) — the editor itself lives at
+    // GET /technicians/:id/capabilities.
+    const summaries = await summarizeCapabilities(db, techs.map((t) => t.id));
     const enriched = await Promise.all(techs.map(async (t) => {
       const row = {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
+        capability_summary: summaries.get(t.id),
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
@@ -680,6 +693,9 @@ async function createTechnician(req, res, next) {
         return { conflict: true };
       }
       const [tech] = await trx('technicians').insert(insertRow).returning('*');
+      // Every hire starts able to take every service, pending review — the
+      // Team tab's Capabilities editor is where a category becomes Qualified.
+      await seedNewHireCapabilities(trx, tech.id);
       return { tech };
     });
     if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
@@ -847,6 +863,62 @@ async function updateTechnician(req, res, next) {
 }
 
 router.put('/technicians/:id', requireAdmin, updateTechnician);
+
+// GET /technicians/:id/capabilities — the five dispatch categories for one
+// tech, missing rows reported as 'unset'. Admin only: this is the editor's
+// read, and capability decisions are a management call.
+async function getTechnicianCapabilities(req, res, next) {
+  try {
+    const tech = await db('technicians').where({ id: req.params.id }).first('id');
+    if (!tech) return res.status(404).json({ error: 'Technician not found' });
+    const capabilities = await listCapabilities(db, tech.id);
+    return res.json({ technicianId: tech.id, capabilities });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// PUT /technicians/:id/capabilities — upsert any subset of the five
+// categories as { service_category, state, notes }. The caller is stamped as
+// verifier. Turning a category Off never touches the schedule: visits already
+// assigned in that category are listed back for manual reassignment (same
+// shape as leaving the dispatch pool), and auto-dispatch stops offering the
+// tech new work in it.
+async function putTechnicianCapabilities(req, res, next) {
+  try {
+    const body = req.body || {};
+    const normalized = normalizeCapabilityEntries(body.capabilities);
+    if (normalized.error) return res.status(400).json({ error: normalized.error });
+    const { entries } = normalized;
+
+    const outcome = await db.transaction(async (trx) => {
+      const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first('id');
+      if (!target) return { notFound: true };
+      await writeCapabilities(trx, target.id, entries, req.technicianId);
+      const turnedOff = new Set(entries.filter((e) => e.state === 'off').map((e) => e.service_category));
+      const futureAssignedVisits = turnedOff.size
+        ? (await listFutureAssignedVisits(trx, target.id))
+          .filter((v) => turnedOff.has(classifyServiceCategory(v.service_type)))
+        : [];
+      const capabilities = await listCapabilities(trx, target.id);
+      return { capabilities, futureAssignedVisits };
+    });
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+
+    logger.info(`[team] Updated capabilities for technician id=${req.params.id} (${entries.map((e) => `${e.service_category}=${e.state}`).join(', ')}) by staff id=${req.technicianId}`);
+    return res.json({
+      success: true,
+      technicianId: req.params.id,
+      capabilities: outcome.capabilities,
+      futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+router.get('/technicians/:id/capabilities', requireAdmin, getTechnicianCapabilities);
+router.put('/technicians/:id/capabilities', requireAdmin, putTechnicianCapabilities);
 
 // GET /technicians/:id/earnings — hours × pay_rate breakdown for a
 // window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset
@@ -1267,6 +1339,8 @@ module.exports = router;
 module.exports._handlers = {
   createTechnician,
   deactivateTechnician,
+  getTechnicianCapabilities,
   listTechnicians,
+  putTechnicianCapabilities,
   updateTechnician,
 };
