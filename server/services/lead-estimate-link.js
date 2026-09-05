@@ -987,6 +987,25 @@ async function markLinkedLeadEstimateAccepted({
       // row still counts as "the lead is accounted for" (no fuzzy fallback).
       if (!CLOSED_LEAD_STATUSES.has(lead.status) && !lead.deleted_at) await convert(lead);
     }
+    // A server-filed repeat the wizard fallback stamped with THIS estimate
+    // but never converted — the process died between its stamp and its
+    // status write — is that fallback mid-flight, not a closure: 'duplicate'
+    // is closed above, so the retry would otherwise credit no lead for the
+    // accepted estimate (codex #3834 r35 P1 / pre-push r33). Resumed under
+    // the fallback's own rules — the marker (a hand-closed duplicate carries
+    // none), still this customer's, and no other live row of this estimate
+    // open or already won (that row is the deal's lead) — through the same
+    // claimed conversion, which pins 'duplicate' and the identity read here.
+    const resumable = linked.filter((lead) => lead.status === 'duplicate' && duplicateMarkerOf(lead) && !lead.deleted_at);
+    const otherRowStands = (lead) => linked.some((other) => other.id !== lead.id && !other.deleted_at && (other.status === 'won' || !CLOSED_LEAD_STATUSES.has(other.status)));
+    if (resumable.length === 1 && !otherRowStands(resumable[0])) {
+      const [lead] = resumable;
+      const estimate = await database('estimates').where({ id: estimateId }).first();
+      const ours = lead.customer_id
+        ? !customerId || String(lead.customer_id) === String(customerId)
+        : !!estimate && leadMatchesEstimateContact(lead, estimate);
+      if (ours) await convert(lead, DUPLICATE_LEAD_CLAIM);
+    }
     return;
   }
 

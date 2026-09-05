@@ -303,6 +303,44 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).not.toHaveBeenCalled();
   });
 
+  describe('a server-filed repeat the wizard fallback stamped with this estimate but never converted resumes on retry (codex r35 P1 / pre-push r33)', () => {
+    const marked = (extra = {}) => ({ id: 'lead-dup', status: 'duplicate', estimate_id: 'estimate-1', customer_id: null, phone: '9412269100', email: null, extracted_data: { duplicate_of_lead_id: 'lead-root' }, ...extra });
+    const estimate = { id: 'estimate-1', customer_phone: '+1 (941) 226-9100' };
+
+    test('resumes through the claimed conversion — no re-stamp, status pinned to duplicate, identity as read', async () => {
+      const database = makeAcceptDb({ linked: [marked()], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+      expect(database._updates).toHaveLength(0);
+      expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup', expect.objectContaining({
+        estimateId: 'estimate-1', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: null, phone: '9412269100', email: null, estimate_id: 'estimate-1' },
+      }));
+    });
+
+    test('a duplicate staff closed by hand (no marker) stays closed', async () => {
+      const database = makeAcceptDb({ linked: [marked({ extracted_data: null })], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+      expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    });
+
+    test('another live row of this estimate — won, or still open — is the deal\'s lead; the duplicate is not resumed beside it', async () => {
+      for (const other of [{ id: 'lead-won', status: 'won', estimate_id: 'estimate-1' }, { id: 'lead-open', status: 'contacted', estimate_id: 'estimate-1' }]) {
+        jest.clearAllMocks();
+        const database = makeAcceptDb({ linked: [marked(), other], estimate });
+        await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+        expect(leadAttribution.markConverted.mock.calls.map((c) => c[0])).toEqual(other.status === 'won' ? [] : ['lead-open']);
+      }
+    });
+
+    test('a repeat that is no longer this customer\'s (contact drifted from the estimate; linked to another customer) is left alone', async () => {
+      for (const row of [marked({ phone: '9415550000' }), marked({ customer_id: 'customer-2' })]) {
+        jest.clearAllMocks();
+        const database = makeAcceptDb({ linked: [row], estimate });
+        await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+        expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+      }
+    });
+  });
+
   test('rescues a quote-wizard lead via estimate_data.lead_id and stamps the estimate link', async () => {
     const database = makeAcceptDb({
       linked: [],
