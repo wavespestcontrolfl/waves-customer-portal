@@ -811,6 +811,10 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       db('call_log').where('twilio_call_sid', callSid)
         .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''")
         .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
+        // A row already sent to voicemail (the fallback below, or a failed
+        // session) is never rung: a Twilio retry after that fallback would
+        // otherwise match again and Dial staff over the recorder (codex r4 P1).
+        .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['voicemail', 'relay_failed']))
         .update({
           call_outcome: db.raw('CASE WHEN call_outcome IS NULL OR call_outcome NOT IN (?, ?, ?) THEN ? ELSE call_outcome END', [...RELAY_TERMINAL_OUTCOMES, 'ai_transferred']),
           metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text)", [new Date().toISOString()]),

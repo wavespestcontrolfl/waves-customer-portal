@@ -236,7 +236,11 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // callback offer below is the better outcome (hook P1s).
   const late = []; // UPDATEs that timed out but are still queued (Promise.race cannot cancel them)
   let wrote = await writePacketBounded(ctx, packet, late);
-  if (wrote === 'failed') wrote = await recordNoContext(ctx, packet, facts, late);
+  let noContext = false;
+  if (wrote === 'failed') {
+    wrote = await recordNoContext(ctx, packet, facts, late);
+    noContext = wrote === 'written'; // the minimal stamp is what landed
+  }
   if (wrote !== 'written' && wrote !== 'reconciled') {
     logger.warn(`[voice-relay] transfer refused (${wrote}) — row not owned, already terminal, or storage unconfirmed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     revertLateWrites(ctx, packet.attempt, late);
@@ -268,6 +272,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // from the end frame and rings the office.
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', facts.language));
   if (typeof ctx.endForTransfer === 'function') ctx.endForTransfer();
+  if (noContext) ringNoContextBell(ctx, facts);
   return 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 }
 
@@ -337,9 +342,9 @@ async function writePacketBounded(ctx, packet, late = []) {
 /**
  * The packet did not land (storage failure / timeout): a second, minimal
  * UPDATE says so on the row (the office at least learns a summary existed)
- * — the transfer proceeds ONLY when that write confirms — and the
- * no-context bell rings, never on the sandbox. Returns the same status
- * vocabulary as writePacketBounded.
+ * — the transfer proceeds ONLY when that write confirms; the caller rings
+ * the no-context bell once the transfer is committed. Returns the same
+ * status vocabulary as writePacketBounded.
  */
 async function recordNoContext(ctx, packet, facts, late = []) {
   let status = 'failed';
@@ -354,11 +359,22 @@ async function recordNoContext(ctx, packet, facts, late = []) {
       else status = 'rejected';
     }
   } catch { /* storage down: unconfirmed */ }
-  if (status !== 'written' || ctx.sandbox === true) return status;
-  // Detached (never on the caller's path or the tool budget) and DEDUPED per
-  // CallSid: a reconnect or a repeated attempt on the same call re-uses the
-  // one bell (the call-commitments watchdog pattern — notifyAdmin with a
-  // dedupeKey and bell: true; the registry entry keeps the row tech-visible).
+  return status;
+}
+
+/**
+ * The no-context bell — rung by transferToOfficeText ONLY once the transfer
+ * is committed (after the session-ended check and the end frame, codex r4
+ * P2): a bell for a transfer that was then abandoned would tell staff a
+ * caller was transferred who never was. Detached (never on the caller's
+ * path or the tool budget) and DEDUPED per CallSid: a reconnect or a
+ * repeated attempt on the same call re-uses the one bell (the
+ * call-commitments watchdog pattern — notifyAdmin with a dedupeKey and
+ * bell: true; the registry entry keeps the row tech-visible). Never on the
+ * sandbox.
+ */
+function ringNoContextBell(ctx, facts) {
+  if (ctx.sandbox === true) return;
   void Promise.resolve()
     .then(() => require('../notification-service').notifyAdmin(
       'alert',
@@ -372,7 +388,6 @@ async function recordNoContext(ctx, packet, facts, late = []) {
       },
     ))
     .catch((err) => logger.warn(`[voice-relay] ${NO_CONTEXT_BELL} bell failed: ${err.message}`));
-  return status;
 }
 
 /**

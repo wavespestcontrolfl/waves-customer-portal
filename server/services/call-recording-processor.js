@@ -15055,7 +15055,11 @@ const CallRecordingProcessor = {
           customerId: customerId || null,
           callDirection: 'inbound',
           callSource: call.to_phone || 'unknown',
-          transcript: transcription,
+          // A transferred call's composite carries Sandy's leg ahead of the
+          // staff leg: the CSR is scored on the HUMAN leg only (Sandy's
+          // greeting / empathy / closing must not be awarded to the employee,
+          // codex r4 P1). The composite stays the call record.
+          transcript: recordedPartOfComposite(transcription) || transcription,
           metadata: {
             callSid,
             duration: call.duration_seconds,
