@@ -223,7 +223,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       count: async () => { if (spec.countThrows) throw new Error('locator.count: Target closed'); return spec.count ?? 0; },
       evaluate: async (fn) => fn({ tagName: (spec.tag || 'input').toUpperCase(), id: spec.id || '', name: spec.name || '', value: spec.value ?? '' }),
       getAttribute: async (n) => (spec.attrs ? spec.attrs[n] ?? null : null),
-      first() { return this; },
+      // firstSeq: each first() call resolves to the NEXT spec (models Playwright re-resolving a locator whose node was replaced between operations — r10 P1)
+      first() { if (spec.firstSeq) { const i = Math.min(spec.firstIdx = (spec.firstIdx || 0) + 1, spec.firstSeq.length) - 1; return el(spec.firstSeq[i]); } return this; },
+      elementHandle() { return Promise.resolve(spec.detached ? { textContent: async () => spec.text ?? null, isVisible: async () => false } : this); },
       nth: (i) => spec.nth ? spec.nth(i) : el(spec),
       textContent: async () => spec.text ?? null,
       inputValue: async () => { if (spec.value == null) throw new Error('not an input'); return String(spec.value); },
@@ -334,6 +336,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // checkoutTotalText: the checkout total (default = the cart total, so a dry run's bell reports 9900);
       // totalAtClick: a DIFFERENT total shown once the Place Order stage re-reads it (async tax / shipping recalculation)
       // totalByRead: a function of the read index for a total that keeps moving
+      // totalNodeReplacedMidRead: at the click boundary the total node is replaced between the text read and the visibility read —
+      // the first resolution is the OLD node (detached once read), the second the NEW visible node with the recalculated figure (r10 P1)
+      if (sel === S.checkoutTotal && st.totalNodeReplacedMidRead && st.atClick) return el({ count: 1, firstSeq: [{ count: 1, visible: true, detached: true, text: st.checkoutTotalText || 'Order total $99.00' }, { count: 1, visible: true, text: 'Order total $999.00' }] });
       if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalByRead ? st.totalByRead(st.totalReads) : st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
@@ -350,13 +355,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.orderNumber && !st.placeClicked && st.orderNumbersBeforeClick) return el({ count: st.orderNumbersBeforeClick.length, nth: (i) => el({ count: 1, visible: true, text: st.orderNumbersBeforeClick[i] }) });
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
-      if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? 'Processing order…' : 'Order # SO-778899' }); }
+      if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? (st.orderNumberLateText || 'Processing order…') : 'Order # SO-778899' }); }
       if (sel === S.orderNumber) return st.orderNumberHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'Order # SO-000001' }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' })) }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' });
       return el();
     };
     const page = {
       goto: async (u) => { if (st.gotoFailOnce) { st.gotoFailOnce = false; throw new Error('net::ERR_TIMED_OUT'); } st.url = u; },
-      url: () => st.url,
+      url: () => (st.placeClicked && st.urlAfterClick ? st.urlAfterClick : st.url), // urlAfterClick: the submit navigates off SiteOne (an allowed asset host) (r10 P2)
       evaluate: async () => st.loginFill || 'ok', // loginFill: what the in-page fill reports ('badform' = the form posts off-host)
       waitForFunction: async () => {},
       waitForTimeout: async () => {},
@@ -489,6 +494,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order date 05092026')).toBeNull(); // compact, day first
     expect(s1._internals.orderNumberIn('Order # 55501234')).toBe('55501234'); // an 8-digit id that is not a date stays an id
     expect(s1._internals.orderNumberIn('Order # 12345-67890')).toBe('12345-67890'); // separator-joined groups that cannot be a date are an id (r8 P2)
+    expect(s1._internals.orderNumberIn('Order # pending · Total $105.93')).toBeNull(); // a price is never an id (r10 P2)
+    expect(s1._internals.orderNumberIn('Total 1,234.56 · Order # SO-778899')).toBe('SO-778899');
+    expect(s1._internals.orderNumberIn('Subtotal 1,234 items')).toBeNull();
     expect(s1._internals.orderNumberIn('Order # 2026-778899')).toBe('2026-778899');
     expect(s1._internals.orderNumberIn('Order date 09-2026')).toBeNull(); // month-year
     expect(s1._internals.orderNumberIn('Order date 5.9.2026')).toBeNull();
@@ -879,6 +887,24 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('a pre-click reference whose only post-click change is casing (so-12345 → SO-12345) is the same node — ambiguous, not placed (r8 P2)', async () => {
     const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'Order ref so-12345', orderNumberText: 'Order ref SO-12345', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('the total is read from ONE element: a node replaced between the text and visibility reads refuses (detached = not visible), never approves the old figure (r10 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ totalNodeReplacedMidRead: true, checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_total_hidden' });
+    expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('a confirmation node that first shows a price ("Order # pending · Total $105.93") is polled until the real number renders — the price is never the order id (r10 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberLate: true, orderNumberLateText: 'Order # pending · Total $105.93' });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.confReads).toBeGreaterThan(3);
+  });
+
+  test('a submit that lands off the trusted host is ambiguous — a numeric id on the foreign page is never a placement (r10 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ urlAfterClick: 'https://cdn.example.com/error/12345678', orderNumberText: 'Order # 12345678', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
   });

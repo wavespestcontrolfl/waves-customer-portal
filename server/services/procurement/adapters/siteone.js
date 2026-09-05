@@ -576,12 +576,19 @@ async function verifyCheckoutLines(page, { vendorSku, qty, evidence, upload }) {
 // zero is unreadable, more than one is ambiguous — the text the bot would
 // compare might not be the order's (pre-push P0s). Returns { count, text,
 // visible }; the caller names the refusal.
+// Text and visibility come from ONE element handle, not two locator
+// resolutions: a node SiteOne replaces mid-recalculation would otherwise
+// yield the old node's text and the new node's visibility, approving a
+// figure that is not the one charged (Codex #3876 r10 P1). A replaced node
+// leaves a detached handle, which reads as not visible → refused.
 async function readExactlyOne(page, selector) {
   const els = page.locator(selector);
   const count = await els.count().catch(() => 0);
   if (count !== 1) return { count, text: '', visible: false };
-  const text = await els.first().textContent().catch(() => '');
-  const isVisible = await els.first().isVisible({ timeout: 1500 }).catch(() => false);
+  const handle = await els.first().elementHandle({ timeout: 1500 }).catch(() => null);
+  if (!handle) return { count, text: '', visible: false };
+  const text = await handle.textContent().catch(() => '');
+  const isVisible = await handle.isVisible().catch(() => false);
   return { count, text: String(text || ''), visible: isVisible };
 }
 
@@ -842,6 +849,10 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // #3876 r8 P1).
     await placeOrder.click({ force: true, timeout: 5000 });
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+    // The confirmation must be read ON SiteOne: SITEONE_BOT_ALLOWED_HOSTS can
+    // admit an asset host, and a numeric error id on a page there is not an
+    // order number — an off-host landing is ambiguous, never green (Codex
+    // #3876 r10 P2). Re-checked on every confirmation poll.
     // An SPA checkout renders the confirmation after domcontentloaded: wait
     // (bounded) for a SHOWN confirmation-number node rather than sampling
     // once after a fixed delay (Codex #3876 r2 P2). A timeout falls through
@@ -875,6 +886,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
 async function waitForNewOrderNumber(page, baseline, timeout) {
   const deadline = Date.now() + timeout;
   for (;;) {
+    if (!isTrustedSiteOneUrl(page.url())) throw new Error(`confirmation page left the trusted host (${String(page.url()).slice(0, 80)})`);
     const text = await shownOrderText(page);
     const number = text != null && !baseline.texts.has(text) ? orderNumberIn(text) : null;
     if (number && !baseline.ids.has(number.toUpperCase())) return number;
@@ -913,7 +925,10 @@ function orderNumberIn(text) {
     || /^(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])(?:19|20)\d{2}$/.test(t) // 05092026 (compact, day first)
     || new RegExp(`^${MON}[-/.]?\\d{1,2}[-/.]\\d{2,4}$`, 'i').test(t) // Sep-05-2026
     || new RegExp(`^\\d{1,2}[-/.]?${MON}[-/.]?\\d{2,4}$`, 'i').test(t); // 05-Sep-2026
-  const isId = (t) => !!t && /\d/.test(t) && !dateShaped(t);
+  // Nor money-shaped: "Order # pending · Total $105.93" must keep polling
+  // for the number, not record the price as the order id (Codex #3876 r10 P2).
+  const moneyShaped = (t) => /^\d+\.\d{2}$/.test(t) || /^\d{1,3}(?:,\d{3})+(?:\.\d{2})?$/.test(t);
+  const isId = (t) => !!t && /\d/.test(t) && !dateShaped(t) && !moneyShaped(t);
   // EVERY labeled match is tried before any fallback: "Order date 2026-09-05
   // … Order # SO-778899" must yield the number, not the date (Codex #3876
   // r2 P2).
