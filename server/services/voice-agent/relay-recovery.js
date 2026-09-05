@@ -75,8 +75,13 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null }) {
   return {
+    // An INCOMPLETE estimate capture at this leg's close: the call was being
+    // held open for the missing fields, and these are the fields already
+    // given — both restored on the resumed leg (codex r2 P1).
+    hold_open: holdOpen === true,
+    estimate_fields: nonEmptyFields(estimateFields),
     // The provider-failure streak at this leg's close (restored on resume).
     model_failures: Number(modelFailures) || 0,
     tool_failures: Number(toolFailures) || 0,
@@ -103,6 +108,13 @@ function buildSegment({ generation, sessionKey, reason, text, turns, latency, ve
     lead_captured: leadCaptured === true,
     ended_at: new Date().toISOString(),
   };
+}
+
+/** The non-empty string entries of a fields object; null when there are none. */
+function nonEmptyFields(fields) {
+  if (!fields || typeof fields !== 'object') return null;
+  const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== '').map(([k, v]) => [k, String(v).trim()]));
+  return Object.keys(kept).length ? kept : null;
 }
 
 /** metadata := metadata || { relay_segments: existing || [segment] } — an append, never an overwrite. */
@@ -241,6 +253,10 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
         reserviceFiled: legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
+        // The LATEST leg's hold (a later complete capture clears it) and the
+        // estimate fields accumulated across every leg, later legs winning.
+        holdOpen: latest ? latest.hold_open === true : false,
+        estimateFields: nonEmptyFields(Object.assign({}, ...[...legs].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0)).map((seg) => nonEmptyFields(seg.estimate_fields) || {}))),
         // The seed keeps the TAIL (the most recent turns matter most).
         segmentsText: full.length > RESUME_SEED_MAX_CHARS ? `[…]${full.slice(-RESUME_SEED_MAX_CHARS)}` : full,
         relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : null,
@@ -293,7 +309,16 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
     const profile = meta.relay_profile_id
       ? { relayProfileId: String(meta.relay_profile_id), relayAttrs: (meta.relay_attrs && typeof meta.relay_attrs === 'object') ? meta.relay_attrs : {} }
       : null;
-    return { reconnects: Number(meta.relay_reconnects) || 0, reconnectMs: Number(meta.relay_reconnect_ms) || null, profile };
+    return {
+      reconnects: Number(meta.relay_reconnects) || 0,
+      reconnectMs: Number(meta.relay_reconnect_ms) || null,
+      // The generation of the row's CURRENT claim owner (a token's mint ms):
+      // ≥ reconnectMs ⇒ a socket minted by the reconnect has claimed the
+      // call (the resumed leg is live); below it ⇒ only the first leg ever
+      // did — the reconnect TwiML was never acted on.
+      claimGen: Number(meta.relay_session_claim_gen) || 0,
+      profile,
+    };
   });
   const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); });
   try { return await Promise.race([read, timeout]); } catch { return null; } finally { clearTimeout(timer); }

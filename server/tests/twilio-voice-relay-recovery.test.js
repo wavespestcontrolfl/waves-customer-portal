@@ -39,7 +39,8 @@ function mockRes() {
   res.send = jest.fn((body) => { res.body = body; return res; });
   return res;
 }
-const RECONNECTED_ROW = { metadata: { relay_session_claim_owner: 'nonce-1', relay_reconnects: 1, relay_reconnect_ms: 777 } };
+// A row the resumed leg has CLAIMED (its token was minted after the stamp: claim gen ≥ relay_reconnect_ms).
+const RECONNECTED_ROW = { metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 900 } };
 function primeDb({ claimRows = 1, firstRow = { metadata: { relay_session_claim_owner: 'nonce-1' } } } = {}) {
   const updates = [];
   const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis() };
@@ -184,7 +185,7 @@ describe('/relay-complete — the second failure', () => {
     expect(res.body).toContain('<Dial');
     expect(res.body).not.toContain('<Record');
     expect(res.body).not.toContain('ConversationRelay');
-    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-1']);
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-2']);
     expect(updates.some((u) => u.metadata && String(u.metadata.sql).includes('relay_transfer_ring_at'))).toBe(true);
   });
 
@@ -244,6 +245,30 @@ describe('/relay-complete — the second failure', () => {
     const res = mockRes();
     await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
     expect(res.body).toContain('<Record');
+  });
+
+  test('a retry of the first leg\'s callback whose reconnect RESPONSE was lost (row reconnected, claim still the first leg\'s) re-issues the reconnect on the same generation — never ends the call (codex r2 P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const firstLegStillOwns = { metadata: { relay_session_claim_owner: 'nonce-1', relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 500 } };
+    const { updates } = primeDb({ claimRows: 0, firstRow: firstLegStillOwns });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    expect(res.body).toContain('<Connect action="/api/webhooks/twilio/relay-complete?gen=777" method="POST">');
+    expect(res.body).toContain('<ConversationRelay url="wss://portal.wavespestcontrol.com/ws/voice-agent?callSid=CA-rc-1&amp;t=v1.');
+    expect(res.body).toContain('<Parameter name="resumed" value="1" />');
+    expect(updates.some((u) => u.call_outcome === 'voicemail')).toBe(false);
+    expect(updates.filter((u) => u.metadata && String(u.metadata.sql).includes('relay_reconnects'))).toHaveLength(1); // the one (refused) claim — no second stamp
+    // a row with NO claim record yet (verification pending on the first leg) reads the same way: no socket minted by the reconnect has claimed
+    primeDb({ claimRows: 0, firstRow: { metadata: { relay_reconnects: 1, relay_reconnect_ms: 777 } } });
+    const res2 = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: { lang: 'es' } }, res2);
+    expect(res2.body).toContain('relay-complete?lang=es&amp;gen=777');
+    // …but the resumed leg's OWN failure (gen = the stamp) is the second failure, not a replay
+    primeDb({ claimRows: 0, firstRow: firstLegStillOwns });
+    const res3 = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: { gen: '777' } }, res3);
+    expect(res3.body).not.toContain('<ConversationRelay');
+    expect(res3.body).toContain('<Record');
   });
 
   test('a failed session carrying a transfer frame still takes the recovery path (the frame is not trusted on a failure)', async () => {

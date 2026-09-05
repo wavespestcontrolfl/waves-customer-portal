@@ -1817,12 +1817,38 @@ async function attemptRelayReconnect(req, callSid, failure) {
       if (state && state.reconnects >= 1) {
         const gen = Number((req.query || {}).gen) || null;
         secondFailure = gen !== null && gen === state.reconnectMs;
+        // A retry of the first leg's callback whose reconnect RESPONSE was
+        // lost (codex r2 P1): the claim landed, but Twilio never received the
+        // new <ConversationRelay>, so no resumed socket exists — the row's
+        // claim is still the FIRST leg's (its token was minted before the
+        // stamp, so its generation is below relay_reconnect_ms). Re-issue
+        // the same reconnect (same generation on the action; a fresh token)
+        // instead of ending the call. Once a socket minted by the reconnect
+        // has claimed (claimGen ≥ the stamp), the resumed leg is live and a
+        // retry is ignored.
+        if (!secondFailure && state.reconnectMs && !(state.claimGen >= state.reconnectMs)) {
+          logger.warn(`[relay-complete] reconnect response for ${maskSid(callSid)} was never acted on — re-issuing (retry after ${failure})`);
+          return renderRelayReconnect(req, callSid, failure, state.reconnectMs);
+        }
         duplicate = !secondFailure;
       }
     }
     logger.info(`[relay-complete] no reconnect for ${maskSid(callSid)} (${claimed === 0 ? (duplicate ? 'duplicate callback' : secondFailure ? 'second failure' : 'not resumable') : claimed}) after ${failure}`);
     return { xml: null, duplicate, secondFailure };
   }
+  return renderRelayReconnect(req, callSid, failure, nowMs);
+}
+
+/**
+ * The reconnect render for a claim stamped `genMs` (the fresh claim, or the
+ * re-issue of one whose response was lost): the SAME action (language /
+ * sandbox) carrying `gen=<genMs>`, the resumed greeting, `resumed=1`, and a
+ * token minted now — after the stamp, so the new socket's generation is ≥
+ * the row's fence. No reachable relay ⇒ the claim is put back to the
+ * fallback's shape and today's path runs.
+ */
+async function renderRelayReconnect(req, callSid, failure, genMs) {
+  const recovery = require('../services/voice-agent/relay-recovery');
   const sandbox = (req.query || {}).sandbox === '1';
   const language = relayCompleteLanguage(req);
   const { buildRelayTwiML, RELAY_WS_PATH, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
@@ -1846,7 +1872,7 @@ async function attemptRelayReconnect(req, callSid, failure) {
     // fallback below is what the record says happened.
     logger.warn(`[relay-complete] reconnect for ${maskSid(callSid)} has no reachable relay — falling back`);
     await withDeadline(
-      recovery.undoLateReconnect(db, { callSid, nowMs, outcome: sandbox ? 'relay_failed' : 'voicemail', answeredBy: sandbox ? null : 'voicemail', status: 'failed' })
+      recovery.undoLateReconnect(db, { callSid, nowMs: genMs, outcome: sandbox ? 'relay_failed' : 'voicemail', answeredBy: sandbox ? null : 'voicemail', status: 'failed' })
         .catch((err) => logger.warn(`[relay-complete] reconnect undo failed for ${maskSid(callSid)}: ${err.message}`)),
       STAMP_DEADLINE_MS,
     );
@@ -1863,7 +1889,7 @@ async function attemptRelayReconnect(req, callSid, failure) {
   // The resumed leg's action carries the reconnect generation, so its own
   // failure callback is told apart from a retry of the first leg's.
   const baseAction = sandbox ? RELAY_COMPLETE_ACTION_SANDBOX : (spanish ? RELAY_COMPLETE_ACTION_ES : RELAY_COMPLETE_ACTION);
-  const action = `${baseAction}${baseAction.includes('?') ? '&' : '?'}gen=${nowMs}`;
+  const action = `${baseAction}${baseAction.includes('?') ? '&' : '?'}gen=${genMs}`;
   const xml = buildRelayTwiML({
     wsUrl,
     callSid,

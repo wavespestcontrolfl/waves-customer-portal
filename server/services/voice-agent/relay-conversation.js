@@ -686,6 +686,21 @@ class RelayConversation {
       // contact-slot match is a shared number and does not speak for the
       // account holder.
       this._contextReady.then(() => { void this._persistLanguagePreference(); }).catch(() => {});
+    } else if (this.callSid && this.sessionKey && require('./relay-recovery').isRecoveryGateOn()) {
+      // PR 2B (codex r2 P1): recovery's proof is the CallSid/ANI claim, not
+      // the optional account context. With VOICE_RELAY_CONTEXT_ENABLED off
+      // the claim still has to be won — the segment append at close and the
+      // resumed leg's prior context are released only to the claim owner —
+      // so the verification runs on its own (same bound, same late-success
+      // rule); no account is read and no KNOWN CALLER block is built.
+      const { verifyRelaySession } = require('./relay-context');
+      this._contextReady = verifyRelaySession({
+        callSid: this.callSid,
+        from: this.from,
+        sessionKey: this.sessionKey,
+        sessionGeneration: this.sessionGeneration,
+        onVerified: (ok) => { this._callerVerified = ok === true; },
+      }).then(() => {}).catch(() => {});
     }
     // Office hours feed the clock block (context gate) AND the transfer rule
     // (PR 2A gate) — loaded when either is on, so GATE_VOICE_RELAY_TRANSFER
@@ -1641,8 +1656,20 @@ class RelayConversation {
     if (state.relayLeadId) this.leadCaptured = true;
     // A re-service already FILED on an earlier leg is this call's artifact:
     // no lead is owed (the floor stays down) and the close reports it filed.
+    // A capture that deliberately created NO lead (an existing lifecycle
+    // customer) is captured all the same (codex r2 P2): the floor stays
+    // down and the session may end when the caller is done.
     if (state.reserviceFiled) { this._reserviceFiled = true; this._noLeadCreated = true; this.leadCaptured = true; }
-    else if (state.noLeadCreated) this._noLeadCreated = true;
+    else if (state.noLeadCreated) { this._noLeadCreated = true; this.leadCaptured = true; }
+    // An INCOMPLETE estimate capture on the earlier leg (codex r2 P1): the
+    // hold that keeps the call open for the missing fields, and the fields
+    // already given, carry over — otherwise the resumed leg's first
+    // end_turn would close the call while Sandy is still asking, and the
+    // retry would have forgotten the name and address. Only while THIS leg
+    // has not captured yet (markCaptured sets the boolean); this leg's own
+    // fields win over the earlier ones.
+    if (state.holdOpen && this._holdOpenForRetry == null) this._holdOpenForRetry = true;
+    if (state.estimateFields) this._estimateFields = { ...state.estimateFields, ...(this._estimateFields || {}) };
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
@@ -2114,6 +2141,8 @@ class RelayConversation {
           modelFailures: this._modelFailures,
           toolFailures: this._toolFailures,
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
+          holdOpen: this._holdOpenForRetry === true,
+          estimateFields: this._estimateFields || null,
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)

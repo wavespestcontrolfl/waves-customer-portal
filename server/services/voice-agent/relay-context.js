@@ -948,18 +948,18 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
 }
 
 /**
- * Resolve the caller's identity + KNOWN CALLER block for one session.
- * Returns { customer: { id, first_name }, tier, block, dataTurn } or null
- * (gate off, unknown, ambiguous, blocked caller ID, error, timeout — all
- * identical: no block, no account access, agent behaves exactly as today).
- *
- * `block` goes in the SYSTEM role. `dataTurn` (the RECENT TEXTS block) does
- * NOT: SMS bodies are customer-AUTHORED text, and the system role is where an
- * instruction is most likely to be obeyed — it is injected as a user-role data
- * turn by relay-conversation instead.
+ * ⭐ THE SESSION'S PROOF, ON ITS OWN — the CallSid/ANI verification and the
+ * one-per-call claim, bounded, published through `onVerified` the moment
+ * THEY settle (never from a race loser; a late genuine success still
+ * upgrades). Independent of the account-context gate: Sandy PR 2B's
+ * recovery rests on this claim (the segment append and the resumed leg's
+ * prior context are released only to the claim owner), so it runs whenever
+ * a session needs the proof, context or not (codex r2 P1). Resolves to
+ * { verified, attested } — the race verdict resolveCallerContext hydrates
+ * from.
  */
-async function resolveCallerContext(from, { callSid = null, sessionKey = null, sessionGeneration = null, onVerified = null, onLateContext = null } = {}) {
-  // Reported to the SESSION, not returned: a caller can be verified and still
+function verifyRelaySession({ callSid = null, from = null, sessionKey = null, sessionGeneration = null, onVerified = null } = {}) {
+  // Reported to the SESSION through the callback, not only returned: a caller can be verified and still
   // match no account (an unmatched-but-real caller may use lookup_customer; a
   // WS client that declared an ANI may not), and it is decided only after
   // EVERY rule below has had its say — including the attestation requirement.
@@ -988,7 +988,6 @@ async function resolveCallerContext(from, { callSid = null, sessionKey = null, s
       try { onVerified(ok === true); } catch { /* the flag is the caller's */ }
     }
   };
-  if (!isContextEnabled()) return null;
   const verifyWork = (async () => {
     // The WS setup frame is unverified input — cross-check it against the
     // signature-verified /voice webhook's call_log row BEFORE any account read.
@@ -1073,6 +1072,23 @@ async function resolveCallerContext(from, { callSid = null, sessionKey = null, s
     .then((v) => { if (v && v.verified === true) publishVerified(true); })
     .catch(() => {}); // a late loser must never surface as unhandled
 
+  return verified;
+}
+
+/**
+ * Resolve the caller's identity + KNOWN CALLER block for one session.
+ * Returns { customer: { id, first_name }, tier, block, dataTurn } or null
+ * (gate off, unknown, ambiguous, blocked caller ID, error, timeout — all
+ * identical: no block, no account access, agent behaves exactly as today).
+ *
+ * `block` goes in the SYSTEM role. `dataTurn` (the RECENT TEXTS block) does
+ * NOT: SMS bodies are customer-AUTHORED text, and the system role is where an
+ * instruction is most likely to be obeyed — it is injected as a user-role data
+ * turn by relay-conversation instead.
+ */
+async function resolveCallerContext(from, { callSid = null, sessionKey = null, sessionGeneration = null, onVerified = null, onLateContext = null } = {}) {
+  if (!isContextEnabled()) return null;
+  const verified = verifyRelaySession({ callSid, from, sessionKey, sessionGeneration, onVerified });
   const work = (async () => {
     const v = await verified;
     if (!v.verified) return null;
@@ -1739,6 +1755,7 @@ module.exports = {
   clockMinutes,
   speakClock,
   resolveCallerContext,
+  verifyRelaySession,
   verifyInboundCaller,
   findUniqueCustomerByAni,
   buildKnownCallerBlock,
