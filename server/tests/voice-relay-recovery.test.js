@@ -130,6 +130,15 @@ describe('relay-recovery module', () => {
     expect(patch.metadata.bindings[3].sql).toContain("'relay_segments'");
   });
 
+  test('appendSegmentPatch fills an EMPTY column only on a row that RECONNECTED — a failed claim\'s voicemail row keeps its columns for the recording (hook r28 P1)', () => {
+    const { db } = primeDb();
+    const patch = recovery.appendSegmentPatch(db, recovery.buildSegment({ generation: 1, text: 'x' }));
+    const fill = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
+    expect(patch.transcription.sql).toContain(fill);
+    expect(patch.transcription_provider.sql).toContain(fill);
+    expect(patch.transcription_status.sql).toContain(fill);
+  });
+
   test('appendSegmentPatch refreshes the AI portion of a processor composite and preserves the recorded portion (hook P1)', () => {
     const { db } = primeDb();
     const patch = recovery.appendSegmentPatch(db, recovery.buildSegment({ generation: 1, text: 'Caller: first leg' }));
@@ -137,8 +146,9 @@ describe('relay-recovery module', () => {
     expect(patch.transcription.bindings[5]).toBe('\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$'); // non-capturing: substring(from) returns the whole match
     expect(patch.transcription.bindings[8]).toBe(patch.transcription.bindings[5]);
     // …and an EMPTY unowned column (the resumed socket closed silently first) is filled and claimed
-    expect(patch.transcription.sql).toContain("WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ?");
-    expect(patch.transcription_provider.sql).toBe("CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ? ELSE transcription_provider END");
+    const fill = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
+    expect(patch.transcription.sql).toContain(`WHEN ${fill} AND ? IS NOT NULL THEN ?`);
+    expect(patch.transcription_provider.sql).toBe(`CASE WHEN ${fill} AND ? IS NOT NULL THEN ? ELSE transcription_provider END`);
     expect(patch.transcription_provider.bindings[1]).toBe('conversation_relay');
     expect(patch.transcription_status.sql).toContain("THEN 'completed' ELSE transcription_status END");
     // …and a RECORDING-only transcript on a reconnected row gets the AI segment ahead of it; the structured form is cleared (hook P1)

@@ -198,8 +198,10 @@ function appendSegmentPatch(db, segment) {
     ),
     transcription: db.raw(
       // Sandy-owned column ⇒ the whole composed call. An EMPTY, unowned
-      // column (the resumed socket closed silently before this segment
-      // landed) ⇒ filled. A COMPOSITE the recording processor already wrote
+      // column on a RECONNECTED row (the resumed socket closed silently
+      // before this segment landed) ⇒ filled — never on a call that never
+      // reconnected (a failed claim's voicemail row keeps its columns for
+      // the recording's transcript, hook r28 P1). A COMPOSITE the recording processor already wrote
       // ("[AI segment]…[Staff|Voicemail segment]…") ⇒ only its AI portion is
       // refreshed; the recorded portion is preserved verbatim
       // (substring(from) with a NON-capturing group returns the whole
@@ -207,7 +209,7 @@ function appendSegmentPatch(db, segment) {
       // A recording's own transcript is never touched.
       `CASE
          WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ?
-         WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ?
+         WHEN ${FILL_EMPTY_SQL} AND ? IS NOT NULL THEN ?
          WHEN transcription LIKE '[AI segment]%' AND transcription ~ ? AND ? IS NOT NULL
            THEN '[AI segment]' || E'\\n' || ? || substring(transcription from ?)
          WHEN ${RECORDED_ONLY_SQL} AND ? IS NOT NULL
@@ -219,11 +221,11 @@ function appendSegmentPatch(db, segment) {
     // The fill above also claims provider/status for the row; every other
     // branch leaves them as they are.
     transcription_provider: db.raw(
-      "CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ? ELSE transcription_provider END",
+      `CASE WHEN ${FILL_EMPTY_SQL} AND ? IS NOT NULL THEN ? ELSE transcription_provider END`,
       [compose(), RELAY_PROVIDER],
     ),
     transcription_status: db.raw(
-      "CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN 'completed' ELSE transcription_status END",
+      `CASE WHEN ${FILL_EMPTY_SQL} AND ? IS NOT NULL THEN 'completed' ELSE transcription_status END`,
       [compose()],
     ),
     // A composite has no structured form: the recorded-only branch clears it.
@@ -234,6 +236,9 @@ function appendSegmentPatch(db, segment) {
     updated_at: new Date(),
   };
 }
+// An EMPTY, unowned transcript column on a row that RECONNECTED — the only
+// empty column a late segment may fill (hook r28 P1).
+const FILL_EMPTY_SQL = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
 // A RECORDING's own transcript, alone, on a row that reconnected: the
 // processor finished before this segment landed (a silent resumed leg wrote
 // no stash). The recording is preserved; the AI segment goes ahead of it.
