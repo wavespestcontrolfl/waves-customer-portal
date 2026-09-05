@@ -862,7 +862,7 @@ async function trialPlaceOrder(page, placeOrder, refuse) {
 }
 
 async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines }) {
-  const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
+  await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   // Confirmation must be evidence created AFTER the click: a node the
   // selector already matches before submission (a reference / PO element,
@@ -915,7 +915,11 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
       await gate(cents, 'total at the click');
       continue;
     }
-    placeHandle = await trialPlaceOrder(page, placeOrder, refuse);
+    // The ONE visible control is resolved again on every pass: a rerender
+    // during the awaits above can expose a second visible Place Order, and
+    // an `nth()` locator saved earlier would re-resolve to one of them
+    // without the ambiguity refusal (Codex #3900 r1 P2).
+    placeHandle = await trialPlaceOrder(page, await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence), refuse);
     await recheckTenderAtClick(page, radio, { evidence, upload });
     await identity();
     await lines();
@@ -981,8 +985,13 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
 // first render ("Processing order…", an empty element) is not the outcome:
 // polling continues until a text yields a number (Codex #3876 r4 P2); a
 // timeout returns null and leaves the ambiguous path to decide.
+// The sole candidate must SETTLE: the same single new identifier on two
+// consecutive polls. A reference / PO value that renders a tick before the
+// order number would otherwise be recorded at once and the real number never
+// observed (Codex #3900 r1 P2); a candidate that changes starts over.
 async function waitForNewOrderNumber(page, baseline, timeout) {
   const deadline = Date.now() + timeout;
+  let candidate = null;
   for (;;) {
     if (!isTrustedSiteOneUrl(page.url())) throw new Error(`confirmation page left the trusted host (${String(page.url()).slice(0, 80)})`);
     const fresh = new Map();
@@ -993,7 +1002,9 @@ async function waitForNewOrderNumber(page, baseline, timeout) {
       // baseline id first and the new one after it (Codex #3876 r18 P2).
       for (const number of orderNumbersIn(text)) if (!baseline.ids.has(number.toUpperCase())) fresh.set(number.toUpperCase(), number);
     }
-    if (fresh.size === 1) return fresh.values().next().value;
+    const sole = fresh.size === 1 ? fresh.values().next().value : null;
+    if (sole && candidate && sole.toUpperCase() === candidate.toUpperCase()) return sole;
+    candidate = sole;
     if (Date.now() >= deadline) return null;
     await page.waitForTimeout(500);
   }

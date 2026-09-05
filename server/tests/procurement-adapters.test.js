@@ -359,12 +359,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.checkoutTotal && st.totalTexts) return el({ count: st.totalTexts.length, nth: (i) => el({ count: 1, visible: true, text: st.totalTexts[i] }) });
       if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalByRead ? st.totalByRead(st.totalReads) : st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
-      if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
+      if (sel === S.placeOrder) { st.atClick = true; st.placeResolves = (st.placeResolves || 0) + 1; } // the Place Order stage has begun (the at-click re-checks run after this)
       // placeOrderDisabled: the visible Place Order button is not enabled (actionability fails, nothing dispatched)
       // placeOrderDisabledAfterTrial: a rerender disables Place Order between the trial click and the dispatch (r8 P1)
       // placeOrderReplacedAtClick: the button element the trial validated is removed and replaced once the confirmation baseline has been sampled —
       // the handle taken at the trial reads detached (not visible); a locator would re-resolve to the replacement (hook P1)
       const placeBtn = () => el({ count: 1, get visible() { return !(st.placeOrderReplacedAtClick && st.baselineSampled); }, get disabled() { return !!st.placeOrderDisabled || (!!st.placeOrderDisabledAfterTrial && !!st.trialDone); }, onTrial: () => { st.trialDone = true; }, onClick: (o) => { st.placeClicked += 1; st.placeClickOpts = o; } });
+      // placeOrderDuplicateAfterFirst: a rerender exposes a SECOND visible Place Order after the stage's first resolution (r1 P2 on #3900)
+      if (sel === S.placeOrder && st.placeOrderDuplicateAfterFirst && st.placeResolves > 1) return el({ count: 2, nth: () => placeBtn() });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
       if (sel === S.placeOrder) return st.placeOrderHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } }) : placeBtn()) }) : placeBtn();
       // orderNumberHiddenFirst: a hidden stale confirmation node precedes the visible current one
@@ -377,6 +379,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
       // orderNumberRetained: the SPA keeps the pre-click reference node (orderNumberBeforeClick) shown and APPENDS the confirmation node (r17 P2)
       if (sel === S.orderNumber && st.orderNumberRetained) return el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? st.orderNumberBeforeClick : 'Order # SO-778899' }) });
+      // orderNumberSequence: the confirmation node's text per post-click poll (last value repeats) (r1 P2 on #3900)
+      if (sel === S.orderNumber && st.orderNumberSequence) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.orderNumberSequence[Math.min(st.confReads - 1, st.orderNumberSequence.length - 1)] }); }
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
       if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? (st.orderNumberLateText || 'Processing order…') : 'Order # SO-778899' }); }
       // orderNumberNested: the h1 wrapping the strong — both match, both shown, one identifier (r12 P2); orderNumberNestedDifferent: two shown nodes, different ids
@@ -672,6 +676,19 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumbersIn('Order ref SO-000001 · Order # SO-778899 · Confirmation # SO-778899')).toEqual(['SO-000001', 'SO-778899']);
     const twoNew = fakeSiteOne({ orderNumberBeforeClick: 'Order ref SO-000001', orderNumberText: 'Order ref SO-000001 · Order # SO-778899 · Order # SO-999999', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), twoNew.deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 }); // two new ids stay ambiguous
+  });
+
+  test('the confirmation identifier must settle: a reference value rendered a tick before the order number is never recorded — the settled number is (r1 P2 on #3900)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberSequence: ['Order ref SO-000002', 'Order # SO-778899', 'Order # SO-778899'] });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.confReads).toBeGreaterThanOrEqual(3);
+  });
+
+  test('a second visible Place Order exposed by a rerender during the pre-click loop refuses place_order_ambiguous — the control is re-resolved on every pass (r1 P2 on #3900)', async () => {
+    const { st, deps } = fakeSiteOne({ placeOrderDuplicateAfterFirst: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'place_order_ambiguous' });
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]);
   });
 
   test('loginConfigured mirrors validatePlaceArgs: login + account number (r12 P2)', () => {
