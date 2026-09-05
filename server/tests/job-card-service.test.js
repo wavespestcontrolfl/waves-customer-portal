@@ -850,3 +850,37 @@ describe('PR review r6', () => {
     expect(jobCard.validateParagraph('First visit on record.', template, [], jobCard._test.criticalFacts(facts))).toBe('critical_fact_dropped');
   });
 });
+
+describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
+  const factsDb = (rows) => {
+    const dbh = (table) => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereNotIn', 'whereIn', 'modify', 'orderBy', 'orderByRaw', 'select', 'limit', 'whereNotNull']) chain[m] = () => chain;
+      const value = rows[table];
+      chain.first = () => Object.assign(Promise.resolve(value ?? null), { catch: async () => value ?? null });
+      chain.catch = async () => (Array.isArray(value) ? value : []);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    return dbh;
+  };
+  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', watering_days: '["Mon"]' };
+  const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges });
+
+  test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
+    const deps = { getRecentCalls: async () => [] };
+    const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
+    expect(away.access.codes).toEqual([]);
+    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: 'dog' });
+    expect(jobCard.buildTemplateParagraph(away.facts)).toContain('visit at a non-primary address');
+    const home = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs }), deps);
+    expect(home.access.codes).toEqual([{ label: 'Property gate', code: '4545#' }]);
+    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false });
+  });
+
+  test('pet presence is a critical fact even without a securing plan (P1)', () => {
+    const facts = { ...baseFacts(), pets: 'dog' };
+    expect(jobCard._test.criticalFacts(facts)).toContain('dog');
+    expect(jobCard.validateParagraph('First visit on record.', jobCard.buildTemplateParagraph(facts), [], jobCard._test.criticalFacts(facts))).toBe('critical_fact_dropped');
+  });
+});

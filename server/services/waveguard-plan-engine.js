@@ -1150,7 +1150,9 @@ function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {
   };
 }
 
-async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date()) {
+// strict: a failed ledger / service-product read throws instead of reading
+// as "nothing applied this year" (an annual-N block must not vanish).
+async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date(), { strict = false } = {}) {
   const year = etParts(serviceDate).year;
   const ledgerRows = await knex('property_nutrient_ledger')
     .where({ customer_id: customerId, application_year: year })
@@ -1170,7 +1172,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
       'service_product_id',
     )
     .orderBy('application_date', 'asc')
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
 
   const ledgerSummary = Array.isArray(ledgerRows) && ledgerRows.length
     ? summarizeLedgerRows(ledgerRows, year)
@@ -1189,7 +1191,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
     serviceProductQuery.whereNotIn('sp.id', ledgerServiceProductIds);
   }
 
-  const rows = await serviceProductQuery.catch(() => []);
+  const rows = await serviceProductQuery.catch((err) => { if (strict) throw err; return []; });
   const fallbackSummary = calculateNutrientLedgerFromRows(rows, products, lawnSqft, year);
   if (ledgerSummary) {
     return {
@@ -1337,7 +1339,7 @@ async function buildPlanForService(serviceId, options = {}) {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,
   });
-  const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate);
+  const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate);
   const structuredProtocolContext = await getProtocolWindowContext(knex, {

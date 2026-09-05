@@ -285,6 +285,11 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       // diverge from it (dispatch's rule) — else no pin, office forecast.
       dbh.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
       dbh.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`),
+      // The same predicate gates every property-bound preference below:
+      // property_preferences is the primary home's row, so a visit stamped
+      // elsewhere must not show that home's codes, entry, parking or
+      // irrigation.
+      dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
       'c.waveguard_tier',
     )
     .first();
@@ -303,7 +308,9 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     serviceLine === 'lawn' ? loadRain7d(dbh, svc) : Promise.resolve(null),
   ]);
 
-  const codes = accessCodes(prefs);
+  const alternateAddress = Boolean(svc.address_diverges);
+  const propertyPrefs = alternateAddress ? null : prefs;
+  const codes = accessCodes(propertyPrefs);
   const lastVisitFact = lastVisit ? (({ startedAt, ...rest }) => rest)(lastVisit) : null;
   const name = clean(`${svc.first_name || ''} ${svc.last_name || ''}`, 80);
   const program = clean(svc.waveguard_tier ? `${svc.service_type} · WaveGuard ${svc.waveguard_tier}` : svc.service_type, 80);
@@ -329,8 +336,9 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       pets: petLine(prefs),
       petsSecured: clean(prefs?.pets_secured_plan, 80),
       gates: codes.map((c) => c.label),
-      entry: clean(prefs?.access_notes || prefs?.side_gate_access, 120),
-      parking: clean(prefs?.parking_notes, 80),
+      entry: clean(propertyPrefs?.access_notes || propertyPrefs?.side_gate_access, 120),
+      parking: clean(propertyPrefs?.parking_notes, 80),
+      alternateAddress,
       instructions: clean(prefs?.special_instructions, 120),
       contactPreference: prefs?.contact_preference || null,
       chemicalSensitivity: prefs?.chemical_sensitivities ? clean(prefs.chemical_sensitivity_details, 80) || 'yes' : '',
@@ -340,8 +348,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       issues,
       recentComplaints,
       calls,
-      irrigation: serviceLine === 'lawn' ? wateringLine(prefs) : null,
-      rain7d,
+      irrigation: serviceLine === 'lawn' ? wateringLine(propertyPrefs) : null,
+      rain7d: alternateAddress ? null : rain7d,
     }, codes),
     cache: { stored: parseJson(svc.job_card), generatedAt: svc.job_card_generated_at || null },
   };
@@ -367,6 +375,7 @@ function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   if (facts.pets) add(1, `Pets: ${facts.pets}${facts.petsSecured ? ` (${facts.petsSecured})` : ''}`);
   else if (facts.petsSecured) add(1, `Pets secured: ${facts.petsSecured}`);
   if (facts.gates.length) add(1, `${facts.gates.join(' and ').toLowerCase()} code on file, tap to show`);
+  if (facts.alternateAddress) add(1, 'visit at a non-primary address — the home\'s access details are not shown');
   add(1, facts.entry, 4);
   add(1, facts.parking, 9);
   if (facts.chemicalSensitivity) add(1, `chemical sensitivity${facts.chemicalSensitivity !== 'yes' ? `: ${facts.chemicalSensitivity}` : ''}`);
@@ -476,6 +485,8 @@ function criticalFacts(facts) {
   for (const issue of facts.issues || []) if (issue.urgent && issue.text) out.push(issue.text);
   // Current away mode: the paragraph is the only place the card says it.
   if (facts.awayUntil) out.push(facts.awayUntil);
+  // Pet presence: the only pet warning when no securing plan is recorded.
+  if (facts.pets) out.push(facts.pets);
   return out;
 }
 
