@@ -632,6 +632,30 @@ function orderNumberIn(text) {
   return (String(text).match(/[A-Z0-9-]{5,}/gi) || []).find(isId) || null;
 }
 
+// The checkout stage: bill-to proof, identity + final total, the cap gate on
+// that total, the one click, the confirmation number. Every check refuses
+// BEFORE the click; only the click flips the caller's cart-cleanup guard.
+async function checkoutAndSubmit(page, { credentials, shipToTokens, gate, evidence, upload, markSubmitted }) {
+  await (await visibleControl(page, SELECTORS.checkoutButton, 'checkout_button', evidence)).click();
+  await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+  await page.waitForTimeout(2000);
+  if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
+  await verifyBillToAccount(page, { evidence, upload });
+  await verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
+  const finalCents = await readCheckoutTotal(page, { evidence, upload });
+  await gate(finalCents, 'checkout total');
+  let externalOrderNumber;
+  try { externalOrderNumber = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted }); }
+  catch (e) {
+    // The click happened at THIS total: an ambiguous outcome parks with it
+    // (a null amount on a placed_at row would count $0 against the
+    // monthly cap — pre-push P0).
+    if (e.ambiguous && e.cents == null) e.cents = finalCents;
+    throw e;
+  }
+  return { externalOrderNumber, amountCents: finalCents, evidence, dryRun: false };
+}
+
 async function place(
   { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
   { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
@@ -664,25 +688,9 @@ async function place(
     const amountCents = await verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload });
     await gate(amountCents, 'order');
     if (dryRun) return { dryRun: true, amountCents, externalOrderNumber: null, evidence };
-
-    await (await visibleControl(page, SELECTORS.checkoutButton, 'checkout_button', evidence)).click();
-    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
-    await page.waitForTimeout(2000);
-    if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
-    await verifyBillToAccount(page, { evidence, upload });
-    await verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
-    const finalCents = await readCheckoutTotal(page, { evidence, upload });
-    await gate(finalCents, 'checkout total');
-    let externalOrderNumber;
-    try { externalOrderNumber = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted: () => { submitted = true; } }); }
-    catch (e) {
-      // The click happened at THIS total: an ambiguous outcome parks with it
-      // (a null amount on a placed_at row would count $0 against the
-      // monthly cap — pre-push P0).
-      if (e.ambiguous && e.cents == null) e.cents = finalCents;
-      throw e;
-    }
-    return { externalOrderNumber, amountCents: finalCents, evidence, dryRun: false };
+    // `await` is load-bearing: the finally below reads `submitted`, so the
+    // stage must have run before it (a bare `return promise` runs finally first).
+    return await checkoutAndSubmit(page, { credentials, shipToTokens, gate, evidence, upload, markSubmitted: () => { submitted = true; } });
   } finally {
     // Nothing was submitted (dry run, refusal, error): leave no cart behind
     // for the next run to find. Best effort — the next run clears it anyway.
