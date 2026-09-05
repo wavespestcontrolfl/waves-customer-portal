@@ -4677,6 +4677,8 @@ export function ProtocolPanel({ service, onClose }) {
   const [protocolMatchReason, setProtocolMatchReason] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState([]);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -4684,7 +4686,7 @@ export function ProtocolPanel({ service, onClose }) {
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
   const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
-  const [activeSection, setActiveSection] = useState(
+  const [requestedSection, setActiveSection] = useState(
     isLawn ? "lawn_protocol" : "overview",
   );
 
@@ -4705,6 +4707,11 @@ export function ProtocolPanel({ service, onClose }) {
     const month = new Date().getMonth() + 1;
 
     setLoading(true);
+    setLoadErrors([]);
+    setPhotos([]);
+    setSeasonal([]);
+    setScripts([]);
+    setEquipment([]);
     setLawnProtocol(null);
     setLawnMix(null);
     setLawnContext({ trackKey: null, lawnSqft: null });
@@ -4713,12 +4720,17 @@ export function ProtocolPanel({ service, onClose }) {
     setProtocolMatchReason(null);
 
     (async () => {
+      const failedSections = [];
       const profileResponse =
         isLawn && service.customerId
           ? await adminFetch(
               `/admin/customers/${service.customerId}/turf-profile`,
-            ).catch(() => null)
+            ).catch(() => {
+              failedSections.push("Turf profile");
+              return null;
+            })
           : null;
+      if (cancelled) return;
       const profile = profileResponse?.profile || null;
       const trackKey = isLawn
         ? [
@@ -4737,7 +4749,7 @@ export function ProtocolPanel({ service, onClose }) {
           })
         : null;
 
-      const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
+      const results = await Promise.allSettled([
         adminFetch(
           // The photos endpoint derives its line from literal tokens
           // (lawn/turf, tree/shrub, pest, mosquito, termite) — send the
@@ -4775,10 +4787,19 @@ export function ProtocolPanel({ service, onClose }) {
       ]);
 
       if (cancelled) return;
-      setPhotos(p.photos || []);
-      setSeasonal(s.pests || []);
-      setScripts(sc.scripts || []);
-      setEquipment(eq.checklists || []);
+      const sectionNames = [
+        "ID guide", "Pest pressure", "Scripts", "Equipment",
+        "Lawn protocol", "Mix quantities", "Service protocol",
+      ];
+      results.forEach((result, index) => {
+        if (result.status === "rejected") failedSections.push(sectionNames[index]);
+      });
+      const [p, s, sc, eq, lp, lm, sp] = results.map((result) => result.value);
+      setLoadErrors(failedSections);
+      setPhotos(p?.photos || []);
+      setSeasonal(s?.pests || []);
+      setScripts(sc?.scripts || []);
+      setEquipment(eq?.checklists || []);
       setLawnProtocol(lp?.track || null);
       setLawnMix(lm || null);
       setLawnContext({ trackKey, lawnSqft });
@@ -4787,13 +4808,16 @@ export function ProtocolPanel({ service, onClose }) {
       setProtocolMatchReason(sp?.reason || null);
       setLoading(false);
     })().catch(() => {
-      if (!cancelled) setLoading(false);
+      if (!cancelled) {
+        setLoadErrors(["Service guidance"]);
+        setLoading(false);
+      }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [service, isLawn, serviceCategory]);
+  }, [service, isLawn, serviceCategory, loadAttempt]);
 
   const SECTIONS = [
     ...(isLawn
@@ -4822,6 +4846,10 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
   ];
+
+  const activeSection = SECTIONS.some((section) => section.id === requestedSection)
+    ? requestedSection
+    : "overview";
 
   // Pest pressure stays ordinal but monochrome — peak gets alert-fg because
   // it's a genuine "act now" signal; the rest step down a zinc ramp.
@@ -4939,6 +4967,19 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+        {loadErrors.length > 0 && (
+          <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
+            <div>Could not load: {loadErrors.join(", ")}.</div>
+            <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
+            <button
+              type="button"
+              onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+              style={{ marginTop: 8, minHeight: 44, padding: "8px 12px", border: `1px solid ${D.inputBorder}`, borderRadius: 4, background: D.card, color: D.heading, fontSize: 14, cursor: "pointer" }}
+            >
+              Retry loading
+            </button>
+          </div>
+        )}
         {loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
@@ -4975,54 +5016,56 @@ export function ProtocolPanel({ service, onClose }) {
                     Set the customer turf type to St. Augustine, Bermuda,
                     Zoysia, or Bahia to show the correct protocol.
                   </div>
-                ) : !lawnProtocol ? (
-                  <div
-                    style={{
-                      color: D.muted,
-                      fontSize: 13,
-                      padding: 20,
-                      textAlign: "center",
-                    }}
-                  >
-                    Lawn protocol unavailable
-                  </div>
                 ) : (
                   <>
                     {" "}
-                    <div
-                      style={{
-                        background: D.bg,
-                        borderRadius: 10,
-                        padding: 14,
-                        border: `1px solid ${D.border}`,
-                        marginBottom: 12,
-                      }}
-                    >
-                      {" "}
+                    {!lawnProtocol ? (
                       <div
                         style={{
+                          color: D.muted,
                           fontSize: 13,
-                          fontWeight: 500,
-                          color: D.heading,
-                          marginBottom: 6,
+                          padding: 20,
+                          textAlign: "center",
                         }}
                       >
-                        {lawnProtocol.name}
+                        Lawn protocol unavailable
                       </div>
-                      {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                    ) : (
+                      <div
+                        style={{
+                          background: D.bg,
+                          borderRadius: 10,
+                          padding: 14,
+                          border: `1px solid ${D.border}`,
+                          marginBottom: 12,
+                        }}
+                      >
+                        {" "}
                         <div
-                          key={i}
                           style={{
-                            fontSize: 11,
-                            color: note.startsWith("") ? D.red : D.text,
-                            lineHeight: 1.45,
-                            marginBottom: 4,
+                            fontSize: 13,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 6,
                           }}
                         >
-                          {note}
+                          {lawnProtocol.name}
                         </div>
-                      ))}
-                    </div>
+                        {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              fontSize: 11,
+                              color: note.startsWith("") ? D.red : D.text,
+                              lineHeight: 1.45,
+                              marginBottom: 4,
+                            }}
+                          >
+                            {note}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {!lawnContext.lawnSqft && (
                       <div
                         style={{
@@ -5125,66 +5168,78 @@ export function ProtocolPanel({ service, onClose }) {
                             {w.message}
                           </div>
                         ))}
-                        {(lawnMix.items || []).map((item, i) => (
-                          <div
-                            key={`${i}-${item.raw}`}
-                            style={{
-                              padding: "9px 0",
-                              borderTop:
-                                i === 0 ? "none" : `1px solid ${D.border}`,
-                            }}
-                          >
-                            {" "}
+                        {(lawnMix.items || []).map((item, i) => {
+                          const areaMix = item.jobMix || item.plannedMix;
+                          const tankMix = item.fullTankMix || item.plannedFullTankMix;
+                          const plannedOnly = !item.jobMix && !!(item.plannedMix || item.plannedFullTankMix);
+                          return (
                             <div
+                              key={`${i}-${item.raw}`}
+                              role="group"
+                              aria-label={item.product?.name || item.raw}
                               style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                gap: 10,
+                                padding: "9px 0",
+                                borderTop:
+                                  i === 0 ? "none" : `1px solid ${D.border}`,
                               }}
                             >
                               {" "}
-                              <div style={{ minWidth: 0 }}>
-                                {" "}
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    fontWeight: 500,
-                                    color: D.heading,
-                                  }}
-                                >
-                                  {item.product?.name || item.raw}
-                                </div>{" "}
-                                <div
-                                  style={{
-                                    fontSize: 10,
-                                    color: D.muted,
-                                    lineHeight: 1.4,
-                                  }}
-                                >
-                                  {item.raw}
-                                </div>{" "}
-                              </div>{" "}
                               <div
                                 style={{
-                                  fontSize: 11,
-                                  color: D.text,
-                                  textAlign: "right",
-                                  flexShrink: 0,
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  gap: 10,
                                 }}
                               >
                                 {" "}
-                                <div>
-                                  {fmtProtocolNumber(item.jobMix?.amount)}{" "}
-                                  {item.jobMix?.amountUnit || ""}
+                                <div style={{ minWidth: 0 }}>
+                                  {" "}
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: 500,
+                                      color: D.heading,
+                                    }}
+                                  >
+                                    {item.product?.name || item.raw}
+                                  </div>{" "}
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: D.muted,
+                                      lineHeight: 1.4,
+                                    }}
+                                  >
+                                    {item.raw}
+                                  </div>{" "}
+                                  {plannedOnly && (
+                                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                                      Optional preview
+                                    </div>
+                                  )}
                                 </div>{" "}
-                                <div style={{ color: D.muted }}>
-                                  {fmtProtocolNumber(item.fullTankMix?.amount)}{" "}
-                                  {item.fullTankMix?.amountUnit || ""}/tank
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    color: plannedOnly ? D.muted : D.text,
+                                    textAlign: "right",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {" "}
+                                  <div>
+                                    {fmtProtocolNumber(areaMix?.amount)}{" "}
+                                    {areaMix?.amountUnit || ""}
+                                  </div>{" "}
+                                  <div style={{ color: D.muted }}>
+                                    {fmtProtocolNumber(tankMix?.amount)}{" "}
+                                    {tankMix?.amountUnit || ""}/tank
+                                  </div>{" "}
                                 </div>{" "}
                               </div>{" "}
-                            </div>{" "}
-                          </div>
-                        ))}
+                            </div>
+                          );
+                        })}
                         {lawnMix.mixingOrder?.length > 0 && (
                           <div
                             style={{
@@ -5232,89 +5287,93 @@ export function ProtocolPanel({ service, onClose }) {
                         )}
                       </div>
                     )}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 500,
-                        color: D.heading,
-                        marginBottom: 8,
-                      }}
-                    >
-                      Annual Protocol Calendar
-                    </div>
-                    {(lawnProtocol.visits || []).map((v) => (
-                      <div
-                        key={v.visit}
-                        style={{
-                          background: D.bg,
-                          borderRadius: 10,
-                          padding: 12,
-                          border: `1px solid ${D.border}`,
-                          marginBottom: 8,
-                        }}
-                      >
-                        {" "}
+                    {lawnProtocol && (
+                      <>
                         <div
                           style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 10,
-                            marginBottom: 6,
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 8,
                           }}
                         >
-                          {" "}
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 500,
-                              color: D.heading,
-                            }}
-                          >
-                            Visit {v.visit} · {v.month}
-                          </div>{" "}
-                          <div style={{ fontSize: 11, color: D.muted }}>
-                            Legacy mat: ${v.material_cost || "—"}
-                          </div>{" "}
-                        </div>{" "}
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: D.text,
-                            whiteSpace: "pre-wrap",
-                            lineHeight: 1.45,
-                          }}
-                        >
-                          {v.primary}
+                          Annual Protocol Calendar
                         </div>
-                        {v.secondary && (
+                        {(lawnProtocol.visits || []).map((v) => (
                           <div
+                            key={v.visit}
                             style={{
-                              fontSize: 11,
-                              color: D.muted,
-                              whiteSpace: "pre-wrap",
-                              lineHeight: 1.45,
-                              marginTop: 6,
+                              background: D.bg,
+                              borderRadius: 10,
+                              padding: 12,
+                              border: `1px solid ${D.border}`,
+                              marginBottom: 8,
                             }}
                           >
-                            {v.secondary}
+                            {" "}
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                marginBottom: 6,
+                              }}
+                            >
+                              {" "}
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 500,
+                                  color: D.heading,
+                                }}
+                              >
+                                Visit {v.visit} · {v.month}
+                              </div>{" "}
+                              <div style={{ fontSize: 11, color: D.muted }}>
+                                Legacy mat: ${v.material_cost || "—"}
+                              </div>{" "}
+                            </div>{" "}
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: D.text,
+                                whiteSpace: "pre-wrap",
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {v.primary}
+                            </div>
+                            {v.secondary && (
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: D.muted,
+                                  whiteSpace: "pre-wrap",
+                                  lineHeight: 1.45,
+                                  marginTop: 6,
+                                }}
+                              >
+                                {v.secondary}
+                              </div>
+                            )}
+                            {stripLegacyBoilerplate(v.notes) && (
+                              <div
+                                style={{
+                                  fontSize: 10,
+                                  color: D.muted,
+                                  lineHeight: 1.4,
+                                  marginTop: 6,
+                                  paddingTop: 6,
+                                  borderTop: `1px solid ${D.border}`,
+                                }}
+                              >
+                                {stripLegacyBoilerplate(v.notes)}
+                              </div>
+                            )}
                           </div>
-                        )}
-                        {stripLegacyBoilerplate(v.notes) && (
-                          <div
-                            style={{
-                              fontSize: 10,
-                              color: D.muted,
-                              lineHeight: 1.4,
-                              marginTop: 6,
-                              paddingTop: 6,
-                              borderTop: `1px solid ${D.border}`,
-                            }}
-                          >
-                            {stripLegacyBoilerplate(v.notes)}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                        ))}
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -5835,7 +5894,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No seasonal data for this service line
+                    {loadErrors.includes("Pest pressure") ? "Pest pressure unavailable" : "No seasonal data for this service line"}
                   </div>
                 ) : (
                   seasonal.map((p, i) => (
@@ -5939,7 +5998,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No photo references for this service
+                    {loadErrors.includes("ID guide") ? "ID guide unavailable" : "No photo references for this service"}
                   </div>
                 ) : (
                   photos.map((p, i) => (
@@ -6017,7 +6076,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No scripts for this service line
+                    {loadErrors.includes("Scripts") ? "Scripts unavailable" : "No scripts for this service line"}
                   </div>
                 ) : (
                   scripts.map((s, i) => (
@@ -6096,7 +6155,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No checklist for this service type
+                    {loadErrors.includes("Equipment") ? "Equipment checklist unavailable" : "No checklist for this service type"}
                   </div>
                 ) : (
                   equipment.map((checklist, ci) => (
