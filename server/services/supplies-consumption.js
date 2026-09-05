@@ -166,7 +166,10 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
     const settled = product
       ? await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')
       : await lookupSettled(db, { scheduledServiceId, serviceLine });
-    if (settled) await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null });
+    if (settled && !(await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null }))) {
+      // The superseded bell stands: the marker must stay for a retry to retire it (hook P1).
+      result.errors.push({ productId: product?.id || null, reason: 'bell_retire_failed', message: 'the superseded adjust-by-hand bell could not be retired' });
+    }
   } catch (bellErr) {
     logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
     result.errors.push({ productId: product?.id || null, reason: 'failure_bell_not_sent', message: bellErr.message });

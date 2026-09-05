@@ -787,6 +787,10 @@ async function claimRequest(trx, { requestId, registry }) {
   const peek = await trx('product_restock_requests').where({ id: requestId }).first('product_id');
   if (!peek) return { skipped: 'not_found' };
   await require('./auto-reorder').lockProductPricing(trx, peek.product_id);
+  // LOCK ORDER: any existing ledger row (a re-claimable dry-run park) BEFORE
+  // the request — the order every manual action and the revoke CLI use, so a
+  // reclaim racing a manual action waits instead of deadlocking (hook P1).
+  await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id');
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
