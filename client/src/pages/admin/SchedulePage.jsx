@@ -5036,7 +5036,13 @@ function JobCardTank({ tank, serviceId, D }) {
         )}
         {picked && (
           <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: 12, display: "grid", gap: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{picked.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+              <span>{picked.name}</span>
+              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.verdict} D={D} />}
+            </div>
+            {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
+              <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
+            )}
             {busy ? (
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
@@ -5083,9 +5089,12 @@ function JobCardTab({ card, loading, error, D }) {
       )}
       {products.length > 0 && (
         <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
-          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}
+          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}{card.addons?.length ? ` · + ${card.addons.map((a) => a.name).join(", ")}` : ""}
         </div>
       )}
+      {(card.addons || []).filter((a) => a.note).map((a) => (
+        <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
+      ))}
       {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
       {products.length === 0 && (
         <div style={{ fontSize: 13, color: D.muted }}>No protocol products matched this visit.</div>

@@ -521,6 +521,7 @@ describe('mixForProduct', () => {
     chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
     return chain;
   };
+  makeDb.withRaw = (fixtures) => Object.assign(makeDb(fixtures), { raw: (sql) => sql });
   const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
 
   const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', assigned_equipment_system_id: null, assigned_calibration_id: null };
@@ -531,7 +532,7 @@ describe('mixForProduct', () => {
   const approve = () => jest.fn().mockResolvedValue({ blocks: [], warnings: [] });
 
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
-    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const dbh = makeDb.withRaw({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] } });
     const evaluateApprovals = approve();
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
@@ -540,7 +541,7 @@ describe('mixForProduct', () => {
     buildPlan.mockRejectedValue(new Error('boom'));
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).planBlocks[0].code).toBe('plan_unavailable');
     // A pest visit never builds the plan nor runs approvals.
-    const pest = makeDb({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] });
+    const pest = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] });
     buildPlan.mockClear(); evaluateApprovals.mockClear();
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: pest, deps: { buildPlan, evaluateApprovals }, ...at })).amount).toBe(6.215);
     expect(buildPlan).not.toHaveBeenCalled();
@@ -552,7 +553,7 @@ describe('mixForProduct', () => {
     const windows = [{ jurisdictionName: 'Manatee County', restrictedNitrogen: true, restrictedPhosphorus: false }];
     const cleanPlan = { propertyGate: { blocks: [], activeOrdinanceWindows: windows }, mixCalculator: { items: [], conditionalOptions: [] } };
     const buildPlan = jest.fn().mockResolvedValue(cleanPlan);
-    const dbh = (rows) => makeDb({ scheduled_services: [lawnVisit], products_catalog: rows, equipment_calibrations: [live] });
+    const dbh = (rows) => makeDb.withRaw({ scheduled_services: [lawnVisit], products_catalog: rows, equipment_calibrations: [live] });
     // Ordinance blackout on an off-plan nitrogen product.
     const n = await jobCard.mixForProduct('n1', 110, { serviceId: 'svc1', dbh: dbh([urea]), deps: { buildPlan, evaluateApprovals: approve() }, ...at });
     expect(n).toMatchObject({ amount: null, reason: expect.stringContaining('Nitrogen blackout'), planBlocks: [{ code: 'nitrogen_blackout' }] });
@@ -568,14 +569,14 @@ describe('mixForProduct', () => {
 
   test('a per-gallon pest product dilutes straight into the tank, range and all (PR r1 P2)', async () => {
     const demand = { id: 'd', name: 'Demand CS', category: 'insecticide', default_rate_per_1000: null, rate_unit: null, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
-    const dbh = makeDb({ scheduled_services: [visit], products_catalog: [demand], equipment_calibrations: [] });
+    const dbh = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [demand], equipment_calibrations: [] });
     const out = await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh, ...at });
     expect(out).toMatchObject({ amount: 22, amountMax: 88, unit: 'fl_oz', gallons: 110, basis: 'per_gallon', reason: null, ratePerGallon: { lo: 0.2, hi: 0.8, unit: 'fl_oz' }, rateVerified: true });
     expect((await jobCard.mixForProduct('d', 1, { serviceId: 'svc1', dbh, ...at })).amount).toBe(0.2);
   });
 
   test('a product the lawn plan resolved is dosed at the plan\'s rate, not the catalog default (Codex r12 P1)', async () => {
-    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const dbh = makeDb.withRaw({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     // Saved substitution override: 0.2 oz/1,000 instead of the catalog's 0.113.
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [{ product: { id: 'p1' }, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
@@ -586,7 +587,7 @@ describe('mixForProduct', () => {
   });
 
   test('no visit row → null, never a dose from an unassigned rig (Codex r9 P1)', async () => {
-    const dbh = makeDb({
+    const dbh = makeDb.withRaw({
       products_catalog: [product],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
@@ -595,7 +596,7 @@ describe('mixForProduct', () => {
   });
 
   test('expired calibration → amount withheld with the tank reason', async () => {
-    const dbh = makeDb({
+    const dbh = makeDb.withRaw({
       scheduled_services: [visit],
       products_catalog: [product],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
@@ -605,7 +606,7 @@ describe('mixForProduct', () => {
   });
 
   test('granular product → no tank amount even on a live rig (Codex r1 P1)', async () => {
-    const dbh = makeDb({
+    const dbh = makeDb.withRaw({
       scheduled_services: [visit],
       products_catalog: [{ id: 'hg', name: 'Headway G', default_rate_per_1000: 3, rate_unit: 'lb', label_verified_at: null }],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
@@ -615,14 +616,14 @@ describe('mixForProduct', () => {
   });
 
   test('an unverified label rate gets no dose on either basis (PR r2 P1)', async () => {
-    const dbh = makeDb({ scheduled_services: [visit], products_catalog: [{ ...product, label_verified_at: null }], equipment_calibrations: [live] });
+    const dbh = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [{ ...product, label_verified_at: null }], equipment_calibrations: [live] });
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, ...at })).toMatchObject({ amount: null, reason: 'Label rate not yet verified', rateVerified: false });
-    const gal = makeDb({ scheduled_services: [visit], products_catalog: [{ id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: null }], equipment_calibrations: [] });
+    const gal = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [{ id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: null }], equipment_calibrations: [] });
     expect((await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh: gal, ...at })).amount).toBeNull();
   });
 
   test('live calibration → amount for 110 gal', async () => {
-    const dbh = makeDb({
+    const dbh = makeDb.withRaw({
       scheduled_services: [visit],
       products_catalog: [product],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
@@ -654,7 +655,8 @@ describe('PR review r4', () => {
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-08-01' };
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], distributor_product_map: [] };
-    const dbh = (table) => {
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
       const chain = {};
       for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'orderBy', 'select', 'modify', 'andWhere', 'join', 'leftJoin', 'limit']) chain[m] = () => chain;
       chain.first = () => Promise.resolve((rows[table] || [])[0] || null);
@@ -662,6 +664,7 @@ describe('PR review r4', () => {
       chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
       return chain;
     };
+    dbh.raw = (sql) => sql;
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [] } });
     const evaluateApprovals = jest.fn().mockRejectedValue(new Error('rotation read failed'));
     const out = await mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, now: new Date('2026-09-04T12:00:00Z') });
@@ -916,5 +919,56 @@ describe('PR review r8', () => {
     };
     expect(await jobCard._test.loadPackSizes(dbh, ['a', 'b', 'c'])).toEqual({ a: '2.5 gal', b: '32 fl_oz' });
     expect(seen).toContainEqual({ active: true, mapping_status: 'verified' });
+describe('follow-up PR: add-on lines + tank-search spray check', () => {
+  const program = { visits: [{ visit: 9, month: 'Sep', primary: 'Speedzone Southern 1 fl oz' }] };
+  const catalog = [{ id: 'c', name: 'Celsius WG', rate_unit: 'oz' }, { id: 's', name: 'Speedzone Southern', rate_unit: 'fl oz' }];
+
+  test('add-on lines resolve onto the card with their source; a lawn add-on is reported, not dosed', async () => {
+    const facts = { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: ['Tree & Shrub Care', 'Lawn Care', 'Mosquito'] };
+    const out = await jobCard.resolveVisitLines({ facts, protocols: { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Celsius WG 1 oz' }] }, tree_shrub: program }, catalog, dbh: () => ({}) });
+    expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['c', null], ['s', 'Tree & Shrub Care']]);
+    expect(out.addons).toEqual([
+      { name: 'Tree & Shrub Care', products: 1, note: null },
+      { name: 'Lawn Care', products: 0, note: 'Lawn add-on — no plan for this line on the card' },
+      { name: 'Mosquito', products: 0, note: 'No protocol matched this add-on' },
+    ]);
+    const [, card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
+    expect(card.line).toBe('Tree & Shrub Care: Speedzone Southern 1 fl oz');
+  });
+
+  test('a failed add-on read fails the card (503)', async () => {
+    const dbh = () => { const chain = {}; for (const m of ['where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = (fn) => Promise.resolve(fn(new Error('db down'))); return chain; };
+    await expect(jobCard._test.loadAddons(dbh, 'svc1')).rejects.toMatchObject({ statusCode: 503 });
+  });
+
+  test('the tank search runs the spray check at the property: a Hold withholds the dose', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12', max_wind_mph: 10 };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', latitude: 27.4, longitude: -82.5 };
+    const dbh = (table) => {
+      const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] }[String(table).split(' as ')[0]] ?? [];
+      const chain = {};
+      for (const m of ['join', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => rows[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const now = new Date('2026-09-04T14:00:00Z');
+    const windy = [{ startTime: '2026-09-04T14:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }, { startTime: '2026-09-04T15:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }, { startTime: '2026-09-04T16:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }, { startTime: '2026-09-04T17:00:00Z', temperatureF: 88, windMph: 14, rainChance: 10 }];
+    const getHourly = jest.fn(async () => windy);
+    const hold = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly }, now });
+    expect(getHourly).toHaveBeenCalledWith(27.4, -82.5);
+    expect(hold.sprayCheck).toEqual({ verdict: 'hold', reason: 'wind over 10 mph' });
+    expect(hold.amount).toBeNull();
+    expect(hold.reason).toBe('Spray check: wind over 10 mph');
+    const calm = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly: async () => windy.map((h) => ({ ...h, windMph: 5 })) }, now });
+    expect(calm.sprayCheck.verdict).toBe('ok');
+    expect(calm.amount).toBe(6.215);
+    // Not today → judged on the visit day, dose allowed.
+    const later = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(later.sprayCheck).toEqual({ verdict: 'unknown', reason: 'Judged on the visit day' });
+    expect(later.amount).toBe(6.215);
   });
 });

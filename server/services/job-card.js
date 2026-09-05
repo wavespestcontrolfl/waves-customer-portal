@@ -261,6 +261,20 @@ async function loadCallsSince(customerId, sinceInstant, deps = {}) {
 }
 
 /**
+ * The visit's add-on lines (dispatch stores them per appointment). Fails
+ * closed: a silently missing line would drop its products and precautions.
+ */
+async function loadAddons(dbh, serviceId) {
+  const rows = await dbh('scheduled_service_addons')
+    .where({ scheduled_service_id: serviceId })
+    .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
+    .select('service_name')
+    .catch((err) => { throw unavailable('Add-on lines unavailable', err); });
+  return rows.map((r) => clean(r.service_name, 80)).filter(Boolean);
+}
+
+/**
  * Everything the card needs about the visit, customer and property. Raw
  * access codes are returned under `access.codes` only.
  */
@@ -296,12 +310,13 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
   if (!svc) return null;
 
   const serviceLine = detectServiceLine(svc.service_type);
-  const [prefs, lastVisit, { issues, recentComplaints }] = await Promise.all([
+  const [prefs, lastVisit, { issues, recentComplaints }, addons] = await Promise.all([
     // A failed preferences read is NOT an empty safety profile: the card
     // fails (503) rather than render without sensitivities, pet plan, codes.
     dbh('property_preferences').where({ customer_id: svc.customer_id }).first().catch((err) => { throw unavailable('Property preferences unavailable', err); }),
     loadLastVisit(dbh, svc.customer_id, serviceLine, etCalendarDayOf(svc.scheduled_date)),
     loadOpenIssues(dbh, svc.customer_id),
+    loadAddons(dbh, svc.id),
   ]);
   const [calls, rain7d] = await Promise.all([
     loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps),
@@ -327,6 +342,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     serviceType: svc.service_type,
     serviceLine,
     isLawn: serviceLine === 'lawn',
+    addons,
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     rig: rigAssignment(svc),
     access: { codes },
@@ -917,9 +933,14 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const blocks = planBlocksOf(loaded);
     return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
   }
-  const match = matchServiceProtocol(protocols, facts.serviceType);
-  const visit = seasonalVisit(match?.program, facts.scheduledDate) || match?.matchedVisit || match?.program?.visits?.[0] || null;
-  if (!visit) return { visit: null, lines: [], blocks: [] };
+  return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog), blocks: [] };
+}
+
+/** One protocol service line (non-lawn) → its matched visit and product lines. */
+function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog) {
+  const match = matchServiceProtocol(protocols, serviceType);
+  const visit = seasonalVisit(match?.program, scheduledDate) || match?.matchedVisit || match?.program?.visits?.[0] || null;
+  if (!visit) return { visit: null, lines: [] };
   const lines = linesFromLineMeta(visit, catalog);
   // Protocol visits without lineMeta (tree & shrub, termite …) name their
   // products in the text itself — the same parse + catalog match the plan
@@ -927,7 +948,32 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   for (const line of linesFromProtocolText(visit, catalog)) {
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
-  return { visit, lines, blocks: [] };
+  return { visit, lines };
+}
+
+/**
+ * The primary line plus every add-on line attached to the visit. Add-ons
+ * resolve through the protocol path with their own seasonal pick; a product
+ * already on the card from the primary line is not repeated. A lawn add-on
+ * has no per-appointment plan of its own (the plan engine keys on the
+ * appointment's service type), so it is reported, never dosed.
+ */
+async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
+  const primary = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+  const lines = [...primary.lines];
+  const addons = [];
+  for (const name of facts.addons || []) {
+    if (detectServiceLine(name) === 'lawn') { addons.push({ name, products: 0, note: 'Lawn add-on — no plan for this line on the card' }); continue; }
+    const resolved = resolveProtocolLines(name, facts.scheduledDate, protocols, catalog);
+    let count = 0;
+    for (const line of resolved.lines) {
+      if (lines.some((l) => l.product.id === line.product.id)) continue;
+      lines.push({ ...line, source: name });
+      count += 1;
+    }
+    addons.push({ name, products: count, note: resolved.visit ? null : 'No protocol matched this add-on' });
+  }
+  return { ...primary, lines, addons };
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1023,7 +1069,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       name: p.name,
       role: line.role || 'base',
       conditional: line.selected === false,
-      line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.raw, ...line.extraLines].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
+      line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.source ? `${line.source}: ${line.raw}` : line.raw, ...line.extraLines].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
@@ -1108,7 +1154,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     isToday && facts.coords.lat != null ? (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null) : Promise.resolve(null),
   ]);
   const tank = tankFromCalibrations(calibrations, serviceInstant);
-  const { visit, lines, blocks } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+  const { visit, lines, blocks, addons } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
@@ -1126,6 +1172,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     products: cards,
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
+    addons,
   };
 }
 
@@ -1136,8 +1183,20 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
  */
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
-    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
+    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'rainfast_minutes').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
+    serviceId
+      ? dbh('scheduled_services as ss')
+        .join('customers as c', 'ss.customer_id', 'c.id')
+        .where('ss.id', serviceId)
+        .select(
+          'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
+          // The booked property's pin, by the card's own rule (see loadJobCardFacts).
+          dbh.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
+          dbh.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`),
+        )
+        .first()
+        .catch(() => null)
+      : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
@@ -1178,6 +1237,17 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     : [];
   const planBlocks = [...planWide, ...productBlocks];
   const tankMixable = isTankMixable(product);
+  // The searched product gets the same spray check as a card product: the
+  // property forecast today, judged on the visit day otherwise. A Hold
+  // withholds the dose.
+  const scheduledDate = etCalendarDayOf(svc.scheduled_date || now);
+  const coords = propertyCoords(svc.latitude, svc.longitude);
+  const isToday = scheduledDate === etDateString(now);
+  const hourly = isToday && coords ? await (deps.getHourly || getHourlyRainOutlook)(coords.lat, coords.lng).catch(() => null) : null;
+  const sprayVerdict = buildSprayCheck({ products: [product], hourly, now }).verdicts[0];
+  const sprayCheck = !isToday
+    ? { verdict: 'unknown', reason: 'Judged on the visit day' }
+    : (!coords ? { verdict: 'unknown', reason: 'No property pin on file — no forecast' } : { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason });
   let mix;
   if (planWide.length) mix = { amount: null, unit: rateUnit || null, reason: 'Lawn plan blocked — amounts withheld' };
   else if (productBlocks.length) mix = { amount: null, unit: rateUnit || null, reason: clean(productBlocks[0].message, 160) };
@@ -1185,6 +1255,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // The catalog contract: no dose from a label value whose provenance is
   // not verified (label_verified_at), on either rate basis.
   else if (!product.label_verified_at) mix = { amount: null, unit: rateUnit || null, reason: 'Label rate not yet verified' };
+  else if (sprayCheck.verdict === 'hold') mix = { amount: null, unit: rateUnit || null, reason: `Spray check: ${sprayCheck.reason}` };
   else if (perGallon) mix = buildPerGallonAmount(perGallon, gallons);
   else mix = buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
   const packSizes = await loadPackSizes(dbh, [product.id]);
@@ -1196,6 +1267,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     rateSource: planned ? 'plan' : 'catalog',
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
+    sprayCheck,
     ...mix,
     planBlocks,
     tank,
@@ -1233,7 +1305,8 @@ module.exports = {
   buildMixAmount,
   tankFromCalibrations,
   resolveVisitProducts,
+  resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons },
 };
