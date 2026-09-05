@@ -49,6 +49,12 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     if (mockPg) await mockPg.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
+  test('a reconnect token bound to the older render cannot take over after reissue', async () => {
+    await mockPg('call_log').where('id', 'call-1').update({ metadata: { relay_reconnect_ms: 110 } });
+    expect(await beginRelaySessionClaim(callSid, 'old-render', 100)).toBe(false);
+    expect(await beginRelaySessionClaim(callSid, 'new-render', 110)).toBe(true);
+  });
+
   beforeEach(async () => {
     delete process.env.GATE_VOICE_RELAY_RECOVERY;
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;

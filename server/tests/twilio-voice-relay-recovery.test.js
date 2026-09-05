@@ -111,6 +111,26 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(res.body).not.toContain('<Dial');
   });
 
+  test('a reissue during routing cannot mint a token newer than this response action', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder, updates } = primeDb();
+    const routing = require('../services/call-routing-config').getCallRoutingConfig;
+    routing.mockImplementationOnce(async () => {
+      const stamp = updates.find((u) => u.metadata && String(u.metadata.sql).includes('relay_reconnects')).metadata.bindings[0];
+      builder.first.mockResolvedValue({ metadata: { relay_reconnect_ms: stamp + 10, relay_reconnects: 1 } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { agentEndpoint: 'wss://portal.wavespestcontrol.com/ws/voice-agent' };
+    });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    const actionGen = Number(res.body.match(/gen=(\d+)/)[1]);
+    const token = res.body.match(/&amp;t=([^"&]+)/)[1];
+    const tokenGen = parseInt(token.split('.')[2].slice(0, 12), 16);
+    expect(tokenGen).toBe(actionGen);
+    expect(tokenGen).toBeLessThan((await builder.first()).metadata.relay_reconnect_ms);
+    expect(require('../services/voice-agent/relay-protocol').verifyCallToken(token, FAILED.CallSid)).toBe(true);
+  });
+
   test('a Spanish caller reconnects on the Spanish action, language, voice and greeting', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb();

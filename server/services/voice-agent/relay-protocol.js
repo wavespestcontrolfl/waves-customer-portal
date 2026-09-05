@@ -412,6 +412,7 @@ function buildRelayTwiML({
   voice = defaultTtsVoice(), // provider-specific voice id (env VOICE_RELAY_TTS_VOICE)
   action, // optional <Connect action> URL — Twilio POSTs here when the session ends/fails
   wsSecret = process.env.VOICE_RELAY_WS_SECRET,
+  tokenNow, // reconnect tokens use the same generation as their action URL
   // Optional { name: value } map rendered as <Parameter> children — Twilio
   // echoes them back verbatim in the setup frame's customParameters, which is
   // how a purpose-built leg (the collections outbound relay) labels its
@@ -435,7 +436,7 @@ function buildRelayTwiML({
   // A render without a CallSid produces a URL with no credentials, which the
   // server refuses: a live call must never be handed a session it did not earn,
   // and refusing at the door is what makes the missing SID visible.
-  const authedUrl = appendCallAuth(wsUrl, { callSid, secret: wsSecret });
+  const authedUrl = appendCallAuth(wsUrl, { callSid, secret: wsSecret, now: tokenNow });
   const attrs = [
     `url="${escapeXmlAttr(authedUrl)}"`,
     `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"`,
