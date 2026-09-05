@@ -6738,25 +6738,30 @@ const CallRecordingProcessor = {
       const recorded = recordedPartOfComposite(row.transcription);
       return isUsableFallback(recorded) ? recorded : null;
     };
-    const composeRelay = async (text, provenance) => {
-      // Composed from the row's CURRENT state, not the claim-time snapshot
-      // (hook P1): end()'s relay_transcript stash can land during the
-      // minutes-long transcription — the stash side prepends the AI segment
-      // only onto a recorded-only column that already exists, so this side
-      // must see a stash that landed before its write. Read failure ⇒ the
-      // snapshot (today's behaviour).
+    // The row's CURRENT relay state, not the claim-time snapshot (hook P1):
+    // end()'s relay_transcript stash can land during the minutes-long
+    // transcription — the stash side prepends the AI segment only onto a
+    // recorded-only column that already exists, so this side must see a
+    // stash that landed before its write. Read failure ⇒ the snapshot.
+    const currentRelayState = async () => {
       let row = call;
       try {
         const fresh = await db('call_log').where({ id: call.id }).first('metadata', 'call_outcome', 'transcription', 'transcription_provider', 'transcription_metadata');
         if (fresh) row = { ...call, ...fresh };
       } catch (err) {
-        logger.warn(`[call-proc] relay-segment re-read failed for ${maskSid(callSid)}: ${err.message} — composing from the snapshot`);
+        logger.warn(`[call-proc] relay-state re-read failed for ${maskSid(callSid)}: ${err.message} — using the snapshot`);
       }
-      const relaySegment = composeRelaySegment(row);
-      if (!relaySegment) return text;
+      let meta = row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || row.call_outcome === 'ai_transferred';
+      return { row, segment: composeRelaySegment(row), transferred, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
+    };
+    const composeRelay = async (text, provenance) => {
+      const { segment, label } = await currentRelayState();
+      if (!segment) return text;
       recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
-      provenance.metadata.relay = relaySegment.metadata;
-      return `${relaySegment.text}\n\n[${row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${text}`;
+      provenance.metadata.relay = segment.metadata;
+      return `${segment.text}\n\n[${label} segment]\n${text}`;
     };
     // Twilio CDN hasn't finished propagating the MP3 (404 or truncated
     // buffer for the known duration) — release the claim untouched instead
@@ -7024,13 +7029,19 @@ const CallRecordingProcessor = {
     // and the whole-call rejection below (voicemail sentinel, triage
     // dismissal, lead retirement keyed by CallSid) never runs.
     const recordedRejected = fallbackImplausible || (!transcription && primaryTranscriptRejected);
-    const relayOnly = recordedRejected ? composeRelaySegment(call) : null;
-    if (relayOnly) {
+    // Decided on the row's CURRENT state (hook P1): the stash may have landed
+    // during transcription. Transfer evidence WITHOUT relay text yet (the
+    // close has not stashed) still keeps the whole-call rejection out — the
+    // recorded-only sentinel is written under the segment header, and the
+    // late stash prepends the AI segment onto it.
+    const relayState = recordedRejected ? await currentRelayState() : null;
+    const relayOnly = relayState && relayState.segment;
+    if (relayOnly || (relayState && relayState.transferred)) {
       const rejectedChars = fallbackImplausible ? spokenCharCount(gateText) : rejectedPrimaryChars;
-      logger.warn(`[call-proc] Rejecting the RECORDED segment of transferred call ${maskSid(callSid)} (${rejectedChars} chars / ${recordingSeconds}s) — keeping the AI segment`);
-      transcription = `${relayOnly.text}\n\n[${call.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}`;
+      logger.warn(`[call-proc] Rejecting the RECORDED segment of transferred call ${maskSid(callSid)} (${rejectedChars} chars / ${recordingSeconds}s) — keeping the AI segment${relayOnly ? '' : ' (pending)'}`);
+      transcription = `${relayOnly ? `${relayOnly.text}\n\n` : ''}[${relayState.label} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}`;
       transcriptionProvenance = transcriptionProvenance || { provider: null, model: null, metadata: {} };
-      transcriptionProvenance.metadata = { ...(transcriptionProvenance.metadata || {}), relay: relayOnly.metadata, recorded_segment_rejected: { reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rejectedChars, recording_seconds: recordingSeconds } };
+      transcriptionProvenance.metadata = { ...(transcriptionProvenance.metadata || {}), ...(relayOnly ? { relay: relayOnly.metadata } : {}), recorded_segment_rejected: { reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rejectedChars, recording_seconds: recordingSeconds } };
       const wroteRelayOnly = await db('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)

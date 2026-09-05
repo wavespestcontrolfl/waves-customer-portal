@@ -411,7 +411,7 @@ describe('pre-push hook round 9', () => {
     expect(src).toContain('return isUsableFallback(recorded) ? recorded : null;'); // a rejected recorded leg (the sentinel) is no fallback either
     // A hallucinated RECORDED leg on a transferred call rejects that segment only: the AI segment stays, and the
     // whole-call rejection (voicemail sentinel, triage dismissal, CallSid-keyed lead retirement) never runs (hook P1).
-    const relayOnlyAt = src.indexOf('const relayOnly = recordedRejected ? composeRelaySegment(call) : null;');
+    const relayOnlyAt = src.indexOf('const relayState = recordedRejected ? await currentRelayState() : null;'); // decided on the CURRENT row, not the claim snapshot
     const wholeCallAt = src.indexOf('if (fallbackImplausible || (!transcription && primaryTranscriptRejected)) {');
     expect(relayOnlyAt).toBeGreaterThan(0);
     expect(relayOnlyAt).toBeLessThan(wholeCallAt);
@@ -420,6 +420,7 @@ describe('pre-push hook round 9', () => {
     expect(site).toContain('fallbackImplausible = false;');
     expect(site).toContain('primaryTranscriptRejected = false;');
     expect(site).toContain('recorded_segment_rejected');
+    expect(site).toContain('if (relayOnly || (relayState && relayState.transferred)) {'); // transfer evidence without relay text yet ⇒ still never the whole-call rejection
   });
 
   test('recordedPartOfComposite: the relay\'s own transcript and a bare AI segment are not recording transcripts; a stored composite yields its recorded part', () => {
