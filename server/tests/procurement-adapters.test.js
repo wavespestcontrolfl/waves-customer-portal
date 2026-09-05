@@ -229,7 +229,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       inputValue: async () => { if (spec.value == null) throw new Error('not an input'); return String(spec.value); },
       isVisible: async () => { if (spec.isVisibleThrows) throw new Error('Element is not attached to the DOM'); return !!spec.visible; },
       isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
-      click: async () => { if (spec.onClick) await spec.onClick(); },
+      // `disabled` models Playwright's actionability failure; `{ trial: true }` runs the checks without dispatching (r5 P2)
+      click: async (o) => { if (spec.disabled) throw new Error('element is not enabled'); if (o && o.trial) return; if (spec.onClick) await spec.onClick(); },
       fill: async (v) => { if (spec.onFill) spec.onFill(v); },
       press: async (key) => { if (spec.onPress) await spec.onPress(key); },
       waitFor: async () => {},
@@ -317,7 +318,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       if (sel === S.billToAccountSelected) return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
-      if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountText === undefined ? 'Account # 12345' : st.accountText });
+      // accountAtClick: a delayed rerender swaps the displayed billing account once the Place Order stage has begun (r5 P1)
+      if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountAtClick && st.atClick ? st.accountAtClick : st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       // checkoutTotalText: the checkout total (default = the cart total, so a dry run's bell reports 9900);
       // totalAtClick: a DIFFERENT total shown once the Place Order stage re-reads it (async tax / shipping recalculation)
@@ -325,7 +327,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalByRead ? st.totalByRead(st.totalReads) : st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
-      const placeBtn = () => el({ count: 1, visible: true, onClick: () => { st.placeClicked += 1; } });
+      // placeOrderDisabled: the visible Place Order button is not enabled (actionability fails, nothing dispatched)
+      const placeBtn = () => el({ count: 1, visible: true, disabled: !!st.placeOrderDisabled, onClick: () => { st.placeClicked += 1; } });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
       if (sel === S.placeOrder) return st.placeOrderHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } }) : placeBtn()) }) : placeBtn();
       // orderNumberHiddenFirst: a hidden stale confirmation node precedes the visible current one
@@ -467,6 +470,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order date 09-05-2026')).toBeNull(); // any date shape (r3 P2)
     expect(s1._internals.orderNumberIn('Order date 05/09/26 ref')).toBeNull();
     expect(s1._internals.orderNumberIn('Order date 20260905')).toBeNull(); // compact date (r4 P2)
+    expect(s1._internals.orderNumberIn('Order date 09052026')).toBeNull(); // compact, month first (r5 P2)
+    expect(s1._internals.orderNumberIn('Order date 05092026')).toBeNull(); // compact, day first
+    expect(s1._internals.orderNumberIn('Order # 55501234')).toBe('55501234'); // an 8-digit id that is not a date stays an id
     expect(s1._internals.orderNumberIn('Order date Sep-05-2026')).toBeNull(); // named month
     expect(s1._internals.orderNumberIn('Placed 05-Sep-2026')).toBeNull();
     expect(s1._internals.orderNumberIn('Order date Sep-05-2026 · Order # SO-778899')).toBe('SO-778899');
@@ -720,6 +726,26 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'PO reference 55501', orderNumberText: 'PO reference 55501', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a pre-click reference node whose status text alone changes keeps the same identifier — ambiguous, not placed (r5 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'PO reference 55501 · Ready', orderNumberText: 'PO reference 55501 · Validation failed', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('a billing account that changes once the Place Order stage has begun refuses at the click boundary (r5 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ accountAtClick: 'Account # 99999' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'account_mismatch' });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]); // pre-click refusal: cart emptied
+  });
+
+  test('a visible but disabled Place Order button refuses BEFORE the submitted guard flips — cart emptied, nothing ambiguous (r5 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ placeOrderDisabled: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'place_order_unactionable' });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {

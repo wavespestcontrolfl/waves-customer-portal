@@ -702,7 +702,7 @@ async function shownOrderText(page) {
   return (await nodes[0].textContent().catch(() => '') || '').replace(/\s+/g, ' ');
 }
 
-async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio }) {
+async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity }) {
   const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
   // Confirmation must be evidence created AFTER the click: a node the
   // selector already matches before submission (a reference / PO element,
@@ -719,9 +719,16 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // during which the page may recalculate once more; the click happens only
   // when the figure on screen is the one the cap approved (pre-push P0).
   // Order at the boundary (Codex #3876 r4 P1): total read → (changed: gate,
-  // start over) → tender + blockers re-checked → total read AGAIN — the
+  // start over) → tender + blockers re-checked → account + ship-to
+  // re-checked → Place Order proven actionable → total read AGAIN — the
   // very last await before the click is that pure read, and it must equal
   // the figure the cap approved.
+  // The identity re-check (Codex #3876 r5 P1): a delayed rerender that
+  // swaps the displayed billing account or ship-to while the radio stays
+  // checked and the total stable would otherwise submit on a stale proof.
+  // The trial click (Codex #3876 r5 P2): Playwright's actionability checks
+  // without dispatching — a disabled Place Order refuses BEFORE the
+  // submitted guard flips, instead of parking ambiguous with nothing sent.
   let cents = finalCents;
   const unstable = (shownCents) => new RefusedError('checkout_total_unstable', `SiteOne checkout total kept changing before the click (${cents} → ${shownCents}) — not submitted`, evidence, shownCents);
   for (let i = 0; ; i += 1) {
@@ -734,6 +741,9 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
       continue;
     }
     await recheckTenderAtClick(page, radio, { evidence, upload });
+    await identity();
+    try { await placeOrder.click({ trial: true, timeout: 5000 }); }
+    catch (e) { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError('place_order_unactionable', `the Place Order control cannot be clicked (${String(e.message).slice(0, 80)}) — nothing submitted`, evidence); }
     shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
     if (shownCents === cents) break;
     if (i >= 3) throw unstable(shownCents);
@@ -765,17 +775,21 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
 }
 
 // Wait (bounded) for a shown confirmation-number node whose text differs
-// from what was shown BEFORE the click; a timeout leaves the ambiguous path
-// to decide.
+// from what was shown BEFORE the click AND whose parsed identifier is not
+// the pre-click one: a reference node whose status text alone changes
+// ("PO reference 55501 · Ready" → "… · Validation failed") is not a new
+// confirmation (Codex #3876 r5 P2); a timeout leaves the ambiguous path to
+// decide.
 // Returns the confirmation number, or null at the timeout. The node's first
 // render ("Processing order…", an empty element) is not the outcome: polling
 // continues until the changed text yields a number (Codex #3876 r4 P2).
 async function waitForNewOrderNumber(page, beforeText, timeout) {
   const deadline = Date.now() + timeout;
+  const beforeNumber = beforeText != null ? orderNumberIn(beforeText) : null;
   for (;;) {
     const text = await shownOrderText(page);
     const number = text != null && text !== beforeText ? orderNumberIn(text) : null;
-    if (number) return number;
+    if (number && number !== beforeNumber) return number;
     if (Date.now() >= deadline) return null;
     await page.waitForTimeout(500);
   }
@@ -792,6 +806,8 @@ function orderNumberIn(text) {
   const MON = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*';
   const dateShaped = (t) => /^\d+([-/.]\d+)+$/.test(t) // 2026-09-05, 09-05-2026, 05/09/26
     || /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/.test(t) // 20260905 (compact)
+    || /^(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:19|20)\d{2}$/.test(t) // 09052026 (compact, month first — r5 P2)
+    || /^(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])(?:19|20)\d{2}$/.test(t) // 05092026 (compact, day first)
     || new RegExp(`^${MON}[-/.]?\\d{1,2}[-/.]\\d{2,4}$`, 'i').test(t) // Sep-05-2026
     || new RegExp(`^\\d{1,2}[-/.]?${MON}[-/.]?\\d{2,4}$`, 'i').test(t); // 05-Sep-2026
   const isId = (t) => !!t && /\d/.test(t) && !dateShaped(t);
@@ -820,7 +836,8 @@ async function checkoutAndSubmit(page, { credentials, shipToTokens, gate, eviden
   // r2 P1). The caller's finally empties the cart.
   if (dryRun) { await shot(page, 'dry-run-stop', evidence, upload); return { dryRun: true, amountCents: finalCents, externalOrderNumber: null, evidence }; }
   let placed;
-  try { placed = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio }); }
+  const identity = () => verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
+  try { placed = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity }); }
   catch (e) {
     // The click happened at THIS total: an ambiguous outcome parks with it
     // (a null amount on a placed_at row would count $0 against the
