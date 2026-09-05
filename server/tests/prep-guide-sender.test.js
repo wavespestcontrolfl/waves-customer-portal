@@ -14,7 +14,7 @@ let mockNotificationPrefsRow = null;
 // The guide's audience: the Monday sweep's own recurring-lawn predicate.
 let mockRecurringLawn = true;
 jest.mock('../services/irrigation-weekly-email', () => ({
-  hasRecurringLawnEvidence: jest.fn(async () => mockRecurringLawn),
+  findEligibleCustomers: jest.fn(async ({ customerId }) => (mockRecurringLawn ? [{ id: customerId }] : [])),
 }));
 jest.mock('../services/document-contract-delivery', () => ({
   marketingSmsConsentBasisForContract: jest.fn(async () => (mockNotificationPrefsRow?.seasonal_tips === true
@@ -203,6 +203,9 @@ beforeEach(() => {
   mockRestrictionPolicy = null;
   db.fn = { now: jest.fn(() => 'NOW()') };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // The dispatch-boundary stamp recheck runs in a transaction under the
+  // prefs advisory lock; the trx reads the same mocked tables.
+  db.transaction = jest.fn(async (fn) => fn(Object.assign((table) => db(table), { raw: jest.fn(async () => undefined) })));
   runRows = [];
   enrollmentRows = [];
   enrollmentUpdates = [];
@@ -1063,7 +1066,7 @@ describe('sprinkler timer guide', () => {
     mockNotificationPrefsRow = { seasonal_tips: true };
     const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
     expect(first.ok).toBe(true);
-    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].idempotencyKey).toBe('prep_guide_once:cust-1:prep.sprinkler_timer');
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].idempotencyKey).toBe('prep_guide_once:cust-1:prep.sprinkler_timer:claim-1');
     // The library's own email row (queued / sent / uncertain — anything not refused) is enough…
     jest.clearAllMocks();
     manualEmailRow = { id: 'em-1', status: 'queued', created_at: '2026-09-02T10:00:00Z' };
@@ -1084,7 +1087,7 @@ describe('sprinkler timer guide', () => {
   });
 
   test('an uncertain email (post-dispatch throw) writes a durable marker so the next click is refused, even though the ledger row reads failed', async () => {
-    EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ onQueued }) => { onQueued?.(); throw new Error('response lost'); });
+    EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ onQueued }) => { await onQueued?.(); throw new Error('response lost'); });
     const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
     expect(first).toMatchObject({ ok: false, emailSent: false, emailUncertain: true });
     // The pre-send claim is kept and marked uncertain — never released.
@@ -1125,6 +1128,54 @@ describe('sprinkler timer guide', () => {
     const refused = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
     expect(refused).toMatchObject({ ok: false, reason: 'guide_check_failed' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the email is withheld at the dispatch boundary when the move stamp changed since the block was built (onQueued → false, under the prefs advisory lock)', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    prefsRow = { irrigation_run_minutes: 35, irrigation_home_changed_at: null };
+    let queuedVerdict;
+    EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ onQueued }) => {
+      queuedVerdict = await onQueued();
+      return queuedVerdict === false ? { sent: false, aborted: true } : { sent: true };
+    });
+    // Unchanged stamp → dispatch.
+    const ok = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(queuedVerdict).toBe(true);
+    expect(ok.ok).toBe(true);
+    expect(db.transaction).toHaveBeenCalled();
+    // A move committed between the block and the queue → withheld (the claim
+    // is released: nothing reached the customer).
+    jest.clearAllMocks(); interactionDeletes = 0;
+    let prefReads = 0;
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customersQuery();
+      if (table === 'property_preferences') return { where: () => ({ first: async () => ({ irrigation_run_minutes: 35, irrigation_home_changed_at: (prefReads++ < 2) ? null : '2026-09-05T22:00:00Z' }) }) };
+      if (table === 'customer_turf_profiles') return traceQuery(null);
+      if (table === 'notification_prefs') return traceQuery(mockNotificationPrefsRow);
+      if (table === 'customer_interactions') { const q = traceQuery(null); q.insert = interactionsInsert; q.update = jest.fn(async () => 1); q.del = jest.fn(async () => { interactionDeletes += 1; return 1; }); return q; }
+      if (table === 'email_messages') return traceQuery(null);
+      if (table === 'sms_log') return traceQuery(null);
+      return customersQuery();
+    });
+    const withheld = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(queuedVerdict).toBe(false);
+    expect(withheld.ok).toBe(false);
+    expect(interactionDeletes).toBe(1);
+  });
+
+  test('a stale pre-dispatch claim (process died before the provider call) is reclaimed; a young one reads as in flight', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    const CLAIM = 'Prep send claimed via Communications — dispatching.';
+    interactionMarkerRow = { id: 'stale-1', subject: 'Sprinkler Timer Guide prep sent (manual)', body: CLAIM, created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString() };
+    const reclaimed = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(reclaimed.ok).toBe(true);
+    expect(interactionClaimWheres).toContainEqual({ id: 'stale-1', customer_id: 'cust-1' });
+    expect(interactionDeletes).toBeGreaterThanOrEqual(1);
+    jest.clearAllMocks();
+    interactionMarkerRow = { ...interactionMarkerRow, created_at: new Date().toISOString() };
+    const busy = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(busy).toMatchObject({ ok: false, reason: 'prep_send_busy' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('only a recurring lawn customer (the Monday plan\'s audience) gets the guide', async () => {
