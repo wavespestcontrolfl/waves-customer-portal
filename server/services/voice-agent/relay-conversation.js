@@ -345,13 +345,26 @@ function transferPromptAddendum(officeOpen) {
       '  say nothing further and call no more tools.',
     ].join('\n');
   }
+  if (officeOpen === false) {
+    return [
+      '',
+      'WHEN THEY ASK FOR A PERSON (office closed):',
+      '- The office is closed right now, so you cannot transfer the call. Say so plainly, state',
+      '  when the office reopens ONLY from the latest CLOCK DATA (never guess), and offer a',
+      '  callback: take their details with capture_lead and say a Waves team member will call',
+      '  them back. Use lead_quality "hot" if it is a genuine emergency.',
+    ].join('\n');
+  }
+  // Unknown (the hours lookup failed or timed out): transfers stay off, but
+  // Sandy must not claim the office is closed or name a reopening time
+  // (codex r5 P2 — the clock block says the same when hours are unknown).
   return [
     '',
-    'WHEN THEY ASK FOR A PERSON (office closed):',
-    '- The office is closed right now, so you cannot transfer the call. Say so plainly, state',
-    '  when the office reopens ONLY from the latest CLOCK DATA (never guess), and offer a',
-    '  callback: take their details with capture_lead and say a Waves team member will call',
-    '  them back. Use lead_quality "hot" if it is a genuine emergency.',
+    'WHEN THEY ASK FOR A PERSON (office hours unknown):',
+    '- You cannot transfer the call right now. Do NOT say the office is open or closed and do',
+    '  NOT state a reopening time. Offer a callback instead: take their details with',
+    '  capture_lead and say a Waves team member will call them back as soon as possible.',
+    '  Use lead_quality "hot" if it is a genuine emergency.',
   ].join('\n');
 }
 
@@ -1440,12 +1453,24 @@ class RelayConversation {
       // rings staff only when the row's owner is still this nonce (or the
       // row is unclaimed), so a superseded socket's transfer frame matches
       // 0 rows — the one-session boundary holds at the callback (hook P1).
+      // Returns whether the end frame was SENT (codex r5 P1): a socket that
+      // went CLOSING between the ended check and this send, or a send that
+      // threw, means no /relay-complete transfer callback will ever come —
+      // the tool reverts the stamp and answers accordingly. An endSession
+      // that reports nothing (older callers) counts as sent.
       endForTransfer: () => {
-        if (this._ending) return;
-        this._ending = true;
-        try { if (this._endSession) this._endSession({ reason: 'transfer', captured: this.leadCaptured, owner: this.sessionKey || null }); } catch (e) {
+        if (this._ending) return false;
+        let sent = false;
+        try {
+          if (this._endSession) {
+            const r = this._endSession({ reason: 'transfer', captured: this.leadCaptured, owner: this.sessionKey || null });
+            sent = r !== false;
+          }
+        } catch (e) {
           logger.error(`[voice-relay] endSession (transfer) failed callSid=${this.callSid}: ${e.message}`);
         }
+        if (sent) this._ending = true;
+        return sent;
       },
       // SERVER state for the handoff packet — never the model's claims.
       handoffFacts: () => ({

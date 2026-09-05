@@ -313,13 +313,16 @@ function attachVoiceRelay(httpServer) {
 
     // End the ConversationRelay session (agent finished + lead captured) so the
     // caller isn't left in silence. Twilio closes the call after the end frame.
+    // Returns true when the end frame was handed to the socket (PR 2A: the
+    // transfer tool needs to know — an unsent frame means no transfer).
     const endSession = (handoffData) => {
-      if (ws.readyState === ws.OPEN) {
-        try {
-          ws.send(endFrame(handoffData));
-        } catch (e) {
-          logger.error(`[voice-relay] end frame send failed: ${e.message}`);
-        }
+      if (ws.readyState !== ws.OPEN) return false;
+      try {
+        ws.send(endFrame(handoffData));
+        return true;
+      } catch (e) {
+        logger.error(`[voice-relay] end frame send failed: ${e.message}`);
+        return false;
       }
     };
 

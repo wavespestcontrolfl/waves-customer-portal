@@ -15040,7 +15040,12 @@ const CallRecordingProcessor = {
     // skipping scoring and carrying on into the finalization work — a
     // superseded pass has no business doing either (codex #3677 P1).
     if (!(await stillOwnsClaim())) return abandonToPeer('CSR scoring and finalization');
-    if (transcription && transcription.length > 50) {
+    // A transferred call is scored on its HUMAN leg only — and not at all
+    // when that leg was rejected as implausible (the sentinel sits under the
+    // staff segment; scoring it would persist a meaningless CSR score and
+    // could file a bogus follow-up, codex r5 P1).
+    const csrTranscript = recordedPartOfComposite(transcription) || transcription;
+    if (transcription && transcription.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
       try {
         const callMeta = typeof call.metadata === 'string'
           ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
@@ -15059,7 +15064,7 @@ const CallRecordingProcessor = {
           // staff leg: the CSR is scored on the HUMAN leg only (Sandy's
           // greeting / empathy / closing must not be awarded to the employee,
           // codex r4 P1). The composite stays the call record.
-          transcript: recordedPartOfComposite(transcription) || transcription,
+          transcript: csrTranscript,
           metadata: {
             callSid,
             duration: call.duration_seconds,

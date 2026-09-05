@@ -47,8 +47,12 @@ describe('registration — gate on AND office open', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     expect(buildBasePrompt(false, null, { officeOpen: true })).toContain('TRANSFER TO A PERSON (transfer_to_office)');
     expect(buildBasePrompt(false, null, { officeOpen: false })).toContain('WHEN THEY ASK FOR A PERSON (office closed)');
-    expect(buildBasePrompt(false, null, { officeOpen: null })).toContain('office closed');
-    expect(buildBasePrompt(false, null, { officeOpen: null })).not.toContain('transfer_to_office');
+    // Unknown hours (lookup failed / timed out): no transfer, and NO claim that the office is closed (codex r5 P2).
+    const unknown = buildBasePrompt(false, null, { officeOpen: null });
+    expect(unknown).toContain('WHEN THEY ASK FOR A PERSON (office hours unknown)');
+    expect(unknown).not.toContain('office closed');
+    expect(unknown).not.toContain('transfer_to_office');
+    expect(unknown).toContain('Do NOT say the office is open or closed');
   });
 });
 
@@ -486,6 +490,45 @@ describe('codex r3 follow-ups', () => {
     expect(tctx.sessionEnded()).toBe(false);
     convo.ended = true;
     expect(tctx.sessionEnded()).toBe(true);
+  });
+});
+
+describe('codex r5 follow-ups', () => {
+  test('the end frame was NOT sent (socket closing / send threw) ⇒ the stamp is reverted and the tool refuses; endForTransfer reports it (P1)', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const revertHandoff = jest.fn(async () => 1);
+    const { ctx } = ctxFor({ endForTransfer: jest.fn(() => false), revertHandoff });
+    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(revertHandoff).toHaveBeenCalledWith(ctx.writeHandoff.mock.calls[0][0].attempt);
+    await new Promise((r) => setImmediate(r));
+    expect(triggerNotification).not.toHaveBeenCalled();
+    // The session side: endSession false ⇒ not ending, returns false; a reporting-nothing endSession counts as sent.
+    const closing = new RelayConversation({ callSid: 'CA-cl', from: '+19415551234', send: jest.fn(), endSession: jest.fn(() => false) });
+    expect(closing._buildToolCtx().endForTransfer()).toBe(false);
+    expect(closing._ending).toBe(false);
+    const ok = new RelayConversation({ callSid: 'CA-ok', from: '+19415551234', send: jest.fn(), endSession: jest.fn() });
+    expect(ok._buildToolCtx().endForTransfer()).toBe(true);
+    expect(ok._ending).toBe(true);
+    expect(ok._buildToolCtx().endForTransfer()).toBe(false); // once
+  });
+
+  test('writeHandoffPacket refuses a call /call-status already closed (status terminal, outcome NULL) (P1)', async () => {
+    const db = require('../models/db');
+    const termQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
+    const attemptQ = { where: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis() };
+    const guardQ = { where: jest.fn((fn) => { fn(termQ); return guardQ; }), orWhere: jest.fn((fn) => { fn(attemptQ); return guardQ; }) };
+    const builder = { update: jest.fn(async () => []), where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }), whereRaw: jest.fn(() => builder) };
+    db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    await transfer.writeHandoffPacket(db, { callSid: 'CA-st', packet: { attempt: 'a' }, terminal: ['voicemail'] });
+    expect(builder.whereRaw).toHaveBeenCalledWith("(status IS NULL OR status NOT IN ('completed', 'failed', 'busy', 'no-answer', 'canceled'))");
+  });
+
+  test('the CSR coach is skipped when the recorded leg was rejected (P1)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('const csrTranscript = recordedPartOfComposite(transcription) || transcription;');
+    expect(src).toContain("if (transcription && transcription.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {");
+    expect(src).toContain('transcript: csrTranscript,');
   });
 });
 

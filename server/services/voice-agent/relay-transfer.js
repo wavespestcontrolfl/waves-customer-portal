@@ -175,6 +175,10 @@ async function writeHandoffPacket(db, { callSid, packet, fence = (q) => q, termi
   const notTransferable = [...new Set([...terminal, 'ai_handled'])];
   const q = db('call_log')
     .where('twilio_call_sid', callSid)
+    // …nor a call /call-status already closed (status terminal, outcome
+    // still NULL — the caller hung up while this UPDATE was queued): the
+    // compensating revert is best-effort, this fence is not (codex r5 P1).
+    .whereRaw("(status IS NULL OR status NOT IN ('completed', 'failed', 'busy', 'no-answer', 'canceled'))")
     .where((w) => w
       .where((n) => n.whereNull('call_outcome').orWhereNotIn('call_outcome', notTransferable))
       // …restricted to a row still in the transfer's own state: a later
@@ -271,7 +275,23 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // Speak, then end the relay leg: /relay-complete reads reason 'transfer'
   // from the end frame and rings the office.
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', facts.language));
-  if (typeof ctx.endForTransfer === 'function') ctx.endForTransfer();
+  const sent = typeof ctx.endForTransfer === 'function' ? ctx.endForTransfer() : false;
+  if (sent === false) {
+    // The socket closed (or the send threw) between the ended check and
+    // the end frame: no /relay-complete transfer callback will come, so the
+    // stamp is undone the same way (codex r5 P1). Nothing rings.
+    logger.warn(`[voice-relay] transfer end frame NOT sent — reverting the stamp callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
+    if (typeof ctx.revertHandoff === 'function') {
+      try {
+        await withTimeout(Promise.resolve(ctx.revertHandoff(packet.attempt)), ABANDON_REVERT_TIMEOUT_MS, 'timeout');
+      } catch (err) {
+        logger.warn(`[voice-relay] unsent-frame revert failed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}: ${err.message}`);
+      }
+    }
+    revertLateWrites(ctx, packet.attempt, late);
+    return 'The transfer could not be started on this call. Do NOT try again — take their details with capture_lead '
+      + 'and say a Waves team member will call them back.';
+  }
   if (noContext) ringNoContextBell(ctx, facts);
   return 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 }
