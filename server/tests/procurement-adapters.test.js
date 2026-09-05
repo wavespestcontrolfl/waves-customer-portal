@@ -366,8 +366,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (st.responsiveIdentity && sel === S.checkoutTotal) return hiddenThen('Order total $999.00', st.checkoutTotalText || 'Order total $99.00');
       // totalTexts: N shown total nodes, each its own text (nested `.grand-total` + `.price` = same figure twice; two figures = ambiguous) (r17 P2)
       if (sel === S.checkoutTotal && st.totalTexts) return el({ count: st.totalTexts.length, nth: (i) => el({ count: 1, visible: true, text: st.totalTexts[i] }) });
-      // totalByRead / totalAtClick index the TEXT reads (a resolution re-enumerates the candidates after the read since r21, so resolutions ≠ reads)
-      if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, get text() { const n = st.totalTextReads || 1; return st.totalByRead ? st.totalByRead(n) : st.totalAtClick && n > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00'); }, onRead: () => { st.totalTextReads = (st.totalTextReads || 0) + 1; } }); }
+      // totalByRead / totalAtClick index the LOGICAL reads: since r21/r22 each readCheckoutTotal resolves twice and reads the text twice (read + re-read must match), so resolutions ≠ reads ≠ logical reads
+      if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, get text() { const n = Math.ceil((st.totalTextReads || 1) / 2); return st.totalByRead ? st.totalByRead(n) : st.totalAtClick && n > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00'); }, onRead: () => { st.totalTextReads = (st.totalTextReads || 0) + 1; } }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       if (sel === S.placeOrder) { st.atClick = true; st.placeResolves = (st.placeResolves || 0) + 1; } // the Place Order stage has begun (the at-click re-checks run after this)
       // placeOrderDisabled: the visible Place Order button is not enabled (actionability fails, nothing dispatched)
