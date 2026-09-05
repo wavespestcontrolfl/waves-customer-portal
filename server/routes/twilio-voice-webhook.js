@@ -335,13 +335,14 @@ function isReconnectedRow(row) {
   return (Number(parseJsonObject(row && row.metadata).relay_reconnects) || 0) > 0;
 }
 
-/** The AI segment is safe in metadata.relay_transcript (PR 2A). */
+/** The AI segment is safe in metadata.relay_transcript (PR 2A) — or in durable metadata.relay_segments (PR 2B: a silent resumed leg wrote no stash). */
 function relayTranscriptStashed(row) {
   const meta = parseJsonObject(row && row.metadata);
-  return Boolean(meta.relay_transcript && typeof meta.relay_transcript === 'object' && String(meta.relay_transcript.text || '').trim());
+  if (meta.relay_transcript && typeof meta.relay_transcript === 'object' && String(meta.relay_transcript.text || '').trim()) return true;
+  return Array.isArray(meta.relay_segments) && meta.relay_segments.some((seg) => seg && typeof seg === 'object' && String(seg.text || '').trim());
 }
 // The SQL twin of the rule above, re-checked in the write.
-const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND COALESCE(metadata->'relay_transcript'->>'text', '') <> '' AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred' OR COALESCE((metadata->>'relay_reconnects')::int, 0) > 0))";
+const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND (COALESCE(metadata->'relay_transcript'->>'text', '') <> '' OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(metadata->'relay_segments') = 'array' THEN metadata->'relay_segments' ELSE '[]'::jsonb END) seg WHERE COALESCE(seg->>'text', '') <> '')) AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred' OR COALESCE((metadata->>'relay_reconnects')::int, 0) > 0))";
 
 // A second recording that arrived while the row's recording was load-bearing
 // (decideRecordingAttach → park). Nothing is lost: the recording rides in
