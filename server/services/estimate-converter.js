@@ -2562,6 +2562,45 @@ function recurringLineAnnualAmount(item = {}) {
   return 0;
 }
 
+// Per-line per-visit amounts for a slot-reserved accept that sold MORE than
+// one recurring program. The reserved row (and the first-application invoice
+// minted on it) carries the accept route's SAME-DAY total — every program's
+// first application on one trip — so a promoted same-trip parent stays
+// unpriced on purpose (the reserved row's invoice covers it; closeout reads
+// that as sibling_first_application). The seeded CHILDREN of both series were
+// the defect: the seeder copies the parent price, so the reserved series
+// repeated the combined figure on every later visit and the promoted series
+// carried NULL (prod 2026-09-04: pest children at $151.80 = $91.80 pest +
+// $60.00 lawn, eight lawn children unpriced). Returns each line's own
+// per-visit amount ONLY when the split reproduces the reserved price to the
+// cent — a plan-credit slice, a manual discount, or an unknown visit count
+// breaks the equality and returns null, and the callers keep the parent-copy
+// behavior rather than invent a price (unpriced = NULL, never a guess).
+function reservedAcceptPerVisitSplit({
+  reservedPrice,
+  reservedService,
+  promotedServices = [],
+  acceptedPlanFrequency = null,
+} = {}) {
+  const target = roundMoney(reservedPrice);
+  if (!(target > 0) || !reservedService || !promotedServices.length) return null;
+  const perVisit = (svc) => {
+    const annual = recurringLineAnnualAmount(svc);
+    // Pest bills at the ACCEPTED cadence, not the line's quote-time count
+    // (acceptedPestSelectionVisits doctrine).
+    const visits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency)
+      ?? visitsPerYearForRecurringService(svc);
+    if (!(annual > 0) || !(visits > 0)) return 0;
+    return roundMoney(annual / visits);
+  };
+  const reserved = perVisit(reservedService);
+  const promoted = promotedServices.map(perVisit);
+  if (!(reserved > 0) || promoted.some((amount) => !(amount > 0))) return null;
+  const sum = roundMoney(promoted.reduce((acc, amount) => acc + amount, reserved));
+  if (sum !== target) return null;
+  return { reserved, promoted };
+}
+
 // FL nonresidential sales tax DEFAULT (6% state + 1% surtax). Used only as the
 // fallback when the customer's effective rate can't be resolved (e.g. the
 // pre-accept estimate display before the customer row exists). The actual
@@ -3912,6 +3951,9 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
     skipWeekends: true,
     weekendShift: 'forward',
     durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
+    // undefined = the seeder's parent-copy price (every caller but the
+    // multi-program reserved accept).
+    estimatedPrice: opts.estimatedPrice,
   });
   if (opts.registerReminders !== false) {
     await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
@@ -5019,6 +5061,10 @@ const EstimateConverter = {
       // the rewritten row span two lines. Aligning multi-service reserved
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
+      // Per-line per-visit amounts for a multi-program reserved accept
+      // (reservedAcceptPerVisitSplit) — computed beside the promotions, read
+      // by both seeding calls. null = keep the seeder's parent-copy price.
+      let reservedPerVisitSplit = null;
       // Hoisted so the seed binding below the promotion try can read the
       // same authoritative identities (audit P0).
       let reservedServiceKeyById = new Map();
@@ -5270,7 +5316,43 @@ const EstimateConverter = {
                 : fam === 'tree_shrub' ? 'tree & shrub program' : 'lawn program',
             };
           });
-        for (const unit of [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits]) {
+        const promotedUnits = [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits];
+        // One reserved row, no combo rewrite pending on it, a stamped price:
+        // the row stands for exactly one accepted line and its price is the
+        // route's same-day total. Split it back into per-line per-visit
+        // amounts for the CHILDREN of every series seeded below. A unit that
+        // shares the reserved line's family IS the reserved program
+        // (alreadyReserved skips its insert) and is not a second line.
+        if (reservedStart && reservedRows.length === 1 && comboRewritePairs.length === 0
+          && Number(reservedStart.estimated_price) > 0 && promotedUnits.length) {
+          const reservedLineForSplit = recurringServiceForScheduledRow(
+            recurringServicesForConversion,
+            reservedStart,
+            process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+              ? seedFamilyForReservedIdentity(
+                reservedServiceKeyById.get(reservedStart.service_id)
+                  || String(reservedStart.service_key_snapshot || '') || null,
+              )
+              : null,
+          );
+          const reservedLineKey = reservedLineForSplit ? recurringServiceKey(reservedLineForSplit) : null;
+          const splitUnits = reservedLineForSplit
+            ? promotedUnits.filter((unit) => recurringServiceKey(unit.service) !== reservedLineKey)
+            : [];
+          const split = reservedAcceptPerVisitSplit({
+            reservedPrice: reservedStart.estimated_price,
+            reservedService: reservedLineForSplit,
+            promotedServices: splitUnits.map((unit) => unit.service),
+            acceptedPlanFrequency,
+          });
+          if (split) {
+            reservedPerVisitSplit = {
+              reserved: split.reserved,
+              byUnit: new Map(splitUnits.map((unit, index) => [unit, split.promoted[index]])),
+            };
+          }
+        }
+        for (const unit of promotedUnits) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to
           // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
@@ -5499,6 +5581,10 @@ const EstimateConverter = {
                 seedResult = await seedRecurringFollowUpsForParent(trx, parentRow, unit.service, {
                   fallbackFrequency: unit.service.frequency,
                   registerReminders: registerSeededRowsInline,
+                  // The promoted parent is deliberately unpriced (the reserved
+                  // row's first-application invoice covers the shared trip);
+                  // its follow-ups bill this line's own per-visit amount.
+                  estimatedPrice: reservedPerVisitSplit?.byUnit.get(unit),
                 });
               } catch (seedErr) {
                 logger.error(`[estimate-converter] standalone bait follow-up seeding failed for estimate ${estimateId}: ${seedErr.message}`);
@@ -5772,6 +5858,9 @@ const EstimateConverter = {
               const seedResult = await seedRecurringFollowUpsForParent(trx, reservedStart, seedSvc, {
                 fallbackFrequency: inferredFrequencyKey,
                 registerReminders: registerSeededRowsInline,
+                // The reserved row keeps the same-day total it was accepted
+                // and invoiced at; its follow-ups bill only this line.
+                estimatedPrice: reservedPerVisitSplit?.reserved,
               });
               return { seedResult };
             });
@@ -7187,6 +7276,7 @@ async function buildSeriesAddressScope(database, estimate, customerId) {
 }
 
 module.exports = EstimateConverter;
+module.exports.reservedAcceptPerVisitSplit = reservedAcceptPerVisitSplit;
 module.exports.buildSeriesAddressScope = buildSeriesAddressScope;
 module.exports.visitCountAliasValues = visitCountAliasValues;
 module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
