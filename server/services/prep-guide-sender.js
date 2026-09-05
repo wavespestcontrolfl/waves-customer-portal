@@ -17,10 +17,18 @@
  *             (auto_*_no_email, three pests) or reason no_upcoming_visit.
  *   • both  → email + the text above.
  *
- * The Communications route allow-lists every PREP_CONFIG pest — the eight
+ * The Communications route allow-lists every PREP_CONFIG entry — the eight
  * live prep.* guides (prep.wildlife stays archived: wildlife is a prohibited
- * Waves service, migration 20260707000002). Wire a new pest by adding its
- * config here.
+ * Waves service, migration 20260707000002) plus the sprinkler timer guide.
+ * Wire a new one by adding its config here.
+ *
+ * A `guide` entry (sprinkler_timer) is not visit prep: it is a one-time
+ * how-to whose buttons deep-link to the hub, so it looks up no upcoming
+ * visit and claims no prep page — a lawn visit's own prep_template_key
+ * (prep.lawn) is never touched by it, and its text is always the hub-link
+ * standalone. Its email carries a `watering_block` rendered here from the
+ * current restriction policy and the customer's minutes per zone (owner
+ * scope 2026-09-05, docs/irrigation-controller-guide-scope.md).
  */
 
 const db = require('../models/db');
@@ -35,6 +43,8 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+const { countyConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -147,7 +157,59 @@ const PREP_CONFIG = Object.freeze({
     emailTemplateKey: 'prep.termite',
     smsStandaloneKey: null,
   },
+  // One-time how-to, not visit prep (see the header): no serviceKeywords,
+  // no visit, no page claim. The text is the hub-link standalone on every
+  // channel.
+  sprinkler_timer: {
+    label: 'Sprinkler Timer Guide',
+    guide: true,
+    emailTemplateKey: 'prep.sprinkler_timer',
+    smsStandaloneKey: 'auto_sprinkler_timer',
+  },
 });
+
+// The guide email's watering callout, from what exists today: the CURRENT
+// restriction policy for the customer's resolved county (day count only —
+// the policy names no weekday or hour window) and the minutes per zone on
+// file. Fail closed: when coverage cannot be established the block points
+// the customer at the county rules and Monday's email instead of guessing.
+async function buildWateringBlock(customer) {
+  let minutes = null;
+  let policy = null;
+  try {
+    const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
+    const turf = await db('customer_turf_profiles').where({ customer_id: customer.id }).first();
+    const runMinutes = Number(prefs?.irrigation_run_minutes);
+    if (Number.isFinite(runMinutes) && runMinutes > 0) minutes = Math.round(runMinutes);
+    const county = resolveRestrictionCounty({
+      county: turf?.county || null,
+      profileCity: turf?.city || null,
+      city: customer.city,
+      zip: customer.zip,
+      homeMoved: !!prefs?.irrigation_home_changed_at,
+      movedAt: prefs?.irrigation_home_changed_at || null,
+      countyConfirmed: countyConfirmedAfterMove(prefs || {}),
+    });
+    policy = currentRestrictionPolicy(new Date(), { county });
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] watering block inputs unavailable for customer ${customer.id}: ${err.message}`);
+  }
+  const minutesLine = minutes
+    ? `run each grass zone about ${minutes} minutes.`
+    : 'each Monday\'s email tells you how many minutes to run each zone.';
+  if (!policy) {
+    return `Before you run, check your county\'s watering rules for your assigned day and hours. Then ${minutesLine}`;
+  }
+  const days = Number(policy.maxDaysPerWeek);
+  const through = policy.expiresOn ? `, through ${formatDisplayDate(policy.expiresOn, { fallback: policy.expiresOn })}` : '';
+  if (days === 0) {
+    return `Right now lawn watering is not allowed in your area (${policy.label})${through}. Wait for Monday\'s email to tell you when it opens back up.`;
+  }
+  const dayWord = days === 1 ? 'one watering day' : `${days} watering days`;
+  const hours = policy.hoursNote ? `, ${policy.hoursNote}` : '';
+  const onDay = days === 1 ? 'On that day' : 'On each of those days';
+  return `Right now your area allows ${dayWord} a week (${policy.label})${hours}${through}. ${onDay}, ${minutesLine}`;
+}
 
 // The text that carries the tokened guide page — one template for every
 // pest; {prep_label} names the guide, {prep_url} is the /prep/:token link.
@@ -507,6 +569,27 @@ async function stampPrepSent(visit, config) {
 async function sendPrepEmail({ customer, recipient, firstName, config, visit, prepUrl, stampVisit }) {
   let dispatched = false;
   try {
+    if (config.guide) {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: config.emailTemplateKey,
+        to: recipient.email,
+        recipientType: 'customer',
+        recipientId: customer.id,
+        suppressionGroupKey: SERVICE_GROUP,
+        categories: ['manual_prep', `prep_${config.emailTemplateKey.replace(/\./g, '_')}`],
+        triggerEventId: manualPrepTriggerId(customer.id, config.emailTemplateKey, null),
+        suppressProviderErrorLog: true,
+        onQueued: () => { dispatched = true; },
+        payload: {
+          first_name: firstName,
+          watering_block: await buildWateringBlock(customer),
+          customer_portal_url: portalUrl('/?tab=property'),
+          company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+          company_email: CONTACT_EMAIL,
+        },
+      });
+      return { sent: !!result?.sent };
+    }
     const portalVisitsUrl = portalUrl('/?tab=visits');
     const address = [customer.address_line1, customer.city, customer.state, customer.zip]
       .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
@@ -757,7 +840,10 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   // lease is an operator-facing "try again", not a wait (pre-push Codex
   // P1s on 8dbc30cc1 + 87b4cee92).
   const outcome = await runExclusive(`prep-send:${customer.id}`, async () => {
-    const page = await resolvePrepVisit(customer, config);
+    // A guide hangs on no visit: nothing to look up, claim, link or stamp.
+    const page = config.guide
+      ? { visit: null, prepUrl: null, ownsPage: false, linkReason: null }
+      : await resolvePrepVisit(customer, config);
     // An automation is already sending this very guide for the visit —
     // every channel would duplicate it.
     if (page.linkReason === 'prep_send_pending') return { ...result, reason: 'prep_send_pending' };
@@ -788,5 +874,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 }
 
 module.exports = {
-  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
 };

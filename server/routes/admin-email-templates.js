@@ -75,6 +75,7 @@ const PROTECTED_EMAIL_TEMPLATE_KEYS = new Set([
   'prep.lawn',
   'prep.mosquito',
   'prep.rodent',
+  'prep.sprinkler_timer',
   'prep.termite',
   'project.report_ready',
   'service.report_ready',

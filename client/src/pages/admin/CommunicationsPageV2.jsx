@@ -3191,10 +3191,14 @@ const PREP_TYPES = [
   { value: "termite", label: "Termite service" },
   { value: "mosquito", label: "Mosquito treatment" },
   { value: "lawn", label: "Lawn treatment" },
+  // One-time how-to, not visit prep: brand buttons deep-link to the hub
+  // sprinkler-timer guides, and the text carries that hub link (no visit).
+  { value: "sprinkler_timer", label: "Sprinkler timer guide (lawn)" },
 ];
 
 // Operator-chosen channel (owner ruling 2026-09-03). Text carries the
-// guide page link, which needs an upcoming visit of that type.
+// guide page link, which needs an upcoming visit of that type (the
+// sprinkler timer guide texts its hub link instead).
 const PREP_CHANNELS = [
   { value: "both", label: "Email and text" },
   { value: "email", label: "Email only" },

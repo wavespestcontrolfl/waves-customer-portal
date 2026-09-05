@@ -4,6 +4,14 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/sms-auto-send', () => ({ isRealProviderSend: jest.requireActual('../services/sms-auto-send').isRealProviderSend }));
+// The sprinkler timer guide's watering block reads the CURRENT restriction
+// policy; pinned here so the copy assertions do not depend on the calendar
+// (the checked-in default expires 2026-10-01 and then fails closed).
+let mockRestrictionPolicy = null;
+jest.mock('../config/irrigation-restrictions', () => ({
+  currentRestrictionPolicy: jest.fn(() => mockRestrictionPolicy),
+  resolveRestrictionCounty: jest.fn(() => 'Manatee'),
+}));
 // The per-customer advisory lock: pass-through by default; a test flips it
 // to "lease held elsewhere" (the real lock semantics live in cron-lock's own suite).
 jest.mock('../utils/cron-lock', () => ({
@@ -30,6 +38,8 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendPrepToCustomer } = require('../services/prep-guide-sender');
 
 let customerRow;
+let prefsRow = null; // property_preferences (sprinkler timer guide minutes)
+let turfRow = null; // customer_turf_profiles (county)
 
 function customersQuery() {
   const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), first: jest.fn(async () => customerRow) };
@@ -150,8 +160,13 @@ beforeEach(() => {
     if (table === 'automation_enrollments' || table === 'automation_enrollments as e') return livenessQuery(enrollmentRows);
     if (table === 'automation_step_sends') return traceQuery(stepSendRow);
     if (table === 'prep_guide_views') return traceQuery(viewRow);
+    if (table === 'property_preferences') return traceQuery(prefsRow);
+    if (table === 'customer_turf_profiles') return traceQuery(turfRow);
     return customersQuery();
   });
+  prefsRow = null;
+  turfRow = null;
+  mockRestrictionPolicy = null;
   db.fn = { now: jest.fn(() => 'NOW()') };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   runRows = [];
@@ -274,7 +289,7 @@ describe('sendPrepToCustomer', () => {
     const keys = Object.keys(PREP_CONFIG);
     // prep.wildlife stays archived — wildlife is a prohibited Waves service.
     expect(keys.sort()).toEqual([
-      'bed_bug', 'cockroach', 'flea', 'interior_pest', 'lawn', 'mosquito', 'rodent', 'termite',
+      'bed_bug', 'cockroach', 'flea', 'interior_pest', 'lawn', 'mosquito', 'rodent', 'sprinkler_timer', 'termite',
     ]);
     for (const pestType of keys) {
       jest.clearAllMocks();
@@ -916,5 +931,80 @@ describe('sendPrepToCustomer', () => {
     const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
     expect(payload.prep_url).toContain('?tab=visits');
     expect(payload.service_date).toBe('To be confirmed');
+  });
+});
+
+// The sprinkler timer guide: a one-time how-to, not visit prep (owner scope
+// 2026-09-05, docs/irrigation-controller-guide-scope.md).
+describe('sprinkler timer guide', () => {
+  const ORDER = {
+    maxDaysPerWeek: 1, label: 'SWFWMD Modified Phase III water shortage order',
+    hoursNote: 'on your assigned day, during your area\'s allowed hours', expiresOn: '2026-10-01', county: 'Manatee',
+  };
+
+  test('hangs on no visit: no scheduled_services read, no page claim, no prep_url — even with a lawn visit upcoming', async () => {
+    upcomingVisitRow = liveVisit({ service_type: 'Lawn Treatment', prep_template_key: 'prep.lawn' });
+    mockRestrictionPolicy = ORDER;
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+    expect(result.ok).toBe(true);
+    expect(result.emailSent).toBe(true);
+    expect(result.smsSent).toBe(true);
+    expect(scheduledQueries).toHaveLength(0);
+    expect(serviceUpdates).toEqual([]);
+    const call = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(call.templateKey).toBe('prep.sprinkler_timer');
+    expect(call.payload).not.toHaveProperty('prep_url');
+    expect(call.payload).not.toHaveProperty('service_date');
+    expect(call.payload.watering_block).toMatch(/one watering day a week/);
+    // The text is the hub-link standalone, never the tokened guide page.
+    expect(renderSmsTemplate.mock.calls[0][0]).toBe('auto_sprinkler_timer');
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.prep_variant).toBe('standalone');
+  });
+
+  test('text only needs no visit (unlike the visit-prep guides with no inline text)', async () => {
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(result.ok).toBe(true);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(renderSmsTemplate.mock.calls[0][0]).toBe('auto_sprinkler_timer');
+  });
+
+  test('watering block: day count from the policy, minutes from the customer\'s settings', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    mockRestrictionPolicy = ORDER;
+    prefsRow = { irrigation_run_minutes: 35 };
+    const block = await buildWateringBlock(customerRow);
+    expect(block).toMatch(/one watering day a week \(SWFWMD Modified Phase III water shortage order\)/);
+    expect(block).toMatch(/run each grass zone about 35 minutes\./);
+    // No weekday, no hour window: the policy cannot name either.
+    expect(block).not.toMatch(/Wednesday|AM|PM/);
+  });
+
+  test('watering block: no minutes on file → Monday\'s email carries the number', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    mockRestrictionPolicy = ORDER;
+    const block = await buildWateringBlock(customerRow);
+    expect(block).toMatch(/Monday's email tells you how many minutes/);
+    expect(block).not.toMatch(/about \d+ minutes/);
+  });
+
+  test('watering block fails closed: no policy (coverage not established) → check your county, never a guessed day count', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    mockRestrictionPolicy = null;
+    prefsRow = { irrigation_run_minutes: 40 };
+    const block = await buildWateringBlock(customerRow);
+    expect(block).toMatch(/check your county's watering rules/);
+    expect(block).toMatch(/about 40 minutes/);
+    expect(block).not.toMatch(/watering day a week/);
+  });
+
+  test('watering block survives a preferences read failure (fails closed)', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    mockRestrictionPolicy = ORDER;
+    db.mockImplementation((table) => {
+      if (table === 'property_preferences') return { where: () => ({ first: async () => { throw new Error('boom'); } }) };
+      return customersQuery();
+    });
+    const block = await buildWateringBlock(customerRow);
+    expect(block).toMatch(/check your county's watering rules/);
   });
 });
