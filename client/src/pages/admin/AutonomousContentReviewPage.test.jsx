@@ -311,3 +311,82 @@ describe('navigation and background loading', () => {
     expect(screen.getByText('Full draft revision 1')).toBeTruthy();
   });
 });
+
+describe('3916 follow-ups', () => {
+  it.each(['filter', 'page'])('disables decisions while a foreground %s query is pending', async (query) => {
+    const original = fetch.getMockImplementation();
+    let release;
+    fetch.mockImplementation(async (url, opts) => {
+      if (url.includes('actionType=other')) {
+        const params = new URL(url, 'http://localhost').searchParams;
+        if (params.get('offset') === '50' || params.get('status') === 'all') {
+          return new Promise(resolve => { release = resolve; });
+        }
+        return { ok: true, json: async () => ({ items: [item('other-1')], total: 51 }) };
+      }
+      return original(url, opts);
+    });
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    await screen.findByPlaceholderText('Reviewer note (optional)');
+    if (query === 'page') fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    else fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'all' } });
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    for (const name of ['Requeue', 'Approve & publish', 'Dismiss']) {
+      const button = screen.getByRole('button', { name });
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button);
+    }
+    expect(fetch.mock.calls.some(([, opts]) => opts?.method === 'POST')).toBe(false);
+    await act(async () => release({ ok: true, json: async () => ({ items: [item('other-1')], total: 51 }) }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Dismiss' }).disabled).toBe(false));
+  });
+
+  it('keeps full detail and unsaved notes visible during a slow same-record poll', async () => {
+    const original = fetch.getMockImplementation();
+    let release;
+    let hold = false;
+    fetch.mockImplementation(async (url, opts) => {
+      if (hold && url.endsWith('/review/other-1')) return new Promise(resolve => { release = resolve; });
+      const response = await original(url, opts);
+      if (url.includes('actionType=other')) return { ok: true, json: async () => ({
+        items: [{ ...item('other-1'), draft: { body_preview: 'Abbreviated list preview' } }], total: 1,
+      }) };
+      return response;
+    });
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    vi.useFakeTimers();
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Other content' })));
+    expect(screen.getByText('Full draft revision 1')).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
+    hold = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(release).toBeTypeOf('function');
+    expect(screen.getByText('Full draft revision 1')).toBeTruthy();
+    expect(screen.queryByText('Abbreviated list preview')).toBeNull();
+    expect(screen.getByDisplayValue('Keep this note')).toBeTruthy();
+    revision = 2;
+    await act(async () => release({ ok: true, json: async () => ({ item: item('other-1') }) }));
+    expect(screen.getByText('Full draft revision 2')).toBeTruthy();
+    expect(screen.getByDisplayValue('Keep this note')).toBeTruthy();
+  });
+
+  it('treats clicking the active tab as a no-op for review notes and queries', async () => {
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    await screen.findByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Unsaved review' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'all' } });
+    await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull());
+    await screen.findByText('Full draft revision 1');
+    const calls = fetch.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    expect(screen.getByDisplayValue('Unsaved review')).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Activity status' }).value).toBe('all');
+    expect(screen.getByText('Full draft revision 1')).toBeTruthy();
+    expect(fetch.mock.calls.length).toBe(calls);
+  });
+});
