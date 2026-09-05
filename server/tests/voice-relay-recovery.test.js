@@ -904,6 +904,45 @@ describe('the conversation side', () => {
     } finally { jest.dontMock('@anthropic-ai/sdk'); }
   });
 
+  test('the resumed model can accept a prior spoken time using its seeded slot reference', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    let Convo;
+    let isolatedDb;
+    let calls = 0;
+    const context = { date: '2026-01-02', startMinutes: 840, lat: 27.4, lng: -82.5, duration: 90, timeOfDay: 'afternoon', expandOpenDays: true };
+    const stream = jest.fn((request) => ({ finalMessage: async () => {
+      calls += 1;
+      if (calls > 1) return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'The team will confirm your requested time.' }] };
+      const seed = request.messages.find((m) => typeof m.content === 'string' && m.content.includes('Previously offered times'));
+      expect(seed.content).toContain('Friday January 2 at 2 PM (slot_ref: S1-1)');
+      expect(seed.content).not.toMatch(/27\.4|-82\.5|startMinutes|expandOpenDays/);
+      const ref = seed.content.match(/slot_ref: ([A-Z0-9-]+)/)[1];
+      return { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'restored-booking', name: 'request_booking', input: { slot_ref: ref } }] };
+    } }));
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream } }; });
+      Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
+      isolatedDb = require('../models/db');
+    });
+    try {
+      const segment = recovery.buildSegment({ generation: 1, text: 'Agent: I can offer Friday at two.\nTool: find_slots', slotRefs: [['S1-1', context]] });
+      primeDb({ db: isolatedDb, firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [segment] } } });
+      const convo = new Convo({ callSid: 'CA-model-slots', sessionKey: 'nonce-2', sessionGeneration: 2, from: '+19415551234', send: jest.fn(), resumed: true });
+      convo._callerVerified = true;
+      await convo._resumeReady;
+      convo._sessionSuperseded = jest.fn(async () => false);
+      const execute = jest.fn(async (name, input, ctx) => {
+        expect(name).toBe('request_booking');
+        expect(ctx.resolveSlotRef(input.slot_ref)).toEqual(context);
+        return 'The team will confirm the requested time.';
+      });
+      convo._executeToolBounded = execute;
+      await convo._runLoop('Yes, Friday at two works');
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(stream).toHaveBeenCalledTimes(2);
+    } finally { jest.dontMock('@anthropic-ai/sdk'); }
+  });
+
   test('a reconnect that read the row BEFORE the old socket appended its segment reloads on the next turns and seeds when it lands (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } }); // proven, but no segment yet

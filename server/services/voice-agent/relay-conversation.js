@@ -25,7 +25,7 @@ const { maskSid } = require('../twilio-failure-alerts');
 const { toE164, isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
-const { activeTools } = require('./relay-tools');
+const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 
@@ -1753,8 +1753,13 @@ class RelayConversation {
     }
     if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
       this._resumeSeeded = true;
+      const { formatSmsTime } = require('../../utils/sms-time-format');
+      const offeredSlots = [...this._slotRefs].map(([ref, slot]) => {
+        const start = `${Math.floor(slot.startMinutes / 60)}:${String(slot.startMinutes % 60).padStart(2, '0')}`;
+        return `${speakSlot({ date: slot.date, start_label: formatSmsTime(start) })} (slot_ref: ${ref})`;
+      }).join('\n');
       this.messages.push(
-        { role: 'user', content: `[Earlier in this call, before the line dropped — the caller may pick up where this left off]\n${this._resume.segmentsText}\n[Previously issued account lookup results — same redacted access rules apply]\n${this._lookupResults.join('\n')}` },
+        { role: 'user', content: `[Earlier in this call, before the line dropped — the caller may pick up where this left off]\n${this._resume.segmentsText}\n[Previously issued account lookup results — same redacted access rules apply]\n${this._lookupResults.join('\n')}\n[Previously offered times — use the matching slot_ref if accepted; request_booking rechecks availability]\n${offeredSlots}` },
         { role: 'assistant', content: 'Understood — I have what we covered before the line dropped.' },
       );
     }
