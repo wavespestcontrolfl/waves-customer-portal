@@ -241,7 +241,7 @@ describe('/call-complete AI backstop → Sandy → transfer (codex hook r21)', (
     process.env.VOICE_RELAY_WS_SECRET = 'test-secret';
     const { getCallRoutingConfig } = require('../services/call-routing-config');
     getCallRoutingConfig.mockResolvedValueOnce({ agentEndpoint: 'wss://portal.wavespestcontrol.com/ws/voice-agent' });
-    const callLog = { update: jest.fn(async () => 1), where: jest.fn(() => callLog), whereRaw: jest.fn(() => callLog), select: jest.fn(() => callLog), first: jest.fn(async () => ({ metadata: {}, call_outcome: null })) };
+    const callLog = { update: jest.fn(async () => 1), where: jest.fn(() => callLog), whereRaw: jest.fn(() => callLog), whereNull: jest.fn(() => callLog), select: jest.fn(() => callLog), first: jest.fn(async () => ({ metadata: {}, call_outcome: null })) };
     const other = { update: jest.fn(async () => 1), where: jest.fn(() => other), whereRaw: jest.fn(() => other), first: jest.fn(async () => null), select: jest.fn(() => other), insert: jest.fn(async () => [1]) };
     db.mockImplementation((table) => (table === 'call_log' ? callLog : other));
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -256,6 +256,23 @@ describe('/call-complete AI backstop → Sandy → transfer (codex hook r21)', (
     await handlerFor('/call-complete')({ body: { CallSid: 'CA-backstop-2', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res2);
     expect(res2.body).not.toContain('ConversationRelay');
     expect(res2.body).toContain('<Record');
+    // A reset that LANDS after the deadline is put back to voicemail (codex r6 P1).
+    jest.useFakeTimers();
+    getCallRoutingConfig.mockResolvedValueOnce({ agentEndpoint: 'wss://portal.wavespestcontrol.com/ws/voice-agent' });
+    let settleReset;
+    const updates = [];
+    callLog.update = jest.fn((patch) => { updates.push(patch); return patch.status === 'in-progress' ? new Promise((r) => { settleReset = r; }) : Promise.resolve(1); });
+    const res3 = mockRes();
+    const p3 = handlerFor('/call-complete')({ body: { CallSid: 'CA-backstop-3', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res3);
+    await jest.advanceTimersByTimeAsync(4000);
+    await p3;
+    expect(res3.body).toContain('<Record');
+    settleReset(1);
+    await jest.advanceTimersByTimeAsync(0);
+    jest.useRealTimers();
+    await new Promise((r) => setImmediate(r));
+    expect(updates[updates.length - 1]).toEqual(expect.objectContaining({ status: 'no-answer', call_outcome: 'voicemail' }));
+    expect(callLog.whereNull).toHaveBeenCalledWith('call_outcome');
     // The packet write's status fence lets a live (in-progress) call through and refuses a closed one.
     const fence = "(status IS NULL OR status NOT IN ('completed', 'failed', 'busy', 'no-answer', 'canceled'))";
     expect(fence).not.toMatch(/in-progress/);

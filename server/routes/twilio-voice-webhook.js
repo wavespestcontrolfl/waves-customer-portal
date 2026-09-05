@@ -1611,13 +1611,23 @@ router.post('/call-complete', async (req, res) => {
               // and every later transfer refused; with the DB down the
               // session could not claim the row either — voicemail is the
               // coherent fallback.
-              const reset = await withDeadline(
-                db('call_log').where('twilio_call_sid', CallSid)
-                  .update({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
-                  .catch((err) => { logger.warn(`[call-complete] backstop status reset failed for ${maskSid(CallSid)}: ${err.message}`); return 0; }),
-                STAMP_DEADLINE_MS,
-                0,
-              );
+              const resetPromise = db('call_log').where('twilio_call_sid', CallSid)
+                .update({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
+                .catch((err) => { logger.warn(`[call-complete] backstop status reset failed for ${maskSid(CallSid)}: ${err.message}`); return 0; });
+              const reset = await withDeadline(resetPromise, STAMP_DEADLINE_MS, 'timeout');
+              if (reset === 'timeout') {
+                // The deadline does not cancel the queued UPDATE: if it lands
+                // after the recorder started it would re-open a call Sandy
+                // never took — put the voicemail classification back when it
+                // does (detached; codex r6 P1).
+                void resetPromise
+                  .then((rows) => (Number(rows) > 0
+                    ? db('call_log').where('twilio_call_sid', CallSid).where('answered_by', 'ai_agent').whereNull('call_outcome')
+                      .update({ status, answered_by: answeredBy, call_outcome: 'voicemail', updated_at: new Date() })
+                    : 0))
+                  .then((rows) => { if (Number(rows) > 0) logger.warn(`[call-complete] late backstop reset for ${maskSid(CallSid)} put back to voicemail`); })
+                  .catch((err) => logger.warn(`[call-complete] late backstop reset compensation failed for ${maskSid(CallSid)}: ${err.message}`));
+              }
               if (Number(reset) > 0) {
                 // CallSid binds the upgrade token to THIS call (relay-protocol).
                 // Profile stamped before the relay opens — same reason as /voice.
