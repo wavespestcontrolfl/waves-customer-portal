@@ -74,10 +74,10 @@ const prospect = (o = {}) => ({ id: 'p1', link_type: 'directory', target_domain:
 
 beforeEach(() => {
   worker.claim.mockReset(); worker.report.mockReset();
-  // A 'placed' report writes status='placed' + quality_signals.location in the real worker;
+  // A 'placed' report stores the reported location_key in the real worker;
   // mirror that into the placement registry so the next prospect's alreadyPlacedAt sees it.
   worker.report.mockImplementation(async (body) => {
-    if (body && body.outcome === 'placed' && mockQueryKey.last) mockPlaced.add(mockQueryKey.last);
+    if (body && body.outcome === 'placed' && body.location) mockPlaced.add(`${mockQueryKey.domain}|${body.location}`);
     return { ok: true };
   });
   worker.releaseClaims.mockReset(); worker.releaseClaims.mockResolvedValue({ released: 0 });
@@ -91,7 +91,7 @@ describe('leaseGuardedReclassify (optimistic lease guard)', () => {
     const n = await leaseGuardedReclassify({ id: 'p1', lease_token: '2026-06-22T00:00:00.000Z', target_domain: 'x.com' }, { automation_policy: 'skip' });
     // .where({id}).where('claimed_at', <lease date>).update(...)
     expect(mockWhere).toHaveBeenCalledWith('claimed_at', new Date('2026-06-22T00:00:00.000Z'));
-    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, claimed_by: null }));
+    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null }));
     expect(n).toBe(1);
     // a reclassify IS a lease release: the placement settles onto its live path (Codex PR #3687 r29 P1)
     expect(require('../services/seo/link-prospect-worker').settleReleasedPlacements).toHaveBeenCalledWith(['p1'], expect.anything()); // inside the release transaction
@@ -328,4 +328,20 @@ describe('run — outcomes', () => {
       { id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' },
     ]);
   });
+});
+
+
+test.each([undefined, '-'])('unscoped signup location %s reports the actual GBP location for duplicate detection', async (location_key) => {
+  worker.claim.mockResolvedValue([prospect({ location_key })]);
+  fillCitationForm.mockResolvedValue({ outcome: 'placed', pending: true });
+  await runner.run();
+  expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', location: 'bradenton' }));
+});
+
+test('unscoped content submission preserves its domain-wide identity', async () => {
+  worker.claim.mockResolvedValue([prospect({ link_type: 'editorial', location_key: '-' })]);
+  fillCitationForm.mockResolvedValue({ outcome: 'placed', pending: true });
+  await runner.run();
+  expect(worker.report).toHaveBeenCalledTimes(1);
+  expect(worker.report.mock.calls[0][0]).not.toHaveProperty('location');
 });

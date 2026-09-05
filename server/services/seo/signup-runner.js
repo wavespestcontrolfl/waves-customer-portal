@@ -184,7 +184,7 @@ async function leaseGuardedReclassify(p, patch) {
       // Stamp last_classified_at so the weekly classifier treats this runtime decision as
       // fresh and won't re-pick the row and revert a parked gate (e.g. a heuristic FREEFORM
       // domain back to submit_free) before the 30-day reclassify window.
-      .update({ ...patch, claimed_at: null, claimed_by: null, last_classified_at: new Date(), updated_at: new Date() });
+      .update({ ...patch, claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, last_classified_at: new Date(), updated_at: new Date() });
     // This IS a lease release (often into a parked policy nothing will claim
     // again): the placement follows a superseded path in the SAME transaction,
     // like every other release — released and settled, or neither.
@@ -294,7 +294,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       // verifier must reconcile THIS row against the homepage (not its money-page
       // target_page). A durable flag scopes the homepage rule to runner-created rows only —
       // manual/strategy directory rows keep target_page.
-      const rep = await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, ...(p.location_key && p.location_key !== '-' ? { location: p.location_key } : {}), notes: 'auto-submitted placement' });
+      const rep = await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'placed', lease_token: p.lease_token, live_url: result.liveUrl || null, evidence_url: evidenceKey || null, pending, ...(worker.SIGNUP_TYPES.includes(p.link_type) ? { location: loc.id } : p.location_key && p.location_key !== '-' ? { location: p.location_key } : {}), notes: 'auto-submitted placement' });
       if (rep && rep.ok) { counts.placed++; }
       else {
         // report rejected (e.g. stale lease) — don't claim success; the row stays
