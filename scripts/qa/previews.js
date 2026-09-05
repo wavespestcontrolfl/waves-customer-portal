@@ -5,7 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { previewServer, launchBrowser, evidence } = require('./browser');
+const { previewServer, launchBrowser, evidence, waitForFonts } = require('./browser');
 
 const root = path.resolve(__dirname, '../..');
 const artifactDir = path.resolve(process.env.QA_ARTIFACT_DIR || path.join(root, '.tmp/qa/previews'));
@@ -38,6 +38,7 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
     const response = await page.goto(baseUrl + scenario.url, { waitUntil: 'domcontentloaded' });
     assert.equal(response.status(), 200);
     await page.waitForFunction((text) => document.body.innerText.toLowerCase().includes(text.toLowerCase()), scenario.ready, { timeout: 30000 });
+    await waitForFonts(page);
     if (scenario.name === 'service-report') {
       await page.locator('h1.sr-title').waitFor();
       assert.equal(await page.locator('h1.sr-title').innerText(), 'Hi Test, one area could not be serviced!');

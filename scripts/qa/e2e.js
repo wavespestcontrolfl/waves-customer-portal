@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { readContext, childEnvironment } = require('../dev/context');
 const { doctor } = require('../dev/doctor');
-const { launchBrowser, evidence } = require('./browser');
+const { launchBrowser, evidence, waitForFonts } = require('./browser');
 const { fixtureIdentity, seed, cleanup } = require('./fixtures');
 const { etDateString } = require('../../server/utils/datetime-et');
 const { createScheduledService } = require('../../server/services/booking/create-scheduled-service');
@@ -124,6 +124,7 @@ async function main() {
       assert.ok(customerToken);
       assert.equal((await page.request.get(`${baseUrl}/api/admin/settings`, { headers: { Authorization: `Bearer ${customerToken}` } })).status(), 401);
       await page.waitForFunction(() => document.body.innerText.includes('QA'));
+      await waitForFonts(page);
       await page.screenshot({ path: path.join(artifactDir, 'customer-portal.png'), fullPage: true });
     });
     await step('estimate-acceptance-is-idempotent', async () => {
@@ -174,6 +175,7 @@ async function main() {
       assert.equal(Number(payments[0].amount), 99);
       await page.goto(`${baseUrl}/receipt/${fixture.invoiceToken}`);
       await page.getByText('$99.00', { exact: false }).first().waitFor();
+      await waitForFonts(page);
       await page.screenshot({ path: path.join(artifactDir, 'receipt.png'), fullPage: true });
     });
     await step('completion-and-report-redaction', async () => {
@@ -205,6 +207,7 @@ async function main() {
       assert.ok(!publicReport.staffViewer, 'Render the customer report without a staff session');
       assert.ok(!JSON.stringify(publicReport).includes('QA-PRIVATE-'));
       await page.getByRole('heading', { name: /Hi QA/i }).waitFor();
+      await waitForFonts(page);
       await page.screenshot({ path: path.join(artifactDir, 'report.png'), fullPage: true });
     });
   } catch (error) {
