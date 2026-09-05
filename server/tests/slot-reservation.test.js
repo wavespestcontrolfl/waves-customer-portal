@@ -122,6 +122,7 @@ describe('slot reservation helpers', () => {
   function makeTechnicianBuilder(row = { id: 'tech-1' }) {
     return {
       where: jest.fn().mockReturnThis(),
+      forShare: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue(row),
     };
   }

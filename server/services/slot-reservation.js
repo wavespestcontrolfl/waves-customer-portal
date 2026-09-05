@@ -852,7 +852,9 @@ async function reserveSlot({
       if (techId) {
         let activeTech = null;
         try {
-          activeTech = await applyAssignable(trx('technicians').where({ 'technicians.id': techId })).first('technicians.id');
+          // FOR SHARE on the reserving trx: an offboarding's FOR UPDATE cannot
+          // commit between this check and the hold's insert.
+          activeTech = await applyAssignable(trx('technicians').where({ 'technicians.id': techId })).forShare().first('technicians.id');
         } catch (techErr) {
           logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
         }
