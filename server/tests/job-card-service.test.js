@@ -1433,4 +1433,95 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const tritek = await jobCard.mixForProduct('tri', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-03-09T14:00:00Z') });
     expect(tritek).toMatchObject({ amount: 1.28, amountMax: null, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false } });
   });
+
+  test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },
+      lawn: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] },
+    };
+    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'ant', name: 'Advion Ant Gel' }, { id: 'bif', name: 'Bifen IT' }, { id: 'c', name: 'Celsius WG' }];
+    const run = (facts) => jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [], ...facts }, protocols, catalog, dbh: () => ({}) });
+    const specialty = await run({ addons: [
+      { name: 'Fire Ant Treatment', category: 'specialty', serviceKey: 'fire_ant' },
+      { name: 'Tick Control Service', category: 'specialty', serviceKey: 'tick_control' },
+      { name: 'Wildlife Trapping Service', category: 'specialty', serviceKey: 'wildlife_trapping' },
+      { name: 'Bee / Wasp Nest Removal', category: 'specialty', serviceKey: 'bee_wasp_removal' },
+    ] });
+    expect(specialty.addons).toEqual([
+      { name: 'Fire Ant Treatment', products: 1, visit: { number: 3, month: 'Any' }, note: null },
+      { name: 'Tick Control Service', products: 1, visit: { number: 4, month: 'Any' }, note: null },
+      { name: 'Wildlife Trapping Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (specialty)' },
+      { name: 'Bee / Wasp Nest Removal', products: 0, visit: null, note: 'No treatment protocol for this add-on (specialty)' },
+    ]);
+    // The same identity as the primary line.
+    const fireAnt = await run({ serviceType: 'Fire Ant Treatment', serviceCategory: 'specialty', serviceKey: 'fire_ant' });
+    expect([fireAnt.visit.visit, fireAnt.lines.map((l) => l.product.id)]).toEqual([3, ['ant']]);
+    // Mechanical lawn services: lawn_care by catalog, no chemical plan — the plan is never built.
+    const buildPlan = jest.fn();
+    for (const [serviceType, serviceKey] of [['Core Aeration', 'lawn_aeration'], ['Lawn Dethatching', 'dethatching'], ['Lawn Plugging', 'plugging'], ['Top Dressing', 'top_dressing']]) {
+      const out = await jobCard.resolveVisitLines({ facts: { isLawn: true, serviceId: 'svc1', serviceType, serviceCategory: 'lawn_care', serviceKey, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}), deps: { buildPlan } });
+      expect([serviceType, out.lines, out.note]).toEqual([serviceType, [], 'No treatment protocol for this service (lawn_care)']);
+    }
+    expect(buildPlan).not.toHaveBeenCalled();
+    const mechanicalAddon = await run({ addons: [{ name: 'Lawn Dethatching', category: 'lawn_care', serviceKey: 'dethatching' }, { name: 'Lawn Care', category: 'lawn_care', serviceKey: 'lawn_care_recurring' }] });
+    expect(mechanicalAddon.addons).toEqual([
+      { name: 'Lawn Dethatching', products: 0, visit: null, note: 'No treatment protocol for this add-on (lawn_care)' },
+      { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
+    ]);
+  });
+
+  test('a lawn add-on on a non-lawn visit withholds the tank dose of a product no protocol names (r6 P1)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const celsius = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const demand = { id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rows = {
+      scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control' }],
+      products_catalog: [celsius], equipment_calibrations: [live], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Lawn Care', category: 'lawn_care', service_key: 'lawn_care_recurring' }],
+    };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const buildPlan = jest.fn();
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] } };
+    const opts = { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') };
+    const held = await jobCard.mixForProduct('p1', 110, opts);
+    expect(held).toMatchObject({ amount: null, reason: 'Lawn Care has no plan on this visit — amount withheld', ratePer1000: null, context: { line: null } });
+    expect(buildPlan).not.toHaveBeenCalled();
+    // The pest protocol's own product still doses under the pest line.
+    rows.products_catalog = [demand];
+    expect(await jobCard.mixForProduct('d', 1, opts)).toMatchObject({ amount: 0.4, context: { line: null, conditional: false } });
+    // Without the lawn add-on the pest search is as permissive as before.
+    rows.products_catalog = [celsius]; rows.scheduled_service_addons = [];
+    expect((await jobCard.mixForProduct('p1', 110, opts)).amount).toBe(6.215);
+    // A lawn PRIMARY with a lawn add-on stays governed by its own plan.
+    rows.scheduled_services = [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care', service_category: 'lawn_care', service_key: 'lawn_care_recurring' }];
+    rows.scheduled_service_addons = [{ service_name: 'Lawn Care', category: 'lawn_care', service_key: 'lawn_care_recurring' }];
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [{ product: { id: 'p1' }, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
+    const planned = await jobCard.mixForProduct('p1', 110, { ...opts, deps: { ...opts.deps, evaluateApprovals: jest.fn().mockResolvedValue({ blocks: [], warnings: [] }) } });
+    expect(buildPlan).toHaveBeenCalled();
+    expect(planned).toMatchObject({ amount: 11, rateSource: 'plan' });
+  });
+
+  test('account-tier and diagnosis "for" clauses are conditional; target-pest ones are not (r6 P2)', () => {
+    const { isConditionalLine } = jobCard._test;
+    for (const raw of [
+      'Cytogro: label rate for premium/stressed accounts ($10.47)',
+      'EDDHA iron (Sequestar 6% Fe): label rate for high-pH chlorosis ($1.73)',
+      'EDDHA iron (Sequestar 6% Fe) for high-pH chlorosis sites ($1.73)',
+      'Cytogro and NutriRoot kelp/humate support for premium/stressed accounts ($10.47)',
+    ]) expect([raw, isConditionalLine(raw)]).toEqual([raw, true]);
+    for (const raw of [
+      'Distance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs or crawlers ($16.52)',
+      'Non-repellent treatment (interior + exterior) for ghost or trailing ants',
+      'Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)',
+    ]) expect([raw, isConditionalLine(raw)]).toEqual([raw, false]);
+  });
 });

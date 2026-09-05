@@ -306,21 +306,29 @@ async function loadAddons(dbh, serviceId) {
 // Station" the termite-bait protocol (the matcher's deliberate composite
 // pick — the tech needs the station steps), while "Pest Inspection
 // Service" — inspection by identity, pest by name — resolves nothing. Specialty is a
-// grab-bag (tick, wildlife, bee/wasp, the general appointment …) whose one
-// treatment protocol is bed bug: named only, no category default.
-// Inspection / other and an unknown category resolve no products.
+// grab-bag (tick, wildlife, bee/wasp, the general appointment …) with no
+// category default: its treatments are admitted by catalog identity
+// (`keys`: fire ant, flea, tick → the pest program's matcher visit; the
+// bed-bug treatment → its own program) or, for the bed-bug rows booked
+// before the catalog link, by name. Inspection / other and an unknown
+// category resolve no products. `mechanical` service keys (core aeration,
+// dethatching, plugging, top dressing) are lawn work without a chemical
+// plan — the catalog classifies them lawn_care, so the category alone
+// would hand them the month's fertiliser and pesticide lines.
 const ADDON_PROGRAMS = Object.freeze({
   pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
-  lawn_care: { any: ['lawn'], fallback: 'lawn' },
+  lawn_care: { any: ['lawn'], fallback: 'lawn', mechanical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
   mosquito: { any: ['mosquito'], fallback: 'mosquito' },
   termite: { any: ['termite'], fallback: 'termite' },
   rodent: { any: ['rodent'], fallback: 'rodent' },
   tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },
-  specialty: { any: ['bed_bug'], fallback: null },
+  specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
   if (!rule) return null;
+  if (serviceKey && rule.mechanical?.includes(serviceKey)) return null;
+  if (serviceKey && rule.keys?.[serviceKey]) return rule.keys[serviceKey];
   const picked = matchServiceProtocol(protocols, name, { serviceKey })?.programKey;
   return rule.any.includes(picked) ? picked : rule.fallback;
 }
@@ -1122,10 +1130,12 @@ function linesFromLineMeta(visit, catalog) {
 // A protocol line that hangs on a diagnosis or a judgement call — "if
 // rotation calls for IRAC 7C", "only when plant/weather safe", "where
 // root/oomycete risk is justified", "for labeled leaf spot", "premium
-// accounts only", "where target pest fits". Placement and legality
-// phrasing ("where label allows", "where ordinance allows", "where pets
-// rest") is how base work is described, not a condition on it.
-const CONDITIONAL_LINE_RE = /\b(?:if|only|as needed|where (?:needed|appropriate|justified|[^,;()]*?\b(?:justif\w*|fits?|supports?|warrants?|exists?))|for (?:confirmed|documented|diagnosed|labell?ed)|when [^,;()]*?\b(?:active|present|safe|justif\w*|fits?|supports?|warrants?))\b/i;
+// accounts only", "where target pest fits", "for premium/stressed
+// accounts", "for high-pH chlorosis" (an account tier or a diagnosis, not
+// a target pest). Placement, legality and target phrasing ("where label
+// allows", "where ordinance allows", "where pets rest", "for whitefly/scale
+// nymphs") is how base work is described, not a condition on it.
+const CONDITIONAL_LINE_RE = /\b(?:if|only|as needed|where (?:needed|appropriate|justified|[^,;()]*?\b(?:justif\w*|fits?|supports?|warrants?|exists?))|for (?:confirmed|documented|diagnosed|labell?ed|premium|stressed|high-?ph|chlorosis)|when [^,;()]*?\b(?:active|present|safe|justif\w*|fits?|supports?|warrants?))\b/i;
 // The clauses of a line: "TriTek spray oil: 1.0% standard, 1.5% only with
 // active scale/mites" is a standard portion and a conditional step-up.
 function lineClauses(raw) {
@@ -1455,7 +1465,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // not the primary lawn plan (an off-protocol / blackout block of the lawn
   // plan says nothing about a pest or tree & shrub mix), and a line the
   // protocol lists as "if needed" is withheld exactly as the card does.
-  const { line: protocolLine, treatment, primaryIsLawn } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
+  const { line: protocolLine, treatment, primaryIsLawn, lawnAddon } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
@@ -1516,6 +1526,10 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     // assessment, the specialty grab-bag) and no booked add-on's protocol
     // names the product: the search is not a way to dose on an inspection.
     [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category})`],
+    // A booked lawn add-on has no plan on this visit: a product no primary /
+    // add-on protocol names is not dosed off the catalog past the lawn
+    // plan's turf, ordinance, stress and approval guards.
+    [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
     // The protocol lists this product as "if needed": no dose until the
@@ -1559,19 +1573,24 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
  * over a conditional one) and `rate` the line's own per-gallon band when it
  * states one; `line` is null when no non-lawn protocol names the product. `treatment` is the primary line's own eligibility (false
  * for an inspection / assessment / specialty grab-bag identity) and
- * `primaryIsLawn` whether the lawn plan governs it.
+ * `primaryIsLawn` whether the lawn plan governs it; `lawnAddon` names a
+ * booked lawn add-on, which has no plan on this visit.
  */
 async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
   const primaryKey = svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined;
   const treatment = primaryKey !== null;
   const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
-  const found = (line) => ({ line, treatment, primaryIsLawn });
+  const addons = (await loadAddons(dbh, serviceId))
+    .map((a) => ({ addon: a.name, name: a.name, programKey: addonProgramKey(a.category, a.name, protocols, a.serviceKey), serviceKey: a.serviceKey }));
+  // A lawn add-on has no plan of its own on this visit (the plan engine keys
+  // on the appointment's service type) — the search must not dose lawn
+  // products off the catalog past the plan's guards.
+  const lawnAddon = addons.find((a) => a.programKey === 'lawn')?.addon || null;
+  const found = (line) => ({ line, treatment, primaryIsLawn, lawnAddon });
   const candidates = [
     ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null }] : []),
-    ...(await loadAddons(dbh, serviceId))
-      .map((a) => ({ addon: a.name, name: a.name, programKey: addonProgramKey(a.category, a.name, protocols, a.serviceKey), serviceKey: a.serviceKey }))
-      .filter((a) => a.programKey && a.programKey !== 'lawn'),
+    ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
   if (!candidates.length) return found(null);
   const aliases = await dbh('product_aliases').where({ product_id: product.id }).select('alias_name')
