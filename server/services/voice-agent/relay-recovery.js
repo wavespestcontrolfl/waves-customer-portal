@@ -164,13 +164,18 @@ function appendSegmentSql(db, segment) {
  */
 function composeSegmentsSql(db, segment = null) {
   // With `segment`, the not-yet-appended segment is unioned in (the UPDATE
-  // reads the old row) — the append statement composes this way.
+  // reads the old row) — the append statement composes this way, and so
+  // does a close whose append was UNCONFIRMED (hook r27 P1): the row's copy
+  // of this socket's segment, if the append landed after all, is dropped by
+  // session key so the text never appears twice.
+  const rowSegments = "COALESCE(metadata->'relay_segments', '[]'::jsonb)";
+  const keyed = segment && segment.session_key;
   const source = segment
-    ? "COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb"
-    : "COALESCE(metadata->'relay_segments', '[]'::jsonb)";
+    ? `${keyed ? `(SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(${rowSegments}) e WHERE COALESCE(e->>'session_key', '') <> ?)` : rowSegments} || ?::jsonb`
+    : rowSegments;
   return db.raw(
     `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
-    segment ? [SEGMENT_SEPARATOR, JSON.stringify([segment])] : [SEGMENT_SEPARATOR],
+    segment ? [SEGMENT_SEPARATOR, ...(keyed ? [String(segment.session_key)] : []), JSON.stringify([segment])] : [SEGMENT_SEPARATOR],
   );
 }
 

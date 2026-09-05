@@ -264,13 +264,29 @@ describe('the conversation side', () => {
     expect(typeof updates[0].transcription).toBe('string');
   });
 
-  test('gate on, the append did not land (no row) ⇒ the column write carries this socket\'s plain text, no composition', async () => {
+  test('gate on, the append was UNCONFIRMED (0 rows / error) ⇒ the column write still composes the row\'s segments plus this socket\'s own, deduplicated by session key should the append land after all (hook r27 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { updates } = primeDb({ updateImpl: jest.fn(async (patch) => { updates.push(patch); return updates.length === 1 ? 0 : 1; }) });
     const convo = convoWithTurns();
     await convo.end('ws_close');
-    expect(typeof updates[1].transcription).toBe('string');
-    expect(JSON.parse(updates[1].transcription_metadata).segments).toBeUndefined();
+    const reconcile = updates[1];
+    expect(reconcile.transcription.sql).toBe('COALESCE(?, ?)');
+    const compose = reconcile.transcription.bindings[0];
+    expect(compose.sql).toContain("WHERE COALESCE(e->>'session_key', '') <> ?"); // the row's copy of THIS socket's segment is dropped
+    expect(compose.bindings[1]).toBe('nonce-1');
+    expect(JSON.parse(compose.bindings[2])[0]).toEqual(expect.objectContaining({ session_key: 'nonce-1', generation: 1725500001000 }));
+    expect(reconcile.transcription.bindings[1]).toContain('Caller: my ants are back');
+    expect(JSON.parse(reconcile.transcription_metadata).segments).toEqual({ this_generation: 1725500001000, appended: false });
+    // …and an append that THREW composes the same way
+    const { updates: u2 } = primeDb({ updateImpl: jest.fn(async (patch) => { u2.push(patch); if (u2.length === 1) throw new Error('pool gone'); return 1; }) });
+    const second = convoWithTurns();
+    await second.end('ws_close');
+    expect(u2[1].transcription.sql).toBe('COALESCE(?, ?)');
+    // an UNKEYED segment (no session key) unions without the filter
+    const { db } = primeDb();
+    const unkeyed = recovery.composeSegmentsSql(db, { generation: 1, text: 'x' });
+    expect(unkeyed.sql).not.toContain('session_key');
+    expect(unkeyed.bindings).toHaveLength(2);
   });
 
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {

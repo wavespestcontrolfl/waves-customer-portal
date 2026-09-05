@@ -2152,6 +2152,7 @@ class RelayConversation {
     const recovery = require('./relay-recovery');
     const recoveryOn = recovery.isRecoveryGateOn();
     let segmentAppended = false;
+    let segment = null; // this socket's close record — composed in even when its append was unconfirmed (hook r27 P1)
     // Only a socket that legitimately HELD this call's claim may append (hook
     // P1): verification IS that proof (the claim is won inside the caller
     // resolution, verified callers only), and the statement re-checks it —
@@ -2162,7 +2163,7 @@ class RelayConversation {
     if (recoveryOn && this.callSid && this._transcript.length && this._callerVerified === true) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
-        const segment = recovery.buildSegment({
+        segment = recovery.buildSegment({
           generation: this.sessionGeneration,
           sessionKey: this.sessionKey,
           reason: reason || null,
@@ -2317,11 +2318,15 @@ class RelayConversation {
         // salvage / stash below use it as the relay_transcript stash.)
         let composedTranscription = null;
         let composedFromRowOnly = null; // PR 2B: a resumed socket with NO turns of its own still owns the composition
-        if (recoveryOn && segmentAppended && transcriptUpdate && transcriptUpdate.transcription) {
-          composedTranscription = db.raw('COALESCE(?, ?)', [recovery.composeSegmentsSql(db), transcriptUpdate.transcription]);
+        // An UNCONFIRMED append (timeout / error / 0 rows) still composes:
+        // the row's durable earlier segments plus this socket's own record,
+        // deduplicated by session key should the append land after all —
+        // never this socket's text alone over a reconnected call (hook r27 P1).
+        if (recoveryOn && segment && transcriptUpdate && transcriptUpdate.transcription) {
+          composedTranscription = db.raw('COALESCE(?, ?)', [recovery.composeSegmentsSql(db, segmentAppended ? null : segment), transcriptUpdate.transcription]);
           try {
             const tm = JSON.parse(transcriptUpdate.transcription_metadata);
-            tm.segments = { this_generation: this.sessionGeneration, appended: true };
+            tm.segments = { this_generation: this.sessionGeneration, appended: segmentAppended };
             transcriptUpdate.transcription_metadata = JSON.stringify(tm);
           } catch { /* keep the metadata as built */ }
         } else if (recoveryOn && this._resume && !(transcriptUpdate && transcriptUpdate.transcription)) {
