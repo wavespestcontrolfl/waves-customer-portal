@@ -751,17 +751,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   const match = matchServiceProtocol(protocols, facts.serviceType);
   const visit = match?.matchedVisit || match?.program?.visits?.[0] || null;
   if (!visit) return { visit: null, lines: [], blocks: [] };
-  const hints = new Map();
-  for (const [raw, meta] of Object.entries(visit.lineMeta || {})) {
-    for (const hint of meta?.catalogProductHints || []) {
-      if (!hints.has(hint)) hints.set(hint, raw);
-    }
-  }
-  const lines = [];
-  for (const [hint, raw] of hints) {
-    const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
-    if (product && !lines.some((l) => l.product.id === product.id)) lines.push({ raw, product, role: 'base', selected: true });
-  }
+  const lines = linesFromLineMeta(visit, catalog);
   // Protocol visits without lineMeta (tree & shrub, termite …) name their
   // products in the text itself — the same parse + catalog match the plan
   // engine runs on lawn lines. Secondary lines are the visit's "if needed".
@@ -769,6 +759,29 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
   return { visit, lines, blocks: [] };
+}
+
+/**
+ * De-branded lines carry their catalog product under lineMeta; the role
+ * comes from where the line sits — a secondary line is the visit's
+ * "if needed", never selected base work.
+ */
+function linesFromLineMeta(visit, catalog) {
+  const secondary = String(visit?.secondary || '');
+  const hints = new Map();
+  for (const [raw, meta] of Object.entries(visit?.lineMeta || {})) {
+    for (const hint of meta?.catalogProductHints || []) {
+      if (!hints.has(hint)) hints.set(hint, raw);
+    }
+  }
+  const lines = [];
+  for (const [hint, raw] of hints) {
+    const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
+    if (!product || lines.some((l) => l.product.id === product.id)) continue;
+    const conditional = raw && secondary.includes(raw);
+    lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
+  }
+  return lines;
 }
 
 function linesFromProtocolText(visit, catalog) {
@@ -1007,5 +1020,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, criticalFacts, linesFromProtocolText, orderFor, perGallonRate },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate },
 };

@@ -342,6 +342,21 @@ describe('non-lawn protocol text resolves products without lineMeta (PR r1 P2)',
   });
 });
 
+describe('lineMeta hints keep the secondary line\'s role (pre-push P1)', () => {
+  test('a hint on a secondary line is conditional and unselected', () => {
+    const catalog = [{ id: 'a', name: 'Advion WDG', cost_per_unit: 1 }, { id: 't', name: 'Talstar P', cost_per_unit: 1 }];
+    const visit = {
+      primary: 'Perimeter spray with a residual',
+      secondary: 'Granular bait in mulch beds if ants are active',
+      lineMeta: { 'Perimeter spray with a residual': { catalogProductHints: ['Talstar P'] }, 'Granular bait in mulch beds if ants are active': { catalogProductHints: ['Advion WDG'] } },
+    };
+    expect(jobCard._test.linesFromLineMeta(visit, catalog)).toEqual([
+      expect.objectContaining({ product: catalog[1], role: 'base', selected: true }),
+      expect.objectContaining({ product: catalog[0], role: 'conditional', selected: false }),
+    ]);
+  });
+});
+
 describe('order quantity (PR r1 P2)', () => {
   const { orderFor } = jobCard._test;
   test('shortage wins, then one pack in the inventory unit, then 1', () => {
