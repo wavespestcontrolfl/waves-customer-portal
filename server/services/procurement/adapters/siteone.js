@@ -719,7 +719,11 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // selector already matches before submission (a reference / PO element,
   // a stale SPA confirmation) is remembered and never accepted as the
   // outcome (Codex #3876 r3 P2).
-  const beforeText = await shownOrderText(page);
+  // Sampled inside the final stable iteration, not here: the loop below
+  // awaits cap reservations and re-checks during which a reference / stale
+  // confirmation node can appear or change — a baseline taken before those
+  // awaits would let that node pass as post-click evidence (Codex #3876 r6 P2).
+  let beforeText = null;
   // The total the click submits is the one shown NOW: an async tax /
   // shipping recalculation after the earlier read (which also spans the
   // screenshot upload and the cap reservation) would otherwise bypass the
@@ -730,16 +734,20 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // during which the page may recalculate once more; the click happens only
   // when the figure on screen is the one the cap approved (pre-push P0).
   // Order at the boundary (Codex #3876 r4 P1): total read → (changed: gate,
-  // start over) → tender + blockers re-checked → account + ship-to
-  // re-checked → Place Order proven actionable → total read AGAIN — the
-  // very last await before the click is that pure read, and it must equal
-  // the figure the cap approved.
+  // start over) → Place Order proven actionable → tender + blockers
+  // re-checked → account + ship-to re-checked → confirmation baseline →
+  // total read AGAIN — the very last await before the click is that pure
+  // read, and it must equal the figure the cap approved.
   // The identity re-check (Codex #3876 r5 P1): a delayed rerender that
   // swaps the displayed billing account or ship-to while the radio stays
   // checked and the total stable would otherwise submit on a stale proof.
   // The trial click (Codex #3876 r5 P2): Playwright's actionability checks
   // without dispatching — a disabled Place Order refuses BEFORE the
   // submitted guard flips, instead of parking ambiguous with nothing sent.
+  // It runs FIRST (Codex #3876 r6 P1): it is itself an awaited wait of up
+  // to 5 s, so a rerender during it that resets the tender or swaps the
+  // account would otherwise go unrevalidated; after it only pure page
+  // reads stand between the proofs and the click.
   let cents = finalCents;
   const unstable = (shownCents) => new RefusedError('checkout_total_unstable', `SiteOne checkout total kept changing before the click (${cents} → ${shownCents}) — not submitted`, evidence, shownCents);
   for (let i = 0; ; i += 1) {
@@ -751,10 +759,11 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
       await gate(cents, 'total at the click');
       continue;
     }
-    await recheckTenderAtClick(page, radio, { evidence, upload });
-    await identity();
     try { await placeOrder.click({ trial: true, timeout: 5000 }); }
     catch (e) { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError('place_order_unactionable', `the Place Order control cannot be clicked (${String(e.message).slice(0, 80)}) — nothing submitted`, evidence); }
+    await recheckTenderAtClick(page, radio, { evidence, upload });
+    await identity();
+    beforeText = await shownOrderText(page);
     shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
     if (shownCents === cents) break;
     if (i >= 3) throw unstable(shownCents);

@@ -230,7 +230,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       isVisible: async () => { if (spec.isVisibleThrows) throw new Error('Element is not attached to the DOM'); return !!spec.visible; },
       isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
       // `disabled` models Playwright's actionability failure; `{ trial: true }` runs the checks without dispatching (r5 P2)
-      click: async (o) => { if (spec.disabled) throw new Error('element is not enabled'); if (o && o.trial) return; if (spec.onClick) await spec.onClick(); },
+      // onTrial models a delayed rerender landing DURING the awaited trial wait (r6 P1)
+      click: async (o) => { if (spec.disabled) throw new Error('element is not enabled'); if (o && o.trial) { if (spec.onTrial) await spec.onTrial(); return; } if (spec.onClick) await spec.onClick(); },
       fill: async (v) => { if (spec.onFill) spec.onFill(v); },
       press: async (key) => { if (spec.onPress) await spec.onPress(key); },
       waitFor: async () => {},
@@ -302,7 +303,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // `checked` is a live getter: a real locator re-resolves, so the option clicked a moment ago reads its CURRENT state
       // The option: a radio input, or (billIsLabel) a wrapping label whose radio is the sub-locator
       // uncheckAccountAtClick: a delayed rerender resets the verified radio once the Place Order stage has begun
-      const isChecked = () => st.accountChecked === true && !(st.uncheckAccountAtClick && st.atClick);
+      // uncheckAccountAtTrial: the reset lands during the trial click's wait (r6 P1)
+      const isChecked = () => st.accountChecked === true && !(st.uncheckAccountAtClick && st.atClick) && !(st.uncheckAccountAtTrial && st.trialDone);
       // hideRadioAtClick: a rerender hides the checked account radio once the Place Order stage has begun
       const radio = (id = 'acct-radio') => el({ count: 1, id, get visible() { return (st.radioVisible ?? true) && !(st.hideRadioAtClick && st.atClick); }, get checked() { return isChecked(); } });
       const billOption = () => el({ count: 1, get visible() { return !(st.hideRadioAtClick && st.atClick); }, tag: st.billIsLabel ? 'label' : 'input', get checked() { return isChecked(); }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
@@ -320,7 +322,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       if (sel === S.billToAccountSelected) return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
       // accountAtClick: a delayed rerender swaps the displayed billing account once the Place Order stage has begun (r5 P1)
-      if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountAtClick && st.atClick ? st.accountAtClick : st.accountText === undefined ? 'Account # 12345' : st.accountText });
+      // accountAtTrial: the swap lands during the trial click's wait (r6 P1)
+      if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountAtTrial && st.trialDone ? st.accountAtTrial : st.accountAtClick && st.atClick ? st.accountAtClick : st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       // checkoutTotalText: the checkout total (default = the cart total, so a dry run's bell reports 9900);
       // totalAtClick: a DIFFERENT total shown once the Place Order stage re-reads it (async tax / shipping recalculation)
@@ -329,12 +332,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
       // placeOrderDisabled: the visible Place Order button is not enabled (actionability fails, nothing dispatched)
-      const placeBtn = () => el({ count: 1, visible: true, disabled: !!st.placeOrderDisabled, onClick: () => { st.placeClicked += 1; } });
+      const placeBtn = () => el({ count: 1, visible: true, disabled: !!st.placeOrderDisabled, onTrial: () => { st.trialDone = true; }, onClick: () => { st.placeClicked += 1; } });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
       if (sel === S.placeOrder) return st.placeOrderHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } }) : placeBtn()) }) : placeBtn();
       // orderNumberHiddenFirst: a hidden stale confirmation node precedes the visible current one
       // Before the click there is no confirmation node — unless orderNumberBeforeClick models a pre-existing reference element
-      if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : el();
+      // orderNumberDuringLoop: a reference node appears only once the Place Order stage's re-checks are under way (after the loop's first total read) (r6 P2)
+      if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
       if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? 'Processing order…' : 'Order # SO-778899' }); }
       if (sel === S.orderNumber) return st.orderNumberHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'Order # SO-000001' }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' })) }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' });
@@ -762,6 +766,27 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'place_order_unactionable' });
     expect(st.placeClicked || 0).toBe(0);
     expect(st.cart).toEqual([]);
+  });
+
+  test('a rerender DURING the trial click that unselects bill-to-account is caught by the tender re-check after it — refused, no click (r6 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ uncheckAccountAtTrial: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    expect(st.trialDone).toBe(true);
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
+  test('a rerender DURING the trial click that swaps the billing account is caught by the identity re-check after it — refused, no click (r6 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ accountAtTrial: 'Account # 99999' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'account_mismatch' });
+    expect(st.trialDone).toBe(true);
+    expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('a reference node that appears DURING the pre-click loop is the baseline, not the outcome: unchanged after the click = ambiguous (r6 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberDuringLoop: 'Order # SO-556677', orderNumberText: 'Order # SO-556677', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {
