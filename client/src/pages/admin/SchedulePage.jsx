@@ -4912,7 +4912,7 @@ function JobCardProduct({ p, D }) {
   );
 }
 
-function JobCardTank({ tank, D }) {
+function JobCardTank({ tank, serviceId, D }) {
   const [gallons, setGallons] = useState(110);
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
@@ -4948,12 +4948,12 @@ function JobCardTank({ tank, D }) {
     }
     let cancelled = false;
     setBusy(true);
-    adminFetch(`/admin/protocols/job-card/mix?productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons]);
+  }, [picked, gallons, serviceId]);
 
   const pill = (g) => ({
     flex: 1,
@@ -5066,7 +5066,7 @@ function JobCardTab({ card, loading, error, D }) {
         <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
-      <JobCardTank tank={card.tank} D={D} />
+      <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
       {products.length > 0 && (
         <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
           Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}

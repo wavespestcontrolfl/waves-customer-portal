@@ -257,22 +257,27 @@ describe('property coordinates', () => {
   });
 });
 
-describe('tankFromCalibration', () => {
+describe('tankFromCalibrations', () => {
   const now = new Date('2026-09-04T12:00:00Z');
   test('expired calibration is not calibrated', () => {
-    expect(jobCard.tankFromCalibration({ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }, now))
+    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }], now))
       .toMatchObject({ calibrated: false, reason: 'Rig calibration expired', carrierGalPer1000: 2 });
   });
   test('live calibration', () => {
-    expect(jobCard.tankFromCalibration({ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }, now))
+    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }], now))
       .toMatchObject({ calibrated: true, reason: null, tankCapacityGal: 110 });
   });
   test('unexpired but not field verified → not calibrated (Codex r3 P1, plan-engine block reused)', () => {
-    expect(jobCard.tankFromCalibration({ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }, now))
+    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }], now))
       .toMatchObject({ calibrated: false, reason: 'Rig calibration not field verified', carrierGalPer1000: 2 });
   });
+  test('two active rigs and no assignment → ambiguous, no mix (Codex r4 P1)', () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' };
+    expect(jobCard.tankFromCalibrations([live, { ...live, carrier_gal_per_1000: 1, system_name: 'Skid' }], now))
+      .toMatchObject({ calibrated: false, reason: 'More than one rig is active — assign the rig on the Lawn plan', carrierGalPer1000: null });
+  });
   test('none on file', () => {
-    expect(jobCard.tankFromCalibration(null, now)).toMatchObject({ calibrated: false, reason: 'No rig calibration on file' });
+    expect(jobCard.tankFromCalibrations([], now)).toMatchObject({ calibrated: false, reason: 'No rig calibration on file' });
   });
 });
 

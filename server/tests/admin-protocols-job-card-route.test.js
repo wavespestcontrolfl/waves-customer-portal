@@ -85,10 +85,12 @@ describe('job-card routes', () => {
   test('mix validates gallons and productId', async () => {
     process.env.GATE_JOB_CARD = 'true';
     jobCard.mixForProduct.mockResolvedValue({ amount: 0.75, unit: 'oz' });
-    expect((await run('/job-card/mix', { productId: SERVICE_ID, gallons: '5' })).statusCode).toBe(400);
-    expect((await run('/job-card/mix', { productId: 'x', gallons: '1' })).statusCode).toBe(400);
-    const ok = await run('/job-card/mix', { productId: SERVICE_ID, gallons: '1' });
+    expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '5' })).statusCode).toBe(400);
+    expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: 'x', gallons: '1' })).statusCode).toBe(400);
+    // The visit's rig decides the carrier: no serviceId, no mix.
+    expect((await run('/job-card/mix', { productId: SERVICE_ID, gallons: '1' })).statusCode).toBe(400);
+    const ok = await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1' });
     expect(ok.body).toEqual({ enabled: true, amount: 0.75, unit: 'oz' });
-    expect(jobCard.mixForProduct).toHaveBeenCalledWith(SERVICE_ID, 1);
+    expect(jobCard.mixForProduct).toHaveBeenCalledWith(SERVICE_ID, 1, { serviceId: SERVICE_ID });
   });
 });

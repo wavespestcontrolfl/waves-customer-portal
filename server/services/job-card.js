@@ -28,7 +28,7 @@ const { detectServiceCategory } = require('../utils/service-normalizer');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
-const { buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration } = require('./waveguard-plan-engine');
+const { buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations } = require('./waveguard-plan-engine');
 const { latestComparableGroupApplication } = require('./waveguard-approval-engine');
 
 const PROMPT_VERSION = 'job_card_paragraph_v1';
@@ -204,7 +204,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     .where('ss.id', serviceId)
     .select(
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes',
-      'ss.job_card', 'ss.job_card_generated_at',
+      'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
       'c.first_name', 'c.last_name', 'c.phone', 'c.latitude', 'c.longitude', 'c.lawn_water_area_id',
       'c.waveguard_tier',
     )
@@ -234,6 +234,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     serviceLine,
     isLawn: serviceLine === 'lawn',
     strip: { name, program, phone: clean(svc.phone, 24) || null },
+    rig: rigAssignment(svc),
     access: { codes: accessCodes(prefs) },
     coords: coords ? { ...coords, source: 'property' } : { ...OFFICE_COORDS, source: 'office' },
     // Model-safe facts. Nothing below carries a code or a phone number.
@@ -537,38 +538,36 @@ async function loadPackSizes(dbh, productIds) {
   return rows.reduce((acc, r) => { if (!acc[r.product_id]) acc[r.product_id] = r.pack_size; return acc; }, {});
 }
 
-async function getActiveCalibration(dbh = db) {
-  return dbh('equipment_calibrations as ec')
-    .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
-    .where('ec.active', true)
-    .where('es.active', true)
-    .select('ec.carrier_gal_per_1000', 'ec.expires_at', 'ec.calibration_status', 'es.name as system_name', 'es.tank_capacity_gal')
-    .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 when es.system_type = 'tank' then 1 else 2 end")
-    .orderBy('es.name', 'asc')
-    .first()
-    .catch(() => null);
+// The appointment's rig assignment (the Lawn plan's equipment pick).
+function rigAssignment(svc) {
+  return { equipmentSystemId: svc?.assigned_equipment_system_id || null, calibrationId: svc?.assigned_calibration_id || null };
 }
 
-// The plan engine's calibration validation (expired / not field verified)
-// decides whether a mix may be computed; only the wording is the card's.
+// The plan engine's calibration resolution and validation (assigned rig
+// first, one active rig otherwise, ambiguous / expired / not field
+// verified = no mix) decide the tank; only the wording is the card's.
 const TANK_BLOCK_REASON = {
   missing_calibration: 'No rig calibration on file',
+  equipment_selection_required: 'More than one rig is active — assign the rig on the Lawn plan',
   expired_calibration: 'Rig calibration expired',
   calibration_not_field_verified: 'Rig calibration not field verified',
 };
 
-function tankFromCalibration(cal, now = new Date()) {
-  if (!cal) return { calibrated: false, reason: TANK_BLOCK_REASON.missing_calibration, carrierGalPer1000: null, tankCapacityGal: null, expiresAt: null, systemName: null };
-  const { blocks } = summarizeCalibration({ calibration: cal, date: now });
+async function loadRigCalibrations(dbh, rig) {
+  return getActiveCalibrations(dbh, { equipmentSystemId: rig?.equipmentSystemId || null, calibrationId: rig?.calibrationId || null });
+}
+
+function tankFromCalibrations(rows, now = new Date()) {
+  const { selected: cal, blocks } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [], date: now });
   const block = blocks[0] || null;
-  const carrier = Number(cal.carrier_gal_per_1000 || 0);
+  const carrier = Number(cal?.carrier_gal_per_1000 || 0);
   return {
     calibrated: !block && carrier > 0,
     reason: block ? (TANK_BLOCK_REASON[block.code] || block.message) : (carrier > 0 ? null : 'No carrier rate on file'),
     carrierGalPer1000: carrier > 0 ? carrier : null,
-    tankCapacityGal: cal.tank_capacity_gal != null ? Number(cal.tank_capacity_gal) : null,
-    expiresAt: cal.expires_at || null,
-    systemName: cal.system_name || null,
+    tankCapacityGal: cal?.tank_capacity_gal != null ? Number(cal.tank_capacity_gal) : null,
+    expiresAt: cal?.expires_at || null,
+    systemName: cal?.system_name || null,
   };
 }
 
@@ -739,13 +738,13 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 
-  const [paragraph, catalog, calibration, hourly] = await Promise.all([
+  const [paragraph, catalog, calibrations, hourly] = await Promise.all([
     paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
-    getActiveCalibration(dbh),
+    loadRigCalibrations(dbh, facts.rig),
     (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null),
   ]);
-  const tank = tankFromCalibration(calibration, now);
+  const tank = tankFromCalibrations(calibrations, now);
   const { visit, lines } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
@@ -768,15 +767,16 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
 
 /**
  * Mix helper for the Tank section's product search: amount of one catalog
- * product for 110 or 1 gallons of water on the active rig.
+ * product for 110 or 1 gallons of water on the visit's rig (the
+ * appointment's assigned equipment, else the one active rig).
  */
-async function mixForProduct(productId, gallons, { dbh = db, now = new Date() } = {}) {
-  const [product, calibration] = await Promise.all([
+async function mixForProduct(productId, gallons, { serviceId, dbh = db, now = new Date() } = {}) {
+  const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
-    getActiveCalibration(dbh),
+    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   if (!product) return null;
-  const tank = tankFromCalibration(calibration, now);
+  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), now);
   // An expired calibration keeps its carrier number for display, but no
   // mix is computed from it — the same withholding the lawn-mix route does.
   const tankMixable = isTankMixable(product);
@@ -811,7 +811,7 @@ module.exports = {
   paragraphForVisit,
   buildSprayCheck,
   buildMixAmount,
-  tankFromCalibration,
+  tankFromCalibrations,
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,

@@ -2499,18 +2499,19 @@ router.get('/product-label/:productId', async (req, res, next) => {
 // router. Raw access codes ride ONLY in strip.access.codes (tap-to-reveal).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// GET /api/admin/protocols/job-card/mix?productId=&gallons=110|1 — the Tank
-// section's search helper: amount of one product for that much water on the
-// active rig. Same gate; pure read. Registered BEFORE /:serviceId so the
+// GET /api/admin/protocols/job-card/mix?serviceId=&productId=&gallons=110|1 —
+// the Tank section's search helper: amount of one product for that much
+// water on the visit's rig (the appointment's assigned equipment). Same gate; pure read. Registered BEFORE /:serviceId so the
 // literal segment never falls into the id param.
 router.get('/job-card/mix', async (req, res, next) => {
   try {
     if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
-    const { productId } = req.query;
+    const { productId, serviceId } = req.query;
     if (!UUID_RE.test(String(productId || ''))) return res.status(400).json({ error: 'productId required' });
+    if (!UUID_RE.test(String(serviceId || ''))) return res.status(400).json({ error: 'serviceId required' });
     const gallons = Number(req.query.gallons);
     if (![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
-    const mix = await jobCard.mixForProduct(productId, gallons);
+    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId });
     if (!mix) return res.status(404).json({ error: 'Product not found' });
     res.json({ enabled: true, ...mix });
   } catch (err) { next(err); }
