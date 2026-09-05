@@ -6250,6 +6250,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // ── Post-commit side-effects (fire-and-forget; never fail the request) ──
     setImmediate(async () => {
       try {
+        // FIRST: a visit created straight onto a tech's route is a "new visit"
+        // to them (tech-visit-notifications.js: gate-dark, silent when the
+        // creator IS the tech). Queued before the slow Twilio/lead steps
+        // below so a reassignment seconds after creation cannot overtake it
+        // in the visit's notice queue. With the gate on it replaces the
+        // legacy opt-in `new_appointment` row further down.
+        const techNotices = require('../services/tech-visit-notifications');
+        const visitNoticeLive = !!resolvedTechId && techNotices.isEnabled();
+        if (visitNoticeLive) {
+          void techNotices.notifyTechVisitChange({
+            visitId: svc.id, kind: 'assigned', technicianId: resolvedTechId, actorId: req.technicianId || null,
+            snapshot: { date: scheduledDate, windowStart: windowStart || null, windowEnd: windowEnd || null },
+          });
+        }
         // Fire the deferred confirmation SMS for any appointment that wants one
         // (the reminder rows were already inserted durably above). This is the
         // slow, Twilio-bound step: landline lookup + send.
@@ -6356,19 +6370,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
         // Optional: push an in-app notification to the assigned tech's PWA queue
         // (honors the "Notify technician" checkbox — unchecked by default).
-        // A visit created straight onto a tech's route is a "new visit" to
-        // them (tech-visit-notifications.js: post-commit, gate-dark, silent
-        // when the creator IS the tech). With the gate on it replaces the
-        // legacy opt-in `new_appointment` row below, which the tech feed
-        // never rendered; gate off keeps that legacy path byte-identical.
-        const techNotices = require('../services/tech-visit-notifications');
-        const visitNoticeLive = !!resolvedTechId && techNotices.isEnabled();
-        if (visitNoticeLive) {
-          void techNotices.notifyTechVisitChange({
-            visitId: svc.id, kind: 'assigned', technicianId: resolvedTechId, actorId: req.technicianId || null,
-            snapshot: { date: scheduledDate, windowStart: windowStart || null, windowEnd: windowEnd || null },
-          });
-        }
+        // Legacy opt-in `new_appointment` row (the tech feed never rendered
+        // it) — only while the visit-notice gate is off; on, the assigned
+        // card queued at the top of this block replaces it.
         if (sendTechNotification && resolvedTechId && !visitNoticeLive) {
           try {
             const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
