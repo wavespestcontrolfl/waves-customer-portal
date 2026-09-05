@@ -37,9 +37,9 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 export const DOC_FONT = FONTS.body; // "'Inter', system-ui, sans-serif"
 export const DOC_FONT_SERIF = FONTS.serif;
 
-// Fixed type scale. On a glass surface (every customer page) nothing renders
-// under 14px — the runtime sheet in glass/glass-theme.css floors it, so the
-// scale starts at 14 (no micro/caption; the PDF twin keeps its own 8/9).
+// Fixed type scale. Nothing renders under 14px on a customer surface — the
+// runtime sheet in glass/glass-theme.css floors it and check-portal-brand
+// refuses smaller literals and tokens at build time (no micro/caption).
 export const FS = {
   body: 14, // meta rows, table cells, buttons, eyebrows, fine print
   bodyLg: 16, // primary prose paragraphs (owner D1 2026-09-05: body prose is 16 on customer surfaces)

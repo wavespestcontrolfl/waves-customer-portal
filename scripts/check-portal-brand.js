@@ -71,6 +71,9 @@ const FONT_FAMILY_LITERAL_RX = new RegExp(
 const LOCAL_PALETTE_RX = /^(?:\s*(?:export\s+)?)const\s+(W|BRAND|PALETTE|THEME|COLORS|PALLETTE)\s*=\s*\{/;
 
 const BANNED_FONT_SIZE_RX = /fontSize:\s*(11|12|13)\b/;
+// Token spellings of the same sizes (FS.micro / FS.caption were 11 / 12 until
+// #3895 deleted them) — a live page must not reach under the floor by name.
+const BANNED_FONT_TOKEN_RX = /fontSize:\s*FS\.(micro|caption)\b/;
 // Customer glass sheet (owner 2026-09-03/05): weights stop at 700. 800/850/900
 // literals render heavier on iPhone than on the Inter/Segoe fallbacks and read
 // as a different face next to the sheet's 600/700; 650/750 are variable-font
@@ -142,6 +145,15 @@ function checkFile(filePath) {
         rule: 'banned-font-size',
         line: n,
         msg: `fontSize: ${m[1]} — nothing under 14px on a customer surface (labels 14, body 16; owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_FONT_TOKEN_RX.test(line)) {
+      const m = line.match(BANNED_FONT_TOKEN_RX);
+      violations.push({
+        rule: 'banned-font-token',
+        line: n,
+        msg: `fontSize: FS.${m[1]} — that token is under the 14px floor; use FS.body`,
         snippet: line.trim().slice(0, 140),
       });
     }
