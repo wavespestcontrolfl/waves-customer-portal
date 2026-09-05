@@ -166,11 +166,12 @@ const gates = {
   // switch for every tokenized capture, judged at mint AND completion),
   // instant bank verification only, same save → consent → enroll tail as
   // every other save surface. Operator-initiated only (Customers page
-  // action: copy link, or text it via the card_request purpose with the
+  // action: copy link, text it via the card_request purpose with the
   // autopay_setup_link template, seeded inactive — and the text ALSO needs
   // GATE_AUTOPAY_CUSTOMER_SMS, since the message type classifies as an
   // Auto Pay customer SMS; the action reports autopay_sms_gate_off
-  // otherwise). Gate off: the admin
+  // otherwise — or email it via the payment.autopay_setup_link email
+  // template through the template library). Gate off: the admin
   // action reports gate_off and mints nothing; already-minted links keep
   // working (the gate governs new links). Customer-facing money surface —
   // fail-closed ==='true' in every environment.
