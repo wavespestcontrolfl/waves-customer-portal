@@ -751,9 +751,11 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
       .orderBy('updated_at', 'desc');
     const Outreach = require('../services/seo/link-prospect-outreach');
     // an open draft, or one the nightly bridge parked for the owner's send (awaiting_owner, PR 3a)
-    const items = await orderByPriority(
-      db('seo_link_prospects').where({ outreach_status: 'drafted' }).whereIn('status', [...Outreach.SENDABLE_STATUSES])
-    );
+    const drafts = await orderByPriority(db('seo_link_prospects').where({ outreach_status: 'drafted' }));
+    const pathIds = [...new Set(drafts.map((p) => p.path_id).filter(Boolean))];
+    const pathById = new Map((pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : []).map((p) => [p.id, p]));
+    // Submit-first placements keep their verified lifecycle while their initial pitch awaits approval.
+    const items = drafts.filter((p) => Outreach.SENDABLE_STATUSES.includes(p.status) || Outreach.lateSend(p, pathById.get(p.path_id)));
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
     // WHATEVER the lifecycle status reads: an ambiguous send holds its recipient's inbox until it is reconciled
@@ -792,8 +794,6 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     // the click's bindings (§3.6b): the hash of the text THIS list displays (the click carries it back; the claim refuses
     // a draft edited since) — and the send's legal context on an attested path (the open communication row's level, the
     // agreement the owner reads before a send that attests to it), shown here as the Owner queue shows it
-    const pathIds = [...new Set(items.map((p) => p.path_id).filter(Boolean))];
-    const pathById = new Map((pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'legal_attestation', 'investigation') : []).map((p) => [p.id, p]));
     const openRows = items.length ? await db('seo_link_placement_authorities').whereIn('prospect_id', items.map((p) => p.id)).where({ dimension: 'communication', instance_kind: '-' }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'level') : [];
     const levelByProspect = new Map(openRows.map((r) => [r.prospect_id, r.level]));
     for (const p of items) {

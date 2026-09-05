@@ -70,6 +70,25 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     const savedPitch = await trx('seo_link_prospects').where({ id: p.id }).first();
     assert.equal(savedPitch.status, 'live'); assert.equal(savedPitch.outreach_status, 'drafted'); assert.equal(savedPitch.outreach_draft_attempts, 0);
     console.log('PASS exhausted late pitch saves a new draft without sending or changing live placement');
+    // Recipient lookup is outside this synthetic backlink schema; no customer records are queried.
+    require(`${root}/server/services/seo/link-outreach-mandate`).reviewByEmail = async () => new Map();
+    const router = require(`${root}/server/routes/admin-backlink-agent-v2`);
+    const pending = router.stack.find(l => l.route?.path === '/prospects/outreach/pending' && l.route.methods.get).route.stack.at(-1).handle;
+    const pendingIds = async () => {
+      const response = await new Promise((resolve, reject) => pending({}, { json: resolve }, reject));
+      return response.items.map(row => row.id);
+    };
+    for (const status of ['placed', 'live', 'indexed']) {
+      await trx('seo_link_prospects').where({ id: p.id }).update({ status });
+      assert.ok((await pendingIds()).includes(p.id), `${status} late draft must remain available for owner approval`);
+    }
+    await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ execution_after_send: true });
+    assert.equal((await pendingIds()).includes(p.id), false);
+    await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ execution_after_send: false });
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'rejected' });
+    assert.equal((await pendingIds()).includes(p.id), false);
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live' });
+    console.log('PASS late draft approval queue includes placed/live/indexed submit-first rows and excludes send-first/terminal rows');
     const rejectedLease = new Date(), rejectedAttempt = randomUUID();
     await trx('seo_link_prospects').where({ id: p.id }).update({ claimed_at: rejectedLease, lease_mode: 'acquire', leased_provider: 'deterministic_runner' });
     await trx('seo_link_attempts').insert({ id: rejectedAttempt, prospect_id: p.id, path_id: pathId, provider: 'deterministic_runner', action: 'submit', outcome: 'submitting', lease_token: rejectedLease.toISOString(), detail: { authority_id: 'synthetic-authority' } });
@@ -91,7 +110,6 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     await trx('seo_link_placement_authorities').where({ id: authority.id }).update({ satisfied_at: null, satisfied_reason: null });
     await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
     await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
-    const router = require(`${root}/server/routes/admin-backlink-agent-v2`);
     const edit = router.stack.find(l => l.route?.path === '/prospects/:id' && l.route.methods.patch).route.stack.at(-1).handle;
     const queue = await require(`${root}/server/services/seo/link-owner-queue`).listOwnerQueue(proxy);
     assert.equal(queue.cards.find((card) => card.placement.id === p.id).submission_ambiguity.evidence_url, 'https://synthetic.example/evidence.png');
