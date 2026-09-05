@@ -919,21 +919,38 @@ describe('PR review r8', () => {
     };
     expect(await jobCard._test.loadPackSizes(dbh, ['a', 'b', 'c'])).toEqual({ a: '2.5 gal', b: '32 fl_oz' });
     expect(seen).toContainEqual({ active: true, mapping_status: 'verified' });
+  });
+});
+
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
   const program = { visits: [{ visit: 9, month: 'Sep', primary: 'Speedzone Southern 1 fl oz' }] };
   const catalog = [{ id: 'c', name: 'Celsius WG', rate_unit: 'oz' }, { id: 's', name: 'Speedzone Southern', rate_unit: 'fl oz' }];
 
-  test('add-on lines resolve onto the card with their source; a lawn add-on is reported, not dosed', async () => {
-    const facts = { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: ['Tree & Shrub Care', 'Lawn Care', 'Mosquito'] };
+  test('add-on lines resolve onto the card with their source and visit; unmatched, lawn and pest-default add-ons are reported, not dosed', async () => {
+    const facts = { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: ['Tree & Shrub Care', 'Lawn Care', 'Mosquito', 'Bee/Wasp removal'] };
     const out = await jobCard.resolveVisitLines({ facts, protocols: { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Celsius WG 1 oz' }] }, tree_shrub: program }, catalog, dbh: () => ({}) });
     expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['c', null], ['s', 'Tree & Shrub Care']]);
     expect(out.addons).toEqual([
-      { name: 'Tree & Shrub Care', products: 1, note: null },
-      { name: 'Lawn Care', products: 0, note: 'Lawn add-on — no plan for this line on the card' },
-      { name: 'Mosquito', products: 0, note: 'No protocol matched this add-on' },
+      { name: 'Tree & Shrub Care', products: 1, visit: { number: 9, month: 'Sep' }, note: null },
+      { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
+      { name: 'Mosquito', products: 0, visit: null, note: 'No protocol matched this add-on' },
+      // An unknown name must not fall to the general-pest default (r1 P1).
+      { name: 'Bee/Wasp removal', products: 0, visit: null, note: 'No protocol matched this add-on' },
     ]);
     const [, card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
     expect(card.line).toBe('Tree & Shrub Care: Speedzone Southern 1 fl oz');
+  });
+
+  test('an add-on that selects a product the primary lists as conditional wins the card through the merger (r1 P1)', async () => {
+    const facts = { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: ['Tree & Shrub Care'] };
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Speedzone Southern 1 fl oz', secondary: 'Celsius WG 1 oz' }] }, tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] } };
+    const out = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}) });
+    expect(out.lines.filter((l) => l.product.id === 'c').map((l) => [l.selected, l.source || null])).toEqual([[false, null], [true, 'Tree & Shrub Care']]);
+    const cards = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
+    const celsius = cards.find((c) => c.id === 'c');
+    expect(cards).toHaveLength(2);
+    expect(celsius.conditional).toBe(false);
+    expect(celsius.line).toBe('Tree & Shrub Care: Celsius WG 1 oz · Celsius WG 1 oz');
   });
 
   test('a failed add-on read fails the card (503)', async () => {

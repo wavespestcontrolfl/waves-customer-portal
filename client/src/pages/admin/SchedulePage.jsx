@@ -5089,7 +5089,7 @@ function JobCardTab({ card, loading, error, D }) {
       )}
       {products.length > 0 && (
         <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
-          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}{card.addons?.length ? ` · + ${card.addons.map((a) => a.name).join(", ")}` : ""}
+          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}{card.addons?.length ? ` · + ${card.addons.map((a) => (a.visit?.number ? `${a.name} (visit ${a.visit.number})` : a.name)).join(", ")}` : ""}
         </div>
       )}
       {(card.addons || []).filter((a) => a.note).map((a) => (

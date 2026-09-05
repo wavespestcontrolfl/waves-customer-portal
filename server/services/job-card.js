@@ -936,9 +936,15 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog), blocks: [] };
 }
 
-/** One protocol service line (non-lawn) → its matched visit and product lines. */
-function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog) {
+/**
+ * One protocol service line (non-lawn) → its matched visit and product
+ * lines. requireMatch: an add-on name the matcher only classifies through
+ * its general-pest default (no rule term, no category) resolves nothing —
+ * a Bee/Wasp or mud-dauber add-on must not acquire general-pest products.
+ */
+function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { requireMatch = false } = {}) {
   const match = matchServiceProtocol(protocols, serviceType);
+  if (requireMatch && !match?.matched && match?.programKey === 'pest') return { visit: null, lines: [] };
   const visit = seasonalVisit(match?.program, scheduledDate) || match?.matchedVisit || match?.program?.visits?.[0] || null;
   if (!visit) return { visit: null, lines: [] };
   const lines = linesFromLineMeta(visit, catalog);
@@ -963,15 +969,18 @@ async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {
   const lines = [...primary.lines];
   const addons = [];
   for (const name of facts.addons || []) {
-    if (detectServiceLine(name) === 'lawn') { addons.push({ name, products: 0, note: 'Lawn add-on — no plan for this line on the card' }); continue; }
-    const resolved = resolveProtocolLines(name, facts.scheduledDate, protocols, catalog);
-    let count = 0;
-    for (const line of resolved.lines) {
-      if (lines.some((l) => l.product.id === line.product.id)) continue;
-      lines.push({ ...line, source: name });
-      count += 1;
-    }
-    addons.push({ name, products: count, note: resolved.visit ? null : 'No protocol matched this add-on' });
+    if (detectServiceLine(name) === 'lawn') { addons.push({ name, products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' }); continue; }
+    const resolved = resolveProtocolLines(name, facts.scheduledDate, protocols, catalog, { requireMatch: true });
+    // Every add-on line rides through buildProductCards' per-product merger:
+    // a product the primary lists as conditional and the add-on as selected
+    // base work renders ONE card, and the selected line wins it.
+    for (const line of resolved.lines) lines.push({ ...line, source: name });
+    addons.push({
+      name,
+      products: resolved.lines.length,
+      visit: resolved.visit ? { number: resolved.visit.visit || null, month: resolved.visit.month || null } : null,
+      note: resolved.visit ? null : 'No protocol matched this add-on',
+    });
   }
   return { ...primary, lines, addons };
 }
