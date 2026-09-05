@@ -1016,7 +1016,10 @@ function linesFromLineMeta(visit, catalog) {
   for (const [hint, raw] of hints) {
     const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
     if (!product || lines.some((l) => l.product.id === product.id)) continue;
-    const conditional = raw && secondary.includes(raw);
+    // Conditional when the line sits in the visit's secondary text OR is
+    // phrased as a condition ("… if crawlers are present") — the parser's
+    // own rule (parseProtocolLines), applied to lineMeta lines too.
+    const conditional = Boolean(raw && (secondary.includes(raw) || /^if\b/i.test(raw) || /\bif\b/i.test(raw)));
     lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
   }
   return lines;

@@ -923,6 +923,16 @@ describe('PR review r8', () => {
 });
 
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
+  test('a lineMeta line phrased "if …" stays conditional too (hook P1)', () => {
+    const catalog = [{ id: 't', name: 'TriTek' }, { id: 'c', name: 'Celsius WG' }];
+    const visit = {
+      primary: 'Celsius WG 1 oz\nTriTek 1 gal only if crawlers are present',
+      secondary: '',
+      lineMeta: { 'Celsius WG 1 oz': { catalogProductHints: ['Celsius WG'] }, 'TriTek 1 gal only if crawlers are present': { catalogProductHints: ['TriTek'] } },
+    };
+    expect(jobCard._test.linesFromLineMeta(visit, catalog).map((l) => [l.product.id, l.role, l.selected])).toEqual([['c', 'base', true], ['t', 'conditional', false]]);
+  });
+
   test('a primary protocol line phrased "if …" stays conditional (hook P1)', () => {
     const catalog = [{ id: 'd', name: 'Distance IGR' }, { id: 't', name: 'TriTek' }, { id: 'c', name: 'Celsius WG' }];
     const visit = { primary: 'Celsius WG 1 oz\nDistance IGR 6 fl oz if rotation calls for IRAC 7C\nTriTek 1 gal only if crawlers are present', secondary: '' };
