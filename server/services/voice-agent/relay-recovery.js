@@ -159,9 +159,11 @@ function appendSegmentPatch(db, segment) {
          WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ?
          WHEN transcription LIKE '[AI segment]%' AND transcription ~ ? AND ? IS NOT NULL
            THEN '[AI segment]' || E'\\n' || ? || substring(transcription from ?)
+         WHEN ${RECORDED_ONLY_SQL} AND ? IS NOT NULL
+           THEN '[AI segment]' || E'\\n' || ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || transcription
          ELSE transcription
        END`,
-      [RELAY_PROVIDER, compose(), compose(), compose(), compose(), COMPOSITE_RECORDED_RE, compose(), compose(), COMPOSITE_RECORDED_RE],
+      [RELAY_PROVIDER, compose(), compose(), compose(), compose(), COMPOSITE_RECORDED_RE, compose(), compose(), COMPOSITE_RECORDED_RE, RELAY_PROVIDER, compose(), compose()],
     ),
     // The fill above also claims provider/status for the row; every other
     // branch leaves them as they are.
@@ -173,9 +175,18 @@ function appendSegmentPatch(db, segment) {
       "CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN 'completed' ELSE transcription_status END",
       [compose()],
     ),
+    // A composite has no structured form: the recorded-only branch clears it.
+    transcript_structured: db.raw(
+      `CASE WHEN ${RECORDED_ONLY_SQL} AND ? IS NOT NULL THEN NULL ELSE transcript_structured END`,
+      [RELAY_PROVIDER, compose()],
+    ),
     updated_at: new Date(),
   };
 }
+// A RECORDING's own transcript, alone, on a row that reconnected: the
+// processor finished before this segment landed (a silent resumed leg wrote
+// no stash). The recording is preserved; the AI segment goes ahead of it.
+const RECORDED_ONLY_SQL = "(transcription_provider IS NOT NULL AND transcription_provider <> ? AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
 const RELAY_PROVIDER = require('./relay-transcript').TRANSCRIPTION_PROVIDER;
 // The recorded half of a processor composite, from its segment header to the end (non-capturing!).
 const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$';

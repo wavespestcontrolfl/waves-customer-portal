@@ -121,6 +121,10 @@ describe('relay-recovery module', () => {
     expect(patch.transcription_provider.sql).toBe("CASE WHEN COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND ? IS NOT NULL THEN ? ELSE transcription_provider END");
     expect(patch.transcription_provider.bindings[1]).toBe('conversation_relay');
     expect(patch.transcription_status.sql).toContain("THEN 'completed' ELSE transcription_status END");
+    // …and a RECORDING-only transcript on a reconnected row gets the AI segment ahead of it; the structured form is cleared (hook P1)
+    expect(patch.transcription.sql).toContain("(transcription_provider IS NOT NULL AND transcription_provider <> ? AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0) AND ? IS NOT NULL");
+    expect(patch.transcription.sql).toContain("E' segment]' || E'\\n' || transcription");
+    expect(patch.transcript_structured.sql).toMatch(/^CASE WHEN \(transcription_provider IS NOT NULL .* THEN NULL ELSE transcript_structured END$/);
   });
 
   test('loadResumeState proves the hint from the row: reconnects > 0 ⇒ state; otherwise null; bounded and fail-soft', async () => {
@@ -190,7 +194,7 @@ describe('the conversation side', () => {
     const convo = convoWithTurns();
     await convo.end('ws_close');
     // 1: the segment append — fenced on having HELD the claim (the current owner, or an older generation on a row a reconnect took over), never on the outcome
-    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'transcription', 'transcription_provider', 'transcription_status', 'updated_at']);
+    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'transcript_structured', 'transcription', 'transcription_provider', 'transcription_status', 'updated_at']);
     expect(guardQ.whereRaw).toHaveBeenCalledWith("(metadata->>'relay_session_claim_owner') = ?", ['nonce-1']);
     expect(guardQ.orWhereRaw).toHaveBeenCalledWith("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [1725500001000]);
     expect(updates[0].metadata.bindings[1].sql).toContain("'relay_segments'"); // the append (both CASE branches)
