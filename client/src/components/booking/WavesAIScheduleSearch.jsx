@@ -140,7 +140,10 @@ export default function WavesAIScheduleSearch({
         <div
           ref={stripRef}
           aria-label="Example searches"
-          onFocus={() => setKeyboard(true)}
+          // Keyboard-initiated focus only (:focus-visible is set for Tab, not
+          // for a pointer press) — a mousedown on a drifting duplicate must not
+          // re-render the strip before its click lands (GH Codex P1).
+          onFocus={(e) => { if (typeof e.target.matches === 'function' && e.target.matches(':focus-visible')) setKeyboard(true); }}
           className={drift ? 'waves-chip-strip waves-chip-strip--drift' : 'waves-chip-strip'}
           style={{
             display: 'flex', flexWrap: 'nowrap', gap: 8, overflowX: drift ? 'hidden' : 'auto',
