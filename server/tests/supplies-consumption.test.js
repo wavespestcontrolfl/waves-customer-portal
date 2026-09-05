@@ -468,6 +468,9 @@ describe('recap consumption hook — retry window (source contract)', () => {
     expect(hook).toMatch(/if \(result\.priorCompleted !== true\) return true;/);
     expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
     expect(hook).toMatch(/return flags\.completion_supplies_owed === true;/);
+    // A failed marker read is NOT owed (hook r27 P1): a historical completion edited today has no movement for the index to stop; the marker stays for the next recap.
+    expect(hook).toMatch(/settlement deferred, marker kept/);
+    expect(hook).not.toMatch(/consuming anyway:/); // the old warn-and-return-true branch
     // Cleared unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must not deduct again.
     expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent'\);/);
     expect(hook).toMatch(/if \(result\.recordId && !handoffLost\) await db\('service_records'\)/);

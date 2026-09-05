@@ -859,24 +859,44 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
   const parked = await trx('vendor_orders').where({ id: ledger.id }).first('evidence');
   const wasRevoked = !!meta(parked?.evidence).revokedAt;
   const after = wasRevoked ? 'the operator revoked it' : `it was parked and the request marked ${fresh?.status || 'missing'}`;
+  const receivedMeanwhile = fresh?.status === 'received';
   // An ambiguous submit (the call left the process, outcome unknown) is
   // attached the same way — conservatively, as an order that MAY exist.
   const landed = placed.ambiguous ? 'MAY have been placed (the submit outcome is unknown — check the account)' : 'was confirmed';
   const bell = versioned({
     title: `Auto-order ${placed.ambiguous ? 'may have landed' : 'landed'} after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
-    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) ${landed} after ${after}. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.`,
+    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) ${landed} after ${after}. ${receivedMeanwhile ? 'The stock counted at that receipt was not this order: receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and record the revoke; new requests for the product are blocked until then.' : 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.'}`,
   });
   await trx('vendor_orders').where({ id: ledger.id }).update({
     ...orderFacts,
     // The adapter's confirmed facts (item / address / payment / read-back)
     // are kept for the reconciliation, as the green path keeps them (Codex r24 P2).
     // A request received meanwhile keeps this row live too (landedAfterReceive — Codex r27 P1).
-    evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ ...(placed.evidence || {}), bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked, ...(fresh?.status === 'received' ? { landedAfterReceive: new Date().toISOString() } : {}) })]),
+    evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ ...(placed.evidence || {}), bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked, ...(receivedMeanwhile ? { landedAfterReceive: new Date().toISOString() } : {}) })]),
     error: conn.raw("COALESCE(error, '') || ?", [` | order ${placed.ambiguous ? 'MAY have been placed' : 'confirmed placed'} after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
   });
-  await requestToOrdered(trx, request.id);
+  // A received request stays received (its stock was counted) — the marker above keeps its row live.
+  if (!receivedMeanwhile) await requestToOrdered(trx, request.id);
   await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order ${placed.ambiguous ? 'may exist (ambiguous submit)' : 'exists'}`, trx });
   return { bell, settledElsewhere: true };
+}
+
+// The order landed on a request an older pod received by hand while the
+// call ran and the row is still 'placing': park it placed_on_received_request
+// inside the record transaction (cap + row locks held) with
+// evidence.landedAfterReceive, which keeps every live-order guard closed
+// until the revoke CLI records a revoke or the request is received once
+// more — the late order's own receipt (Codex r27 P1). The request is not
+// touched: its stock was counted. Returns the bell for delivery.
+async function parkOnReceivedLocked(trx, { ctx, placed, finalCents }) {
+  const { ledger, request, product, vendor, adapterKey } = ctx;
+  const reason = 'placed_on_received_request';
+  const message = `${vendor.name} order ${placed.externalOrderNumber || '?'} (${dollars(finalCents)}) landed after the restock request was received by hand — the stock counted was not this order. Receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and record the revoke; new requests for the product are blocked until then.`;
+  const bell = parkBell({ reason, status: 'needs_review', product, vendor, request, amountCents: finalCents, message, placed });
+  const patch = parkPatch({ status: 'needs_review', reason, message, evidence: { ...(placed.evidence || {}), landedAfterReceive: new Date().toISOString() }, bell, amountCents: finalCents, postSubmit: true, placed });
+  await trx('vendor_orders').where({ id: ledger.id, status: 'placing' }).update(patch);
+  await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'needs_review', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, reason: `${reason}: ${message}`.slice(0, 400), trx });
+  return { bell, parkedOnReceived: true };
 }
 
 /**
@@ -910,14 +930,19 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
     // LOCK ORDER: ledger row next, then the request — the same order the
     // revoke script and every park use, so a late placement racing an
     // operator revoke waits instead of deadlocking (Codex r3 P1).
-    await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
+    const row = await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id', 'status');
     const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
     // Received by hand while the call ran (an older, pre-guard pod): that
     // receipt counted stock that was not this order, and a received request
-    // would settle the row in every guard. Not a green placement — parked
-    // below, outside this transaction, with the marker that keeps the
-    // guards closed (Codex r27 P1). Nothing written here.
-    if (fresh?.status === 'received') return { parkOnReceived: true };
+    // would settle the row in every guard. Not a green placement: the row
+    // parks placed_on_received_request HERE, under the same locks, with the
+    // marker that keeps the guards closed (Codex r27 P1) — or, when stale
+    // recovery already parked it, the late facts attach with that same
+    // marker (hook r27 P0). Either way the request stays received.
+    if (fresh?.status === 'received') {
+      if (row?.status !== 'placing') return attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCents, fresh });
+      return parkOnReceivedLocked(trx, { ctx, placed, finalCents });
+    }
     const stillOpen = fresh?.status === 'open';
     const bell = stillOpen ? null : closedMidFlightBell(fresh?.status);
     // Green transition only from a row still 'placing' (pre-push P1).
@@ -932,16 +957,13 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
     await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed', amount_cents: finalCents, external_order_number: placed.externalOrderNumber || null, trx });
     return { bell };
   });
-  if (outcome.parkOnReceived) {
-    return park(conn, { ...ctx, reason: 'placed_on_received_request', message: `${vendor.name} order ${placed.externalOrderNumber || '?'} (${dollars(finalCents)}) landed after the restock request was received by hand — the stock counted was not this order. Receive the request once more when it arrives (the tab allows it for this order), or cancel with the vendor and record the revoke; new requests for the product are blocked until then.`, amountCents: finalCents, evidence: { ...(placed.evidence || {}), landedAfterReceive: new Date().toISOString() }, placed });
-  }
   const bellDelivered = outcome.bell ? await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...outcome.bell }) : true;
   logger.info(`[order-dispatch] ${placed.ambiguous ? 'ambiguous submit attached for' : 'placed'} ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
   return {
     requestId: request.id,
     ledgerId: ledger.id,
-    status: outcome.settledElsewhere ? 'needs_review' : 'placed',
-    ...(outcome.settledElsewhere ? { reason: 'placed_after_stale_park' } : {}),
+    status: outcome.settledElsewhere || outcome.parkedOnReceived ? 'needs_review' : 'placed',
+    ...(outcome.parkedOnReceived ? { reason: 'placed_on_received_request' } : outcome.settledElsewhere ? { reason: 'placed_after_stale_park' } : {}),
     externalOrderNumber: placed.externalOrderNumber || null,
     amountCents: finalCents,
     ...(bellDelivered ? {} : { bellPending: true }),

@@ -45,6 +45,7 @@ jest.mock('../models/db', () => {
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.first = async (...cols) => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrder; // assertNoLiveAutoOrder's aliased join
+      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
@@ -707,6 +708,21 @@ test('an order that lands after an OLDER pod received the request by hand parks 
   expect(notify).toHaveBeenCalledTimes(1);
   expect(notify.mock.calls[0][2]).toMatch(/landed after the restock request was received by hand/);
   expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
+});
+
+test('an order that lands after stale recovery parked the row AND an older pod received the request attaches as a late placement carrying landedAfterReceive — never already_settled (hook r27 P0)', async () => {
+  const dbFn = require('../models/db');
+  dbFn.raw.mockClear();
+  mockState.freshRequestStatus = 'received';
+  const a = mockAdapter({ place: jest.fn(async () => { mockState.ledgerSettled = true; return { externalOrderNumber: 'SM-3', amountCents: 31400, response: {}, evidence: { itemId: 4242 } }; }) });
+  const r = await run(a);
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_after_stale_park', externalOrderNumber: 'SM-3' });
+  expect(r.skipped).toBeUndefined();
+  const attached = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.external_order_number === 'SM-3');
+  expect(attached).toBeDefined(); // the confirmed number + amount reach the parked row
+  expect(dbFn.raw.mock.calls.some((c) => /revokedAt/.test(c[0]) && c[1] && String(c[1][0]).includes('"landedAfterReceive"'))).toBe(true); // the marker keeps the guards closed
+  expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0); // received stays received
+  expect(notify.mock.calls[0][2]).toMatch(/receive the request once more/);
 });
 
 test('a DB failure after the vendor call parks as persist_after_placement, never failed', async () => {
