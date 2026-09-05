@@ -73,6 +73,17 @@ describe('assignDispatchJob → tech notice', () => {
     });
   });
 
+  test('a caller that will rewrite the schedule in the same trx overrides the row snapshot (edit modal: tech + date)', async () => {
+    const trx = assignmentTrx();
+    await assignDispatchJob({
+      jobId: 'job-1', technicianId: 't-new', actorId: 'adam', trx,
+      noticeSnapshot: { date: '2026-09-14', windowStart: '13:00', windowEnd: undefined },
+    });
+    expect(mockNotifyAssignmentChange).toHaveBeenCalledWith(expect.objectContaining({
+      snapshot: { date: '2026-09-14', windowStart: '13:00', windowEnd: undefined },
+    }));
+  });
+
   test('a caller-owned trx is passed through so the notice waits for THAT commit', async () => {
     const trx = assignmentTrx();
     await assignDispatchJob({ jobId: 'job-1', technicianId: null, actorId: 'adam', trx });

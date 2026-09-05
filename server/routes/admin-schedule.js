@@ -1559,7 +1559,7 @@ async function getAssignmentTargetIds(conn, jobId, assignmentScope) {
   return { scope, job, parentId, targetIds: targetIds.length ? targetIds : [jobId] };
 }
 
-async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScope = 'this_only', trx }) {
+async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScope = 'this_only', trx, noticeSnapshot = null }) {
   const conn = trx || db;
   const { scope, job, parentId, targetIds } = await getAssignmentTargetIds(conn, jobId, assignmentScope);
   // Multi-visit series assignment under a caller transaction: pre-acquire
@@ -1622,6 +1622,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
       actorId,
       emit: false,
       trx: conn,
+      // The edited row's pending schedule applies to the anchor only —
+      // series siblings keep their own dates.
+      ...(noticeSnapshot && String(targetId) === String(jobId) ? { noticeSnapshot } : {}),
     });
     if (assignment.technicianName) technicianName = assignment.technicianName;
     if (assignment.changed) changedJobIds.push(targetId);
@@ -8671,6 +8674,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           actorId: req.technicianId,
           trx,
           assignmentScope: normalizedAssignmentScope,
+          // Tech + date/window in one save: the new tech's card must name
+          // the schedule this transaction is about to write, not the row as
+          // it stands before the update below.
+          noticeSnapshot: {
+            date: updates.scheduled_date,
+            windowStart: updates.window_start,
+            windowEnd: updates.window_end,
+          },
         });
         assignmentChanged = !!assignment.changed;
         assignmentUpdatedJobIds = assignment.changedJobIds || [];
