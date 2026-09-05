@@ -1125,6 +1125,11 @@ describe('sprinkler timer guide', () => {
     expect(turfQueries[0].where).toHaveBeenCalledWith({ customer_id: 'cust-1', active: true });
   });
 
+  test('the seasonal consent helper the gate imports is a real top-level export (the suite mocks it; pre-push Codex P1 on d85f2981c)', () => {
+    const actual = jest.requireActual('../services/document-contract-delivery');
+    expect(typeof actual.marketingSmsConsentBasisForContract).toBe('function');
+  });
+
   test('every visit-prep entry carries a service family; only a guide may omit it (the composer scan iterates PREP_CONFIG)', () => {
     const { PREP_CONFIG } = require('../services/prep-guide-sender');
     for (const config of Object.values(PREP_CONFIG)) {
