@@ -436,8 +436,11 @@ describe('pre-push hook round 9', () => {
     convo._recordTurn('agent', 'Transferring you now.');
     await convo.end('transfer');
     expect(updates).toHaveLength(3);
-    expect(builder.where).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'ai_transferred']); // …or a transferred row whose recording was already processed
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff') IS NOT NULL"));
+    // The column salvage itself only takes an ai_transferred row whose columns are still Sandy's (provider NULL / conversation_relay).
+    const src = require('fs').readFileSync(require.resolve('../services/voice-agent/relay-conversation'), 'utf8');
+    expect(builder.whereRaw).toHaveBeenCalledWith("(call_outcome = 'relay_failed' OR transcription_provider IS NULL OR transcription_provider = ?)", ['conversation_relay']);
     expect(updates[2]).not.toHaveProperty('transcription'); // the recording owns the columns
     expect(updates[2].metadata.bindings[0]).toContain('"relay_transcript"');
     const logger = require('../services/logger');

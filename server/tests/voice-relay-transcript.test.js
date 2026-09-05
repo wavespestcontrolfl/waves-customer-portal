@@ -36,6 +36,7 @@ function primeCallLog({ rows = 1, updateImpl } = {}) {
     update,
     where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
     whereIn: jest.fn(() => builder),
+    whereRaw: jest.fn(() => builder), // the salvage's provider guard (PR 2A)
   };
   db.mockReturnValue(builder);
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));

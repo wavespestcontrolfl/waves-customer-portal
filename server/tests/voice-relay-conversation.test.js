@@ -106,7 +106,7 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
     // The salvage is keyed to the failure stamp, owner-fenced, and never touches the outcome.
     expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['relay_failed', 'ai_transferred']);
-    expect(builder.whereRaw).toHaveBeenCalledTimes(2);
+    expect(builder.whereRaw).toHaveBeenCalledTimes(3); // owner fence ×2 + the salvage's provider guard (PR 2A)
     expect(updates[1]).toEqual(expect.objectContaining({ transcription_status: 'completed' }));
     expect(updates[1]).not.toHaveProperty('call_outcome');
     expect(updates[1]).not.toHaveProperty('status');

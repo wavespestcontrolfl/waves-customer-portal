@@ -1940,7 +1940,14 @@ class RelayConversation {
           // staff/voicemail recording later REPLACES the transcript columns
           // (recording-status swap), and the processor rebuilds the AI segment
           // from this copy (codex r1 P1).
-          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['relay_failed', 'ai_transferred']))
+          // …but ONLY while the columns are still Sandy's (hook P1): a close
+          // that lands after the staff recording was processed must not
+          // replace the recording's transcript — that row takes the
+          // metadata-only stash below instead.
+          const { TRANSCRIPTION_PROVIDER: RELAY_PROVIDER } = require('./relay-transcript');
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid)
+            .whereIn('call_outcome', ['relay_failed', 'ai_transferred'])
+            .whereRaw("(call_outcome = 'relay_failed' OR transcription_provider IS NULL OR transcription_provider = ?)", [RELAY_PROVIDER]))
             .update({
               ...transcriptUpdate,
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
@@ -1951,11 +1958,12 @@ class RelayConversation {
           if (salvaged) logger.info(`[voice-relay] transcript kept on a relay_failed row callSid=${maskSid(this.callSid)} turns=${this._transcript.length}`);
         }
         // Voicemail WON the close race (no staff numbers / an unconfirmed
-        // ring stamped it before this close): the recording's transcript
+        // ring stamped it before this close), or the recording was already
+        // processed onto the transferred row: the recording's transcript
         // owns the columns, but the AI segment still rides
         // metadata.relay_transcript on the transfer-marked row (hook P1).
         if (transcriptUpdate && !updated && !salvaged && this._transferRequested === true) {
-          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).where('call_outcome', 'voicemail').whereRaw("(metadata->'relay_handoff') IS NOT NULL"))
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['voicemail', 'ai_transferred']).whereRaw("(metadata->'relay_handoff') IS NOT NULL"))
             .update({
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
                 relay_transcript: { text: transcriptUpdate.transcription, metadata: JSON.parse(transcriptUpdate.transcription_metadata) },
