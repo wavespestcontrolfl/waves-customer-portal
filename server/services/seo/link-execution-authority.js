@@ -84,7 +84,8 @@ async function reserveSlot(trx, placement, path, authority, leaseToken, now, pre
 }
 
 // Runs immediately before the browser enables mutating requests. A replay cannot cross it twice.
-async function beginSubmission(db, { prospectId, leaseToken }) {
+async function beginSubmission(db, { prospectId, leaseToken, citation }) {
+  if (!citation || typeof citation.website !== 'string' || !citation.website || typeof citation.location !== 'string' || !citation.location) return false;
   const { lockProspectDomain } = require('./prospect-domain-lock');
   const initial = await db('seo_link_prospects').where({ id: prospectId }).first();
   if (!initial) return false;
@@ -101,7 +102,7 @@ async function beginSubmission(db, { prospectId, leaseToken }) {
     const now = new Date();
     if (!(await slotAvailable(trx, authority.policy, now, slot.id))) return false;
     return Boolean(await trx(ATTEMPTS).where({ id: slot.id, outcome: 'slot_reserved', lease_token: leaseToken })
-      .update({ outcome: 'submitting', slot_day: etDateString(now), updated_at: now }));
+      .update({ outcome: 'submitting', slot_day: etDateString(now), detail: { ...slot.detail, citation: { website: citation.website, location: citation.location } }, updated_at: now }));
   });
 }
 
@@ -136,6 +137,11 @@ async function reconcileOwnerPlacement(trx, { prospectId, status, attemptId = nu
     return { ok: true };
   }
   for (const attempt of held) {
+    const citation = attempt.detail?.citation;
+    if (citation) {
+      const quality = typeof prospect.quality_signals === 'string' ? JSON.parse(prospect.quality_signals) : (prospect.quality_signals || {});
+      await trx('seo_link_prospects').where({ id: prospectId }).update({ quality_signals: { ...quality, cited_homepage: true, submitted_website: citation.website, location: citation.location }, location_key: require('./prospect-domain-lock').locationKeyOf(citation.location), updated_at: now });
+    }
     await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'placed', detail: { ...attempt.detail, owner_confirmed_at: now.toISOString() }, updated_at: now });
     // A revised decision on this same path does not require a second submission after the owner confirms placement.
     const settledIds = authorities.filter((r) => r.path_id === attempt.path_id && (r.id === attempt.detail.authority_id || !r.ended_at)).map((r) => r.id);

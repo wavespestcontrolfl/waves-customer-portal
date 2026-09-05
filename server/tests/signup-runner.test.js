@@ -239,6 +239,8 @@ describe('run — outcomes', () => {
     fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: 'https://citysquares.com/biz/waves', pending: false, screenshot: Buffer.from('png') });
     const r = await runner.run({ allow: ['citysquares.com'] });
     expect(r.placed).toBe(1);
+    await fillCitationForm.mock.calls[0][1].beforeSubmit();
+    expect(require('../services/seo/link-execution-authority').beginSubmission).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ citation: { website: 'https://wavespestcontrol.com', location: 'bradenton' } }));
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', live_url: 'https://citysquares.com/biz/waves', evidence_url: 'backlink-evidence/x.png' }));
     // v2 ledger (seo_link_attempts): CHECKed enum outcome, provider + action, verbatim engine outcome in detail
     expect(mockInsert).not.toHaveBeenCalled();

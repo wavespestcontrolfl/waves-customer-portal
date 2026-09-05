@@ -47,10 +47,10 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     const p = leases[0];
     assert.equal((await W.report({ prospect_id: p.id, provider: 'deterministic_runner', lease_token: p.lease_token, outcome: 'placed', pending: true })).code, 'submit_not_started');
     gates.delete('linkAuthority');
-    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token }), false);
+    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } }), false);
     gates.add('linkAuthority');
-    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token }), true);
-    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token }), false);
+    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } }), true);
+    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } }), false);
     assert.equal((await W.report({ prospect_id: p.id, provider: 'hermes', lease_token: p.lease_token, outcome: 'placed', pending: true })).code, 'stale_lease');
     assert.equal((await W.report({ prospect_id: p.id, provider: 'deterministic_runner', lease_token: p.lease_token, outcome: 'placed', pending: true })).ok, true);
     const stored = await trx('seo_link_prospects').where({ id: p.id }).first();
@@ -89,7 +89,7 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     console.log('PASS held submit preserves screenshot/reason/authority on the original attempt and releases lease stamps');
     const authority = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution', instance_kind: '-' }).first();
     await trx('seo_link_placement_authorities').where({ id: authority.id }).update({ satisfied_at: null, satisfied_reason: null });
-    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id } });
+    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
     await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
     const router = require(`${root}/server/routes/admin-backlink-agent-v2`);
     const edit = router.stack.find(l => l.route?.path === '/prospects/:id' && l.route.methods.patch).route.stack.at(-1).handle;
@@ -100,6 +100,10 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     await assert.rejects(confirm({ live_url: 'javascript:alert(1)' }), /400/);
     assert.equal((await confirm()).prospect.status, 'placed');
     assert.equal((await trx('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'placed');
+    const recoveredCitation = await trx('seo_link_prospects').where({ id: p.id }).first();
+    assert.equal(recoveredCitation.quality_signals.cited_homepage, true);
+    assert.equal(recoveredCitation.quality_signals.location, p.location_key);
+    assert.equal(require(`${root}/server/services/seo/link-prospect-verifier`)._test.expectedTargetUrl(recoveredCitation), 'https://wavespestcontrol.com');
     assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_reason, 'placed');
     await assert.rejects(confirm(), /409/);
     assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 1);
