@@ -405,6 +405,21 @@ describe('mixForProduct', () => {
     expect(buildPlan).not.toHaveBeenCalled();
   });
 
+  test('an off-plan searched product still faces the plan\'s guards (Codex r13 P1)', async () => {
+    const urea = { id: 'n1', name: 'Urea 46-0-0', category: 'fertilizer', analysis_n: 46, analysis_p: 0, default_rate_per_1000: 2, rate_unit: 'lb' };
+    const primo = { id: 'pg', name: 'Primo Maxx', category: 'plant growth regulator', default_rate_per_1000: 0.25, rate_unit: 'fl oz' };
+    const windows = [{ jurisdictionName: 'Manatee County', restrictedNitrogen: true, restrictedPhosphorus: false }];
+    const cleanPlan = { propertyGate: { blocks: [], activeOrdinanceWindows: windows, latestAssessment: { stressFlags: { drought_stress: true } } }, mixCalculator: { items: [], conditionalOptions: [] } };
+    const buildPlan = jest.fn().mockResolvedValue(cleanPlan);
+    const dbh = (rows) => makeDb({ scheduled_services: [lawnVisit], products_catalog: rows, equipment_calibrations: [live] });
+    const n = await jobCard.mixForProduct('n1', 110, { serviceId: 'svc1', dbh: dbh([urea]), deps: { buildPlan }, ...at });
+    expect(n).toMatchObject({ amount: null, reason: 'Lawn plan blocked — amounts withheld', planBlocks: [{ code: 'nitrogen_blackout' }] });
+    const p = await jobCard.mixForProduct('pg', 110, { serviceId: 'svc1', dbh: dbh([primo]), deps: { buildPlan }, ...at });
+    expect(p).toMatchObject({ amount: null, planBlocks: [{ code: 'pgr_on_stressed_turf' }] });
+    // A nitrogen-free, non-PGR product doses normally under the same plan.
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan }, ...at })).amount).toBe(6.215);
+  });
+
   test('a product the lawn plan resolved is dosed at the plan\'s rate, not the catalog default (Codex r12 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     // Saved substitution override: 0.2 oz/1,000 instead of the catalog's 0.113.

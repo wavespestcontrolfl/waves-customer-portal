@@ -30,7 +30,10 @@ const { detectServiceLine } = require('./service-report/service-line-configs');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
-const { buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations } = require('./waveguard-plan-engine');
+const {
+  buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
+  itemHasNitrogen, itemHasPhosphorus, itemIsPgr,
+} = require('./waveguard-plan-engine');
 const { latestComparableGroupApplication } = require('./waveguard-approval-engine');
 
 const PROMPT_VERSION = 'job_card_paragraph_v1';
@@ -664,6 +667,29 @@ function planBlocksOf({ plan }) {
   return (plan.propertyGate?.blocks || []).map((b) => ({ code: b.code || null, message: clean(b.message, 200) })).filter((b) => b.message);
 }
 
+/**
+ * The plan's guards applied to ONE product the plan did not evaluate (a
+ * searched, off-plan product): the property's active ordinance windows
+ * (N / P blackout) and the PGR-on-stressed-turf rule, using the same
+ * predicates the plan engine uses on its own items.
+ */
+function productBlocksUnderPlan({ plan }, product) {
+  if (!plan) return [];
+  const item = { product, raw: product.name || '' };
+  const gate = plan.propertyGate || {};
+  const blocks = [];
+  for (const w of gate.activeOrdinanceWindows || []) {
+    const where = w.jurisdictionName ? ` (${clean(w.jurisdictionName, 60)})` : '';
+    if (w.restrictedNitrogen && itemHasNitrogen(item)) blocks.push({ code: 'nitrogen_blackout', message: `Nitrogen blackout is active${where} — this product carries nitrogen.` });
+    if (w.restrictedPhosphorus && itemHasPhosphorus(item)) blocks.push({ code: 'phosphorus_blackout', message: `Phosphorus blackout is active${where} — this product carries phosphorus.` });
+  }
+  const stress = gate.latestAssessment?.stressFlags || {};
+  if ((stress.drought_stress || stress.heat_stress || stress.recent_scalp) && itemIsPgr(item)) {
+    blocks.push({ code: 'pgr_on_stressed_turf', message: 'Turf is flagged stressed — no growth regulator this visit.' });
+  }
+  return blocks;
+}
+
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
   if (facts.isLawn) {
     const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now });
@@ -821,7 +847,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
  */
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date() } = {}) {
   const [product, svc] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
+    dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
     serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
@@ -833,7 +859,10 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
   const plan = detectServiceLine(svc.service_type) === 'lawn' ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
-  const planBlocks = plan ? planBlocksOf(plan) : [];
+  // Plan-wide blocks first, then the plan's guards on this product itself
+  // (an off-plan nitrogen fertilizer during a blackout, a PGR on stressed
+  // turf) — the search is not a way around the plan.
+  const planBlocks = plan ? [...planBlocksOf(plan), ...productBlocksUnderPlan(plan, product)] : [];
   const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;

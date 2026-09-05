@@ -1674,6 +1674,9 @@ module.exports = {
   isConditionalSelected,
   summarizeCalibration,
   getActiveCalibrations,
+  itemHasNitrogen,
+  itemHasPhosphorus,
+  itemIsPgr,
   summarizeOrdinanceStatus,
   summarizeTurfProfileCompleteness,
 };
