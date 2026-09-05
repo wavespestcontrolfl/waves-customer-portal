@@ -815,7 +815,9 @@ is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
 GET returns the appointment summary (customer first name, service type,
 current date/window, recurring flag, `missed` flag, and — series visits
 only — the `reanchorPullForwardDays` threshold) + live open slots from the
-/book availability engine. POST is a WRITE with two owner-authorized
+/book availability engine. The day lists contain all feasible starts; only
+the separate recommendations are curated. Moving an existing self-booked
+visit excludes that booking from its own day-cap count. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day

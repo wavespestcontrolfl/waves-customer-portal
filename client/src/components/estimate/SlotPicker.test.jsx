@@ -317,3 +317,21 @@ describe('SlotPicker', () => {
     });
   });
 });
+
+describe('date availability failures', () => {
+  it.each(['http', 'network'])('shows a retryable error instead of an empty day on %s failure', async (failure) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [], expander: [] }));
+    if (failure === 'http') fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
+    else fetchMock.mockRejectedValueOnce(new Error('Connection lost'));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ primary: [slot('retried', '2099-06-11')], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: '2099-06-11' } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('We couldn’t load times for that day');
+    expect(screen.queryByText(/No open times then/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    await screen.findByText(/Arrival window:/);
+    expect(fetchMock.mock.calls[2][0]).toContain('date=2099-06-11');
+  });
+});

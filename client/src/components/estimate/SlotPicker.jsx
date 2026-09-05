@@ -24,6 +24,7 @@ import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/es
 import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
 import { docTransition } from '../../theme-doc';
 import { W } from './tokens';
+import { GOLD_CTA } from '../../theme-brand';
 
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -143,6 +144,7 @@ export default function SlotPicker({
   const [searchData, setSearchData] = useState(null);
   const [pickedDate, setPickedDate] = useState(null);
   const [pickedData, setPickedData] = useState(null);
+  const [pickedError, setPickedError] = useState(false);
   const [pickedLoading, setPickedLoading] = useState(false);
   const [pickedDateFocused, setPickedDateFocused] = useState(false);
   const latestPickedRequestRef = useRef(0);
@@ -225,6 +227,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(null);
     setPickedData(null);
+    setPickedError(false);
     setPickedLoading(false);
     latestPickedRequestRef.current += 1;
     const params = new URLSearchParams();
@@ -314,6 +317,10 @@ export default function SlotPicker({
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
+    latestPickedRequestRef.current += 1;
+    setPickedData(null);
+    setPickedError(false);
+    setPickedLoading(false);
     setPickedDate(null);
     selectSlot(null);
     setSearchData(body);
@@ -325,6 +332,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(null);
     setPickedData(null);
+    setPickedError(false);
     setPickedLoading(false);
     selectSlot(null);
   };
@@ -335,6 +343,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
+    setPickedError(false);
     selectSlot(null);
     if (!date) {
       setPickedLoading(false);
@@ -345,12 +354,13 @@ export default function SlotPicker({
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
-      const body = res.ok ? await res.json() : { primary: [], expander: [] };
+      if (!res.ok) throw new Error('Availability lookup failed');
+      const body = await res.json();
       if (latestPickedRequestRef.current !== requestId) return;
       setPickedData(body);
     } catch {
       if (latestPickedRequestRef.current !== requestId) return;
-      setPickedData({ primary: [], expander: [] });
+      setPickedError(true);
     } finally {
       if (latestPickedRequestRef.current === requestId) {
         setPickedLoading(false);
@@ -470,7 +480,14 @@ export default function SlotPicker({
         </div>
       </div>
       {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption }}>Loading times…</div> : null}
-      {pickedData ? <div>{renderSlotList(pickedData)}</div> : null}
+      {pickedError ? (
+        <div role="alert" style={{ fontSize: 16, color: W.textBody }}>
+          We couldn’t load times for that day. Please try again.
+          <button type="button" onClick={() => onPickDate(pickedDate)} style={{ ...GOLD_CTA, display: 'block', width: '100%', marginTop: 12 }}>
+            Try again
+          </button>
+        </div>
+      ) : pickedData ? <div>{renderSlotList(pickedData)}</div> : null}
     </div>
   );
 
@@ -568,7 +585,7 @@ export default function SlotPicker({
           bookable window as a one-tap card — the slot lists are ordered
           soonest-first, so the first non-stale slot IS the next available.
           Hidden while the finder/date-picker results own the list. */}
-      {quickPick && !(searchData || pickedData || pickedLoading) ? (() => {
+      {quickPick && !(searchData || pickedDate || pickedLoading) ? (() => {
         const next = (glass ? allSlots.find((s) => !glassSlotIsStale(s)) : allSlots[0]) || null;
         if (!next) return null;
         const meta = glassSlotMeta(next);
@@ -602,10 +619,10 @@ export default function SlotPicker({
         );
       })() : null}
       {finder}
-      {glass && !(searchData || pickedData || pickedLoading) ? (
+      {glass && !(searchData || pickedDate || pickedLoading) ? (
         <GlassScarcityBadge info={glassScarcityInfo(allSlots, data?.metadata?.firstDayAvailability)} />
       ) : null}
-      {searchData || pickedData || pickedLoading ? null : initial.map((slot) => (
+      {searchData || pickedDate || pickedLoading ? null : initial.map((slot) => (
         <SlotCard
           key={slot.slotId}
           slot={slot}
@@ -616,7 +633,7 @@ export default function SlotPicker({
         />
       ))}
 
-      {(searchData || pickedData || pickedLoading) ? null : more.length > 0 ? (
+      {(searchData || pickedDate || pickedLoading) ? null : more.length > 0 ? (
         <>
           <button
             type="button"

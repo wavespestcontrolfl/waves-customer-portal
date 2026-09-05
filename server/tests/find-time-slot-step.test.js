@@ -47,7 +47,7 @@ afterAll(() => {
 
 function chain(result) {
   const c = {};
-  ['where', 'whereBetween', 'whereIn', 'whereNotIn', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+  ['whereNotNull', 'where', 'whereBetween', 'whereIn', 'whereNotIn', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
   c.select = async () => result;
   return c;
 }

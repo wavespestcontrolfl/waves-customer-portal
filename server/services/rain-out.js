@@ -18,6 +18,7 @@
  * tech doesn't reschedule into tomorrow's 65% thunderstorms.
  */
 
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
@@ -706,7 +707,7 @@ async function loadOccupancy({
   // Same status exclusions the rebooker enforces at its commit gate. The
   // generic admin slot-check passes the admin set (skipped / no_show freed)
   // so its hints agree with the save-side probe (window-rules.js).
-  excludeStatuses = ['cancelled', 'completed'],
+  excludeStatuses = [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
 } = {}) {
   const { listOccupiedWindows } = require('./scheduling/occupancy');
   const rows = await listOccupiedWindows({

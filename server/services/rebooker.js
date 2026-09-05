@@ -1,3 +1,4 @@
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const crypto = require('crypto');
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
@@ -905,7 +906,7 @@ class SmartRebooker {
           windowStart: window.start,
           windowEnd: candidateEnd,
           excludeServiceIds: [String(serviceId)],
-          excludeStatuses: ['cancelled', 'completed'],
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
           // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
           // survive the commit's own probe. Admin reschedule-options stay
           // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
@@ -1324,7 +1325,7 @@ class SmartRebooker {
           // excludeServiceIds) — a chained sibling's OLD slot is not a
           // conflict for the shifted primary (codex #3609 r1).
           .whereNotIn('id', [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))])
-          .whereNotIn('status', ['cancelled', 'completed'])
+          .whereNotIn('status', [...NOT_A_ROUTE_STOP_STATUSES, 'completed'])
           // Expired estimate-slot holds are dead weight until cleanup
           // reclaims them — same active-reservation predicate
           // slot-reservation.js uses, so a lapsed hold can't block a
@@ -1370,7 +1371,7 @@ class SmartRebooker {
           windowStart: updates.window_start,
           windowEnd: occupancyGateEnd,
           excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
-          excludeStatuses: ['cancelled', 'completed'],
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
           // Travel gap (GATE_SLOT_TRAVEL_GAP): the moving row's own pin —
           // CUSTOMER-FACING movers only (options.travelGap: public reschedule
           // page, SMS reply). Auto-dispatch generates its candidates under
@@ -2305,7 +2306,7 @@ class SmartRebooker {
               .where('scheduled_date', date)
               .where('technician_id', options.technicianId)
               .whereNot('id', sib.id)
-              .whereNotIn('status', ['cancelled', 'completed'])
+              .whereNotIn('status', [...NOT_A_ROUTE_STOP_STATUSES, 'completed'])
               .where((q) => {
                 q.whereNull('reservation_expires_at')
                   .orWhereRaw('reservation_expires_at > NOW()');
@@ -2344,7 +2345,7 @@ class SmartRebooker {
             windowStart: updateData.window_start,
             windowEnd: anchorOccEnd,
             excludeServiceIds: sweptIds,
-            excludeStatuses: TERMINAL,
+            excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
             travel: seriesTravel,
           });
           if (anchorOccClash.length) {
@@ -2425,7 +2426,7 @@ class SmartRebooker {
             windowStart: updateData.window_start,
             windowEnd: occEnd,
             excludeServiceIds: sweptIds,
-            excludeStatuses: TERMINAL,
+            excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
             travel: seriesTravel,
           });
           if (occClash.length) {
@@ -2852,7 +2853,7 @@ class SmartRebooker {
         windowStart: row.window_start,
         windowEnd: occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes),
         excludeServiceIds: sweptIds,
-        excludeStatuses: TERMINAL,
+        excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
       });
       if (clash.length) conflictCount += 1;
     }
