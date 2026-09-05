@@ -612,14 +612,22 @@ async function previewBulkLeadUpdate(input) {
 // rows the bridge cannot land — run the shared per-lead settlement (the
 // repeat's own bridge inside it is a monotonic no-op). The bridge result is
 // the card's warning source, as for every other status.
+// Best-effort like the bridges it sits between (codex r37 P2): the statuses
+// have committed, so a failed repeat discovery surfaces as the card's
+// attribution warning and never fails the tool.
 async function settleBulkWon(ids) {
   const funnel = await bridgeLeadsFunnelStage(ids, 'won');
-  const repeats = await db('leads')
-    .whereIn('id', ids)
-    .where({ lead_type: 'quote_wizard' })
-    .whereRaw("extracted_data->>'duplicate_of_lead_id' IS NOT NULL")
-    .select('id', 'customer_id');
-  for (const row of repeats) await leadAttribution.settleWonFunnelRow(row.id, row.customer_id || null);
+  try {
+    const repeats = await db('leads')
+      .whereIn('id', ids)
+      .where({ lead_type: 'quote_wizard' })
+      .whereRaw("extracted_data->>'duplicate_of_lead_id' IS NOT NULL")
+      .select('id', 'customer_id');
+    for (const row of repeats) await leadAttribution.settleWonFunnelRow(row.id, row.customer_id || null);
+  } catch (err) {
+    logger.error(`[intelligence-bar:leads] bulk won repeat settlement failed: ${err.message}`);
+    return { reason: 'error' };
+  }
   return funnel;
 }
 

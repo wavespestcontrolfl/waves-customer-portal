@@ -265,6 +265,22 @@ describe('bulk_update_leads (leads)', () => {
     expect(res.warning).toMatch(/attribution reporting may lag/);
   });
 
+  test('a bulk WON whose repeat discovery fails after the statuses committed still reports success with the attribution warning and writes the activities (codex #3834 r37 P2)', async () => {
+    const leads = chain({ update: [{ id: 'lead-1' }] });
+    leads.select.mockRejectedValueOnce(new Error('db boom'));
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+
+    const res = await executeLeadsTool('bulk_update_leads', {
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1'],
+    });
+    expect(res.success).toBe(true);
+    expect(res.updated).toBe(1);
+    expect(res.warning).toMatch(/attribution reporting may lag/);
+    expect(activities.insert).toHaveBeenCalled();
+    expect(settleWonFunnelRow).not.toHaveBeenCalled();
+  });
+
   test('a confirmed run with dry_run:false actually updates (no silent no-op)', async () => {
     const leads = chain({ update: [{ id: 'lead-1' }] });
     const activities = chain({ insert: undefined });
