@@ -23,6 +23,7 @@ stub('models/db', proxy);
   const trx = await db.transaction(); active = trx;
   try {
     const V = require(`${root}/server/services/seo/link-prospect-verifier`);
+    const Q = require(`${root}/server/services/seo/link-owner-queue`);
     const oid = randomUUID(), opath = randomUUID(), first = randomUUID(), second = randomUUID(), backlink = randomUUID();
     const publisher = `synthetic-${oid}.example`, target = 'https://wavespestcontrol.com/pest-control/';
     const sent = new Date(Date.now() - 3 * 86400000);
@@ -32,24 +33,50 @@ stub('models/db', proxy);
     for (const [pid,location] of [[first,'sarasota'],[second,'bradenton']]) await trx('seo_link_prospects').insert({id:pid,domain_id:oid,path_id:opath,target_domain:publisher,target_page:target,location_key:location,status:'contacted',link_type:'resource',outreach_status:'sent',outreach_sent_at:sent,follow_up_status:'drafted'});
     await trx('seo_backlinks').insert({id:backlink,source_domain:publisher,source_url:`https://${publisher}/resources`,target_url:target,status:'active',discovery_source:'dataforseo',first_seen:require(`${root}/server/utils/datetime-et`).etDateString(new Date())});
     assert.deepEqual(await V.reconcileOutreach(), {matched:0,ambiguous:2});
-    assert.equal((await trx('seo_link_placement_backlinks').where({ backlink_id: backlink })).length, 0);
-    // A non-representative backlink is already owned by a live sibling. Matching
-    // must neither steal it nor retire the waiting placement's follow-up.
-    await trx('seo_link_prospects').where({ id: first }).update({ status: 'live' });
-    await trx('seo_link_placement_backlinks').insert({ prospect_id: first, backlink_id: backlink });
-    assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 0 });
-    assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).follow_up_status, 'drafted');
-    assert.equal((await trx('seo_link_placement_backlinks').where({ backlink_id: backlink }).first()).prospect_id, first);
-    // Removing the synthetic ownership makes exact evidence available to second.
+    const queue = await Q.listOwnerQueue(proxy);
+    assert.equal(queue.cards.filter(c=>c.backlink_match?.id===backlink).length,2);
+    for (const status of ['lost', 'disavowed']) {
+      await trx('seo_backlinks').where({ id: backlink }).update({ status });
+      await V.reconcileOutreach();
+      assert.equal((await Q.listOwnerQueue(proxy)).cards.length, 0);
+      for (const row of await trx('seo_link_prospects').whereIn('id', [first, second])) assert.equal(row.quality_signals.outreach_match_ambiguous, undefined);
+      await trx('seo_backlinks').where({ id: backlink }).update({ status: 'active' });
+      assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 2 });
+    }
+    console.log('PASS lost/disavowed evidence clears stale markers and empty owner cards');
+    for (const status of ['rejected', 'lost']) {
+      await trx('seo_link_prospects').whereIn('id', [first, second]).update({ status });
+      await V.reconcileOutreach();
+      for (const row of await trx('seo_link_prospects').whereIn('id', [first, second])) assert.equal(row.quality_signals.outreach_match_ambiguous, undefined);
+      await trx('seo_link_prospects').whereIn('id', [first, second]).update({ status: 'contacted' });
+      assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 2 });
+    }
+    console.log('PASS terminal placements lose their stale ambiguity markers');
+    await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
+    assert.deepEqual(await V.reconcileOutreach({ownerMatch:{prospectId:second,backlinkId:backlink}}),{matched:1,ambiguous:0});
+    const chosen = await trx('seo_link_prospects').where({id:second}).first();
+    assert.equal(chosen.status,'placed');assert.equal(chosen.backlink_id,backlink);assert.equal(chosen.follow_up_status,'skipped');
+    assert.equal((await trx('seo_link_prospects').where({id:first}).first()).status,'contacted');
+    assert.deepEqual(await V.reconcileOutreach(),{matched:0,ambiguous:0});
+    assert.equal((await trx('audit_log').where({resource_id:second,action:'backlink.placement.match'})).length,1);
+    console.log('PASS scan → ambiguous owner cards → audited assignment → follow-up retired → replay does not assign sibling');
+    const another = randomUUID();
+    await trx('seo_backlinks').insert({ id: another, source_domain: publisher, source_url: `https://${publisher}/another`, target_url: target, status: 'active', discovery_source: 'dataforseo', first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date()) });
+    // Existing secondary ownership must survive an explicit attempt to steal it.
+    await trx('seo_link_placement_backlinks').insert({ prospect_id: second, backlink_id: another });
+    assert.equal((await V.reconcileOutreach({ ownerMatch: { prospectId: first, backlinkId: another } })).matched, 0);
+    assert.equal((await trx('seo_link_placement_backlinks').where({ backlink_id: another }).first()).prospect_id, second);
+    assert.equal((await trx('seo_link_prospects').where({ id: first }).first()).follow_up_status, 'drafted');
+    await trx('seo_link_placement_backlinks').where({ backlink_id: another }).delete();
     await trx('seo_link_placement_backlinks').where({ backlink_id: backlink }).delete();
-    await trx('seo_link_prospects').where({ id: second }).update({ target_url: `https://${publisher}/resources` });
-    assert.deepEqual(await V.reconcileOutreach(), { matched: 1, ambiguous: 0 });
-    const chosen = await trx('seo_link_prospects').where({ id: second }).first();
-    assert.equal(chosen.status, 'placed'); assert.equal(chosen.backlink_id, backlink); assert.equal(chosen.follow_up_status, 'skipped');
-    assert.equal((await trx('seo_link_placement_backlinks').where({ backlink_id: backlink }).first()).prospect_id, second);
-    assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 0 });
-    console.log('PASS canonical non-representative ownership, mapping persistence, follow-up retirement, replay');
-    await trx('seo_link_prospects').where({ id: first }).update({ status: 'contacted' });
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', live_url: null, backlink_id: null, follow_up_status: 'drafted' });
+    await V.reconcileOutreach();
+    const result = await V.reconcileOutreach({ ownerMatch: { prospectId: second, backlinkId: backlink } });
+    assert.equal(result.matched, 1);
+    assert.equal((await trx('seo_link_prospects').where({ id: first }).first()).quality_signals.outreach_match_ambiguous, another);
+    assert.ok((await Q.listOwnerQueue(proxy)).cards.some((card) => card.backlink_match?.id === another));
+    await trx('seo_backlinks').where({ id: another }).update({ status: 'lost' });
+    console.log('PASS non-representative owner assignment refusal and remaining-link queue refresh');
     // Recovery retains the historic attribution. A restored link can settle that
     // same placement, but may never be reassigned to its still-waiting sibling.
     await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', follow_up_status: 'drafted', quality_signals: { lost_recovery: true } });
@@ -68,6 +95,12 @@ stub('models/db', proxy);
     assert.equal(restored.follow_up_status, 'skipped');
     assert.equal(restored.indexing_status, 'not_checked');
     console.log('PASS recovered historical and moved backlinks settle only their own placement and retire follow-ups');
+    // A previously ambiguous owner choice is still valid after its competing sibling is rejected.
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', live_url: null, backlink_id: null, quality_signals: { outreach_match_ambiguous: replacement }, follow_up_status: 'drafted' });
+    assert.deepEqual(await V.reconcileOutreach({ ownerMatch: { prospectId: second, backlinkId: replacement } }), { matched: 1, ambiguous: 0 });
+    assert.equal((await trx('audit_log').where({ resource_id: second, action: 'backlink.placement.match' })).length, 3);
+    console.log('PASS owner assignment completes when its choice became unique');
+
     // Canonical mail/apex spellings use the same publisher identity in SQL and matching.
     await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', live_url: null, backlink_id: null, quality_signals: {} });
     await trx('seo_backlinks').where({ id: replacement }).update({ source_domain: `mail.${publisher}`, source_url: `https://mail.${publisher}/new-resources` });

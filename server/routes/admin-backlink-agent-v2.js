@@ -595,6 +595,16 @@ router.post('/prospects', async (req, res, next) => {
 });
 
 // PATCH /api/admin/backlink-agent/prospects/:id — edit
+router.post('/prospects/:id/reconcile-backlink', async (req, res, next) => {
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (!uuid.test(req.params.id) || !uuid.test(req.body?.backlink_id || '')) return res.status(400).json({ error: 'valid placement and backlink ids required' });
+    const result = await require('../services/seo/link-prospect-verifier').reconcileOutreach({ ownerMatch: { prospectId: req.params.id, backlinkId: req.body.backlink_id, actorId: req.technician?.id || null } });
+    if (!result.matched) return res.status(409).json({ error: 'This link no longer matches an available outreach placement. Refresh the queue.' });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
 router.patch('/prospects/:id', async (req, res, next) => {
   try {
     const allowed = ['status', 'priority', 'link_type', 'anchor_planned', 'live_url', 'target_page', 'target_url', 'domain_rating', 'owner', 'notes', 'placement_date'];
