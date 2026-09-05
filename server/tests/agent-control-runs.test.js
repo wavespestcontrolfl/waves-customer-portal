@@ -309,6 +309,30 @@ describe('a spent handle', () => {
     expect(store.agent_run_steps ?? []).toHaveLength(0);
   });
 
+  test('a retry counts its progress from zero: the reopened row was reset, and the handle must not carry attempt 1\'s count', async () => {
+    const a = await runs.startRun(base);
+    await a.heartbeat({ progress: true });
+    await a.heartbeat({ progress: true });
+    expect(runRow().progress_sequence).toBe(2);
+    await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
+    const b = await runs.startRun(base);
+    expect(runRow().progress_sequence).toBe(0);
+    await b.heartbeat({ progress: true });
+    expect(runRow().progress_sequence).toBe(1);
+  });
+
+  test('a work item supplied by a later start binds on the run row, not only the handle', async () => {
+    const a = await runs.startRun(base);
+    expect(a.workItemId).toBeNull();
+    expect(runRow().work_item_id).toBeNull();
+    await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
+    const b = await runs.startRun({ ...base, workItem: { sourceRef: 'entity-9', entityType: 'lead', entityId: '9', title: 'Lead 9' } });
+    expect(b.workItemId).toBe(store.work_items[0].id);
+    expect(runRow().work_item_id).toBe(store.work_items[0].id);
+    await b.finish({});
+    expect(store.work_items[0].status).toBe('done');
+  });
+
   test('a retry continues the step numbering, so the timeline orders across attempts', async () => {
     const a = await runs.startRun(base);
     await a.step({ key: 'one' }, async () => 1);

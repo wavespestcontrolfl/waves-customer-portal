@@ -45,6 +45,8 @@ const runIndex = require('../services/agent-control/run-index');
 
 const NOW = new Date('2026-09-05T12:00:00Z');
 const ago = (ms) => new Date(NOW.getTime() - ms);
+// the uuid-keyed sources (agent_runs, autonomous_runs, message_drafts, agent_decisions, call_log) take uuid ids only
+const uid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 beforeEach(() => {
   for (const k of Object.keys(fixtures)) delete fixtures[k];
@@ -69,7 +71,12 @@ describe('adapters project onto the canonical shape', () => {
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'awaiting_reply', approval_at: ago(1e3) })).toMatchObject({ lifecycle: 'waiting_human', lastProgressAt: ago(1e3).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'approved', approval_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'passed', finishedAt: ago(1e3).toISOString(), link: null });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'rejected' })).toMatchObject({ disposition: 'rejected', verification: 'failed' });
-    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'executing' })).toMatchObject({ lifecycle: 'running' });
+    // executing = active again FROM the decision: its own start / heartbeat, no finish (a draft parked past the hard timeout is not stalled the moment the owner replies)
+    const executing = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), updated_at: ago(40e3), approval_status: 'executing', approval_at: ago(1e3) });
+    expect(executing).toMatchObject({ lifecycle: 'running', startedAt: ago(1e3).toISOString(), lastHeartbeatAt: ago(1e3).toISOString(), lastProgressAt: ago(1e3).toISOString(), finishedAt: null });
+    // a failed emailed approval names ITS failure (content_email_approvals.last_error), not the parked generation outcome
+    const approvalFailed = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), approval_status: 'failed', approval_at: ago(1e3), approval_error: 'astro PR open failed: 502' });
+    expect(approvalFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'approval_failed', errorMessage: 'astro PR open failed: 502', detail: 'astro PR open failed: 502', finishedAt: ago(1e3).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', trust_build_approved_at: ago(500) })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', finishedAt: ago(500).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'skipped_gate_fail', quality_gate_result: { ok: false } })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'instruction' });
     const running = autonomousRuns.fromRow({ ...base, outcome: null, shadow_mode: true });
@@ -120,8 +127,16 @@ describe('adapters project onto the canonical shape', () => {
     // statuses: sms-auto-send's lifecycle constants + the literals the other producers write on agent_decisions rows
     const statuses = new Set(['pending_review', 'scheduled', 'superseded', 'expired', 'ignored', 'shadow', 'reviewed', 'auto_resolved', 'auto_applied']);
     for (const m of read('services/sms-auto-send.js').matchAll(/const (?:CLAIM|SENT|FAILED)_STATUS = '([a-z_]+)'/g)) statuses.add(m[1]);
-    expect(statuses.size).toBeGreaterThanOrEqual(12);
+    // the review paths persist the owner's verdict as the row status too (admin-agent-decisions VALID_VERDICTS; admin-communications + sms-suggest-mode write the same values)
+    const verdicts = new Set([...read('routes/admin-agent-decisions.js').match(/const VALID_VERDICTS = new Set\(\[([^\]]*)\]\)/)[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
+    expect([...verdicts].sort()).toEqual(['accepted', 'corrected', 'dismissed']);
+    for (const v of verdicts) statuses.add(v);
+    expect(statuses.size).toBeGreaterThanOrEqual(15);
     for (const st of statuses) expect(agentDecisions.STATUS_MAP).toHaveProperty(st);
+    // every human_verdict literal a producer writes is a verification
+    for (const f of ['routes/admin-communications.js', 'services/sms-suggest-mode.js']) for (const m of read(f).matchAll(/human_verdict: '([a-z_]+)'/g)) verdicts.add(m[1]);
+    expect(verdicts.has('ignored')).toBe(true);
+    for (const v of verdicts) expect(agentDecisions.VERDICT).toHaveProperty(v);
     expect(agentDecisions.LIVE_STATUSES).toEqual(expect.arrayContaining(['pending_review', 'sending', 'scheduled']));
 
     const base = { id: 'x', workflow: 'sms_house_voice_suggest', detected_intent: 'book', confidence: 0.82, mode: 'suggest', created_at: ago(3e3) };
@@ -129,6 +144,13 @@ describe('adapters project onto the canonical shape', () => {
     const reviewed = agentDecisions.fromRow({ ...base, status: 'reviewed', human_verdict: 'corrected', reviewed_at: ago(1e3), safety_flags: ['pricing_claim'] });
     expect(reviewed).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', verification: 'warning', disposition: 'applied' });
     expect(reviewed.steps.map((s) => s.key)).toEqual(['decide', 'safety', 'review']);
+    // an accepted / corrected review is applied work, a dismissed one refused, an ignored suggestion overridden — none of them failed
+    expect(agentDecisions.fromRow({ ...base, status: 'accepted', human_verdict: 'accepted', reviewed_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', verification: 'passed', disposition: 'applied', finishedAt: ago(1e3).toISOString() });
+    expect(agentDecisions.fromRow({ ...base, status: 'corrected', human_verdict: 'corrected' })).toMatchObject({ result: 'succeeded', verification: 'warning', disposition: 'applied' });
+    expect(agentDecisions.fromRow({ ...base, status: 'dismissed', human_verdict: 'dismissed' })).toMatchObject({ result: 'succeeded', verification: 'failed', disposition: 'rejected' });
+    const ignored = agentDecisions.fromRow({ ...base, status: 'ignored', human_verdict: 'ignored' });
+    expect(ignored).toMatchObject({ result: 'succeeded', verification: 'overridden', disposition: 'no_action' });
+    expect(runIndex.bucketsOf({ ...ignored, health: 'healthy', attention: null })).toMatchObject({ done: true, failed: false, attention: false });
     // auto-send: in flight, sent, failed
     expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'sending' })).toMatchObject({ lifecycle: 'running', laneId: 'sms_draft', area: 'sms' });
     expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_sent' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' });
@@ -161,6 +183,11 @@ describe('adapters project onto the canonical shape', () => {
     expect(parseFailed.steps[1]).toMatchObject({ status: 'failed', detail: 'schema_failed' });
     expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
     expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
+    // no transcription = the processor's known-failed retry state (its sweep re-runs it, its stats count it failed): errored, the transcribe step failed, nothing after it attempted
+    const noTranscript = callLog.fromRow({ ...base, processing_status: 'no_transcription', transcription_status: 'failed' });
+    expect(noTranscript).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider', errorCode: 'no_transcription' });
+    expect(noTranscript.steps.map((s) => s.status)).toEqual(['failed', 'skipped', 'skipped']);
+    expect(runIndex.bucketsOf({ ...noTranscript, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
     expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
     // a fresh, never-claimed call (NULL status) is queued work too
     expect(callLog.fromRow({ ...base, processing_status: null }).lifecycle).toBe('queued');
@@ -200,6 +227,9 @@ describe('adapters project onto the canonical shape', () => {
     expect(ok.finishedAt).toBe(ago(9e3).toISOString());
     expect(ok.startedAt).toBe(ago(14e3).toISOString());
     expect(managedSessions.fromRow({ provider_ref: 's2', lane_id: 'agent_bi', ok: false, error_code: 'anthropic_529', created_at: ago(1e3) })).toMatchObject({ result: 'errored', failureClass: 'provider', errorCode: 'anthropic_529' });
+    // a session the assistant keeps turning: created_at stays the first turn's; the newest turn is the finish and the span is the duration
+    const long = managedSessions.fromRow({ provider_ref: 's3', lane_id: 'customer_assistant', ok: true, latency_ms: 4000, created_at: ago(3600e3), last_turn_at: ago(2e3), turns: 6 });
+    expect(long).toMatchObject({ startedAt: ago(3604e3).toISOString(), finishedAt: ago(2e3).toISOString(), durationMs: 3602e3, stepsDone: 6 });
   });
 
   test('agent_runs: columns map straight through; counts from the subqueries; work-item entity', () => {
@@ -234,11 +264,11 @@ describe('listRuns', () => {
   afterEach(() => jest.restoreAllMocks());
 
   test('merges canonical and legacy rows newest-first, derives health, buckets and counts, reports unavailable sources', async () => {
-    spies.agentRuns.mockResolvedValue({ runs: [canonicalRun({ source: 'agent_runs', id: 'r1', sourceSystem: 'autonomous_runs', sourceRunId: 'a1', laneId: 'blog_draft', lifecycle: 'running', createdAt: ago(40 * 60e3), startedAt: ago(40 * 60e3), lastHeartbeatAt: ago(20 * 60e3), lastProgressAt: ago(20 * 60e3), canonical: true })], unavailable: false });
-    spies.autonomousRuns.mockResolvedValue({ runs: [laneRun({ id: 'a2', createdAt: ago(30e3) }), laneRun({ id: 'a3', result: 'errored', createdAt: ago(45e3) })], unavailable: false });
-    spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: 'd1', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(3 * 864e5), lastProgressAt: ago(3 * 864e5) })], unavailable: false });
+    spies.agentRuns.mockResolvedValue({ runs: [canonicalRun({ source: 'agent_runs', id: uid(1), sourceSystem: 'autonomous_runs', sourceRunId: uid(1), laneId: 'blog_draft', lifecycle: 'running', createdAt: ago(40 * 60e3), startedAt: ago(40 * 60e3), lastHeartbeatAt: ago(20 * 60e3), lastProgressAt: ago(20 * 60e3), canonical: true })], unavailable: false });
+    spies.autonomousRuns.mockResolvedValue({ runs: [laneRun({ id: uid(2), createdAt: ago(30e3) }), laneRun({ id: uid(3), result: 'errored', createdAt: ago(45e3) })], unavailable: false });
+    spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: uid(1), laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(3 * 864e5), lastProgressAt: ago(3 * 864e5) })], unavailable: false });
     const out = await runIndex.listRuns({ window: '7d', now: NOW });
-    expect(out.runs.map((r) => r.key)).toEqual(['autonomous_runs:a2', 'autonomous_runs:a3', 'agent_runs:r1', 'message_drafts:d1']);
+    expect(out.runs.map((r) => r.key)).toEqual([`autonomous_runs:${uid(2)}`, `autonomous_runs:${uid(3)}`, `agent_runs:${uid(1)}`, `message_drafts:${uid(1)}`]);
     expect(out.runs[2]).toMatchObject({ health: 'stalled', healthReason: 'no_heartbeat' });
     expect(out.runs[3]).toMatchObject({ health: 'healthy', attention: 'human_wait' });
     expect(out.counts).toEqual({ all: 4, active: 1, waiting: 1, attention: 3, done: 1, failed: 1 });
@@ -251,23 +281,23 @@ describe('listRuns', () => {
   test('legacy adapters exclude rows a canonical run mirrors through an SQL anti-join (page-independent)', () => {
     const knex = require('knex')({ client: 'pg' });
     const { notMirrored, keyset } = require('../services/agent-control/sources/shape');
-    const { sql, bindings } = keyset(notMirrored(knex('call_log').select('id'), { source: 'call_log', idColumn: 'call_log.id' }), { start: 'created_at', id: 'id', cursor: { at: NOW, id: 'c9' }, limit: 3 }).toSQL().toNative();
+    const { sql, bindings } = keyset(notMirrored(knex('call_log').select('id'), { source: 'call_log', idColumn: 'call_log.id' }), { start: 'created_at', id: 'id', cursor: { at: NOW, id: uid(9) }, limit: 3 }).toSQL().toNative();
     expect(sql).toMatch(/where not exists \(select 1 from "agent_runs" where "agent_runs"\."source_system" = \$1 and agent_runs\.source_run_id = call_log\.id::text\)/);
     expect(sql).toMatch(/\("created_at" < \$2 or \("created_at" = \$3 and "id" < \$4\)\)/);
     expect(sql).toMatch(/order by "created_at" desc, "id" desc limit \$5/);
-    expect(bindings).toEqual(['call_log', NOW, NOW, 'c9', 3]);
+    expect(bindings).toEqual(['call_log', NOW, NOW, uid(9), 3]);
   });
 
   test('status / area / lane filters; a lane filter skips single-lane adapters that cannot match', async () => {
-    spies.autonomousRuns.mockImplementation(sqlLike([laneRun({ id: 'a1' }), laneRun({ id: 'a2', result: 'errored' })]));
-    spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: 'd1', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) })], unavailable: false });
-    expect((await runIndex.listRuns({ status: 'failed', now: NOW })).runs.map((r) => r.key)).toEqual(['autonomous_runs:a2']);
-    expect((await runIndex.listRuns({ status: 'done', now: NOW })).runs.map((r) => r.key)).toEqual(['autonomous_runs:a1']);
-    expect((await runIndex.listRuns({ area: 'sms', now: NOW })).runs.map((r) => r.key)).toEqual(['message_drafts:d1']);
+    spies.autonomousRuns.mockImplementation(sqlLike([laneRun({ id: uid(1) }), laneRun({ id: uid(2), result: 'errored' })]));
+    spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: uid(1), laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) })], unavailable: false });
+    expect((await runIndex.listRuns({ status: 'failed', now: NOW })).runs.map((r) => r.key)).toEqual([`autonomous_runs:${uid(2)}`]);
+    expect((await runIndex.listRuns({ status: 'done', now: NOW })).runs.map((r) => r.key)).toEqual([`autonomous_runs:${uid(1)}`]);
+    expect((await runIndex.listRuns({ area: 'sms', now: NOW })).runs.map((r) => r.key)).toEqual([`message_drafts:${uid(1)}`]);
     jest.clearAllMocks();
     const byLane = await runIndex.listRuns({ lane: 'blog_draft', now: NOW });
     // equal start times: key desc keeps the order deterministic
-    expect(byLane.runs.map((r) => r.key)).toEqual(['autonomous_runs:a2', 'autonomous_runs:a1']);
+    expect(byLane.runs.map((r) => r.key)).toEqual([`autonomous_runs:${uid(2)}`, `autonomous_runs:${uid(1)}`]);
     expect(spies.messageDrafts).not.toHaveBeenCalled();
     expect(spies.callLog).not.toHaveBeenCalled();
     expect(spies.agentDecisions).toHaveBeenCalled();
@@ -282,35 +312,35 @@ describe('listRuns', () => {
   };
 
   test('keyset cursor: per-source positions resume each source strictly after its last row; pages walk the window; counts only on page 1; bad params are 400', async () => {
-    const all = [1, 2, 3, 4, 5].map((i) => laneRun({ id: `a${i}`, createdAt: ago(i * 1000) }));
+    const all = [1, 2, 3, 4, 5].map((i) => laneRun({ id: uid(i), createdAt: ago(i * 1000) }));
     spies.autonomousRuns.mockImplementation(sqlLike(all));
     const p1 = await runIndex.listRuns({ limit: 2, now: NOW });
-    expect(p1.runs.map((r) => r.id)).toEqual(['a1', 'a2']);
+    expect(p1.runs.map((r) => r.id)).toEqual([1, 2].map(uid));
     expect(p1.counts.all).toBe(5);
     expect(p1.countsCapped).toBe(false);
     expect(spies.autonomousRuns).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: null, limit: 2000 }));
     const p2 = await runIndex.listRuns({ limit: 2, cursor: p1.nextCursor, now: NOW });
-    expect(p2.runs.map((r) => r.id)).toEqual(['a3', 'a4']);
+    expect(p2.runs.map((r) => r.id)).toEqual([3, 4].map(uid));
     expect(p2.counts).toBeNull();
-    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ cursor: { at: new Date(p1.runs[1].startedAt), id: 'a2' }, limit: 3 }));
+    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ cursor: { at: new Date(p1.runs[1].startedAt), id: uid(2) }, limit: 3 }));
     const p3 = await runIndex.listRuns({ limit: 2, cursor: p2.nextCursor, now: NOW });
-    expect(p3.runs.map((r) => r.id)).toEqual(['a5']);
+    expect(p3.runs.map((r) => r.id)).toEqual([5].map(uid));
     expect(p3.nextCursor).toBeNull();
-    for (const bad of [{ cursor: '!!' }, { cursor: Buffer.from('{"p":{"nope":["x","y"]}}').toString('base64url') }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }, { limit: '2.5' }, { limit: 'ten' }]) {
+    for (const bad of [{ cursor: '!!' }, { cursor: Buffer.from('{"p":{"nope":["x","y"]}}').toString('base64url') }, { cursor: Buffer.from('{"p":{"call_log":["2026-09-05T00:00:00Z","not-a-uuid"]}}').toString('base64url') }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }, { limit: '2.5' }, { limit: 'ten' }]) {
       await expect(runIndex.listRuns({ ...bad, now: NOW })).rejects.toMatchObject({ status: 400 });
     }
   });
 
   test('a page never ends early: a status filter whose matches sit past non-matching slices keeps reading; equal timestamps page exactly', async () => {
-    const mixed = [1, 2, 3, 4, 5, 6, 7].map((i) => laneRun({ id: `m${i}`, createdAt: ago(i * 1000), result: i === 6 || i === 7 ? 'errored' : 'succeeded' }));
+    const mixed = [1, 2, 3, 4, 5, 6, 7].map((i) => laneRun({ id: uid(i), createdAt: ago(i * 1000), result: i === 6 || i === 7 ? 'errored' : 'succeeded' }));
     spies.autonomousRuns.mockImplementation(sqlLike(mixed));
     const f1 = await runIndex.listRuns({ limit: 1, status: 'failed', now: NOW });
-    expect(f1.runs.map((r) => r.id)).toEqual(['m6']);
+    expect(f1.runs.map((r) => r.id)).toEqual([6].map(uid));
     const f2 = await runIndex.listRuns({ limit: 1, status: 'failed', cursor: f1.nextCursor, now: NOW });
-    expect(f2.runs.map((r) => r.id)).toEqual(['m7']);
+    expect(f2.runs.map((r) => r.id)).toEqual([7].map(uid));
     expect(f2.nextCursor).toBeNull();
     // six rows at one timestamp, pages of two: every row exactly once
-    const band = [1, 2, 3, 4, 5, 6].map((i) => laneRun({ id: `b${i}`, createdAt: ago(1000) }));
+    const band = [1, 2, 3, 4, 5, 6].map((i) => laneRun({ id: uid(i), createdAt: ago(1000) }));
     spies.autonomousRuns.mockImplementation(sqlLike(band));
     const seen = [];
     let cursor = null;
@@ -319,31 +349,31 @@ describe('listRuns', () => {
       seen.push(...pg.runs.map((r) => r.id));
       cursor = pg.nextCursor;
     }
-    expect(seen).toEqual(['b6', 'b5', 'b4', 'b3', 'b2', 'b1']);
+    expect(seen).toEqual([6, 5, 4, 3, 2, 1].map(uid));
     expect(cursor).toBeNull();
     // a filtered scan that spends its rounds on non-matching rows returns an EMPTY page with the advanced cursor
-    const sparse = [...Array.from({ length: 30 }, (_, i) => laneRun({ id: `s${String(i).padStart(2, '0')}`, createdAt: ago((i + 1) * 1000) })), laneRun({ id: 'zz', result: 'errored', createdAt: ago(99e3) })];
+    const sparse = [...Array.from({ length: 30 }, (_, i) => laneRun({ id: uid(100 + i), createdAt: ago((i + 1) * 1000) })), laneRun({ id: uid(99), result: 'errored', createdAt: ago(99e3) })];
     spies.autonomousRuns.mockImplementation(sqlLike(sparse));
     let pg = await runIndex.listRuns({ limit: 1, status: 'failed', cursor: Buffer.from('{"p":{}}').toString('base64url'), now: NOW });
     expect(pg.runs).toEqual([]);
     expect(pg.nextCursor).not.toBeNull();
     let hops = 1;
     while (!pg.runs.length && pg.nextCursor && hops < 10) { pg = await runIndex.listRuns({ limit: 1, status: 'failed', cursor: pg.nextCursor, now: NOW }); hops += 1; }
-    expect(pg.runs.map((r) => r.id)).toEqual(['zz']);
+    expect(pg.runs.map((r) => r.id)).toEqual([uid(99)]);
   });
 
   test('sources merge newest-first across pages, each resuming from its own position; a capped first page flags counts and offers a cursor', async () => {
-    const content = [1, 3, 5].map((i) => laneRun({ id: `c${i}`, createdAt: ago(i * 1000) }));
-    const drafts = [2, 4, 6].map((i) => canonicalRun({ source: 'message_drafts', id: `d${i}`, laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i * 1000) }));
+    const content = [1, 3, 5].map((i) => laneRun({ id: uid(i), createdAt: ago(i * 1000) }));
+    const drafts = [2, 4, 6].map((i) => canonicalRun({ source: 'message_drafts', id: uid(i), laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i * 1000) }));
     spies.autonomousRuns.mockImplementation(sqlLike(content));
     spies.messageDrafts.mockImplementation(sqlLike(drafts));
     const p1 = await runIndex.listRuns({ limit: 4, now: NOW });
-    expect(p1.runs.map((r) => r.id)).toEqual(['c1', 'd2', 'c3', 'd4']);
+    expect(p1.runs.map((r) => r.id)).toEqual([1, 2, 3, 4].map(uid));
     const p2 = await runIndex.listRuns({ limit: 4, cursor: p1.nextCursor, now: NOW });
-    expect(p2.runs.map((r) => r.id)).toEqual(['c5', 'd6']);
+    expect(p2.runs.map((r) => r.id)).toEqual([5, 6].map(uid));
     expect(p2.nextCursor).toBeNull();
     // a source that fills the first-page scan cap
-    spies.messageDrafts.mockImplementation(async ({ cursor, limit }) => ({ runs: cursor ? [] : Array.from({ length: limit }, (_, i) => canonicalRun({ source: 'message_drafts', id: `x${String(i).padStart(4, '0')}`, laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i + 1) })), unavailable: false }));
+    spies.messageDrafts.mockImplementation(async ({ cursor, limit }) => ({ runs: cursor ? [] : Array.from({ length: limit }, (_, i) => canonicalRun({ source: 'message_drafts', id: uid(1000 + i), laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i + 1) })), unavailable: false }));
     const hit = await runIndex.listRuns({ limit: 10, now: NOW });
     expect(hit.countsCapped).toBe(true);
     expect(hit.runs).toHaveLength(10);
@@ -355,33 +385,33 @@ describe('getRun', () => {
   afterEach(() => jest.restoreAllMocks());
 
   test('a legacy row folds with its canonical mirror: canonical run + legacy steps when the mirror has none; calls by run id', async () => {
-    jest.spyOn(callLog, 'get').mockResolvedValue({ run: canonicalRun({ source: 'call_log', id: 'c1', laneId: 'call_extraction', lifecycle: 'running', createdAt: ago(1e3), steps: [{ key: 'transcribe', status: 'done' }] }) });
-    jest.spyOn(agentRuns, 'findMirror').mockResolvedValue('r9');
-    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: 'r9', sourceSystem: 'call_log', sourceRunId: 'c1', laneId: 'call_extraction', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [{ attempt_no: 1 }], artifacts: [], events: [{ event_type: 'finished' }], workItem: { id: 'w' } });
+    jest.spyOn(callLog, 'get').mockResolvedValue({ run: canonicalRun({ source: 'call_log', id: uid(1), laneId: 'call_extraction', lifecycle: 'running', createdAt: ago(1e3), steps: [{ key: 'transcribe', status: 'done' }] }) });
+    jest.spyOn(agentRuns, 'findMirror').mockResolvedValue(uid(9));
+    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: uid(9), sourceSystem: 'call_log', sourceRunId: uid(1), laneId: 'call_extraction', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [{ attempt_no: 1 }], artifacts: [], events: [{ event_type: 'finished' }], workItem: { id: 'w' } });
     fixtures.llm_dispatch_log = [{ id: 1, row_kind: 'call' }];
-    const d = await runIndex.getRun('call_log', 'c1', { now: NOW });
+    const d = await runIndex.getRun('call_log', uid(1), { now: NOW });
     // the timeline is the legacy steps; the counts stay the canonical run's (current attempt), not a recount
-    expect(d.run).toMatchObject({ key: 'agent_runs:r9', canonical: true, stepsDone: 0, stepsTotal: 0, health: 'healthy' });
+    expect(d.run).toMatchObject({ key: `agent_runs:${uid(9)}`, canonical: true, stepsDone: 0, stepsTotal: 0, health: 'healthy' });
     expect(d.steps).toEqual([{ key: 'transcribe', status: 'done' }]);
     expect(d.attempts).toHaveLength(1);
     expect(d.calls).toHaveLength(1);
-    expect(d.legacy).toEqual({ source: 'call_log', id: 'c1' });
+    expect(d.legacy).toEqual({ source: 'call_log', id: uid(1) });
     expect(d.trace).toEqual({ id: null, calls: 1 });
   });
 
   test('opening a canonical run by its own id folds in the legacy row it mirrors (steps, session calls)', async () => {
-    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: 'r7', sourceSystem: 'managed_sessions', sourceRunId: 'sess_9', laneId: 'agent_bi', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [], artifacts: [], events: [], workItem: null });
+    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: uid(7), sourceSystem: 'managed_sessions', sourceRunId: 'sess_9', laneId: 'agent_bi', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [], artifacts: [], events: [], workItem: null });
     const legacyGet = jest.spyOn(managedSessions, 'get').mockResolvedValue({ run: canonicalRun({ source: 'managed_sessions', id: 'sess_9', laneId: 'agent_bi', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), steps: [{ key: 'turn_1', status: 'done' }] }) });
     fixtures.llm_dispatch_log = [{ id: 1, row_kind: 'session_turn' }];
-    const d = await runIndex.getRun('agent_runs', 'r7', { now: NOW });
+    const d = await runIndex.getRun('agent_runs', uid(7), { now: NOW });
     expect(legacyGet).toHaveBeenCalledWith('sess_9');
-    expect(d.run.key).toBe('agent_runs:r7');
+    expect(d.run.key).toBe(`agent_runs:${uid(7)}`);
     expect(d.steps).toEqual([{ key: 'turn_1', status: 'done' }]);
     expect(d.calls).toHaveLength(1);
     expect(d.legacy).toEqual({ source: 'managed_sessions', id: 'sess_9' });
     // a canonical run whose source system is not a ledger here (an S5 lane writing directly) has no legacy fold
-    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: 'r8', sourceSystem: 'cron', sourceRunId: 'tick-1', workflowId: 'nightly', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [], artifacts: [], events: [], workItem: null });
-    const e = await runIndex.getRun('agent_runs', 'r8', { now: NOW });
+    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: uid(8), sourceSystem: 'cron', sourceRunId: 'tick-1', workflowId: 'nightly', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [], artifacts: [], events: [], workItem: null });
+    const e = await runIndex.getRun('agent_runs', uid(8), { now: NOW });
     expect(e.legacy).toBeNull();
     expect(e.steps).toEqual([]);
   });
@@ -390,9 +420,17 @@ describe('getRun', () => {
     await expect(runIndex.getRun('nope', '1')).rejects.toMatchObject({ status: 400 });
     jest.spyOn(jobHealth, 'get').mockResolvedValue(null);
     expect(await runIndex.getRun('job_health', 'missing')).toBeNull();
-    jest.spyOn(messageDrafts, 'get').mockResolvedValue({ run: canonicalRun({ source: 'message_drafts', id: 'd', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) }) });
+    // a uuid-keyed source never asks PostgreSQL about a non-uuid id (22P02 → 500): it is not found; a name-keyed source takes any id
+    const agentGet = jest.spyOn(agentRuns, 'get');
+    const callGet = jest.spyOn(callLog, 'get');
+    expect(await runIndex.getRun('agent_runs', 'not-a-uuid')).toBeNull();
+    expect(await runIndex.getRun('call_log', 'CA1234')).toBeNull();
+    expect(agentGet).not.toHaveBeenCalled();
+    expect(callGet).not.toHaveBeenCalled();
+    expect(jobHealth.get).toHaveBeenCalledWith('missing');
+    jest.spyOn(messageDrafts, 'get').mockResolvedValue({ run: canonicalRun({ source: 'message_drafts', id: uid(4), laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) }) });
     jest.spyOn(agentRuns, 'findMirror').mockResolvedValue(null);
-    const d = await runIndex.getRun('message_drafts', 'd', { now: NOW });
+    const d = await runIndex.getRun('message_drafts', uid(4), { now: NOW });
     expect(d.run.canonical).toBe(false);
     expect(d.events).toEqual([]);
     expect(d.calls).toEqual([]);

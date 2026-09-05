@@ -34,6 +34,13 @@ const STATUS_MAP = Object.freeze({
   auto_applied: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // contact-correction
   auto_resolved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' }, // reschedule-intent-watcher
   reviewed: { lifecycle: 'terminal', result: 'succeeded' },
+  // the owner's verdict is persisted as the row status too (admin-agent-
+  // decisions' review route, the SMS composer send in admin-communications,
+  // sms-suggest-mode's scheduled send): accepted / corrected = the draft
+  // went out (as written / edited), dismissed = the owner refused it
+  accepted: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' },
+  corrected: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' },
+  dismissed: { lifecycle: 'terminal', result: 'succeeded', disposition: 'rejected' },
   superseded: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
   expired: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
   ignored: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
@@ -61,11 +68,14 @@ const WORKFLOW_MAP = Object.freeze({
 const NO_WORKFLOW = Object.freeze({ laneId: null, area: null });
 
 const NO_VERDICT = Object.freeze({ verification: 'unjudged', disposition: null });
+// human_verdict → verification: the values the producers write (drift-
+// tested) — accepted / corrected / dismissed from the review paths,
+// ignored when staff replied their own way and the suggestion was set aside
 const VERDICT = Object.freeze({
-  approved: { verification: 'passed', disposition: 'applied' },
+  accepted: { verification: 'passed', disposition: 'applied' },
   corrected: { verification: 'warning', disposition: 'applied' },
-  rejected: { verification: 'failed', disposition: 'rejected' },
-  overridden: { verification: 'overridden', disposition: null },
+  dismissed: { verification: 'failed', disposition: 'rejected' },
+  ignored: { verification: 'overridden', disposition: 'no_action' },
 });
 const TRIAGE_LINK = '/admin/agents?tab=triage';
 
@@ -133,4 +143,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, WORKFLOW_MAP, STATUS_MAP, LIVE_STATUSES, list, get, fromRow };
+module.exports = { SOURCE, WORKFLOW_MAP, STATUS_MAP, VERDICT, LIVE_STATUSES, list, get, fromRow };

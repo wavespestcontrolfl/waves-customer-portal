@@ -11,24 +11,31 @@ const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
 // recordSessionUsage inserts AFTER the runner finishes: created_at is the
-// recording time (= the finish); the start is that minus latency_ms (the
-// wall time since the runner's startedAt). Sort / page on the same
-// projected start so the cursor and the rows agree. A session the
-// assistant re-records per turn keeps its first turn's created_at and its
-// longest turn's latency — an approximation, stated in the subtitle.
+// recording time of the FIRST turn (the per-session upsert never moves
+// it); the start is that minus latency_ms (the wall time since the
+// runner's startedAt — the longest turn for the assistant). Sort / page on
+// the same projected start so the cursor and the rows agree. The session's
+// latest activity is its newest session_turn row (created_at for a
+// one-turn session): that is the finish, and the WINDOW is judged on it,
+// so a long-lived assistant conversation stays listed while it still
+// turns instead of ageing out with its first turn (Codex r1).
 const START = () => db.raw("date_trunc('milliseconds', created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))");
+const LAST_TURN = "COALESCE((SELECT max(t.created_at) FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref), created_at)";
 const ID = 'provider_ref';
 const COLUMNS = () => [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',
   'latency_ms', 'input_tokens', 'output_tokens', 'created_at', 'run_id', 'trace_id', 'workload',
   db.raw("(SELECT count(*) FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref) AS turns"),
+  db.raw(`${LAST_TURN} AS last_turn_at`),
 ];
 
 function fromRow(s) {
   const turns = Number(s.turns || 0);
   const errored = s.ok === false;
-  // the row lands when the session is billed: start = that minus its latency
+  // the row lands when the session is first billed: start = that minus its
+  // latency; the finish is its newest turn (= created_at for one turn)
   const startedAt = new Date(new Date(s.created_at).getTime() - Number(s.latency_ms || 0));
+  const finishedAt = new Date(s.last_turn_at || s.created_at);
   return canonicalRun({
     source: SOURCE,
     id: s.provider_ref,
@@ -43,8 +50,9 @@ function fromRow(s) {
     errorCode: errored ? s.error_code : null,
     createdAt: startedAt,
     startedAt,
-    finishedAt: s.created_at,
-    durationMs: s.latency_ms == null ? null : Number(s.latency_ms),
+    finishedAt,
+    // the latency for one turn; the wall span for a session that kept turning
+    durationMs: s.latency_ms == null ? null : finishedAt.getTime() - startedAt.getTime(),
     stepsDone: turns,
     stepsTotal: turns,
     steps: [],
@@ -63,7 +71,8 @@ function baseQuery() {
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(baseQuery()
-      .where(START(), '>=', from), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: START(), id: ID, cursor, limit });
+      // windowed on the latest turn, paged on the start (see LAST_TURN)
+      .whereRaw(`${LAST_TURN} >= ?`, [from]), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

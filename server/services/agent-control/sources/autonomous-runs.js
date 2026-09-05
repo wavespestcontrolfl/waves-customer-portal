@@ -10,8 +10,12 @@ const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require
 
 const SOURCE = 'autonomous_runs';
 const LANE = 'blog_draft';
-// Sort / page key = the run's startedAt in fromRow, at ms precision.
-const START = () => db.raw("date_trunc('milliseconds', COALESCE(claimed_at, created_at))");
+// The newest emailed approval on the run (see COLUMNS): while the poller
+// is executing its decision, that decision's time is the run's start.
+const NEWEST_APPROVAL = 'FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1';
+const EXECUTING_AT = `(SELECT CASE WHEN a.status = 'executing' THEN a.decided_at END ${NEWEST_APPROVAL})`;
+// Sort / page key = the run's startedAt in fromRow (spanFor), at ms precision.
+const START = () => db.raw(`date_trunc('milliseconds', COALESCE(${EXECUTING_AT}, claimed_at, created_at))`);
 const ID = 'id';
 const COLUMNS = () => [
   'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
@@ -22,8 +26,9 @@ const COLUMNS = () => [
   'publish_ms', 'index_submit_ms', 'link_plan_ms',
   'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result', 'trust_build_approved_at',
   // the NEWEST emailed approval on the run decides whether the owner still owes a reply
-  db.raw("(SELECT a.status FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1) AS approval_status"),
-  db.raw("(SELECT COALESCE(a.decided_at, a.created_at) FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1) AS approval_at"),
+  db.raw(`(SELECT a.status ${NEWEST_APPROVAL}) AS approval_status`),
+  db.raw(`(SELECT COALESCE(a.decided_at, a.created_at) ${NEWEST_APPROVAL}) AS approval_at`),
+  db.raw(`(SELECT a.last_error ${NEWEST_APPROVAL}) AS approval_error`),
 ];
 // A run parked for the owner (completed_pending_review) stays live until a
 // terminal emailed decision or the in-review approval stamp lands.
@@ -88,6 +93,28 @@ function decisionFor(run, status) {
   return null;
 }
 
+// The run's active span. Normally the claim → completion (a decided run
+// closes at its decision). While the poller executes an emailed decision
+// the run is active AGAIN from that decision: judged from its own start
+// (a draft parked past the hard timeout is not stalled the moment the
+// owner replies) and with no finish yet (Codex r1).
+function spanFor(run, decided, decidedAt) {
+  if (decided === DECIDED.executing) return { startedAt: decidedAt, finishedAt: null, lastHeartbeatAt: decidedAt };
+  return {
+    startedAt: run.claimed_at || run.created_at,
+    finishedAt: decided ? decidedAt || run.completed_at : run.completed_at,
+    lastHeartbeatAt: run.updated_at || run.claimed_at,
+  };
+}
+
+// What failed: a failed emailed approval names ITS failure (the executor
+// keeps it in content_email_approvals.last_error) — not the generation-
+// time outcome, which was a parked success (Codex r2).
+function failureFor(run, decided) {
+  if (decided === DECIDED.failed) return { code: 'approval_failed', message: run.approval_error };
+  return { code: run.outcome, message: run.failure_message };
+}
+
 function fromRow(run) {
   const status = runStatus(run);
   const decided = decisionFor(run, status);
@@ -96,6 +123,7 @@ function fromRow(run) {
   const decidedAt = run.approval_at || run.trust_build_approved_at;
   const steps = stepsFor(run, status);
   const errored = map.result === 'errored';
+  const failure = failureFor(run, decided);
   const skipReason = run.skip_reason ? humanize(run.skip_reason) : null;
   return canonicalRun({
     source: SOURCE,
@@ -105,17 +133,15 @@ function fromRow(run) {
       || [humanize(run.action_type), humanize(run.page_type)].filter(Boolean).join(' · ') || 'Content run',
     subtitle: [humanize(run.action_type), humanize(run.page_type), SHADOW_LABEL[run.shadow_mode]].filter(Boolean).join(' · ') || null,
     ...map,
-    errorCode: errored ? run.outcome : null,
-    errorMessage: run.failure_message,
+    errorCode: errored ? failure.code : null,
+    errorMessage: failure.message,
     createdAt: run.created_at,
-    startedAt: run.claimed_at || run.created_at,
-    finishedAt: decided ? decidedAt || run.completed_at : run.completed_at,
-    lastHeartbeatAt: run.updated_at || run.claimed_at,
+    ...spanFor(run, decided, decidedAt),
     lastProgressAt: decidedAt || run.updated_at || run.claimed_at,
     durationMs: run.total_ms,
     steps,
     link: map.lifecycle === 'waiting_human' ? REVIEW_LINK : run.published_url,
-    detail: run.failure_message || skipReason || run.published_url,
+    detail: failure.message || skipReason || run.published_url,
     entity: { type: 'autonomous_run', id: run.id },
   });
 }

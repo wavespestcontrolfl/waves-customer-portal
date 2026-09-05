@@ -273,6 +273,13 @@ async function startRun(args = {}) {
     const workItemId = await upsertWorkItem(trx, args, laneId, policy);
     const run = await insertRun(trx, args, laneId, policy, workItemId, traceId, now);
     if (!run) throw new Error('run row missing after insert');
+    // a run first started without a work item binds one supplied by a later
+    // start ON THE ROW — the ledger's readers (not just this handle) must
+    // see the link finish() will mark done (Codex r2)
+    if (!run.work_item_id && workItemId) {
+      await trx('agent_runs').where({ id: run.id }).update({ work_item_id: workItemId, updated_at: now });
+      run.work_item_id = workItemId;
+    }
     // A reopened run keeps ITS lane and policy: the persisted row decides
     // (a money lane cannot be reopened under a read-only one and gain a
     // retry — Codex r1). A mismatch is logged, never honoured.
@@ -283,7 +290,7 @@ async function startRun(args = {}) {
     const resumed = Number(run.attempts || 0) > 0 || run.lifecycle !== 'running';
     const { attemptId, attemptNo } = await openAttempt(trx, run, runPolicy, now);
     await trx('run_events').insert({ run_id: run.id, event_type: resumed ? 'resumed' : 'started', message: null, metadata: jsonb({ attempt: attemptNo, worker: WORKER_ID }) });
-    return { run, attemptId, attemptNo, workItemId: run.work_item_id || workItemId, laneId: persistedLane, policy: runPolicy };
+    return { run, attemptId, attemptNo, workItemId: run.work_item_id, laneId: persistedLane, policy: runPolicy };
   }));
   if (!opened) return inertHandle(args);
   // a reopened run keeps the trace its ledger rows already carry
@@ -299,7 +306,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   let stepsThisAttempt = 0; // the budget's unit: this attempt starts its budget over
   let toolCalls = 0;
   let budgetFlagged = false;
-  let progress = Number(run.progress_sequence || 0);
+  let progress = 0; // this attempt's count: openAttempt reset the persisted one (a reopen's row is pre-reset)
   // this handle's attempt is the run's current one (see openAttempt) and
   // the run is still open: a terminal run is changed only by openAttempt
   const fenced = (conn = db) => conn('agent_runs').where({ id: runId, attempts: attemptNo }).whereNot('lifecycle', 'terminal');

@@ -28,7 +28,10 @@ const STATUS_MAP = Object.freeze({
   extraction_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' },
   voicemail: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   spam: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
-  no_transcription: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
+  // transcription never landed: the processor returns success:false, its
+  // retry sweep re-runs the call and its stats count it as failed — a
+  // failure awaiting retry, never a finished no-op (Codex r2)
+  no_transcription: { lifecycle: 'terminal', result: 'errored', failureClass: 'provider' },
   // extraction landed but the customer / lead write did not (the processor
   // stamps these instead of processed; the sweep retries them)
   customer_creation_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'tool' },
@@ -48,6 +51,12 @@ const UNKNOWN_STATUS = Object.freeze({ lifecycle: 'terminal', result: null });
 // its own — ai_extraction_enriched is the enriched payload.
 const TRANSCRIBED = new Set(['completed', 'summary_only']);
 const V2_VALID = 'valid';
+const TRANSCRIBE_FAILED = 'no_transcription';
+const EXTRACT_FAILED = /_failed$|^api_unavailable$/;
+// PAN quarantine clears recording_url by design; the row's MASKED
+// transcript is still queued work (the processor's transcript-only branch
+// in processAllPending), so the prefilter admits it like a recording.
+const PAN_TRANSCRIPT_ONLY = "((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL)";
 
 function stepStatus(done, running) {
   return done ? 'done' : running ? 'running' : 'skipped';
@@ -60,13 +69,25 @@ function title(c) {
   return parts.join(' ');
 }
 
+// The three stages as steps: transcribe → extract → enrich. A failed
+// transcription fails its own step (nothing after it was attempted); an
+// extraction failure fails the extract step.
+function stepsFor(c, status, map) {
+  const live = map.lifecycle === 'running';
+  const extracted = status === 'processed' || c.v2_extraction_status === V2_VALID;
+  const transcribeFailed = status === TRANSCRIBE_FAILED;
+  const extractFailed = !transcribeFailed && (map.result === 'errored' || EXTRACT_FAILED.test(c.v2_extraction_status || ''));
+  const transcribed = extracted || TRANSCRIBED.has(c.transcription_status);
+  return [
+    { key: 'transcribe', label: 'Transcribe', status: transcribeFailed ? 'failed' : stepStatus(transcribed, live), detail: null, ms: null, toolName: null },
+    { key: 'extract', label: 'Extract', status: extractFailed ? 'failed' : stepStatus(extracted, live && transcribed), detail: extractFailed && c.v2_extraction_status ? c.v2_extraction_status : modelLabel(c, 'ai_extraction_model', 'ai_extraction_prompt_version'), ms: null, toolName: null },
+    { key: 'enrich', label: 'Enrich', status: stepStatus(!!c.enriched, live && extracted), detail: null, ms: null, toolName: null },
+  ];
+}
+
 function fromRow(c) {
   const status = c.processing_status || 'pending';
   const map = STATUS_MAP[status] || UNKNOWN_STATUS;
-  const live = map.lifecycle === 'running';
-  const extracted = status === 'processed' || c.v2_extraction_status === V2_VALID;
-  const extractFailed = map.result === 'errored' || /_failed$|^api_unavailable$/.test(c.v2_extraction_status || '');
-  const transcribed = extracted || TRANSCRIBED.has(c.transcription_status);
   const beat = c.processing_heartbeat_at || c.processing_started_at;
   return canonicalRun({
     source: SOURCE,
@@ -82,11 +103,7 @@ function fromRow(c) {
     lastHeartbeatAt: beat,
     lastProgressAt: beat,
     attempts: Math.max(1, Number(c.extraction_attempts || 0)),
-    steps: [
-      { key: 'transcribe', label: 'Transcribe', status: stepStatus(transcribed, live), detail: null, ms: null, toolName: null },
-      { key: 'extract', label: 'Extract', status: extractFailed ? 'failed' : stepStatus(extracted, live && transcribed), detail: extractFailed && c.v2_extraction_status ? c.v2_extraction_status : modelLabel(c, 'ai_extraction_model', 'ai_extraction_prompt_version'), ms: null, toolName: null },
-      { key: 'enrich', label: 'Enrich', status: stepStatus(!!c.enriched, live && extracted), detail: null, ms: null, toolName: null },
-    ],
+    steps: stepsFor(c, status, map),
     link: `/admin/communications?tab=calls&call=${c.id}`,
     entity: { type: 'call_log', id: c.id },
   });
@@ -98,8 +115,8 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .select(COLUMNS())
       // a fresh, never-claimed row is processing_status NULL (the processor
       // treats NULL as queued); a call with neither a status nor a
-      // recording is not work
-      .where((q) => q.whereNotNull('processing_status').orWhereNotNull('recording_url'))
+      // recording (nor a quarantined transcript) is not work
+      .where((q) => q.whereNotNull('processing_status').orWhereNotNull('recording_url').orWhereRaw(PAN_TRANSCRIPT_ONLY))
       // a voice-agent sandbox call is not a run anyone supervises
       .modify((qb) => whereNotSandboxCall(qb))
       .where((q) => {

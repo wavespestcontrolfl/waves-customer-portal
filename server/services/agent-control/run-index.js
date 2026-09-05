@@ -39,6 +39,13 @@ const managedSessions = require('./sources/managed-sessions');
 
 const LEGACY_SOURCES = [autonomousRuns, messageDrafts, agentDecisions, callLog, jobHealth, managedSessions];
 const SOURCES = new Map([agentRuns, ...LEGACY_SOURCES].map((s) => [s.SOURCE, s]));
+// Sources keyed by a uuid column (job_health = job name, managed_sessions =
+// the provider's session id). An id that is not a uuid matches nothing —
+// and asked of PostgreSQL it is a 22P02 error, not a miss — so it is
+// answered here: not found for a read, a bad cursor for a bookmark.
+const UUID_KEYED = new Set([agentRuns, autonomousRuns, messageDrafts, agentDecisions, callLog].map((s) => s.SOURCE));
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const keyed = (source, id) => !UUID_KEYED.has(source) || UUID_RE.test(String(id));
 const STATUSES = Object.freeze(['all', 'active', 'waiting', 'attention', 'done', 'failed']);
 const ACTIVE = new Set(['queued', 'leased', 'running', 'waiting_external']);
 const DEFAULT_LIMIT = 50;
@@ -115,7 +122,7 @@ function decodeCursor(cursor) {
     if (!parsed || typeof parsed.p !== 'object' || !parsed.p) throw new Error('shape');
     const positions = new Map();
     for (const [source, pair] of Object.entries(parsed.p)) {
-      if (!SOURCES.has(source) || !Array.isArray(pair) || typeof pair[1] !== 'string') throw new Error('shape');
+      if (!SOURCES.has(source) || !Array.isArray(pair) || typeof pair[1] !== 'string' || !keyed(source, pair[1])) throw new Error('shape');
       const at = new Date(pair[0]);
       if (Number.isNaN(at.getTime())) throw new Error('shape');
       positions.set(source, { at, id: pair[1] });
@@ -254,7 +261,7 @@ async function resolveSides(reader, id) {
   if (reader === agentRuns) {
     const canonical = await agentRuns.get(id);
     const legacyReader = canonical ? SOURCES.get(canonical.run.sourceSystem) : null;
-    const legacy = legacyReader && legacyReader !== agentRuns ? await legacyReader.get(canonical.run.sourceRunId) : null;
+    const legacy = legacyReader && legacyReader !== agentRuns && keyed(legacyReader.SOURCE, canonical.run.sourceRunId) ? await legacyReader.get(canonical.run.sourceRunId) : null;
     return { canonical, legacy, legacySource: legacy ? legacyReader : null };
   }
   const legacy = await reader.get(id);
@@ -266,6 +273,7 @@ async function getRun(source, id, { now = new Date() } = {}) {
   const reader = SOURCES.get(String(source));
   if (!reader) throw badRequest(`unknown source: ${source}`);
   if (!id) throw badRequest('missing id');
+  if (!keyed(reader.SOURCE, id)) return null;
   const { canonical, legacy, legacySource } = await resolveSides(reader, id);
   if (!canonical && !legacy) return null;
 
