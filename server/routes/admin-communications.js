@@ -1150,6 +1150,10 @@ const PREP_REFUSAL_COPY = {
   prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
   unsupported_pest_type: () => 'That prep type is not available yet.',
   unsupported_channel: () => 'Choose Email, Text, or Both.',
+  // The sprinkler timer guide is a seasonal tip, sent once.
+  seasonal_tips_off: () => 'This customer turned off Seasonal Lawn Tips, and the sprinkler timer guide is one — it was not sent.',
+  guide_already_sent: (r) => `This customer already received the sprinkler timer guide${r.sentAt ? ` on ${new Date(r.sentAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : ''} — it is sent once. The guide link is in the composer's link library if they need it again.`,
+  guide_check_failed: () => "Couldn't confirm this customer's preferences or send history — try again.",
 };
 // Both delivered the email but not the text: why the text did not go, by the
 // link's own reason (an unplanned text); anything else = the number.

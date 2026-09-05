@@ -59,7 +59,7 @@ const TEMPLATE = {
       type: 'list',
       items: [
         'Between runs, leave the dial on OFF. Nothing waters unless you start it, including any old schedule the builder left behind.',
-        'Each week: turn the dial to MANUAL, or press RUN ALL ZONES, and enter the minutes from Monday\'s email. Press start and walk away. The box runs every zone in turn and goes quiet by itself. Next time you pass by, turn it back to OFF.',
+        'Each week: start a run of all zones with the minutes from Monday\'s email (your brand guide shows the exact buttons). The box runs every zone in turn and goes quiet by itself. When it finishes, turn the dial back to OFF the same day, so an old schedule cannot sneak in while it sits on Run.',
         'When Monday\'s email says skip this week, do nothing. The dial is already off.',
       ],
     },

@@ -178,7 +178,10 @@ async function buildWateringBlock(customer) {
   let policy = null;
   try {
     const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
-    const turf = await db('customer_turf_profiles').where({ customer_id: customer.id }).first();
+    // The ACTIVE profile only — a retired profile's county is the former
+    // home's and must not decide a legal instruction (the weekly sweep joins
+    // on tp.active = true; GH Codex #3953 r1 P1).
+    const turf = await db('customer_turf_profiles').where({ customer_id: customer.id, active: true }).first();
     // After a move the saved minutes describe the FORMER home's system
     // until the customer re-enters them (the same per-field ledger the
     // weekly plan sizes from — irrigation_confirmed_fields); an unconfirmed
@@ -650,7 +653,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
 // uncertain: providerOutcome.sent === true is a send (the caller stamps the
 // page and writes the tagger-compatible marker exactly as for a returned
 // send), anything else a plain failure (GH Codex #3856 r9 P2).
-async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, pestType, actorId }) {
+async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, purpose = 'appointment', pestType, actorId }) {
   let body;
   try {
     body = await renderSmsTemplate(templateKey, { first_name: firstName, ...vars }, {
@@ -672,7 +675,7 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       body,
       channel: 'sms',
       audience: 'customer',
-      purpose: 'appointment',
+      purpose,
       customerId: customer.id,
       identityTrustLevel: 'phone_matches_customer',
       // Sole caller is the admin send-prep route — an operator-clicked send,
@@ -730,7 +733,10 @@ function planPrepSms(config, prepUrl) {
   if (prepUrl) {
     return { templateKey: SMS_GUIDE_LINK_KEY, vars: { prep_label: config.label, prep_url: prepUrl }, variant: 'guide_link' };
   }
-  if (config.smsStandaloneKey) return { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone' };
+  // A standalone guide is a seasonal tip, not appointment prep: its text
+  // runs under the marketing_seasonal policy (owner ruling 08-25 — Seasonal
+  // Tips consent + the seasonal_tips preference; GH Codex #3953 r1 P1).
+  if (config.smsStandaloneKey) return { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone', purpose: config.guide ? 'marketing_seasonal' : 'appointment' };
   return null;
 }
 
@@ -792,6 +798,26 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
   }
 }
 
+// Why a standalone guide is not sent right now, or null. Reads fail closed:
+// an unreadable preference or history is treated as a refusal, never as a
+// send (a guide is a courtesy; a second copy or an unwanted one is not).
+async function guideRefusal(customer, config, pestType) {
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+    if (prefs && prefs.seasonal_tips === false) return { reason: 'seasonal_tips_off' };
+    const prior = await db('customer_interactions')
+      .where({ customer_id: customer.id })
+      .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
+      .orderBy('created_at', 'desc')
+      .first();
+    if (prior) return { reason: 'guide_already_sent', sentAt: prior.created_at || null };
+    return null;
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] guide preference / history read failed for customer ${customer.id}: ${err.message}`);
+    return { reason: 'guide_check_failed' };
+  }
+}
+
 // When the SMS went out, write the SAME marker the appointment tagger's
 // replay guard (hasSentPrepSms) looks for — sms_outbound + "<pestType> prep
 // info sent" — so a later replay of onServiceScheduled (e.g. regenerate-
@@ -848,6 +874,15 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   // P1s on 8dbc30cc1 + 87b4cee92).
   const outcome = await runExclusive(`prep-send:${customer.id}`, async () => {
     // A guide hangs on no visit: nothing to look up, claim, link or stamp.
+    // It is also a seasonal tip sent ONCE: a customer who turned off Seasonal
+    // Lawn Tips does not get it (the weekly irrigation email honors the same
+    // preference), and a customer who already received it is not sent it
+    // again — the interaction row logPrepInteraction writes is the durable
+    // proof (GH Codex #3953 r1 P1 + P2).
+    if (config.guide) {
+      const refusal = await guideRefusal(customer, config, pestType);
+      if (refusal) return { ...result, ...refusal };
+    }
     const page = config.guide
       ? { visit: null, prepUrl: null, ownsPage: false, linkReason: null }
       : await resolvePrepVisit(customer, config);

@@ -3286,8 +3286,10 @@ function PrepSendDialog({ open, onClose }) {
       <DialogBody>
         <p className="text-13 text-zinc-600 mb-3">
           Search a customer by name, pick the guide, and choose how it goes
-          out. A text carries the guide page link, so it needs an upcoming
-          visit of that type on the calendar.
+          out.{" "}
+          {pestType === "sprinkler_timer"
+            ? "The sprinkler timer guide is a one-time seasonal tip: the text carries the website guide link, no visit needed, and it is not sent to a customer who turned off Seasonal Lawn Tips."
+            : "A text carries the guide page link, so it needs an upcoming visit of that type on the calendar."}
         </p>
         <label className="block text-11 uppercase tracking-label text-zinc-500 mb-1">
           Treatment

@@ -40,6 +40,8 @@ const { sendPrepToCustomer } = require('../services/prep-guide-sender');
 let customerRow;
 let prefsRow = null; // property_preferences (sprinkler timer guide minutes)
 let turfRow = null; // customer_turf_profiles (county)
+let turfQueries = [];
+let notificationPrefsRow = null; // notification_prefs (seasonal_tips)
 
 function customersQuery() {
   const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), first: jest.fn(async () => customerRow) };
@@ -74,7 +76,7 @@ let interactionQueries = [];
 let manualSmsRow = null;
 let interactionMarkerRow = null;
 function traceQuery(row) {
-  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q), first: jest.fn(async () => row) };
+  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q), orderBy: jest.fn(() => q), first: jest.fn(async () => row) };
   return q;
 }
 // Honours a whereIn('status', …) filter so the live-lane read (first) and
@@ -161,11 +163,14 @@ beforeEach(() => {
     if (table === 'automation_step_sends') return traceQuery(stepSendRow);
     if (table === 'prep_guide_views') return traceQuery(viewRow);
     if (table === 'property_preferences') return traceQuery(prefsRow);
-    if (table === 'customer_turf_profiles') return traceQuery(turfRow);
+    if (table === 'customer_turf_profiles') { const q = traceQuery(turfRow); turfQueries.push(q); return q; }
+    if (table === 'notification_prefs') return traceQuery(notificationPrefsRow);
     return customersQuery();
   });
   prefsRow = null;
   turfRow = null;
+  turfQueries = [];
+  notificationPrefsRow = null;
   mockRestrictionPolicy = null;
   db.fn = { now: jest.fn(() => 'NOW()') };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -956,9 +961,65 @@ describe('sprinkler timer guide', () => {
     expect(call.payload).not.toHaveProperty('prep_url');
     expect(call.payload).not.toHaveProperty('service_date');
     expect(call.payload.watering_block).toMatch(/one watering day a week/);
-    // The text is the hub-link standalone, never the tokened guide page.
+    // The text is the hub-link standalone, never the tokened guide page —
+    // and it runs under the seasonal-tips policy, not appointment prep.
     expect(renderSmsTemplate.mock.calls[0][0]).toBe('auto_sprinkler_timer');
     expect(sendCustomerMessage.mock.calls[0][0].metadata.prep_variant).toBe('standalone');
+    expect(sendCustomerMessage.mock.calls[0][0].purpose).toBe('marketing_seasonal');
+  });
+
+  test('visit prep texts keep the appointment purpose', async () => {
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'sms' });
+    expect(sendCustomerMessage.mock.calls[0][0].purpose).toBe('appointment');
+  });
+
+  test('a customer who turned off Seasonal Lawn Tips is refused on every channel (the guide is a seasonal tip)', async () => {
+    notificationPrefsRow = { seasonal_tips: false };
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+    expect(result).toMatchObject({ ok: false, reason: 'seasonal_tips_off' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // The visit-prep guides are unaffected by the preference.
+    const flea = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' });
+    expect(flea.ok).toBe(true);
+  });
+
+  test('sent once: a customer who already received the guide is refused, with the date', async () => {
+    interactionMarkerRow = { id: 'i-1', subject: 'sprinkler_timer prep info sent', created_at: '2026-09-01T14:00:00Z' };
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(result).toMatchObject({ ok: false, reason: 'guide_already_sent', sentAt: '2026-09-01T14:00:00Z' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    // The history read names exactly the two subjects logPrepInteraction writes.
+    const q = interactionQueries.find((iq) => iq.whereIn.mock.calls.length);
+    expect(q.whereIn.mock.calls[0]).toEqual(['subject', ['sprinkler_timer prep info sent', 'Sprinkler Timer Guide prep sent (manual)']]);
+  });
+
+  test('an unreadable preference or history fails closed (no send)', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customersQuery();
+      if (table === 'notification_prefs') return { where: () => ({ first: async () => { throw new Error('boom'); } }) };
+      return customersQuery();
+    });
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(result).toMatchObject({ ok: false, reason: 'guide_check_failed' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('watering block reads the ACTIVE turf profile only (a retired profile\'s county is the former home\'s)', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    mockRestrictionPolicy = ORDER;
+    await buildWateringBlock(customerRow);
+    expect(turfQueries).toHaveLength(1);
+    expect(turfQueries[0].where).toHaveBeenCalledWith({ customer_id: 'cust-1', active: true });
+  });
+
+  test('every visit-prep entry carries a service family; only a guide may omit it (the composer scan iterates PREP_CONFIG)', () => {
+    const { PREP_CONFIG } = require('../services/prep-guide-sender');
+    for (const [key, config] of Object.entries(PREP_CONFIG)) {
+      if (config.guide) expect(config.serviceKeywords).toBeUndefined();
+      else expect(Array.isArray(config.serviceKeywords) && config.serviceKeywords.length > 0).toBe(true);
+    }
+    expect(PREP_CONFIG.sprinkler_timer.guide).toBe(true);
   });
 
   test('text only needs no visit (unlike the visit-prep guides with no inline text)', async () => {

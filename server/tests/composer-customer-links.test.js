@@ -50,6 +50,9 @@ jest.mock('../services/prep-guide-sender', () => ({
   PREP_CONFIG: {
     flea: { label: 'Flea Treatment', serviceKeywords: ['flea'], emailTemplateKey: 'prep.flea' },
     bed_bug: { label: 'Bed Bug Treatment Service', serviceKeywords: ['bed bug'], emailTemplateKey: 'prep.bed_bug' },
+    // A standalone guide: no service family, no visit — the prep-link scan
+    // must skip it, not read serviceKeywords[0] (GH Codex #3953 r1 P1).
+    sprinkler_timer: { label: 'Sprinkler Timer Guide', guide: true, emailTemplateKey: 'prep.sprinkler_timer' },
   },
   nextUpcomingVisit: jest.fn(),
   settleHeldEnrollment: jest.fn(async () => {}),
