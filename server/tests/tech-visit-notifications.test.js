@@ -144,6 +144,11 @@ describe('notifyTechVisitChange', () => {
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1', newTechnicianId: ADAM_ID })).toEqual({ sent: false, skipped: 'stale' });
     // cancelled: a compensated (reverted) cancel never reaches the tech.
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    // assigned / rescheduled on a visit that has since ended: nothing to announce.
+    prime({ visit: { ...VISIT, status: 'cancelled' } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    prime({ visit: { ...VISIT, status: 'completed' } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
     expect(mockSendTechNotification).not.toHaveBeenCalled();
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
@@ -162,13 +167,26 @@ describe('notifyTechVisitChange', () => {
     expect(mockSendTechNotification.mock.calls[0][1].payload.address).toBe('88 Palm Ave, Parrish');
   });
 
-  test('the committed snapshot wins over the row (a later move cannot rewrite this card)', async () => {
+  test('the committed snapshot fills the card when it matches the row; a snapshot the row has moved past is dropped (the later move\'s own card lands)', async () => {
+    // Matching snapshot (the hook wrote exactly what the row holds): fills the card.
     await notices.notifyTechVisitChange({
       visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID,
+      snapshot: { date: '2026-09-10', windowStart: '09:00', windowEnd: '11:00' },
+    });
+    expect(mockSendTechNotification.mock.calls[0][1].payload.when).toBe('Thu Sep 10, 9–11 AM');
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    jest.clearAllMocks();
+    // Superseded: the row was moved again after this hook committed.
+    const out = await notices.notifyTechVisitChange({
+      visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId: ADAM_ID,
+      previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
       snapshot: { date: '2026-09-12', windowStart: '13:00', windowEnd: '15:00' },
     });
-    expect(mockSendTechNotification.mock.calls[0][1].payload.when).toBe('Sat Sep 12, 1–3 PM');
-    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(out).toEqual({ sent: false, skipped: 'stale' });
+    // Only supplied fields are compared: a date-only snapshot on the row's date passes.
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID, snapshot: { date: '2026-09-10' } });
+    expect(mockSendTechNotification).toHaveBeenCalledTimes(1);
+    expect(mockSendTechNotification).not.toHaveBeenCalledWith('tech-1', expect.objectContaining({ type: 'visit_rescheduled' }));
   });
 
   test('a push failure is logged and the card still counts as sent', async () => {

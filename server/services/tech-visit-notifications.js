@@ -35,6 +35,20 @@ const { parseETDateTime, TZ } = require('../utils/datetime-et');
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
 
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
+// Lifecycle states with nothing left to announce for an assignment/move card.
+const TERMINAL_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show']);
+
+// True when the caller's committed snapshot no longer matches the row — a
+// later change moved the visit on. Only the fields the caller supplied are
+// compared (an assignment hook may know the date alone).
+function snapshotSuperseded(snapshot, row) {
+  if (!snapshot) return false;
+  const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+  if (snapshot.date !== undefined && dateOnly(snapshot.date) !== dateOnly(row.scheduled_date)) return true;
+  if (snapshot.windowStart !== undefined && hhmm(snapshot.windowStart) !== hhmm(row.window_start)) return true;
+  if (snapshot.windowEnd !== undefined && hhmm(snapshot.windowEnd) !== hhmm(row.window_end)) return true;
+  return false;
+}
 
 const TYPE_BY_KIND = Object.freeze({
   assigned: 'visit_assigned',
@@ -221,7 +235,17 @@ async function prepareNotice({
     // the tech the current state, and the newest feed row is never stale.
     const holder = row.technician_id ? String(row.technician_id) : null;
     const recipient = String(technicianId);
-    if ((kind === 'assigned' || kind === 'rescheduled') && holder !== recipient) return { ok: false, skipped: 'stale' };
+    if (kind === 'assigned' || kind === 'rescheduled') {
+      if (holder !== recipient) return { ok: false, skipped: 'stale' };
+      // A visit that has since ended (cancelled, completed, …) has no
+      // "new visit" / "moved" card left to deliver.
+      if (TERMINAL_VISIT_STATUSES.has(String(row.status))) return { ok: false, skipped: 'stale' };
+      // The schedule this hook committed must still be the row's schedule:
+      // two same-tech moves prepared out of order (deploy overlap, a
+      // deferred hold notice) would otherwise leave the OLDER "Now …" as
+      // the newest card. The later move's own card is the one that lands.
+      if (snapshotSuperseded(snapshot, row)) return { ok: false, skipped: 'stale' };
+    }
     if (kind === 'unassigned' && holder === recipient) return { ok: false, skipped: 'stale' };
     if (kind === 'cancelled' && String(row.status) !== 'cancelled') return { ok: false, skipped: 'stale' };
     // The card describes the schedule the hook COMMITTED, not whatever the
