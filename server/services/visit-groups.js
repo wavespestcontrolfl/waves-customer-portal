@@ -317,9 +317,11 @@ async function assertRowMovableAlone(t, rowId, observedVisitId) {
   }
 }
 
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
-  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
+  // actorId: the staff row (or system label) behind a unit move, so the
+  // tech notices name them and their own move stays silent.
+  await assignDispatchJob({ jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
 }
 
 /**
@@ -2791,7 +2793,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               }
               if (clashId) warnings.push(`service ${target.id} overlaps another job on the destination technician's route (${clashId})`);
             }
-            await alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true, expectTechnicianId: target.expect.technician_id || null });
+            await alignMemberTechnician(t, target.id, options.technicianId || null, {
+              skipVisitSeam: true,
+              expectTechnicianId: target.expect.technician_id || null,
+              actorId: options.actorId || initiatedBy || null,
+            });
           });
           return;
         } catch (err) {

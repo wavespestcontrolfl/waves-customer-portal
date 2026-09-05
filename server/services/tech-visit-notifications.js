@@ -307,11 +307,21 @@ async function deliver(notices) {
  *                                       rescheduled only
  * @param {string|null} [args.newTechnicianId]  unassigned only: who has it now
  */
-async function notifyTechVisitChange(args = {}) {
+async function runNotice(args = {}) {
   const notice = await prepareNotice(args);
   if (!notice.ok) return { sent: false, skipped: notice.skipped };
   const written = await deliver([notice]);
   return written ? { sent: true } : { sent: false, skipped: 'error' };
+}
+
+// Public single-notice entry (creation hooks call it directly): it rides
+// the visit's queue like every batch, so a "new visit" card can never be
+// overtaken by a reassignment that follows the creation seconds later.
+// Skips are decided without queueing (nothing to order).
+async function notifyTechVisitChange(args = {}) {
+  if (!enabled()) return { sent: false, skipped: 'gate_off' };
+  if (!args.visitId) return { sent: false, skipped: 'no_recipient' };
+  return enqueueForVisit(args.visitId, () => runNotice(args));
 }
 
 // Notices for one visit apply in the order their changes committed. Two
@@ -373,7 +383,7 @@ function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, a
 function notifyVisitRescheduled({ visitId, technicianId, actorId = null, previous = null, snapshot = null, trx = null } = {}) {
   if (!visitId || !technicianId) return null;
   if (!enabled()) return null;
-  return afterCommit(trx, () => notifyTechVisitChange({ visitId, kind: 'rescheduled', technicianId, actorId, previous, snapshot }), visitId);
+  return afterCommit(trx, () => runNotice({ visitId, kind: 'rescheduled', technicianId, actorId, previous, snapshot }), visitId);
 }
 
 /**
@@ -392,7 +402,7 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
       recipient = row?.technician_id || null;
     }
     if (!recipient) return;
-    await notifyTechVisitChange({ visitId, kind: 'cancelled', technicianId: recipient, actorId, snapshot });
+    await runNotice({ visitId, kind: 'cancelled', technicianId: recipient, actorId, snapshot });
   }, visitId);
 }
 

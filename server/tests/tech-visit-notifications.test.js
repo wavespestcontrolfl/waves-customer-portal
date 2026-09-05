@@ -220,6 +220,28 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
     mockSendTechNotification.mockResolvedValue(undefined);
   });
 
+  test('a direct creation notice queues behind a pending change for the same visit', async () => {
+    const order = [];
+    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`${techId}:${row.type}`); return true; });
+    let visitReads = 0;
+    db.mockImplementation((table) => {
+      if (table === 'technicians') {
+        const c = { where: jest.fn((arg) => { c.first = jest.fn(async () => ({ ...TECH, id: arg.id, name: arg.id })); return c; }), first: jest.fn() };
+        return c;
+      }
+      if (table === 'scheduled_services as s') {
+        const slow = visitReads++ === 0;
+        return chain(null, slow ? () => new Promise((r) => setTimeout(() => r(VISIT), 20)) : () => Promise.resolve(VISIT));
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const creation = notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'customer_self_serve' });
+    const change = notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID });
+    await Promise.all([creation, change]);
+    expect(order).toEqual(['tech-1:visit_assigned', 'tech-1:visit_unassigned', 'tech-2:visit_assigned']);
+    mockSendTechNotification.mockResolvedValue(undefined);
+  });
+
   test('notifyVisitCancelled without a technicianId reads the assigned tech from the row', async () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') {
