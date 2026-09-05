@@ -106,6 +106,34 @@ describe('moveVisitAsUnit', () => {
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
   });
 
+  test('options.moveGuard runs for EVERY member in the assignment transaction with the destination tech, before assignDispatchJob; a refusal leaves that member on its old tech and reported failed', async () => {
+    // landed rows: a re-pointed to t2 by the (mocked) assignment; b refused, so it stays on t1
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', technician_id: 't2' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' },
+    ] });
+    const seen = [];
+    const moveGuard = jest.fn(async ({ trx, technicianId, service }) => {
+      seen.push({ trxIsFn: typeof trx === 'function', technicianId, id: service.id, assignsSoFar: assignDispatchJob.mock.calls.length });
+      if (service.id === 'b') throw Object.assign(new Error('deactivated for lawn'), { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', reason: 'auto_dispatch', initiatedBy: 'auto_dispatch', options: { technicianId: 't2', moveGuard } });
+    // both members checked against the DESTINATION (t2), each before its own assignment write
+    expect(seen).toEqual([
+      { trxIsFn: true, technicianId: 't2', id: 'a', assignsSoFar: 0 },
+      { trxIsFn: true, technicianId: 't2', id: 'b', assignsSoFar: 1 },
+    ]);
+    // a assigned; b refused → never assigned, reported failed
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(assignDispatchJob.mock.calls[0][0]).toMatchObject({ jobId: 'a', technicianId: 't2' });
+    // b's row DID move (its rebooker call committed) but stays on its old tech: reported
+    // "moved but unassigned", never silently split-tech; a is clean.
+    expect(out.visitMove.moved).toEqual(['a', 'b']);
+    expect(out.visitMove.failed).toEqual([
+      expect.objectContaining({ id: 'b', movedButUnassigned: true, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }),
+    ]);
+  });
+
   test('date + window move: members moved first (primary with caller options, siblings with their OWN fence), then the parent retargeted from the rows that landed', async () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
