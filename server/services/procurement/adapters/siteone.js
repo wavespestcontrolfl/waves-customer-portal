@@ -1012,7 +1012,11 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // click proved actionable a few reads ago; a control the browser will
     // not act on submits nothing and falls to the ambiguous path (Codex
     // #3876 r8 P1).
-    await placeHandle.click({ force: true, timeout: 5000 });
+    // `noWaitAfter`: the click is the dispatch — a slow post-submit
+    // navigation must not reject the click and skip the confirmation poll
+    // (which would park a placed order without its number); the bounded
+    // load-state wait and the poll below handle the response (Codex #3900 P2).
+    await placeHandle.click({ force: true, noWaitAfter: true, timeout: 5000 });
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
     // The confirmation must be read ON SiteOne: SITEONE_BOT_ALLOWED_HOSTS can
     // admit an asset host, and a numeric error id on a page there is not an
@@ -1130,7 +1134,9 @@ function orderNumbersIn(text) {
   // recorded with it, the same number rerendered without it would read as a
   // new one, and the date / money exclusions would miss (Codex #3876 r17 P2).
   const ids = [];
-  for (const m of String(text).matchAll(/(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1]) && !ids.some((x) => x.toUpperCase() === m[1].toUpperCase())) ids.push(m[1]);
+  // A word boundary before the label: "Reorder # 12345" / "Backorder # 12345"
+  // are other concepts, never the confirmation (Codex #3900 P2).
+  for (const m of String(text).matchAll(/\b(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1]) && !ids.some((x) => x.toUpperCase() === m[1].toUpperCase())) ids.push(m[1]);
   if (ids.length) return ids;
   // A dedicated number element (`[data-test="order-number"]`, `.order-number`)
   // carries the bare identifier and no label: the WHOLE text, when it is one

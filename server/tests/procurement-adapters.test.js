@@ -561,6 +561,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('105.93')).toBeNull();
     expect(s1._internals.orderNumberIn('Processing order…')).toBeNull();
     expect(s1._internals.orderNumberIn('Ships to 34205')).toBeNull();
+    expect(s1._internals.orderNumberIn('Reorder # 12345')).toBeNull(); // another concept's label (word boundary — #3900 P2)
+    expect(s1._internals.orderNumberIn('Backorder # 12345 · Order # SO-778899')).toBe('SO-778899');
     expect(s1._internals.orderNumberIn('Order ref SO-778899')).toBe('SO-778899');
     expect(s1._internals.orderNumberIn('Reference 55501 · Ready')).toBeNull();
     expect(s1._internals.orderNumberIn('Total 1,234.56 · Order # SO-778899')).toBe('SO-778899');
@@ -1014,7 +1016,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   test('the dispatch click is FORCED — it never waits on actionability past the validated state; a control disabled after the trial submits nothing and parks ambiguous, one click attempt (r8 P1)', async () => {
     const ok = fakeSiteOne();
     await expect(s1.place(args(), ok.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(ok.st.placeClickOpts).toMatchObject({ force: true });
+    expect(ok.st.placeClickOpts).toMatchObject({ force: true, noWaitAfter: true }); // one-shot dispatch: never waits on the post-submit navigation (#3900 P2)
     const { st, deps } = fakeSiteOne({ placeOrderDisabledAfterTrial: true, orderNumberText: 'Thank you', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(0); // the browser ignored the forced click on a disabled control — nothing dispatched, nothing retried
