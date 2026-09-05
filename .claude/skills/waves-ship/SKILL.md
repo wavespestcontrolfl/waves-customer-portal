@@ -39,6 +39,12 @@ all final-HEAD CI and Codex requirements.
 - For implementation, use a task-owned worktree. Reuse the selected
   task-owned worktree when suitable; create another only when the authorized
   work requires isolation. Preserve unrelated changes.
+- When creating a worktree, resolve and record the user-selected base, or
+  a refreshed `origin/main` when no base was selected. Pass that revision
+  explicitly: `git worktree add <path> -b <branch> <base-sha>`; never rely
+  on the current checkout's HEAD as the implicit base.
+- Record whether this task created or reused the worktree. Selecting or
+  reusing an existing worktree does not authorize removing it.
 - For audits and reviews, use the user's selected branch, worktree, diff,
   or commit. Record the resolved SHA(s). Read-only review does not require
   creating a worktree.
@@ -89,7 +95,11 @@ all final-HEAD CI and Codex requirements.
 - For an authorized merged release, confirm the Railway deploy went green
   before reporting it deployed. Local and PR-only tasks use the completion
   states above.
-- Clean up the worktree when the lane closes: `git worktree remove ~/wt-<slug>`.
+- When the lane closes, remove only a worktree created by this task, after
+  confirming its changes are preserved, no other session is using it, and
+  no process or shared dependency still needs it. Never force removal.
+  Leave reused worktrees in place unless the owner explicitly authorizes
+  their removal.
 
 ### 6. Dark-ship pattern (user-visible features)
 - New user-visible behavior ships behind an env-var gate (`GATE_*`) or query param, default OFF in prod. Name the kill switch in the PR body.

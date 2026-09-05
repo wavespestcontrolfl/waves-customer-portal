@@ -45,14 +45,21 @@ Rules:
   as naive. Verify the column's `udt_name` in the target environment before
   accepting the finding; production access still requires §3 authorization.
 
-## 3. Local DB access — dev/preview by default, prod is break-glass
+## 3. Local DB access — Codex uses dev/preview only
 
 Default for agent sessions (per the AGENTS.md database policy): use a
 Railway **dev or preview Postgres branch** as `DATABASE_URL`. Do not point a
 session at production for routine work, and never run migrations or other
 writes against prod from a local machine.
 
-Prod access is **break-glass**: owner-authorized for the specific task,
+**Codex sessions never connect to production databases**, including for
+read-only verification. The AGENTS.md prohibition applies throughout this
+skill. Codex must not obtain or use production database credentials; when
+production evidence is needed, request it from an authorized operator and
+continue independent work against dev/preview.
+
+For other operators whose applicable policy permits it, prod access is
+**break-glass**: owner-authorized for the specific task,
 read-only (SELECT), and through a restricted role when one exists for the
 domain (e.g. `newsletter_verifier`) instead of the full-write URL. This
 skill deliberately ships no copy/paste prod connection command — get the
@@ -155,9 +162,10 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   database verification. Mock builders do not verify SQL identifiers,
   types, constraints, or transaction behavior.
 - For a task whose acceptance criteria concern the deployed schema, obtain
-  deployment evidence or separately authorized restricted read-only
-  production evidence under §3. Dev verification alone does not establish
-  production state.
+  deployment evidence or production evidence supplied by an authorized
+  operator. Codex must not connect to production to collect it. Other
+  operators may use restricted read-only access only under §3 and their
+  applicable policy. Dev verification alone does not establish production state.
 - Without the required safe database or authorization, report verification
   blocked and continue independent implementation or static checks.
   Never substitute production credentials for missing development access.
