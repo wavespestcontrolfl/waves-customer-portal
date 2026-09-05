@@ -14513,6 +14513,17 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     // committed and permanently skip reminder registration on the retry
     // (codex P2 r6).
     logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile?.findingsType || 'untyped'}) for ${date}`);
+    // Tech-facing "new visit" card (tech-visit-notifications.js): this
+    // writer inserts the assigned row itself, bypassing assignDispatchJob.
+    // Queued FIRST after commit (before the awaited alert resolution and
+    // reminder registration); silent when the booker IS the tech; only a
+    // FRESH booking — the alreadyScheduled returns above announced nothing.
+    if (appointment.technician_id) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: req.technicianId || null,
+        snapshot: { date: appointment.scheduled_date, windowStart: appointment.window_start || null, windowEnd: appointment.window_end || null },
+      });
+    }
     await resolveOpenFollowupAlerts();
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).

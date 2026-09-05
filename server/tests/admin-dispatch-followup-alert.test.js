@@ -251,7 +251,13 @@ describe('/schedule-followup (source contracts)', () => {
     const winnerBlock = routeTail.slice(winnerIdx, routeTail.indexOf('});', winnerIdx));
     expect(winnerBlock).toContain('await resolveOpenFollowupAlerts();');
     const bookedIdx = routeTail.indexOf('follow-up ${appointment.id} booked');
-    expect(routeTail.slice(bookedIdx, bookedIdx + 300)).toContain('await resolveOpenFollowupAlerts();');
+    const bookedTail = routeTail.slice(bookedIdx, bookedIdx + 1400);
+    expect(bookedTail).toContain('await resolveOpenFollowupAlerts();');
+    // The tech's "new visit" card is queued BEFORE that await (and the
+    // reminder registration): a reassignment during them must not overtake it.
+    const noticeIdx = bookedTail.indexOf("notifyTechVisitChange({\n        visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: req.technicianId || null,");
+    expect(noticeIdx).toBeGreaterThan(-1);
+    expect(noticeIdx).toBeLessThan(bookedTail.indexOf('await resolveOpenFollowupAlerts();'));
   });
 });
 

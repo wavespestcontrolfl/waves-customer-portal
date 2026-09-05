@@ -105,8 +105,10 @@ async function describeActor(actor, conn) {
     }
     return 'by the office';
   }
+  // Text-reply movers first: reschedule-sms passes 'customer_sms', which the
+  // generic customer branch below would otherwise claim as "online".
+  if (label === 'sms' || label === 'reschedule_sms' || label === 'customer_sms') return 'by the customer by text';
   if (label.startsWith('customer')) return 'by the customer online';
-  if (label === 'sms' || label === 'reschedule_sms') return 'by the customer by text';
   if (label === 'auto_dispatch') return 'by auto-dispatch';
   if (label.startsWith('rain')) return 'by the rain-out sweep';
   return 'by the office';
@@ -184,7 +186,7 @@ async function loadVisit(visitId, conn) {
     .leftJoin('customers as c', 's.customer_id', 'c.id')
     .where('s.id', visitId)
     .first(
-      's.id', 's.service_type', 's.scheduled_date', 's.window_start', 's.window_end', 's.technician_id',
+      's.id', 's.service_type', 's.scheduled_date', 's.window_start', 's.window_end', 's.technician_id', 's.status',
       's.service_address_line1', 's.service_address_city',
       'c.first_name as cust_first_name', 'c.last_name as cust_last_name',
       'c.address_line1 as cust_address', 'c.city as cust_city',
@@ -211,6 +213,17 @@ async function prepareNotice({
 
     const row = await loadVisit(visitId, conn);
     if (!row) return { ok: false, skipped: 'no_visit' };
+    // The committed row must still agree with the card. The per-visit queue
+    // orders notices within ONE process; during a deploy two app instances
+    // overlap (cron-lock.js), so an A→B card prepared on the old instance
+    // can run after B→C committed through the new one. A card the row
+    // already contradicts is dropped — the writer of the later change tells
+    // the tech the current state, and the newest feed row is never stale.
+    const holder = row.technician_id ? String(row.technician_id) : null;
+    const recipient = String(technicianId);
+    if ((kind === 'assigned' || kind === 'rescheduled') && holder !== recipient) return { ok: false, skipped: 'stale' };
+    if (kind === 'unassigned' && holder === recipient) return { ok: false, skipped: 'stale' };
+    if (kind === 'cancelled' && String(row.status) !== 'cancelled') return { ok: false, skipped: 'stale' };
     // The card describes the schedule the hook COMMITTED, not whatever the
     // row holds by the time delivery runs (a later move must not rewrite
     // this card's "Now …"). Callers pass what they wrote; the row supplies

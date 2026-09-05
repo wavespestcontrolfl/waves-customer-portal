@@ -272,3 +272,20 @@ describe('direct creators tell the tech (source order)', () => {
     expect(src).toContain('technicianId: c.committedTechId,');
   });
 });
+
+describe('cancel-flow plan hold (source order)', () => {
+  test('every per-move notice is suppressed (forward AND revert); the holders hear only after the hold write committed', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/holds.js'), 'utf8');
+    expect(src).toContain("}, 'plan_hold', 'customer', { suppressTechNotice: true });");
+    expect(src).toContain("'plan_hold_revert', 'customer', { suppressTechNotice: true });");
+    const holdWrite = src.indexOf("await trx('plan_holds').insert({");
+    const compensate = src.indexOf("throw codedError('hold_setup_failed'");
+    const notice = src.indexOf('void techNotices.notifyVisitRescheduled({');
+    expect(holdWrite).toBeGreaterThan(-1);
+    expect(notice).toBeGreaterThan(compensate);
+    // The recipient is the holder on the COMMITTED move (rebooker result).
+    expect(src).toContain("movedTechIds.set(String(visit.id), moveResult?.technicianId || null);");
+  });
+});

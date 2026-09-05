@@ -23,7 +23,7 @@ const ADAM_ID = '11111111-1111-4111-8111-111111111111';
 const ADAM = { id: ADAM_ID, name: 'Adam Benetti', employment_status: 'active', field_dispatchable: true };
 const VISIT = {
   id: 'visit-1', service_type: 'Pest Control', scheduled_date: '2026-09-10', window_start: '09:00:00', window_end: '11:00:00',
-  technician_id: 'tech-1', cust_first_name: 'Ana', cust_last_name: 'Ruiz', cust_address: '4312 Cortez Rd W', cust_city: 'Bradenton',
+  technician_id: 'tech-1', status: 'confirmed', cust_first_name: 'Ana', cust_last_name: 'Ruiz', cust_address: '4312 Cortez Rd W', cust_city: 'Bradenton',
 };
 
 function chain(first, firstImpl = null) {
@@ -99,12 +99,15 @@ describe('notifyTechVisitChange', () => {
   });
 
   test('unassigned names who has it now; rescheduled carries the previous slot; cancelled names the actor', async () => {
+    // Each card is prepared against the row the change COMMITTED.
+    prime({ visit: { ...VISIT, technician_id: ADAM_ID } });
     await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1', actorId: ADAM_ID, newTechnicianId: ADAM_ID });
     expect(mockSendTechNotification.mock.calls[0][1]).toMatchObject({
       type: 'visit_unassigned',
       payload: { headline: 'Moved off your route', now_with: 'Adam Benetti', actor: 'by Adam' },
     });
 
+    prime();
     await notices.notifyTechVisitChange({
       visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId: 'customer_self_serve',
       previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
@@ -114,12 +117,35 @@ describe('notifyTechVisitChange', () => {
       payload: { headline: 'Visit moved', previous_when: 'Wed Sep 9, 1–3 PM', when: 'Thu Sep 10, 9–11 AM', actor: 'by the customer online' },
     });
 
+    prime({ visit: { ...VISIT, status: 'cancelled' } });
     await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1', actorId: ADAM_ID });
     expect(mockSendTechNotification.mock.calls[2][1]).toMatchObject({
       type: 'visit_cancelled',
       payload: { headline: 'Visit cancelled', actor: 'by Adam' },
     });
     expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route was cancelled' }));
+  });
+
+  test('a text-reply move (reschedule-sms actor customer_sms) reads "by text", not "online"', async () => {
+    await notices.notifyTechVisitChange({
+      visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId: 'customer_sms',
+      previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
+    });
+    expect(mockSendTechNotification.mock.calls[0][1].payload.actor).toBe('by the customer by text');
+  });
+
+  test('a card the committed row already contradicts is dropped (deploy overlap: two instances, two queues)', async () => {
+    // assigned / rescheduled: the row must still name the recipient.
+    prime({ visit: { ...VISIT, technician_id: ADAM_ID } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    // unassigned: the row must NOT name them any more.
+    prime();
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1', newTechnicianId: ADAM_ID })).toEqual({ sent: false, skipped: 'stale' });
+    // cancelled: a compensated (reverted) cancel never reaches the tech.
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    expect(mockSendTechNotification).not.toHaveBeenCalled();
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
   test('a failed feed insert means NO push for that card (a push with no card behind it sends the tech to an empty feed)', async () => {
@@ -169,6 +195,7 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
   });
 
   test('previous holder hears it left, new holder hears it arrived; the actor is skipped on their own side', async () => {
+    prime({ techs: { 'tech-1': TECH, 'tech-2': { ...TECH, id: 'tech-2', name: 'Tech Two' }, [ADAM_ID]: ADAM }, visit: { ...VISIT, technician_id: 'tech-2' } });
     await notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID });
     expect(mockSendTechNotification.mock.calls.map(([id, row]) => [id, row.type])).toEqual([
       ['tech-1', 'visit_unassigned'],
@@ -176,11 +203,13 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
     ]);
     jest.clearAllMocks();
     // Adam takes it himself: only the tech who lost it hears.
+    prime({ techs: { 'tech-1': TECH, 'tech-2': { ...TECH, id: 'tech-2', name: 'Tech Two' }, [ADAM_ID]: ADAM }, visit: { ...VISIT, technician_id: ADAM_ID } });
     await notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: ADAM_ID, actorId: ADAM_ID });
     expect(mockSendTechNotification.mock.calls.map(([id, row]) => [id, row.type])).toEqual([['tech-1', 'visit_unassigned']]);
   });
 
   test('both cards are written BEFORE any push is awaited (a slow push cannot reorder a rapid A→B, B→C)', async () => {
+    prime({ techs: { 'tech-1': TECH, 'tech-2': { ...TECH, id: 'tech-2', name: 'Tech Two' }, [ADAM_ID]: ADAM }, visit: { ...VISIT, technician_id: 'tech-2' } });
     const order = [];
     mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`card:${techId}:${row.type}`); return true; });
     mockSendToAdminUser.mockImplementation(async (techId) => {
@@ -204,8 +233,11 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
         return c;
       }
       if (table === 'scheduled_services as s') {
+        // The row as each hook's reads see it: B→C commits after the first
+        // hook's two reads (one per side), so those see B, the rest see C.
+        const row = { ...VISIT, technician_id: visitReads < 2 ? 'tech-2' : 'tech-3' };
         const slow = visitReads++ === 0;
-        return chain(null, slow ? () => new Promise((r) => setTimeout(() => r(VISIT), 20)) : () => Promise.resolve(VISIT));
+        return chain(null, slow ? () => new Promise((r) => setTimeout(() => r(row), 20)) : () => Promise.resolve(row));
       }
       throw new Error(`unexpected table ${table}`);
     });
@@ -220,6 +252,25 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
     mockSendTechNotification.mockResolvedValue(undefined);
   });
 
+  test('A→B then B→C both committed before the first card is prepared: B hears only "moved off" — the stale "new visit" is dropped, C hears it arrived', async () => {
+    const order = [];
+    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`${techId}:${row.type}`); return true; });
+    db.mockImplementation((table) => {
+      if (table === 'technicians') {
+        const c = { where: jest.fn((arg) => { c.first = jest.fn(async () => ({ ...TECH, id: arg.id, name: arg.id })); return c; }), first: jest.fn() };
+        return c;
+      }
+      if (table === 'scheduled_services as s') return chain({ ...VISIT, technician_id: 'tech-3' });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await Promise.all([
+      notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID }),
+      notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-2', toTechId: 'tech-3', actorId: ADAM_ID }),
+    ]);
+    expect(order).toEqual(['tech-1:visit_unassigned', 'tech-2:visit_unassigned', 'tech-3:visit_assigned']);
+    mockSendTechNotification.mockResolvedValue(undefined);
+  });
+
   test('a direct creation notice queues behind a pending change for the same visit', async () => {
     const order = [];
     mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`${techId}:${row.type}`); return true; });
@@ -230,8 +281,10 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
         return c;
       }
       if (table === 'scheduled_services as s') {
+        // The creation's read sees its own row; the change commits after it.
+        const row = { ...VISIT, technician_id: visitReads < 1 ? 'tech-1' : 'tech-2' };
         const slow = visitReads++ === 0;
-        return chain(null, slow ? () => new Promise((r) => setTimeout(() => r(VISIT), 20)) : () => Promise.resolve(VISIT));
+        return chain(null, slow ? () => new Promise((r) => setTimeout(() => r(row), 20)) : () => Promise.resolve(row));
       }
       throw new Error(`unexpected table ${table}`);
     });
@@ -252,7 +305,7 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
         const c = { where: jest.fn(() => c), first: jest.fn(async () => TECH) };
         return c;
       }
-      if (table === 'scheduled_services as s') return chain(VISIT);
+      if (table === 'scheduled_services as s') return chain({ ...VISIT, status: 'cancelled' });
       throw new Error(`unexpected table ${table}`);
     });
     await notices.notifyVisitCancelled({ visitId: 'visit-1' });
@@ -268,6 +321,7 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
   });
 
   test('inside a caller transaction the notice waits for the OUTERMOST commit and is dropped on rollback', async () => {
+    prime({ techs: { 'tech-1': TECH, 'tech-2': { ...TECH, id: 'tech-2', name: 'Tech Two' }, [ADAM_ID]: ADAM }, visit: { ...VISIT, technician_id: 'tech-2' } });
     let resolveCommit; let rejectCommit;
     const trx = { executionPromise: new Promise((res, rej) => { resolveCommit = res; rejectCommit = rej; }) };
     notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID, trx });

@@ -99,7 +99,9 @@ async function revertMoves(customerId, moved) {
   const SmartRebooker = require('../rebooker');
   for (const done of [...moved].reverse()) {
     try {
-      await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', {});
+      // A compensating move back is not a schedule change the tech should
+      // hear about — the forward move it undoes was never announced either.
+      await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', { suppressTechNotice: true });
     } catch (revertErr) {
       logger.error(`[holds] revert of visit ${done.id} failed: ${revertErr.message}`);
       const { notifyAdmin } = require('../notification-service');
@@ -142,6 +144,10 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   // visit that can still dispatch.
   const visits = await familyUpcomingVisits(customerId, familyKey);
   const moved = [];
+  // Holder on each COMMITTED move (rebooker result), for the tech notices
+  // sent only once the whole hold stands — kept off the persisted
+  // moved_visits shape.
+  const movedTechIds = new Map();
   if (visits.length) {
     const SmartRebooker = require('../rebooker');
     const delta = daysBetween(String(visits[0].scheduled_date).slice(0, 10), resume);
@@ -149,10 +155,14 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       const from = String(visit.scheduled_date).slice(0, 10);
       const to = addDays(from, delta);
       try {
-        await SmartRebooker.reschedule(visit.id, to, {
+        // suppressTechNotice: a later visit in this loop, or the hold write
+        // below, can still fail and revert every move made so far — the
+        // tech must never act on a schedule change that gets rolled back.
+        const moveResult = await SmartRebooker.reschedule(visit.id, to, {
           start: visit.window_start || null, end: visit.window_end || null,
-        }, 'plan_hold', 'customer', {});
+        }, 'plan_hold', 'customer', { suppressTechNotice: true });
         moved.push({ id: visit.id, from, to, window: { start: visit.window_start || null, end: visit.window_end || null } });
+        movedTechIds.set(String(visit.id), moveResult?.technicianId || null);
       } catch (err) {
         logger.error(`[holds] visit ${visit.id} did not move for a ${familyKey} hold: ${err.message}`);
         await revertMoves(customerId, moved);
@@ -231,6 +241,22 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
     logger.error(`[holds] hold write failed for ${customerId}/${familyKey} — compensating moved visits: ${err.message}`);
     await revertMoves(customerId, moved);
     throw codedError('hold_setup_failed', 'We could not set the hold up — nothing changed. Call our office and we will do it by hand');
+  }
+
+  // The hold stands and nothing can revert the moves now — tell each
+  // visit's holder (tech-visit-notifications.js: post-commit, best-effort,
+  // never awaited, gate-dark; actor "the customer online").
+  {
+    const techNotices = require('../tech-visit-notifications');
+    for (const m of moved) {
+      const technicianId = movedTechIds.get(String(m.id));
+      if (!technicianId) continue;
+      void techNotices.notifyVisitRescheduled({
+        visitId: m.id, technicianId, actorId: 'customer',
+        previous: { date: m.from, windowStart: m.window.start, windowEnd: m.window.end },
+        snapshot: { date: m.to, windowStart: m.window.start, windowEnd: m.window.end },
+      });
+    }
   }
 
   try {

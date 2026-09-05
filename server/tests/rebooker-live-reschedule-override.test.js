@@ -324,10 +324,12 @@ describe('live-status reschedule override (allowLive)', () => {
     // same-tech move), so tech-7 is the one told.
     updateQuery.update.mockImplementation(() => updateResult(1, [{ id: 'svc-1', technician_id: 'tech-7' }]));
 
+    // The result names the committed holder too — callers that suppressed
+    // the per-move notice (the cancel-flow hold) tell them later.
     await expect(SmartRebooker.reschedule(
       'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin',
       { allowLive: true, actorId: 'virginia' },
-    )).resolves.toMatchObject({ success: true });
+    )).resolves.toMatchObject({ success: true, technicianId: 'tech-7' });
 
     expect(notifyAssignmentChange).not.toHaveBeenCalled();
     expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
