@@ -2512,7 +2512,7 @@ router.get('/job-card/mix', async (req, res, next) => {
     const gallons = Number(req.query.gallons);
     if (![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
     const mix = await jobCard.mixForProduct(productId, gallons, { serviceId });
-    if (!mix) return res.status(404).json({ error: 'Product not found' });
+    if (!mix) return res.status(404).json({ error: 'Product or visit not found' });
     res.json({ enabled: true, ...mix });
   } catch (err) { next(err); }
 });

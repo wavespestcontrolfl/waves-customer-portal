@@ -810,7 +810,9 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, now = ne
     dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
     serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
-  if (!product) return null;
+  // Fail closed: no visit row (missing id, unknown id, query failure) means
+  // no rig assignment to trust, so no dose — never "any active rig".
+  if (!product || !svc) return null;
   const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), now);
   // An expired calibration keeps its carrier number for display, but no
   // mix is computed from it — the same withholding the lawn-mix route does.
