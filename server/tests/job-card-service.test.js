@@ -1471,11 +1471,38 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       expect([serviceType, out.lines, out.note]).toEqual([serviceType, [], 'No treatment protocol for this service (lawn_care)']);
     }
     expect(buildPlan).not.toHaveBeenCalled();
-    const mechanicalAddon = await run({ addons: [{ name: 'Lawn Dethatching', category: 'lawn_care', serviceKey: 'dethatching' }, { name: 'Lawn Care', category: 'lawn_care', serviceKey: 'lawn_care_recurring' }] });
+    // Rodent sanitation is bleach and manual clean-up by catalog (r8 P1): no program either, primary or add-on.
+    for (const serviceKey of ['rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy']) {
+      const out = await run({ serviceType: 'Rodent Sanitation — Standard', serviceCategory: 'rodent', serviceKey });
+      expect([serviceKey, out.lines, out.note]).toEqual([serviceKey, [], 'No treatment protocol for this service (rodent)']);
+    }
+    const mechanicalAddon = await run({ addons: [{ name: 'Lawn Dethatching', category: 'lawn_care', serviceKey: 'dethatching' }, { name: 'Lawn Care', category: 'lawn_care', serviceKey: 'lawn_care_recurring' }, { name: 'Rodent Sanitation — Light', category: 'rodent', serviceKey: 'rodent_sanitation_light' }] });
     expect(mechanicalAddon.addons).toEqual([
       { name: 'Lawn Dethatching', products: 0, visit: null, note: 'No treatment protocol for this add-on (lawn_care)' },
       { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
+      { name: 'Rodent Sanitation — Light', products: 0, visit: null, note: 'No treatment protocol for this add-on (rodent)' },
     ]);
+  });
+
+  test('the tank search withholds every dose on a rodent sanitation appointment (r8 P1)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Rodent Sanitation — Standard', service_category: 'rodent', service_key: 'rodent_sanitation_standard' }], products_catalog: [product], equipment_calibrations: [live], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { protocols: { rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }] } } }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, reason: 'No treatment protocol for this visit (rodent)', ratePer1000: null, context: { line: null } });
+    // The same appointment by name alone (no key) keeps the rodent program's own read, as every legacy row does.
+    rows.scheduled_services = [{ ...rows.scheduled_services[0], service_key: null }];
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { protocols: { rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }] } } }, now: new Date('2026-09-03T14:00:00Z') })).amount).toBe(6.215);
   });
 
   test('a lawn add-on on a non-lawn visit withholds the tank dose of a product no protocol names (r6 P1)', async () => {

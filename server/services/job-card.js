@@ -311,23 +311,25 @@ async function loadAddons(dbh, serviceId) {
 // (`keys`: fire ant, flea, tick → the pest program's matcher visit; the
 // bed-bug treatment → its own program) or, for the bed-bug rows booked
 // before the catalog link, by name. Inspection / other and an unknown
-// category resolve no products. `mechanical` service keys (core aeration,
-// dethatching, plugging, top dressing) are lawn work without a chemical
-// plan — the catalog classifies them lawn_care, so the category alone
-// would hand them the month's fertiliser and pesticide lines.
+// category resolve no products. `nonChemical` service keys — the mechanical
+// lawn services (core aeration, dethatching, plugging, top dressing) and
+// rodent sanitation (bleach and manual clean-up) — are work without a
+// chemical program: the catalog classifies them lawn_care / rodent, so the
+// category alone would hand them the program's lines and let the tank
+// search dose any pesticide on them.
 const ADDON_PROGRAMS = Object.freeze({
   pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
-  lawn_care: { any: ['lawn'], fallback: 'lawn', mechanical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
+  lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
   mosquito: { any: ['mosquito'], fallback: 'mosquito' },
   termite: { any: ['termite'], fallback: 'termite' },
-  rodent: { any: ['rodent'], fallback: 'rodent' },
+  rodent: { any: ['rodent'], fallback: 'rodent', nonChemical: ['rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy'] },
   tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },
   specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });
 function addonProgramKey(category, name, protocols, serviceKey = null) {
   const rule = ADDON_PROGRAMS[category];
   if (!rule) return null;
-  if (serviceKey && rule.mechanical?.includes(serviceKey)) return null;
+  if (serviceKey && rule.nonChemical?.includes(serviceKey)) return null;
   if (serviceKey && rule.keys?.[serviceKey]) return rule.keys[serviceKey];
   const picked = matchServiceProtocol(protocols, name, { serviceKey })?.programKey;
   return rule.any.includes(picked) ? picked : rule.fallback;
