@@ -1956,11 +1956,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // transition landing in between (won / lost / contacted) wins and
       // this public retry claims 0 rows instead of regressing it (r9 P1);
       // on 0 rows the row is re-read and claimed once more — a concurrent
-      // request on this token that moved the label — before the fields
-      // land unlabelled through the merge write below, which leaves the
-      // label to the write that won. Gate off: the stored marker is kept
-      // as is (no lookup, no relabel — the kill switch must not reopen the
-      // pipeline it labelled) through that same merge write.
+      // request on this token that moved the label — and a row still in
+      // play after that reopens as 'new' (below). Gate off: the stored
+      // marker is kept as is (no lookup, no relabel — the kill switch must
+      // not reopen the pipeline it labelled) through the merge write.
       let prior = dedupeOn ? await ownRow().first(RETURNING) : null;
       lead = null;
       for (let attempt = 0; !lead && relabelable(prior) && attempt < 2; attempt++) {
@@ -1999,14 +1998,37 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (lead) duplicateOfLeadId = desired;
         else prior = await ownRow().first(RETURNING);
       }
+      if (!lead && relabelable(prior)) {
+        // Claims exhausted while the row is still a wizard row in play
+        // (concurrent requests on one token retyping in a tight loop): this
+        // request's fields must never land under a marker another request
+        // derived for ITS fields — that is the mismatch the claimed write
+        // exists to prevent (pre-push P1 on 5e2777f). The row reopens as
+        // 'new' with the marker cleared: one self-consistent open lead (the
+        // pre-dedupe outcome), never a mislabelled one. Still claimed on
+        // the status being in play, so a staff transition wins here too.
+        const rows = await ownRow()
+          .whereIn('status', ['new', 'duplicate'])
+          .update({
+            ...updateFields,
+            status: 'new',
+            extracted_data: db.raw(
+              "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb",
+              [extractedData],
+            ),
+          })
+          .returning(RETURNING);
+        lead = rows[0] || null;
+        if (lead) duplicateOfLeadId = null;
+      }
       if (!lead) {
+        // Gate off, or the row left play (a staff transition won): the
+        // fields land through the merge write and the label is the row's
+        // own — the stored marker when the gate is off; whatever the
+        // winning write left otherwise (nothing follows a marker on a row
+        // that is no longer 'duplicate').
         const rows = await ownRow().update(updateFields).returning(RETURNING);
         lead = rows[0];
-        // The label is the row's own: the stored marker when the gate is
-        // off, or whatever the write that won the claim left (a staff
-        // transition, or a concurrent request on this token that filed the
-        // row as a repeat and dropped its lead-stage funnel row — trusting
-        // a stale read would re-validate a null marker, codex #3834 r17 P1).
         if (relabelable(lead)) duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
       }
       if (relabelable(lead)) {

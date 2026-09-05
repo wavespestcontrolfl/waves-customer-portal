@@ -218,7 +218,16 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // the label to the write that won.
     expect(block).toMatch(/for \(let attempt = 0; !lead && relabelable\(prior\) && attempt < 2; attempt\+\+\) \{/);
     expect(block).toMatch(/if \(lead\) duplicateOfLeadId = desired;\n\s+else prior = await ownRow\(\)\.first\(RETURNING\);/);
-    expect(block).toMatch(/if \(!lead\) \{\n\s+const rows = await ownRow\(\)\.update\(updateFields\)\.returning\(RETURNING\);\n\s+lead = rows\[0\];\n[\s\S]*?if \(relabelable\(lead\)\) duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
+    // Claims exhausted with the row still in play: this request's fields
+    // never land under another request's marker — the row reopens as 'new'
+    // with the marker cleared, claimed on the status still being in play
+    // (pre-push P1 on 5e2777f). Only a row that left play (gate off, or a
+    // staff transition) takes the merge write, whose marker nothing follows.
+    expect(block).toMatch(/if \(!lead && relabelable\(prior\)\) \{\n[\s\S]*?const rows = await ownRow\(\)\n\s+\.whereIn\('status', \['new', 'duplicate'\]\)\n\s+\.update\(\{\n\s+\.\.\.updateFields,\n\s+status: 'new',/);
+    const reopenRaw = block.slice(block.indexOf("if (!lead && relabelable(prior)) {"), block.indexOf("if (!lead) {"));
+    expect(reopenRaw).not.toMatch(/duplicate_of_lead_id/);
+    expect(reopenRaw).toMatch(/if \(lead\) duplicateOfLeadId = null;/);
+    expect(block).toMatch(/if \(!lead\) \{\n[\s\S]*?const rows = await ownRow\(\)\.update\(updateFields\)\.returning\(RETURNING\);\n\s+lead = rows\[0\];\n\s+if \(relabelable\(lead\)\) duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
     expect(block).not.toMatch(/duplicateOfLeadId = stored;/);
     // The identity predicate is defined once and shared with the reopen.
     expect(src).toMatch(/const scopedToTypedIdentity = \(qb\) => qb\n\s+\.where\(\{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest \}\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[observedExtraCount\]\);/);
