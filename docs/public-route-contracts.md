@@ -628,6 +628,10 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+Overlapping annual coverage on public `/accept` returns 409
+`{ error, code: 'ANNUAL_PREPAY_OVERLAP' }` with the existing call-the-office
+explanation and no acceptance committed. Clients preserve the appointment
+selection and display that billing conflict instead of a slot-taken message.
 A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
 non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
 bedroom reply proves the row's address or dollars stale; lifted only by the

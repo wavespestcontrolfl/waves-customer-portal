@@ -1,22 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  AlertTriangle,
-  ArrowLeft,
-  Bot,
-  CheckCircle2,
-  ExternalLink,
-  FileText,
-  GitPullRequest,
-  Link2,
-  RefreshCw,
-  RotateCcw,
-  XCircle,
-  Search,
-  TrendingUp,
-} from "lucide-react";
-import { CardBody, Textarea, cn } from "../../components/ui";
-
-const ACTIVITY_STATUSES = { pending: "Queued", claimed: "Running", pending_review: "Processing / held", done: "Completed", skipped: "Skipped", expired: "Expired" };
+import { useState, useRef, useCallback, useEffect } from "react";
+import { cn } from "../../components/ui";
+import { Bot, RefreshCw, AlertTriangle } from "lucide-react";
+import { PillTab, PhoneFrame } from "./autonomous-content/shared";
+import ContentTab from "./autonomous-content/ActivityTab";
+import LinksTab from "./autonomous-content/LinksTab";
+import ImpactTab from "./autonomous-content/ImpactTab";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -44,45 +32,6 @@ function adminFetch(path, options = {}) {
   });
 }
 
-function formatDate(value) {
-  if (!value) return "—";
-  try {
-    return new Date(value).toLocaleString(undefined, {
-      timeZone: "America/New_York",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  } catch {
-    return "—";
-  }
-}
-
-function gateTag(summary, qualityGate) {
-  if (!summary) return { tone: "neutral", label: "—" };
-  // comparison_ok === false means the comparison-table gate failed (named
-  // competitors); it previously wasn't checked here, so a failing draft
-  // could show "Gate passed".
-  if ((summary.hard_failures || []).length > 0 || (qualityGate?.ok === false || (summary.quality_ok === false && summary.quality_score != null)) || summary.uniqueness_ok === false || summary.seo_completion_ok === false || summary.comparison_ok === false || summary.topic_ok === false) {
-    return { tone: "alert", label: "Needs fix" };
-  }
-  if ((summary.soft_failures || []).length > 0) return { tone: "neutral", label: "Soft flags" };
-  if (summary.quality_ok === true && summary.uniqueness_ok !== false) return { tone: "green", label: "Gate passed" };
-  return { tone: "neutral", label: "In review" };
-}
-
-function linkTagTone(status) {
-  if (status === "failed" || status === "dismissed") return "alert";
-  if (["patch_candidate", "pr_open", "merged", "deployed"].includes(status)) return "forest";
-  if (status === "verified" || status === "applied") return "green";
-  return "neutral";
-}
-
-function isNamedCompetitor(item) {
-  return item?.skip_reason === "named_competitor_review";
-}
-
 export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [view, setView] = useState("content");
   const [data, setData] = useState(null);
@@ -99,7 +48,12 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [decisionError, setDecisionError] = useState("");
   const [linkError, setLinkError] = useState("");
   const [impactError, setImpactError] = useState("");
-  const error = { links: linkError, impact: impactError, content: contentError, review: [decisionError, contentError].filter(Boolean).join(" · ") }[view];
+  const error = {
+    links: linkError,
+    impact: impactError,
+    content: contentError,
+    review: [decisionError, contentError].filter(Boolean).join(" · "),
+  }[view];
   const [reviewNote, setReviewNote] = useState("");
   const [linkReviewNote, setLinkReviewNote] = useState("");
   const [actionPending, setActionPending] = useState("");
@@ -121,37 +75,42 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   selectedIdRef.current = selectedId;
   const actionType = view === "review" ? "other" : "new_supporting_blog";
 
-  const load = useCallback(async (background = false) => {
-    const request = ++listRequest.current;
-    listInFlight.current = request;
-    if (!background) setLoading(true);
-    setContentError("");
-    try {
-      const next = await adminFetch(`/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=${actionType}`);
-      if (request !== listRequest.current) return;
-      setData(next);
-      if (!detailInFlight.current) setDetailVersion((version) => version + 1);
-      const retained = next.items?.some((item) => item.id === selectedIdRef.current);
-      if (background && !retained) {
-        setSelectedId(null);
-        setDetail(null);
-        setMobileDetailOpen(false);
-      } else {
-        setSelectedId((current) => retained ? current : next.items?.[0]?.id || null);
+  const load = useCallback(
+    async (background = false) => {
+      const request = ++listRequest.current;
+      listInFlight.current = request;
+      if (!background) setLoading(true);
+      setContentError("");
+      try {
+        const next = await adminFetch(
+          `/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=${actionType}`,
+        );
+        if (request !== listRequest.current) return;
+        setData(next);
+        if (!detailInFlight.current) setDetailVersion((version) => version + 1);
+        const retained = next.items?.some((item) => item.id === selectedIdRef.current);
+        if (background && !retained) {
+          setSelectedId(null);
+          setDetail(null);
+          setMobileDetailOpen(false);
+        } else {
+          setSelectedId((current) => (retained ? current : next.items?.[0]?.id || null));
+        }
+      } catch (err) {
+        if (request !== listRequest.current) return;
+        setContentError(err.message);
+        if (!background) {
+          setData(null);
+          setSelectedId(null);
+          setDetail(null);
+        }
+      } finally {
+        if (listInFlight.current === request) listInFlight.current = null;
+        if (request === listRequest.current) setLoading(false);
       }
-    } catch (err) {
-      if (request !== listRequest.current) return;
-      setContentError(err.message);
-      if (!background) {
-        setData(null);
-        setSelectedId(null);
-        setDetail(null);
-      }
-    } finally {
-      if (listInFlight.current === request) listInFlight.current = null;
-      if (request === listRequest.current) setLoading(false);
-    }
-  }, [offset, status, actionType]);
+    },
+    [offset, status, actionType],
+  );
   currentLoad.current = load;
 
   const loadLinks = async () => {
@@ -160,7 +119,9 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     try {
       const next = await adminFetch("/admin/content/internal-links?status=all&limit=100");
       setLinkData(next);
-      setSelectedLinkId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
+      setSelectedLinkId((current) =>
+        next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null,
+      );
     } catch (err) {
       setLinkError(err.message);
     } finally {
@@ -191,11 +152,18 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     const timer = setInterval(() => {
       if (listInFlight.current === null) void load(true);
     }, 30000);
-    return () => { clearInterval(timer); listRequest.current += 1; };
+    return () => {
+      clearInterval(timer);
+      listRequest.current += 1;
+    };
   }, [load]);
 
-  useEffect(() => { setReviewNote(""); }, [selectedId]);
-  useEffect(() => { setLinkReviewNote(""); }, [selectedLinkId]);
+  useEffect(() => {
+    setReviewNote("");
+  }, [selectedId]);
+  useEffect(() => {
+    setLinkReviewNote("");
+  }, [selectedLinkId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -208,14 +176,16 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     let stale = false;
     const request = { id: selectedId };
     detailInFlight.current = request;
-    setDetail(null);
+    setDetail((current) => (current?.id === selectedId ? current : null));
     setDetailLoading(true);
     adminFetch(`/admin/content/autonomous/review/${selectedId}`)
       .then((next) => {
         if (stale) return;
         setDetail(next.item);
       })
-      .catch((err) => { if (!stale) setContentError(err.message); })
+      .catch((err) => {
+        if (!stale) setContentError(err.message);
+      })
       .finally(() => {
         if (detailInFlight.current === request) detailInFlight.current = null;
         if (!stale) setDetailLoading(false);
@@ -239,13 +209,20 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         if (stale) return;
         setLinkDetail(next.item);
       })
-      .catch((err) => { if (!stale) setLinkError(err.message); })
-      .finally(() => { if (!stale) setLinkDetailLoading(false); });
-    return () => { stale = true; };
+      .catch((err) => {
+        if (!stale) setLinkError(err.message);
+      })
+      .finally(() => {
+        if (!stale) setLinkDetailLoading(false);
+      });
+    return () => {
+      stale = true;
+    };
   }, [selectedLinkId]);
 
   const submitDecision = async (decision) => {
-    if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending) return;
+    if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending || loading)
+      return;
     setActionPending(decision);
     setDecisionError("");
     try {
@@ -287,31 +264,33 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   const items = data?.items || [];
   const linkItems = linkData?.items || [];
-  const selected = detail || items.find((item) => item.id === selectedId) || null;
-  const selectedLink = linkDetail || linkItems.find((item) => item.id === selectedLinkId) || null;
-  const counts = data?.counts || {};
-  const linkCounts = linkData?.counts || {};
-  const gateSummary = selected?.run?.gate_summary;
-  const reviewActions = selected?.review_actions || {};
-  const selectedGate = gateTag(gateSummary, selected?.run?.quality_gate_result);
-  const hardFailures = gateSummary?.hard_failures || [];
-  const softFailures = gateSummary?.soft_failures || [];
-  const uniquenessFailures = gateSummary?.uniqueness_failures || [];
-  const comparisonFindings = gateSummary?.comparison_findings || [];
-  const seoCompletion = selected?.run?.seo_completion;
-  const seoFindings = seoCompletion?.findings || [];
-  const recommendedLinks = seoCompletion?.recommended_links || [];
-  const remediation = selected?.run?.remediation;
-  const pendingCount = (counts.pending || 0) + (counts.claimed || 0) + (counts.pending_review || 0);
-  const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
-  const impactItems = impactData?.items || [];
-  const impactTotals = impactData?.totals || {};
+  const selected = detail || items.find((item) => item.id === selectedId);
+  const selectedLink = linkDetail || linkItems.find((item) => item.id === selectedLinkId);
+
   const busy = loading || linkLoading || impactLoading;
 
-  const refreshAll = () => { load(); loadLinks(); loadImpact(); };
-  const changeView = (next) => { setView(next); setMobileDetailOpen(false); setOffset(0); setStatus(next === "review" ? "pending_review" : "all"); setDetail(null); setReviewNote(""); };
-  const openContent = (id) => { setSelectedId(id); setMobileDetailOpen(true); };
-  const openLink = (id) => { setSelectedLinkId(id); setMobileDetailOpen(true); };
+  const refreshAll = () => {
+    load();
+    loadLinks();
+    loadImpact();
+  };
+  const changeView = (next) => {
+    if (next === view) return;
+    setView(next);
+    setMobileDetailOpen(false);
+    setOffset(0);
+    setStatus(next === "review" ? "pending_review" : "all");
+    setDetail(null);
+    setReviewNote("");
+  };
+  const openContent = (id) => {
+    setSelectedId(id);
+    setMobileDetailOpen(true);
+  };
+  const openLink = (id) => {
+    setSelectedLinkId(id);
+    setMobileDetailOpen(true);
+  };
 
   return (
     <div className={cn("min-h-full", embedded ? "" : "bg-[#FAF7EF] p-4 sm:p-6")}>
@@ -334,15 +313,26 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                 <span className="hidden sm:inline">Refresh</span>
               </button>
             </div>
-            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Autonomous blog activity</h1>
+            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">
+              Autonomous blog activity
+            </h1>
             <p className="mt-1.5 max-w-md text-13 text-white/65 sm:text-14">
-              Blog posts are drafted, checked, repaired, and published automatically. Failed checks are retried or skipped with a recorded reason. No approval is needed.
+              Blog posts are drafted, checked, repaired, and published automatically. Failed checks are retried or
+              skipped with a recorded reason. No approval is needed.
             </p>
             <div className="mt-4 flex gap-1.5 overflow-x-auto">
-              <PillTab active={view === "content"} onClick={() => changeView("content")}>Content</PillTab>
-              <PillTab active={view === "review"} onClick={() => changeView("review")}>Other content</PillTab>
-              <PillTab active={view === "links"} onClick={() => changeView("links")}>Links</PillTab>
-              <PillTab active={view === "impact"} onClick={() => changeView("impact")}>Impact</PillTab>
+              <PillTab active={view === "content"} onClick={() => changeView("content")}>
+                Content
+              </PillTab>
+              <PillTab active={view === "review"} onClick={() => changeView("review")}>
+                Other content
+              </PillTab>
+              <PillTab active={view === "links"} onClick={() => changeView("links")}>
+                Links
+              </PillTab>
+              <PillTab active={view === "impact"} onClick={() => changeView("impact")}>
+                Impact
+              </PillTab>
             </div>
           </div>
           {/* iPhone mockup — desktop only (decorative; hidden on phones where it'd waste the screen) */}
@@ -363,640 +353,49 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
       {/* ── Content Queue ── */}
       {(view === "content" || view === "review") && (
-        <div className="pt-4">
-          <KpiRow>
-            <Kpi label="In progress" value={pendingCount} emphasize={pendingCount > 0} />
-            <Kpi label="Shadow rows" value={shadowCount} />
-            <Kpi label="Done" value={counts.done || 0} />
-            <Kpi label="Skipped" value={counts.skipped || 0} />
-          </KpiRow>
-
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:items-start">
-            {/* List */}
-            <div className={cn(mobileDetailOpen ? "hidden" : "block", "lg:block")}>
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <label className="text-14 text-zinc-700">Status <select aria-label="Activity status" className="ml-2 rounded border border-zinc-200 p-2" value={status} onChange={(event) => { setStatus(event.target.value); setOffset(0); }}>
-                  <option value="all">All activity</option>
-                  <option value="pending">Queued</option>
-                  <option value="claimed">Running</option>
-                  <option value="pending_review">Processing / held</option>
-                  <option value="done">Completed</option>
-                  <option value="skipped">Skipped</option>
-                  <option value="expired">Expired</option>
-                </select></label>
-                <span className="text-14 text-zinc-500">Updates every 30 seconds</span>
-              </div>
-              <ListHeader icon={Search} title="Activity" count={data?.total || 0} />
-              {loading ? (
-                <Empty>Loading…</Empty>
-              ) : items.length === 0 ? (
-                <Empty>
-                  {data?.unavailable
-                    ? "Review queue unavailable — the review tables are missing or the query failed. Check server logs."
-                    : "No runs match this filter."}
-                </Empty>
-              ) : (
-                <div className="flex flex-col gap-2.5">
-                  {items.map((item) => {
-                    const gt = gateTag(item.run?.gate_summary, item.run?.quality_gate_result);
-                    const named = isNamedCompetitor(item);
-                    const meta = [item.city, item.service, item.bucket].filter(Boolean).join(" · ");
-                    return (
-                      <RowCard key={item.id} active={item.id === selectedId} onClick={() => openContent(item.id)}>
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="truncate text-14 font-medium text-zinc-900">
-                              {item.target_keyword || item.query || item.target_url || "Untitled"}
-                            </div>
-                            {meta && <div className="mt-0.5 truncate text-12 text-zinc-500">{meta}</div>}
-                          </div>
-                          {named && <Tag tone="forest" className="shrink-0">Named competitor</Tag>}
-                        </div>
-                        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                          <Tag>{ACTIVITY_STATUSES[item.status] || item.status}</Tag>
-                          <Tag>{item.action_type}</Tag>
-                          <Tag tone={gt.tone}>{gt.label}</Tag>
-                          <span className="text-12 tabular-nums text-zinc-500">Score {item.final_score ?? item.score ?? "—"}</span>
-                          <span className="ml-auto text-12 text-zinc-400">{formatDate(item.updated_at || item.completed_at)}</span>
-                        </div>
-                      </RowCard>
-                    );
-                  })}
-                </div>
-              )}
-              <div className="mt-3 flex items-center justify-between gap-2 text-14 text-zinc-600">
-                <ActionBtn variant="secondary" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</ActionBtn>
-                <span>{items.length ? offset + 1 : 0}–{items.length ? offset + items.length : 0} of {data?.total || 0}</span>
-                <ActionBtn variant="secondary" disabled={loading || offset + items.length >= (data?.total || 0)} onClick={() => setOffset(offset + 50)}>Next</ActionBtn>
-              </div>
-            </div>
-
-            {/* Detail */}
-            <div className={cn(mobileDetailOpen ? "block" : "hidden", "lg:block lg:sticky lg:top-4")}>
-              <Panel>
-                <PanelHeader icon={FileText} title="Run detail" onBack={() => setMobileDetailOpen(false)} />
-                {!selected ? (
-                  <Empty>Select a run to see its status.</Empty>
-                ) : (
-                  <CardBody className={cn("flex flex-col gap-4", detailLoading && "opacity-60")}>
-                    <div>
-                      <div className="text-16 font-medium leading-snug text-zinc-900">
-                        {selected.draft?.title || selected.target_keyword || "Untitled run"}
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        <Tag>{selected.status === "pending_review" ? "Processing / held" : selected.status}</Tag>
-                        <Tag>{selected.action_type}</Tag>
-                        {selected.run?.shadow_mode && <Tag>shadow</Tag>}
-                        {isNamedCompetitor(selected) && <Tag tone="forest">Named competitor</Tag>}
-                      </div>
-                    </div>
-
-                    <div className="grid gap-2">
-                      <Field label="Target" value={selected.target_url || "—"} />
-                      <Field label="Keyword" value={selected.target_keyword || "—"} />
-                      <Field label="Reason" value={selected.skip_reason || "—"} />
-                      <Field label="Run" value={view === "content" && selected.run?.outcome === "completed_pending_review" ? "Automatic processing" : selected.run?.outcome || "—"} />
-                    </div>
-
-                    {selected.run?.astro_pr_url && <ExternalAnchor href={selected.run.astro_pr_url} label="Open Astro PR" />}
-
-                    {(selected.run?.poll_pending_reason || remediation) && (
-                      <Section
-                        icon={selected.run?.poll_pending_reason || remediation?.status === "parked" ? AlertTriangle : CheckCircle2}
-                        ok={!selected.run?.poll_pending_reason && remediation?.status !== "parked"}
-                        title="Pipeline status"
-                      >
-                        <div className="grid gap-1 text-13 text-zinc-600">
-                          {selected.run?.poll_pending_reason && (
-                            <div>
-                              Auto-merge waiting on <span className="font-medium text-zinc-900">{selected.run.poll_pending_reason}</span>
-                              {selected.run.poll_pending_since ? ` since ${formatDate(selected.run.poll_pending_since)}` : ""}
-                            </div>
-                          )}
-                          {remediation && (
-                            <div>
-                              Codex remediation: <span className="font-medium text-zinc-900">{remediation.status}</span>
-                              {Number.isFinite(remediation.rounds) ? ` · ${remediation.rounds} round(s)` : ""}
-                            </div>
-                          )}
-                          {remediation?.park_reason && (
-                            <div className="text-[#B42318]">Parked: {remediation.park_reason}</div>
-                          )}
-                        </div>
-                      </Section>
-                    )}
-
-                    {view === "review" && selected.action_type !== "new_supporting_blog" && selected.status === "pending_review" && (
-                      <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
-                        <Textarea
-                          value={reviewNote}
-                          onChange={(e) => setReviewNote(e.target.value)}
-                          placeholder="Reviewer note (optional)"
-                          rows={3}
-                        />
-                        <div className="flex flex-wrap gap-2">
-                          <ActionBtn variant="secondary" disabled={!reviewActions.can_requeue || !!actionPending} onClick={() => submitDecision("requeue")}>
-                            <RotateCcw size={15} strokeWidth={2} />
-                            {actionPending === "requeue" ? "Working…" : "Requeue"}
-                          </ActionBtn>
-                          {reviewActions.can_approve_trust_build && (
-                            <ActionBtn disabled={!!actionPending} onClick={() => submitDecision("approve_trust_build")}>
-                              <CheckCircle2 size={15} strokeWidth={2} />
-                              {actionPending === "approve_trust_build" ? "Working…" : "Approve"}
-                            </ActionBtn>
-                          )}
-                          {reviewActions.can_approve_named_competitor && (
-                            <ActionBtn disabled={!!actionPending} onClick={() => submitDecision("approve_named_competitor")}>
-                              <CheckCircle2 size={15} strokeWidth={2} />
-                              {actionPending === "approve_named_competitor" ? "Working…" : "Approve & publish"}
-                            </ActionBtn>
-                          )}
-                          <ActionBtn variant="danger" disabled={!reviewActions.can_dismiss || !!actionPending} onClick={() => submitDecision("dismiss")}>
-                            <XCircle size={15} strokeWidth={2} />
-                            {actionPending === "dismiss" ? "Working…" : "Dismiss"}
-                          </ActionBtn>
-                        </div>
-                      </div>
-                    )}
-
-                    <Section
-                      icon={selectedGate.tone === "alert" ? AlertTriangle : selectedGate.tone === "green" ? CheckCircle2 : RefreshCw}
-                      ok={selectedGate.tone === "neutral" ? undefined : selectedGate.tone === "green"}
-                      title="Gate summary"
-                    >
-                      <div className="grid gap-1 text-13 text-zinc-600">
-                        <div>Score: <span className="tabular-nums text-zinc-900">{gateSummary?.quality_score ?? "—"} / {gateSummary?.quality_min_score ?? "—"}</span></div>
-                        <div>Hard: {hardFailures.length ? hardFailures.join(", ") : "none"}</div>
-                        <div>Soft: {softFailures.length ? softFailures.join(", ") : "none"}</div>
-                        <div>Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}</div>
-                        <div>SEO completion: {seoCompletion?.available ? `P0 ${seoCompletion.p0} / P1 ${seoCompletion.p1} / P2 ${seoCompletion.p2}` : "not run"}</div>
-                        <div>Topic targeting: {gateSummary?.topic_ok == null ? "not run" : gateSummary.topic_ok ? "ok" : "failed"}</div>
-                        {(gateSummary?.topic_findings || []).map((finding, i) => <div key={`topic-${i}`} className="text-alert-fg">{finding.code}: {finding.message}</div>)}
-                        <div>Comparison: {gateSummary?.comparison_ok == null ? "not run" : gateSummary.comparison_ok ? "ok" : "failed"}</div>
-                        {gateSummary?.comparison_ok === false && comparisonFindings.slice(0, 4).map((finding, i) => (
-                          <div key={`${finding.code}-${i}`} className="text-[#B42318]">
-                            <span className="font-medium">{finding.severity} {finding.code}</span>: {finding.message}
-                          </div>
-                        ))}
-                      </div>
-                    </Section>
-
-                    {selected.run?.reviewer_notes && (
-                      <Section title="Run notes">
-                        <div className="max-h-48 overflow-y-auto whitespace-pre-wrap text-13 leading-relaxed text-zinc-600">
-                          {selected.run.reviewer_notes}
-                        </div>
-                      </Section>
-                    )}
-
-                    {seoCompletion?.available && (
-                      <Section icon={seoCompletion.p0 === 0 ? CheckCircle2 : AlertTriangle} ok={seoCompletion.p0 === 0} title="SEO completion">
-                        <div className="mb-2.5 flex flex-wrap gap-1.5">
-                          <Tag tone={seoCompletion.p0 > 0 ? "alert" : "green"}>P0 {seoCompletion.p0}</Tag>
-                          <Tag>P1 {seoCompletion.p1}</Tag>
-                          <Tag>P2 {seoCompletion.p2}</Tag>
-                          <Tag>{seoCompletion.faq_count || 0} FAQs</Tag>
-                          <Tag>{recommendedLinks.length} links</Tag>
-                        </div>
-                        {seoFindings.length > 0 && (
-                          <div className="mb-2.5 grid gap-1.5">
-                            {seoFindings.slice(0, 6).map((finding) => (
-                              <div key={`${finding.severity}-${finding.code}`} className={cn("text-13 leading-snug", finding.severity === "P0" ? "text-[#B42318]" : "text-zinc-600")}>
-                                <span className="font-medium">{finding.severity} {finding.code}</span>: {finding.message}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {recommendedLinks.length > 0 && (
-                          <div className="grid gap-1.5">
-                            <div className="text-12 uppercase tracking-label text-zinc-400">Recommended links</div>
-                            {recommendedLinks.slice(0, 6).map((link) => (
-                              <div key={`${link.reason}-${link.url}`} className="text-13 leading-snug text-zinc-600">
-                                <span className="font-medium text-zinc-900">{link.url}</span>
-                                <br />
-                                Anchor: {link.anchorText || "—"} · Reason: {link.reason || "—"}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </Section>
-                    )}
-
-                    {selected.draft?.meta_description && (
-                      <Section title="Meta">
-                        <div className="text-14 leading-snug text-zinc-600">{selected.draft.meta_description}</div>
-                      </Section>
-                    )}
-
-                    {selected.draft?.body_preview && (
-                      <Section title="Draft preview">
-                        <div className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded-md bg-[#FAF7EF] p-3 text-14 leading-relaxed text-zinc-800">
-                          {selected.draft.body || selected.draft.body_preview}
-                        </div>
-                      </Section>
-                    )}
-                  </CardBody>
-                )}
-              </Panel>
-            </div>
-          </div>
-        </div>
+        <ContentTab
+          data={data}
+          items={items}
+          mobileDetailOpen={mobileDetailOpen}
+          status={status}
+          setStatus={setStatus}
+          setOffset={setOffset}
+          loading={loading}
+          selectedId={selectedId}
+          openContent={openContent}
+          offset={offset}
+          setMobileDetailOpen={setMobileDetailOpen}
+          selected={selected}
+          detailLoading={detailLoading}
+          view={view}
+          reviewNote={reviewNote}
+          setReviewNote={setReviewNote}
+          actionPending={actionPending}
+          submitDecision={submitDecision}
+        />
       )}
 
       {/* ── Internal Links ── */}
       {view === "links" && (
-        <div className="pt-4">
-          <KpiRow>
-            <Kpi label="Candidates" value={linkCounts.patch_candidate || 0} emphasize={(linkCounts.patch_candidate || 0) > 0} />
-            <Kpi label="PR open" value={linkCounts.pr_open || 0} emphasize={(linkCounts.pr_open || 0) > 0} />
-            <Kpi label="Merged / deployed" value={(linkCounts.merged || 0) + (linkCounts.deployed || 0)} />
-            <Kpi label="Verified" value={linkCounts.verified || 0} />
-          </KpiRow>
-
-          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)] lg:items-start">
-            {/* List */}
-            <div className={cn(mobileDetailOpen ? "hidden" : "block", "lg:block")}>
-              <ListHeader icon={Link2} title="Internal-link tasks" count={linkItems.length} />
-              {linkLoading ? (
-                <Empty>Loading…</Empty>
-              ) : linkItems.length === 0 ? (
-                <Empty>No internal-link tasks.</Empty>
-              ) : (
-                <div className="flex flex-col gap-2.5">
-                  {linkItems.map((item) => (
-                    <RowCard key={item.id} active={item.id === selectedLinkId} onClick={() => openLink(item.id)}>
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="truncate text-14 font-medium text-zinc-900">{item.anchor_text || "—"}</div>
-                          <div className="mt-0.5 truncate text-12 text-zinc-500">{[item.anchor_type, scorePercent(item.topical_relevance_score)].filter(Boolean).join(" · ")}</div>
-                        </div>
-                        <Tag tone={linkTagTone(item.status)} className="shrink-0">{item.status}</Tag>
-                      </div>
-                      <div className="mt-2 grid gap-0.5 text-12 text-zinc-500">
-                        <div className="truncate"><span className="text-zinc-400">→</span> {item.target_url || "—"}</div>
-                        <div className="flex items-center gap-2">
-                          <span className="truncate">{item.source_url || item.source_file || "—"}</span>
-                          <span className="ml-auto shrink-0 text-zinc-400">{formatDate(item.updated_at || item.planned_at)}</span>
-                        </div>
-                      </div>
-                    </RowCard>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Detail */}
-            <div className={cn(mobileDetailOpen ? "block" : "hidden", "lg:block lg:sticky lg:top-4")}>
-              <Panel>
-                <PanelHeader icon={GitPullRequest} title="Link detail" onBack={() => setMobileDetailOpen(false)} />
-                {!selectedLink ? (
-                  <Empty>Select a task.</Empty>
-                ) : (
-                  <CardBody className={cn("flex flex-col gap-4", linkDetailLoading && "opacity-60")}>
-                    <div>
-                      <div className="text-16 font-medium leading-snug text-zinc-900">{selectedLink.anchor_text || "Untitled link"}</div>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        <Tag tone={linkTagTone(selectedLink.status)}>{selectedLink.status}</Tag>
-                        {selectedLink.anchor_type && <Tag>{selectedLink.anchor_type}</Tag>}
-                        {selectedLink.topic_cluster && <Tag>{selectedLink.topic_cluster}</Tag>}
-                      </div>
-                    </div>
-
-                    <div className="grid gap-2">
-                      <Field label="Source" value={selectedLink.source_url || selectedLink.source_file || "—"} />
-                      <Field label="Target" value={selectedLink.target_url || "—"} />
-                      <Field label="Source file" value={selectedLink.source_file || "—"} />
-                      <Field label="Target file" value={selectedLink.target_file || "—"} />
-                      <Field label="Reason" value={selectedLink.failure_reason || selectedLink.skip_reason || selectedLink.dismissed_reason || "—"} />
-                      <Field label="Verified" value={formatDate(selectedLink.verified_at)} />
-                    </div>
-
-                    {selectedLink.astro_pr_url && <ExternalAnchor href={selectedLink.astro_pr_url} label="Open Astro PR" />}
-
-                    <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
-                      <Textarea
-                        value={linkReviewNote}
-                        onChange={(e) => setLinkReviewNote(e.target.value)}
-                        placeholder="Reviewer note (optional)"
-                        rows={3}
-                      />
-                      <div className="flex flex-wrap gap-2">
-                        <ActionBtn variant="secondary" disabled={!selectedLink.review_actions?.can_requeue || !!linkActionPending} onClick={() => submitLinkDecision("requeue")}>
-                          <RotateCcw size={15} strokeWidth={2} />
-                          {linkActionPending === "requeue" ? "Working…" : "Requeue"}
-                        </ActionBtn>
-                        <ActionBtn disabled={!selectedLink.review_actions?.can_verify_now || !!linkActionPending} onClick={() => submitLinkDecision("verify_now")}>
-                          <CheckCircle2 size={15} strokeWidth={2} />
-                          {linkActionPending === "verify_now" ? "Working…" : "Verify"}
-                        </ActionBtn>
-                        <ActionBtn variant="danger" disabled={!selectedLink.review_actions?.can_dismiss || !!linkActionPending} onClick={() => submitLinkDecision("dismiss")}>
-                          <XCircle size={15} strokeWidth={2} />
-                          {linkActionPending === "dismiss" ? "Working…" : "Dismiss"}
-                        </ActionBtn>
-                      </div>
-                    </div>
-
-                    <LinkContext title="Before" value={selectedLink.link_context_before || selectedLink.context_snippet} />
-                    <LinkContext title="After" value={selectedLink.link_context_after} />
-
-                    <Section title="Validation">
-                      <div className="grid gap-1 text-13 text-zinc-600">
-                        <div>Target: HTTP {selectedLink.target_http_status ?? "—"} · indexable {yesNo(selectedLink.target_indexable)} · canonical {yesNo(selectedLink.target_canonical_matches)}</div>
-                        <div>Source: HTTP {selectedLink.source_http_status ?? "—"} · indexable {yesNo(selectedLink.source_indexable)} · canonical {yesNo(selectedLink.source_canonical_matches)}</div>
-                        <div>Links: source {selectedLink.source_existing_internal_links_count ?? "—"} · target inlinks {selectedLink.target_existing_inlinks_count ?? "—"}</div>
-                      </div>
-                    </Section>
-
-                    {selectedLink.reviewer_notes && (
-                      <Section title="Reviewer notes">
-                        <div className="whitespace-pre-wrap text-13 leading-relaxed text-zinc-600">{selectedLink.reviewer_notes}</div>
-                      </Section>
-                    )}
-                  </CardBody>
-                )}
-              </Panel>
-            </div>
-          </div>
-        </div>
+        <LinksTab
+          linkData={linkData}
+          mobileDetailOpen={mobileDetailOpen}
+          linkItems={linkItems}
+          linkLoading={linkLoading}
+          selectedLinkId={selectedLinkId}
+          openLink={openLink}
+          setMobileDetailOpen={setMobileDetailOpen}
+          selectedLink={selectedLink}
+          linkDetailLoading={linkDetailLoading}
+          linkReviewNote={linkReviewNote}
+          setLinkReviewNote={setLinkReviewNote}
+          linkActionPending={linkActionPending}
+          submitLinkDecision={submitLinkDecision}
+        />
       )}
 
       {/* ── Ranking Impact ── */}
-      {view === "impact" && (
-        <div className="pt-4">
-          <KpiRow>
-            <Kpi label="Articles tracked" value={impactTotals.tracked || 0} />
-            <Kpi label="Improved" value={impactTotals.verdicts?.improved || 0} emphasize={(impactTotals.verdicts?.improved || 0) > 0} />
-            <Kpi label="Regressed" value={impactTotals.verdicts?.regressed || 0} />
-            <Kpi label="Clicks (measured windows)" value={impactTotals.window_clicks || 0} />
-          </KpiRow>
-
-          <ListHeader icon={TrendingUp} title="Proof of ranking" count={impactItems.length} />
-          {impactLoading ? (
-            <Empty>Loading…</Empty>
-          ) : impactItems.length === 0 ? (
-            <Empty>No published optimizations tracked yet. A row appears when an engine publish goes live; positions are measured 14 and 21 days after Google recrawls it.</Empty>
-          ) : (
-            <div className="flex flex-col gap-2.5">
-              {impactItems.map((it) => (
-                <div key={it.id} className="rounded-2xl border border-zinc-200 bg-white p-3 sm:p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="truncate text-14 font-medium text-zinc-900">{it.title || it.page_url}</div>
-                      <a
-                        href={it.page_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mt-0.5 block truncate text-12 text-zinc-500 hover:text-zinc-700"
-                      >
-                        {it.page_url}
-                      </a>
-                    </div>
-                    <Tag tone={verdictTone(it.verdict, !!it.latest_window)} className="shrink-0">
-                      {it.latest_window ? (it.verdict || "measuring") : "awaiting data"}
-                    </Tag>
-                  </div>
-
-                  {(it.target_queries?.length ? it.target_queries : it.target_query ? [{ query: it.target_query }] : []).map((tq) => (
-                    <div key={tq.query} className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-13 text-zinc-600">
-                      <span className="truncate font-medium text-zinc-800">“{tq.query}”</span>
-                      {tq.after_position != null || tq.before_position != null ? (
-                        <span className="tabular-nums">
-                          {tq.before_position != null ? `#${Math.round(tq.before_position)}` : "not ranking"}
-                          {" → "}
-                          {tq.after_position != null ? `#${Math.round(tq.after_position)}` : "not ranking"}
-                        </span>
-                      ) : (
-                        <span className="text-zinc-400">no query data yet</span>
-                      )}
-                      {tq.position_delta != null && tq.position_delta !== 0 && (
-                        <span className={cn("tabular-nums", tq.position_delta > 0 ? "text-[#2E7D20]" : "text-[#B42318]")}>
-                          {tq.position_delta > 0 ? `↑${tq.position_delta}` : `↓${Math.abs(tq.position_delta)}`}
-                        </span>
-                      )}
-                      {tq.clicks != null && <span className="text-12 text-zinc-500">{tq.clicks} clicks · {tq.impressions} impr</span>}
-                    </div>
-                  ))}
-
-                  <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-12 text-zinc-500">
-                    {it.bucket && <Tag>{it.bucket}</Tag>}
-                    <span>Live {formatDate(it.deployed_at)}</span>
-                    {it.latest_window && (
-                      <span className="tabular-nums">
-                        Page: {it.baseline.position != null ? `#${Math.round(it.baseline.position)}` : "—"} → {it.latest_window.position != null ? `#${Math.round(it.latest_window.position)}` : "—"} · {it.latest_window.clicks} clicks / {it.latest_window.impressions} impr in {it.latest_window.days}d
-                      </span>
-                    )}
-                    {it.estimated_lift_position != null && (
-                      <span className="tabular-nums">Control-adjusted lift: {it.estimated_lift_position > 0 ? "+" : ""}{it.estimated_lift_position} pos · {it.estimated_lift_clicks_pct > 0 ? "+" : ""}{it.estimated_lift_clicks_pct}% clicks</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          <p className="mt-3 text-12 leading-relaxed text-zinc-500">
-            Position before → after is the article’s target query in Search Console (impressions-weighted). “Control-adjusted lift” subtracts the movement of similar unoptimized pages, so it credits the article only with movement the publish caused — stricter than a raw before/after.
-          </p>
-        </div>
-      )}
+      {view === "impact" && <ImpactTab impactData={impactData} impactLoading={impactLoading} />}
     </div>
   );
-}
-
-function verdictTone(verdict, measured) {
-  if (!measured) return "neutral";
-  if (verdict === "improved") return "green";
-  if (verdict === "regressed") return "alert";
-  return "neutral";
-}
-
-// ── Presentational helpers (TruGreen-inspired: forest header, kelly-green accents) ──
-
-function PhoneFrame({ src }) {
-  // The App Store capture already includes the app's own top bar, so no hardware
-  // notch is drawn over it — just a rounded bezel + screen for a clean mockup.
-  return (
-    <div className="relative rounded-[2rem] border-[5px] border-zinc-900 bg-zinc-900 shadow-2xl ring-1 ring-white/10">
-      <img src={src} alt="Waves customer app" className="block w-full rounded-[1.6rem]" loading="lazy" />
-    </div>
-  );
-}
-
-function PillTab({ active, onClick, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "h-9 shrink-0 rounded-full px-4 text-13 font-medium transition-colors u-focus-ring",
-        active ? "bg-[#43B02A] text-white" : "bg-white/10 text-white/80 hover:bg-white/20",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function KpiRow({ children, cols = 4 }) {
-  return (
-    <div className={cn("mb-4 grid grid-cols-2 gap-2.5 sm:gap-3", cols === 3 ? "sm:grid-cols-3" : "sm:grid-cols-4")}>
-      {children}
-    </div>
-  );
-}
-
-function Kpi({ label, value, emphasize }) {
-  return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-3 sm:p-4">
-      <div className="text-11 uppercase tracking-label text-zinc-400 sm:text-12">{label}</div>
-      <div className={cn("mt-1 text-22 leading-none tabular-nums sm:text-28", emphasize ? "font-medium text-[#43B02A]" : "text-zinc-900")}>{value}</div>
-    </div>
-  );
-}
-
-function ListHeader({ icon: Icon, title, count }) {
-  return (
-    <div className="mb-2.5 flex items-center gap-2">
-      <Icon size={15} strokeWidth={2} className="text-[#2E7D20]" />
-      <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
-      {typeof count === "number" && (
-        <span className="rounded-full bg-zinc-100 px-2 text-11 tabular-nums text-zinc-500">{count}</span>
-      )}
-    </div>
-  );
-}
-
-function RowCard({ active, onClick, children }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "w-full rounded-2xl border p-3 text-left transition-colors sm:p-4 u-focus-ring",
-        active ? "border-[#43B02A] bg-[#F1F9EE]" : "border-zinc-200 bg-white hover:border-[#43B02A] hover:bg-[#F8FCF6]",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Panel({ children }) {
-  return <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">{children}</div>;
-}
-
-function PanelHeader({ icon: Icon, title, onBack }) {
-  return (
-    <div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3">
-      <button
-        type="button"
-        onClick={onBack}
-        className="-ml-1 inline-flex h-7 items-center gap-1 rounded-full px-1.5 text-12 text-zinc-600 hover:bg-zinc-100 lg:hidden u-focus-ring"
-      >
-        <ArrowLeft size={15} strokeWidth={2} /> Back
-      </button>
-      <Icon size={15} strokeWidth={2} className="text-[#2E7D20]" />
-      <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
-    </div>
-  );
-}
-
-function Empty({ children }) {
-  return <div className="rounded-2xl border border-zinc-200 bg-white p-8 text-center text-14 text-zinc-400">{children}</div>;
-}
-
-function Tag({ tone = "neutral", className, children }) {
-  const cls = {
-    neutral: "bg-zinc-100 text-zinc-600",
-    green: "bg-[#EAF5E4] text-[#2E7D20]",
-    forest: "bg-[#143D2A] text-white",
-    alert: "bg-[#FEECEB] text-[#B42318]",
-  }[tone];
-  return (
-    <span className={cn("inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-11 font-medium", cls, className)}>
-      {children}
-    </span>
-  );
-}
-
-function ActionBtn({ variant = "green", size = "md", disabled, onClick, children }) {
-  const tone = {
-    green: "bg-[#43B02A] text-white hover:bg-[#3A9A24] border-transparent",
-    secondary: "bg-white text-zinc-800 border-zinc-300 hover:bg-zinc-50",
-    danger: "bg-white text-[#B42318] border-[#F1C7C2] hover:bg-[#FEF3F2]",
-  }[variant];
-  const sizing = size === "sm" ? "h-9 px-3.5 text-12" : "h-11 px-4 text-13 sm:h-10";
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center justify-center gap-1.5 rounded-full border font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 u-focus-ring",
-        sizing,
-        tone,
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-function Field({ label, value }) {
-  return (
-    <div className="grid grid-cols-[84px_minmax(0,1fr)] gap-2 text-14">
-      <span className="text-zinc-400">{label}</span>
-      <span className="break-words text-zinc-900">{value}</span>
-    </div>
-  );
-}
-
-function Section({ icon: Icon, ok, title, children }) {
-  return (
-    <div className="border-t border-zinc-200 pt-4">
-      <div className="mb-2 flex items-center gap-2">
-        {Icon && <Icon size={15} strokeWidth={2} className={ok === undefined ? "text-zinc-500" : ok ? "text-[#2E7D20]" : "text-[#B42318]"} />}
-        <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function ExternalAnchor({ href, label }) {
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      onClick={(event) => event.stopPropagation()}
-      className="inline-flex w-fit items-center gap-1.5 text-13 font-medium text-[#2E7D20] hover:underline"
-    >
-      <ExternalLink size={14} strokeWidth={2} />
-      {label}
-    </a>
-  );
-}
-
-function LinkContext({ title, value }) {
-  if (!value) return null;
-  return (
-    <Section title={title}>
-      <div className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-md bg-[#FAF7EF] p-3 text-13 leading-relaxed text-zinc-600">
-        {value}
-      </div>
-    </Section>
-  );
-}
-
-function scorePercent(value) {
-  if (value == null) return "";
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "";
-  return `${Math.round(n * 100)}% relevance`;
-}
-
-function yesNo(value) {
-  if (value === true) return "yes";
-  if (value === false) return "no";
-  return "—";
 }
