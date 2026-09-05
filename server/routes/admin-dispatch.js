@@ -3692,7 +3692,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
                 this.where('id', parentId).orWhere('recurring_parent_id', parentId);
               })
               .whereNotIn('status', [...PREPAID_SKIP])
-              .orderBy('scheduled_date', 'asc')
+              // Identical three-column order to fetchSeriesRows — a date tie
+              // alone would let the two paths take siblings in opposite order.
+              .orderBy(['scheduled_date', 'window_start', 'id'])
               .forUpdate()
               .select('id');
           }
