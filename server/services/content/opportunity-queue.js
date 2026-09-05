@@ -23,6 +23,19 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const effectiveActionSql = require('./opportunity-action-sql');
+
+// Keep read-only catch-up probes and atomic claims on the same eligibility.
+const claimableStatusSql = `(status = 'pending' OR (
+           ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
+           AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
+             OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
+           -- Existing approval holds re-enter the SAME guarded draft pipeline.
+           -- Never redraft work with any external publish already in flight.
+           AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
+             WHERE r.opportunity_id = opportunity_queue.id
+               AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
+         ))`;
+
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
@@ -89,7 +102,7 @@ class OpportunityQueue {
   async peek({ limit = DEFAULT_FETCH_LIMIT, minScore = null, bucket = null, actionType = null } = {}) {
     try {
       let q = db('opportunity_queue')
-        .where('status', 'pending')
+        .whereRaw(claimableStatusSql)
         // Same availability window as claimNext, so previews show exactly
         // what the runner could claim (operator-seeded rows may carry a
         // future available_at — see migration 20260611000016).
@@ -99,7 +112,7 @@ class OpportunityQueue {
         // catch-up; previewTop drives dashboards), so an exhausted pending
         // row awaiting the janitor sweep must not trigger a catch-up batch
         // that claimNext will immediately return empty from.
-        .where('attempt_count', '<', maxClaimAttempts())
+        .whereRaw("(attempt_count < ?::int OR status = 'pending_review')", [maxClaimAttempts()])
         .orderBy('score', 'desc')
         .limit(limit);
       // Same lane fence as claimNext (peek is consumed as "what the runner
@@ -161,16 +174,7 @@ class OpportunityQueue {
              updated_at = now()
        WHERE id = (
          SELECT id FROM opportunity_queue
-         WHERE (status = 'pending' OR (
-           ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
-           AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
-             OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
-           -- Existing approval holds re-enter the SAME guarded draft pipeline.
-           -- Never redraft work with any external publish already in flight.
-           AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
-             WHERE r.opportunity_id = opportunity_queue.id
-               AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
-         ))
+         WHERE ${claimableStatusSql}
            -- Availability window: operator-seeded rows (intercept briefs) may
            -- carry a future available_at; they stay invisible to the claim
            -- until their window opens. NULL = available immediately (every

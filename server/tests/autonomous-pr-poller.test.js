@@ -759,6 +759,46 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(result.results[0].reason).toBe('automatic_retirement_pending');
   });
 
+  test('retirement preserves the blocker across closure and branch-deletion retries', async () => {
+    const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    let updates = setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    await poller.pollPending();
+    expect(updates.some(u => u.updates.poll_pending_reason === 'automatic_retirement_pending')).toBe(false);
+
+    updates = setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue({ ...openPr(), state: 'closed' });
+    gh.retireBranch.mockResolvedValueOnce(false);
+    const retry = await poller.pollPending();
+    expect(retry.results[0]).toMatchObject({ pending: true, transient: true, reason: 'branch_retirement_pending' });
+    expect(runUpdates(updates)).toHaveLength(0);
+    expect(updates.some(u => u.updates.poll_pending_reason === 'branch_retirement_pending')).toBe(false);
+
+    updates = setupDb({ pending: [run] });
+    const done = await poller.pollPending();
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
+    expect(done.results[0].closed).toBe(true);
+    expect(runUpdates(updates)[0].updates.failure_message).toContain('Last blocker: preview_build_pending.');
+  });
+
+  test('a merge observed after branch cleanup wins over retirement', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValueOnce({ ...openPr(), state: 'closed' })
+      .mockResolvedValue({ ...openPr(), state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    await poller.pollPending();
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
+    expect(runUpdates(updates).some(u => u.updates.outcome === 'failed')).toBe(false);
+    expect(runUpdates(updates).some(u => u.updates.outcome === 'completed_published')).toBe(true);
+  });
+
+  test('a reopened PR remains pollable after branch cleanup', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValueOnce({ ...openPr(), state: 'closed' }).mockResolvedValue(openPr());
+    const result = await poller.pollPending();
+    expect(result.results[0]).toMatchObject({ pending: true, transient: true, reason: 'retirement_state_changed' });
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
   test('retirement never closes a PR that merged while its queue lock was acquired', async () => {
     const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     setupDb({ pending: [run] });

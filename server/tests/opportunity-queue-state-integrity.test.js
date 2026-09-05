@@ -315,7 +315,7 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     await queue.peek({});
 
     expect(q._filters).toEqual(expect.arrayContaining([
-      ['attempt_count', '<', 5],
+      ['raw', "(attempt_count < ?::int OR status = 'pending_review')", [5]],
     ]));
   });
 });

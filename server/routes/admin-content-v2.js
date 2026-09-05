@@ -462,7 +462,6 @@ router.get('/internal-links', async (req, res, next) => {
     const review = await internalLinkReviewQueue.listTasks({
       status: req.query.status,
       limit: req.query.limit,
-      offset: req.query.offset,
     });
     res.json(review);
   } catch (err) { next(err); }

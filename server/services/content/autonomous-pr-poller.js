@@ -1707,7 +1707,18 @@ async function pollRun(run, { allowMerge = true } = {}) {
         mergedAt: pr.merged_at || null,
       });
     }
-    if (pr.state !== 'open') return await finalizeClosed(run, prNumber);
+    if (pr.state !== 'open') {
+      if (run.action_type === 'new_supporting_blog') {
+        // A closed PR with a surviving branch can be reopened. Keep polling
+        // until branch deletion is verified, preserving the original blocker.
+        if (!(await gh.retireBranch(pr.head?.ref))) return { pending: true, transient: true, reason: 'branch_retirement_pending' };
+        const current = await gh.getPr(prNumber);
+        if (!current) return { pending: true, transient: true, reason: 'pr_unreadable' };
+        if (current.merged || current.merged_at) return await finalizeMerged(run, prNumber, { autoMerged: false, mergeSha: current.merge_commit_sha || null, mergedAt: current.merged_at || null });
+        if (current.state === 'open') return { pending: true, transient: true, reason: 'retirement_state_changed' };
+      }
+      return await finalizeClosed(run, prNumber);
+    }
 
     if (!autoMergeEnabled(run.action_type)) return { pending: true, reason: 'auto_merge_disabled' };
     if (isMetadataLane(run)) {
@@ -1743,7 +1754,7 @@ async function pollRun(run, { allowMerge = true } = {}) {
       });
       // Re-read on the next tick: a concurrent external merge wins over
       // retirement and must still complete deployment/impact bookkeeping.
-      return retired ? { pending: true, reason: 'automatic_retirement_pending' }
+      return retired ? { pending: true, transient: true, reason: 'automatic_retirement_pending' }
         : { pending: true, reason: 'retirement_state_changed' };
     }
     return verdict;
