@@ -930,8 +930,14 @@ async function checkPrepLinks(ctx, preps) {
     // The marker is keyed by the tagger's pest type; a guide outside
     // PREP_CONFIG (a project prep page) has no replay guard to satisfy.
     const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === source.templateKey);
-    if (pestType && !preps.some((p) => p.customerId === source.customerId && p.pestType === pestType)) {
-      preps.push({ customerId: source.customerId, pestType, serviceId: serviceId || null, templateKey: source.templateKey });
+    // One entry per texted PAGE (visit): two links for different visits of
+    // the same customer + pest each need their delivery stamp, or the
+    // second visit's queued automation sends the guide again (pre-push
+    // Codex P1 on 899bacd69). The interaction marker dedupes per customer +
+    // pest in markPrepGuidesSent.
+    const target = { customerId: source.customerId, pestType, serviceId: serviceId || null, templateKey: source.templateKey };
+    if (pestType && !preps.some((p) => p.customerId === target.customerId && p.pestType === pestType && p.serviceId === target.serviceId)) {
+      preps.push(target);
     }
   }
   return null;
@@ -1244,6 +1250,7 @@ async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestinati
  * (GH Codex #3844 r8 P2). Fail-soft: the text already went out.
  */
 async function markPrepGuidesSent(preps, actorId) {
+  const marked = new Set(); // customer + pest — one replay marker per pair
   for (const { customerId, pestType, serviceId, templateKey } of preps) {
     // The visit-level delivery fence FIRST: a texted page is a delivered
     // page — prep_sent_at is what every release predicate (the manual
@@ -1262,6 +1269,8 @@ async function markPrepGuidesSent(preps, actorId) {
         logger.warn(`[composer-customer-links] prep_sent_at stamp failed for service ${serviceId}: ${stampErr.message}`);
       }
     }
+    if (marked.has(`${customerId}:${pestType}`)) continue;
+    marked.add(`${customerId}:${pestType}`);
     await db('customer_interactions').insert({
       customer_id: customerId,
       interaction_type: 'sms_outbound',

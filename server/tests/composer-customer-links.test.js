@@ -1829,12 +1829,18 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     const stamp = { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), update: jest.fn(async () => 1) };
     mockBuilders = { customer_interactions: { insert }, scheduled_services: stamp };
     mockDb.fn = { now: () => 'NOW()' };
-    await markPrepGuidesSent([{ customerId: 'c1', pestType: 'flea', serviceId: 'svc-1', templateKey: 'prep.flea' }, { customerId: 'c2', pestType: 'bed_bug' }], 'admin-9');
+    await markPrepGuidesSent([
+      { customerId: 'c1', pestType: 'flea', serviceId: 'svc-1', templateKey: 'prep.flea' },
+      // A second visit of the same customer + pest: stamped too, marker once.
+      { customerId: 'c1', pestType: 'flea', serviceId: 'svc-2', templateKey: 'prep.flea' },
+      { customerId: 'c2', pestType: 'bed_bug' },
+    ], 'admin-9');
     // The texted visit page is stamped delivered (the fence every release
     // predicate honours), conditional on the key that rendered — only the
     // prep that carried a visit (pre-push Codex P1 on d5c33f299).
-    expect(stamp.where).toHaveBeenCalledTimes(1);
+    expect(stamp.where).toHaveBeenCalledTimes(2);
     expect(stamp.where).toHaveBeenCalledWith({ id: 'svc-1', prep_template_key: 'prep.flea' });
+    expect(stamp.where).toHaveBeenCalledWith({ id: 'svc-2', prep_template_key: 'prep.flea' });
     expect(stamp.whereNull).toHaveBeenCalledWith('prep_sent_at');
     expect(stamp.update).toHaveBeenCalledWith({ prep_sent_at: expect.anything() });
     expect(stamp.update.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
