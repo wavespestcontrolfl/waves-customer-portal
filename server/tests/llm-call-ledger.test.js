@@ -12,20 +12,15 @@ const mockInsert = jest.fn();
 const mockMerge = jest.fn();
 // failCall writes where({ id }).update(patch) against a call row the adapter filed as ok.
 const mockUpdate = jest.fn(() => Promise.resolve(1));
-// The session row already in the table when a turn is recorded (null = first turn),
-// and the last session_turn row written for it.
+// The session row already in the table when a turn is recorded (null = first turn).
 let sessionPrev = null;
-let lastTurnPrev = null;
 const mockDb = jest.fn((table) => ({
   insert: (row) => {
     const p = mockInsert(table, row);
     p.onConflict = (target) => ({ merge: (updates) => { mockMerge(table, target, updates); return { returning: p.returning }; } });
     return p;
   },
-  where: (cond) => {
-    const first = () => Promise.resolve(cond.row_kind === 'session_turn' ? lastTurnPrev : sessionPrev);
-    return { update: (patch) => mockUpdate(table, cond, patch), first, orderBy: () => ({ first }) };
-  },
+  where: (cond) => ({ update: (patch) => mockUpdate(table, cond, patch), first: () => Promise.resolve(sessionPrev) }),
 }));
 jest.mock('../models/db', () => {
   const db = (...args) => mockDb(...args);
@@ -68,6 +63,8 @@ function load() {
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const ledgerRows = () => mockInsert.mock.calls.filter(([t, row]) => t === 'llm_dispatch_log' && row.row_kind !== 'session_turn').map(([, row]) => row);
 const turnRows = () => mockInsert.mock.calls.filter(([t, row]) => t === 'llm_dispatch_log' && row.row_kind === 'session_turn').map(([, row]) => row);
+// merges by target: the session row (provider_ref) vs the turn row (step_id)
+const mergesFor = (kind) => mockMerge.mock.calls.filter(([, target]) => String(target).includes(`'${kind}'`));
 const callRows = () => ledgerRows().filter((r) => r.row_kind === 'call');
 
 function fetchJson(data, { ok = true, status = 200 } = {}) {
@@ -634,8 +631,8 @@ describe('llm call ledger', () => {
       global.fetch = fetchJson({ id: 'sess_2', status: 'idle', usage: { input_tokens: 250, output_tokens: 40 } });
       const { metrics } = load();
       await expect(metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_2' })).resolves.toEqual(expect.any(Number));
-      expect(mockMerge).toHaveBeenCalledTimes(1);
-      const [table, target, updates] = mockMerge.mock.calls[0];
+      expect(mergesFor('session')).toHaveLength(1);
+      const [table, target, updates] = mergesFor('session')[0];
       expect(table).toBe('llm_dispatch_log');
       expect(String(target)).toBe("(provider_ref) WHERE row_kind = 'session'");
       // counters and latency only grow
@@ -649,55 +646,47 @@ describe('llm call ledger', () => {
       expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
     });
 
-    it('writes one session_turn row per turn that carries something new — its delta of the counters, or a new failure on known counters — never a placeholder, none for a re-recorded snapshot', async () => {
+    it('writes one session_turn row per turn, keyed by (session, turn start), with that turn\'s delta of the counters — every re-record of the same turn upserts the SAME row monotonically', async () => {
       const { metrics } = load();
-      // first turn: no session row yet → the delta is the whole snapshot
+      const turnA = Date.now() - 500;
+      // first record of the session: no session row yet → the delta is the whole snapshot
       sessionPrev = null;
       global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 250, output_tokens: 40 } });
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: Date.now() - 50 });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA });
       expect(turnRows()).toHaveLength(1);
       expect(turnRows()[0]).toMatchObject({ row_kind: 'session_turn', lane_id: 'agent_assistant', provider_ref: 'sess_9', ok: true, input_tokens: 250, output_tokens: 40, cached_input_tokens: null });
-      expect(turnRows()[0].latency_ms).toBeGreaterThanOrEqual(50);
-      // second turn: the cumulative snapshot grew by 100 / 5 → only that lands on the turn row
+      expect(turnRows()[0].step_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(turnRows()[0].latency_ms).toBeGreaterThanOrEqual(500);
+      // the same turn re-recorded (a runner's finally, a retry) carries the SAME key → the unique
+      // partial index on step_id makes it an upsert, merged like the session row (monotone)
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, failure: 'streaming_failed' });
+      expect(turnRows()[1].step_id).toBe(turnRows()[0].step_id);
+      expect(turnRows()[1]).toMatchObject({ ok: false, error_code: 'streaming_failed' });
+      expect(mergesFor('session_turn')).toHaveLength(2);
+      const [, target, updates] = mergesFor('session_turn')[1];
+      expect(String(target)).toBe("(step_id) WHERE row_kind = 'session_turn'");
+      expect(String(updates.input_tokens)).toBe('GREATEST(EXCLUDED.input_tokens, llm_dispatch_log.input_tokens)');
+      expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
+      expect(String(updates.error_code)).toBe('COALESCE(llm_dispatch_log.error_code, EXCLUDED.error_code)');
+      // the next turn: the cumulative snapshot grew by 100 / 5 → only that lands on its own row
       sessionPrev = { input_tokens: 250, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 40, reasoning_tokens: null };
       global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
-      expect(turnRows()[1]).toMatchObject({ input_tokens: 100, output_tokens: 5, ok: false, error_code: 'streaming_failed' });
-      // nothing new → no turn row: a delayed lower snapshot, the same failure re-billed from a
-      // runner's finally, and ANY record whose usage GET failed (no placeholder — its outcome is
-      // on the session row; the recovered snapshot of that turn is the one row)
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA + 1000 });
+      expect(turnRows()[2].step_id).not.toBe(turnRows()[0].step_id);
+      expect(turnRows()[2]).toMatchObject({ input_tokens: 100, output_tokens: 5, ok: true });
+      // a delayed lower snapshot never goes negative; a failed usage GET keeps null counters (the
+      // row still exists under its key; the recovered snapshot fills it through GREATEST)
       sessionPrev = { input_tokens: 400, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 50, reasoning_tokens: null };
-      lastTurnPrev = { ok: false, error_code: 'streaming_failed' };
-      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA + 2000 });
+      expect(turnRows()[3]).toMatchObject({ input_tokens: 0, output_tokens: 0 });
+      global.fetch = jest.fn(() => Promise.reject(new Error('network')));
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA + 3000 });
+      expect(turnRows()[4]).toMatchObject({ input_tokens: null, output_tokens: null });
+      // no turn start → no turn row, the session row alone
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'streaming_failed' });
-      global.fetch = jest.fn(() => Promise.reject(new Error('network')));
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'session_timeout' });
-      expect(turnRows()).toHaveLength(2);
-      // a NEW failure on known, unchanged counters is a turn — judged against the LAST TURN, not
-      // the session row (which keeps only the first error): re-billing it is then nothing new
-      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 400, output_tokens: 50 } });
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'session_timeout' });
-      expect(turnRows()).toHaveLength(3);
-      expect(turnRows()[2]).toMatchObject({ ok: false, error_code: 'session_timeout', input_tokens: 0, output_tokens: 0 });
-      lastTurnPrev = { ok: false, error_code: 'session_timeout' };
-      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', failure: 'session_timeout' });
-      expect(turnRows()).toHaveLength(3);
-      // first record of a session with a failed GET: no placeholder; the recovered re-record is the one row
+      expect(turnRows()).toHaveLength(5);
+      expect(mergesFor('session')).toHaveLength(6);
       sessionPrev = null;
-      lastTurnPrev = null;
-      global.fetch = jest.fn(() => Promise.reject(new Error('network')));
-      await metrics.recordSessionUsage({ laneId: 'agent_bi', sessionId: 'sess_10' });
-      expect(turnRows()).toHaveLength(3);
-      sessionPrev = { input_tokens: null, cached_input_tokens: null, cache_write_tokens: null, output_tokens: null, reasoning_tokens: null };
-      global.fetch = fetchJson({ id: 'sess_10', status: 'idle', usage: { input_tokens: 90, output_tokens: 9 } });
-      await metrics.recordSessionUsage({ laneId: 'agent_bi', sessionId: 'sess_10' });
-      expect(turnRows()).toHaveLength(4);
-      expect(turnRows()[3]).toMatchObject({ provider_ref: 'sess_10', input_tokens: 90, output_tokens: 9 });
-      // the session row itself is still the ONE cumulative upsert per record
-      expect(mockMerge).toHaveBeenCalledTimes(9);
-      sessionPrev = null;
-      lastTurnPrev = null;
     });
 
     it('is a no-op while the gate is off', async () => {

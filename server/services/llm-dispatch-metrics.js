@@ -47,6 +47,7 @@
  */
 
 const logger = require('./logger');
+const { v5: uuidv5 } = require('uuid');
 
 const { classifyFailure } = require('./agent-control/taxonomy');
 const { policyFor } = require('./agent-control/lane-policies');
@@ -486,62 +487,64 @@ function messageText(value) {
 // resurrect a terminated session. A runner's finally re-bills safely; a sum
 // over session rows never counts a session twice.
 //
-// Beside it, ONE row_kind='session_turn' row per recorded turn carries this
-// turn's share: the counters minus the session row's previous snapshot,
-// this turn's latency and outcome. Windowed reads (agent-control hub) sum
-// turn rows, so a session live across a window edge contributes only what
-// it did inside the window (GH codex #3869 r2). The read-then-write runs in
+// Beside it, ONE row_kind='session_turn' row per turn carries that turn's
+// share: the counters minus the session row's previous snapshot, this
+// turn's latency and outcome. Windowed reads (agent-control hub) sum turn
+// rows, so a session live across a window edge contributes only what it
+// did inside the window (GH codex #3869 r2). The read-then-write runs in
 // one transaction under a per-session advisory lock, so two overlapping
-// turns of the same session cannot both subtract the same snapshot. A
-// re-record that carries nothing new — a runner's finally re-billing the
-// same snapshot, a retried terminal write, a delayed lower snapshot — writes
-// NO turn row (pre-push audit P1 on #3869): a turn row means the counters
-// advanced, or — on KNOWN counters — a failure the LAST TURN ROW does not
-// already carry (the session row keeps only the first error, so it cannot
-// say whether a later, different failure was already recorded). Never a
-// placeholder: a record whose usage GET failed writes no turn row (its
-// outcome is on the session row) and is folded into the next snapshot —
-// otherwise that snapshot's re-record of the same turn would be a second
-// row.
+// turns of the same session cannot both subtract the same snapshot.
+//
+// A turn is identified by (session id, turn start): step_id = uuid v5 of
+// that pair, unique per turn row (migration 000030). Every re-record of the
+// same turn — a runner's finally re-billing, a retried terminal write, a
+// recovered usage GET — lands on the SAME row through the same monotone
+// merge the session row uses (pre-push audits on #3869): counters and
+// latency only grow, ok only goes false, the first error stays. A record
+// with unknown usage (the GET failed) still writes its turn row with null
+// counters; the recovered snapshot fills it in place.
 const SESSION_COUNTERS = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens'];
-function sessionTurnRow(row, prev, lastTurn) {
-  const turn = { ...row, row_kind: 'session_turn' };
-  let advanced = false;
+const SESSION_TURN_NS = '60c2b5a4-2f0e-4f3b-9a4e-3f7e6d2c1b0a';
+function sessionTurnKey(sessionId, startedAt) {
+  return startedAt ? uuidv5(`${sessionId}:${Number(startedAt)}`, SESSION_TURN_NS) : null;
+}
+function sessionTurnRow(row, prev, turnKey) {
+  const turn = { ...row, row_kind: 'session_turn', step_id: turnKey };
   for (const col of SESSION_COUNTERS) {
     // null = this turn's usage GET failed; no number is better than a false zero
     turn[col] = row[col] == null ? null : Math.max(row[col] - Number(prev?.[col] || 0), 0);
-    if (turn[col] > 0) advanced = true;
   }
-  const known = row.input_tokens != null;
-  const newFailure = known && !row.ok && (lastTurn?.ok !== false || lastTurn.error_code !== row.error_code);
-  return advanced || newFailure ? turn : null;
+  return turn;
 }
-async function upsertSessionRow(row) {
+// Every merged column is MONOTONE — no ordering between writers is assumed.
+function monotoneMerge(db) {
+  const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
+  const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
+  return {
+    ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
+    error_code: first('error_code'),
+    error_class: first('error_class'),
+    latency_ms: greatest('latency_ms'),
+    served_model: first('served_model'),
+    ...Object.fromEntries(SESSION_COUNTERS.map((col) => [col, greatest(col)])),
+  };
+}
+async function upsertSessionRow(row, turnKey) {
   try {
     const db = require('../models/db');
-    const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
-    const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
     return await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [row.provider_ref]);
       const prev = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session' }).first(SESSION_COUNTERS);
-      const lastTurn = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session_turn' }).orderBy('id', 'desc').first(['ok', 'error_code']);
       const id = await writtenId(trx('llm_dispatch_log')
         .insert(row)
         .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
-        .merge({
-          ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
-          error_code: first('error_code'),
-          error_class: first('error_class'),
-          latency_ms: greatest('latency_ms'),
-          served_model: first('served_model'),
-          input_tokens: greatest('input_tokens'),
-          cached_input_tokens: greatest('cached_input_tokens'),
-          cache_write_tokens: greatest('cache_write_tokens'),
-          output_tokens: greatest('output_tokens'),
-          reasoning_tokens: greatest('reasoning_tokens'),
-        }));
-      const turn = sessionTurnRow(row, prev || null, lastTurn || null);
-      if (turn) await trx('llm_dispatch_log').insert(turn);
+        .merge(monotoneMerge(db)));
+      if (turnKey) {
+        await trx('llm_dispatch_log')
+          .insert(sessionTurnRow(row, prev || null, turnKey))
+          .onConflict(db.raw("(step_id) WHERE row_kind = 'session_turn'"))
+          .merge(monotoneMerge(db));
+      }
       return id;
     });
   } catch (err) {
@@ -607,7 +610,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
       tokens,
       latencyMs,
       providerRef: sessionId,
-    }));
+    }), sessionTurnKey(sessionId, startedAt));
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
     return null;
