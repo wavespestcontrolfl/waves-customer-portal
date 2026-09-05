@@ -143,3 +143,9 @@ palette/card tests pass with both HTTP 200 handled failures and HTTP 409
 responses on desktop/mobile. HTTP 409 was also exercised in the real palette
 browser fixture at both widths; inspected captures retain the error and no
 Confirm button. Build passed again.
+
+CI on 914debcb5 passed 40,189 server tests but failed an outdated wizard source
+contract that assumed the template carried only price provenance. Updated its
+assertions to include appointment_address while requiring explicit price edits
+to remove only the anchored price marker. All 87 tests in that suite now pass.
+No production code was changed for this correction.
