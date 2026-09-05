@@ -263,13 +263,16 @@ async function loadOpenIssues(dbh, customerId) {
  * into the briefing. Its 60-day / 4-call window bounds the read. Null when
  * the lookup failed: the template says so instead of "no calls".
  */
-async function loadCallsSince(customerId, sinceInstant, deps = {}) {
+// Calls between the previous visit and THIS visit's start: a historical
+// card must not show later conversations as its pre-visit context.
+async function loadCallsSince(customerId, sinceInstant, deps = {}, untilInstant = null) {
   const read = deps.getRecentCalls || ((id, opts) => contextAggregator.getRecentCalls(id, opts));
   const rows = await read(customerId, { sentinelOnError: true });
   if (!Array.isArray(rows)) return null;
   const since = sinceInstant ? new Date(sinceInstant).getTime() : 0;
+  const until = untilInstant ? new Date(untilInstant).getTime() : Infinity;
   return rows
-    .filter((r) => new Date(r.created_at).getTime() > since)
+    .filter((r) => { const t = new Date(r.created_at).getTime(); return t > since && t < until; })
     .slice(0, 3)
     .map((r) => ({ summary: clean(r.call_summary, 140), direction: r.direction || null, date: etDateString(r.created_at) }));
 }
@@ -318,7 +321,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     loadOpenIssues(dbh, svc.customer_id),
   ]);
   const [calls, rain7d] = await Promise.all([
-    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps),
+    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc) : Promise.resolve(null),
   ]);
 
@@ -494,17 +497,12 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   // three words of the same token in the grounding (a "20" moved from
   // "runs 20 min" to "20 dogs" is an invented fact, not a rephrase).
   if (numbersOutOfContext(body, grounding)) return 'ungrounded_number';
-  // A rewrite that drops a safety-critical fact is not a rewrite — and one
-  // that restates it under a negation ("No chemical sensitivity is
-  // reported.") reverses it. Every fact's own words are removed before the
-  // negation check so "asthma, no pyrethroids" keeps its "no".
-  const needles = critical.filter(Boolean).map((fact) => String(fact).toLowerCase());
-  if (needles.some((needle) => !lower.includes(needle))) return 'critical_fact_dropped';
-  for (const sentence of sentences) {
-    const said = sentence.toLowerCase();
-    if (!needles.some((needle) => said.includes(needle))) continue;
-    if (NEGATION_RE.test(needles.reduce((rest, needle) => rest.split(needle).join(' '), said))) return 'critical_fact_negated';
-  }
+  // A rewrite that drops a safety-critical fact is not a rewrite.
+  if (critical.some((fact) => fact && !lower.includes(String(fact).toLowerCase()))) return 'critical_fact_dropped';
+  // A clause keeps the polarity of the grounding clause it restates: "No
+  // side gate." over "Side gate.", or "Irrigation on file." over "No
+  // irrigation on file", reverses the instruction.
+  if (polarityFlip(body, grounding)) return 'polarity_flip';
   // Every sentence must be made of the grounding's own words: a sentence
   // the notes never mention ("No pets are present." over "First visit on
   // record."), an instruction lifted from a visit note, or one invented
@@ -552,6 +550,24 @@ function sentenceWords(text) {
 // invented word is one invented fact ("Dog secured." over "Pets: dog."
 // invents a securing plan), so the rewrite may reorder and connect the
 // notes' own words, never add to them. Function words are free.
+// Clauses: the template's facts are comma / colon / dash separated inside
+// one sentence, so polarity is compared at that grain.
+function clauses(text) {
+  return String(text || '').split(/[,;:.!?()]|\s[—–-]\s/).map((c) => c.trim().toLowerCase()).filter(Boolean);
+}
+function contentStems(text) {
+  return contextWords(text).filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem);
+}
+function polarityFlip(body, grounding) {
+  const src = clauses(grounding).map((c) => ({ negated: NEGATION_RE.test(c), stems: new Set(contentStems(c)) }));
+  return clauses(body).some((c) => {
+    const stems = contentStems(c);
+    if (!stems.length) return false;
+    const matched = src.filter((g) => stems.some((w) => g.stems.has(w)));
+    const negated = NEGATION_RE.test(c);
+    return matched.length > 0 && !matched.some((g) => g.negated === negated);
+  });
+}
 function ungroundedSentence(body, grounding) {
   const src = new Set(sentenceWords(grounding).flat().filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem));
   return sentenceWords(body).some((words) => {
@@ -838,9 +854,12 @@ async function loadRigCalibrations(dbh, rig) {
 // the appointment start — window_start on the service day, noon ET when no
 // window is booked. Expiry is an exact timestamp, so a rig lapsing between
 // noon and a 3 pm start is expired when treatment begins.
-function serviceDayInstant(serviceDate, now = new Date(), windowStart = null) {
+function serviceStartInstant(serviceDate, windowStart = null) {
   const wall = /^\d{2}:\d{2}/.exec(String(windowStart || ''));
-  const start = serviceDate ? parseETDateTime(`${serviceDate}T${wall ? wall[0] : '12:00'}`) : null;
+  return serviceDate ? parseETDateTime(`${serviceDate}T${wall ? wall[0] : '12:00'}`) : null;
+}
+function serviceDayInstant(serviceDate, now = new Date(), windowStart = null) {
+  const start = serviceStartInstant(serviceDate, windowStart);
   return start && start.getTime() > now.getTime() ? start : now;
 }
 
@@ -926,7 +945,8 @@ async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date() }
   }
 }
 
-function planBlocksOf({ plan }) {
+function planBlocksOf({ plan, blocks }) {
+  if (blocks) return blocks;
   if (!plan) return [PLAN_UNAVAILABLE];
   return (plan.propertyGate?.blocks || []).map((b) => ({ code: b.code || null, message: clean(b.message, 200) })).filter((b) => b.message);
 }
@@ -950,8 +970,14 @@ function productBlocksUnderPlan({ plan }, product) {
   return blocks;
 }
 
+// The lawn plan is built from the customer's singleton turf profile — the
+// primary home's grass, area, assessments and nutrient history. A lawn
+// visit stamped elsewhere gets no plan and no amounts.
+const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
+
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
   if (facts.isLawn) {
+    if (facts.facts?.alternateAddress) return { visit: null, lines: [], blocks: [ALTERNATE_ADDRESS_BLOCK] };
     const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now });
     const plan = loaded.plan;
     if (!plan) return { visit: null, lines: [], blocks: planBlocksOf(loaded) };
@@ -1217,7 +1243,13 @@ function unselectedBaseBlock(plan, product) {
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
-    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'window_start', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
+    serviceId
+      ? dbh('scheduled_services as ss')
+        .join('customers as c', 'c.id', 'ss.customer_id')
+        .where('ss.id', serviceId)
+        .select('ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.window_start', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`))
+        .first().catch(() => null)
+      : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
@@ -1227,7 +1259,9 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
-  const plan = detectServiceLine(svc.service_type) === 'lawn' ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
+  const isLawn = detectServiceLine(svc.service_type) === 'lawn';
+  // Same rule as the card: no plan at a non-primary address.
+  const plan = isLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
   const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
@@ -1317,5 +1351,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, ungroundedSentence, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, ungroundedSentence, polarityFlip, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
 };

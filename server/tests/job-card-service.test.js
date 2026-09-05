@@ -352,8 +352,12 @@ describe('safety-critical facts survive the rewrite (PR r1 P1)', () => {
     expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
     expect(jobCard.validateParagraph('Customer has a chemical sensitivity; dog crated in garage.', grounding, [], critical)).toBe('critical_fact_dropped');
     // A critical fact restated under a negation is reversed, not kept (hook P1).
-    expect(jobCard.validateParagraph('No chemical sensitivity is reported. First visit on record.', 'Chemical sensitivity. First visit on record.', [], ['sensitiv'])).toBe('critical_fact_negated');
-    expect(jobCard.validateParagraph('The dog isn\'t crated in garage today.', 'Pets: dog (crated in garage).', [], ['crated in garage'])).toBe('critical_fact_negated');
+    expect(jobCard.validateParagraph('No chemical sensitivity is reported. First visit on record.', 'Chemical sensitivity. First visit on record.', [], ['sensitiv'])).toBe('polarity_flip');
+    expect(jobCard.validateParagraph('The dog isn\'t crated in garage today.', 'Pets: dog (crated in garage).', [], ['crated in garage'])).toBe('polarity_flip');
+    // Polarity holds for EVERY clause, not only critical facts (Codex r12 P1).
+    expect(jobCard.validateParagraph('No side gate. First visit on record.', 'Side gate. First visit on record.', [])).toBe('polarity_flip');
+    expect(jobCard.validateParagraph('Irrigation on file. First visit on record.', 'No irrigation on file — ask the customer. First visit on record.', [])).toBe('polarity_flip');
+    expect(jobCard.validateParagraph('No irrigation on file, ask the customer. First visit on record.', 'No irrigation on file — ask the customer. First visit on record.', [])).toBeNull();
     // The fact's own "no" (asthma, no pyrethroids) is not a negation of the fact.
     expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
     expect(jobCard._test.criticalFacts({ chemicalSensitivity: 'yes', issues: [] })).toEqual(['sensitiv']);
@@ -501,6 +505,15 @@ describe('access codes never enter the model-safe facts', () => {
   });
 });
 
+describe('a lawn visit at a non-primary address never gets the primary home\'s plan (Codex r12 P1)', () => {
+  test('card path: alternate_address block, no lines, plan never built', async () => {
+    const buildPlan = jest.fn();
+    const out = await jobCard.resolveVisitProducts({ facts: { serviceId: 'svc1', isLawn: true, facts: { alternateAddress: true } }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan } });
+    expect(out).toEqual({ visit: null, lines: [], blocks: [{ code: 'alternate_address', message: expect.stringContaining('non-primary address') }] });
+    expect(buildPlan).not.toHaveBeenCalled();
+  });
+});
+
 describe('resolveVisitProducts reuses the appointment plan for lawn visits (Codex r2 P1)', () => {
   const catalog = [
     { id: 'orig', name: 'Celsius WG', rate_unit: 'oz' },
@@ -553,7 +566,7 @@ describe('isTankMixable', () => {
 describe('mixForProduct', () => {
   // Generic knex-chain stub: every builder method returns the chain, the
   // terminal (.first / await) resolves the table's fixture.
-  const makeDb = (fixtures) => (table) => {
+  const makeDb = (fixtures) => Object.assign((table) => {
     const rows = fixtures[String(table).split(" as ")[0]] ?? [];
     const chain = {};
     for (const m of ['join', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
@@ -561,7 +574,7 @@ describe('mixForProduct', () => {
     chain.catch = (fn) => Promise.resolve(rows).catch(fn);
     chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
     return chain;
-  };
+  }, { raw: (sql) => sql });
   const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
 
   const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', assigned_equipment_system_id: null, assigned_calibration_id: null };
@@ -597,6 +610,14 @@ describe('mixForProduct', () => {
     // No window booked → judged at noon → still valid.
     const noon = makeDb({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [lapsing] });
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: noon, ...at })).amount).toBe(6.215);
+  });
+
+  test('a lawn visit at a non-primary address gets no plan and no searched dose (Codex r12 P1)', async () => {
+    const dbh = makeDb({ scheduled_services: [{ ...lawnVisit, address_diverges: true }], products_catalog: [product], equipment_calibrations: [live] });
+    const buildPlan = jest.fn();
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
+    expect(out).toMatchObject({ amount: null, planBlocks: [{ code: 'alternate_address' }] });
+    expect(buildPlan).not.toHaveBeenCalled();
   });
 
   test('a base line the resolver left unselected is withheld by the search, not dosed at the catalog rate (Codex r9 P1)', async () => {
@@ -722,15 +743,16 @@ describe('PR review r4', () => {
     const visit = { id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care', assigned_equipment_system_id: null, assigned_calibration_id: null };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-08-01' };
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
-    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], distributor_product_map: [] };
-    const dbh = (table) => {
+    const fixtures = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], distributor_product_map: [] };
+    const dbh = Object.assign((table) => {
+      const rows = fixtures[String(table).split(' as ')[0]] || [];
       const chain = {};
       for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'orderBy', 'select', 'modify', 'andWhere', 'join', 'leftJoin', 'limit']) chain[m] = () => chain;
-      chain.first = () => Promise.resolve((rows[table] || [])[0] || null);
-      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
-      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.first = () => Promise.resolve(rows[0] || null);
+      chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      chain.catch = (fn) => Promise.resolve(rows).catch(fn);
       return chain;
-    };
+    }, { raw: (sql) => sql });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [] } });
     const evaluateApprovals = jest.fn().mockRejectedValue(new Error('rotation read failed'));
     const out = await mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, now: new Date('2026-09-04T12:00:00Z') });
@@ -763,6 +785,9 @@ describe('PR review r4', () => {
       { call_summary: 'Old call', direction: 'inbound', created_at: new Date('2026-08-01T15:00:00Z') },
     ]);
     const calls = await jobCard._test.loadCallsSince('c1', new Date('2026-08-12T14:30:00Z'), { getRecentCalls });
+    // A historical card caps at its own start: later calls are not its pre-visit context (Codex r12 P2).
+    const later = [{ created_at: new Date('2026-09-20T10:00:00Z'), call_summary: 'after the visit', direction: 'inbound' }, { created_at: new Date('2026-09-01T10:00:00Z'), call_summary: 'before the visit', direction: 'inbound' }];
+    expect((await jobCard._test.loadCallsSince('c1', new Date('2026-08-12T14:30:00Z'), { getRecentCalls: async () => later }, new Date('2026-09-04T16:00:00Z'))).map((c) => c.summary)).toEqual(['before the visit']);
     expect(getRecentCalls).toHaveBeenCalledWith('c1', { sentinelOnError: true });
     expect(calls).toEqual([{ summary: 'Asked about ants', direction: 'inbound', date: '2026-08-20' }]);
     expect(await jobCard._test.loadCallsSince('c1', null, { getRecentCalls: async () => null })).toBeNull();

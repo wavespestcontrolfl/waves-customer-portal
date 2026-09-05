@@ -15,6 +15,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => {
   const chain = {};
   for (const m of ['where', 'whereNotIn', 'select']) chain[m] = () => chain;
+  chain.modify = (fn) => { fn(chain); return chain; };
   chain.first = async () => fn.ownedRow;
   function fn() { return chain; }
   fn.ownedRow = null;

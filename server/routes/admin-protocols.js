@@ -16,6 +16,7 @@ const {
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
+const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { scopeFromText } = require('../services/service-report/action-scope');
 const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
 const {
@@ -2506,25 +2507,22 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // the Tank section's search helper: amount of one product for that much
 // water on the visit's rig (the appointment's assigned equipment). Same gate; pure read. Registered BEFORE /:serviceId so the
 // literal segment never falls into the id param.
-// A technician token reads only its CURRENT assignment — the same contract
-// as admin-schedule's technicianCurrentVisitFilter (assigned tech, not a
+// A technician token reads only its CURRENT assignment — the shared
+// technicianCurrentVisitFilter predicate (assigned tech, not a
 // dead status, inside the 7-day access window); admins are unscoped. The
 // card carries gate / garage / lockbox codes, so the card route checks
 // before the build AND after it: a dispatch reassignment during the reads
 // must not hand them to the former technician.
-const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
-const TECH_ACCESS_WINDOW_DAYS = 7;
 // Vendor pricing is owner-only (admin-inventory's technician projection):
 // a technician's card and mix answers carry no lastPrice.
 function viewerSeesPricing(req) {
   return req.techRole !== 'technician';
 }
 async function techOwnsVisit(req, serviceId) {
-  if (req.techRole !== 'technician') return true;
+  if (!isTechnicianRequest(req)) return true;
   const row = await db('scheduled_services')
-    .where({ id: serviceId, technician_id: req.technicianId })
-    .whereNotIn('status', TECH_DEAD_ASSIGNMENT_STATUSES)
-    .where('scheduled_date', '>=', etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS)))
+    .where({ id: serviceId })
+    .modify((q) => technicianCurrentVisitFilter(req, q))
     .first('id');
   return Boolean(row);
 }
