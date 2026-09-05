@@ -3902,6 +3902,7 @@ router.get('/', async (req, res, next) => {
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
+        state: s.state,
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
         serviceAddons,
@@ -7461,6 +7462,13 @@ async function planCollectiveEditDateMove(req) {
 
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
+    const { propertyId } = req.body;
+    if (propertyId !== undefined) {
+      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
+      if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
+        throw httpError(422, 'Choose a saved customer address.');
+      }
+    }
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan) {
       // The series commit lands the date and the window (supplied, kept, or
@@ -8439,6 +8447,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       parsedPlannedCount,
     });
 
+    const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../services/appointment-address');
+    const addressPlan = propertyId !== undefined ? await planAppointmentAddress(db, req.params.id, propertyId) : null;
+    let addressUpdatedIds = [];
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
@@ -8477,11 +8488,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           ? [occupancyDateKey, ...plannedRecurrenceDates].filter(Boolean)
           : [],
       );
+      if (addressPlan) {
+        for (const row of addressPlan.rows) lockedRecurrenceDates.add(dateOnly(row.scheduled_date));
+        if (occupancyDateKey) lockedRecurrenceDates.add(occupancyDateKey);
+      }
       if (lockedRecurrenceDates.size > 0) {
         await acquireOccupancyLocks(trx, [...lockedRecurrenceDates]);
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      if (addressPlan) await lockAppointmentAddress(trx, addressPlan, { ...updates, technician_id: requestedTechnicianId });
       // Visit stop lock for a slot change on a row that sat in a ONE-member
       // visit at the unlocked pre-read (local codex audit): a sibling can
       // join that visit between the pre-read's member count and this
@@ -8560,7 +8576,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // overrides that auto-extend / top-up / alert-extend read, so it must
       // serialize against those writers (and against a concurrent scoped
       // save merging the same override JSON) — Codex #3505 r1 P1.
-      const wantsExistingPlanMutation = wantsVisitCountReconcile
+      const wantsExistingPlanMutation = !!addressPlan || wantsVisitCountReconcile
         || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
         || wantsPriceServiceScope
         // The no-scope override-coherence refresh (and the conversion
@@ -8591,6 +8607,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
         : null;
+
+      if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
       if (assignmentShouldRun) {
         // COMPLETE tech-day lock set, ONCE, sorted (uncapped audit r20 P1):
@@ -10382,9 +10400,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
-    if (assignmentChanged || detailsChanged || addonsReplaced) {
+    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length) {
       try {
         const broadcastJobIds = new Set((detailsChanged || addonsReplaced) ? [req.params.id] : []);
+        for (const id of addressUpdatedIds) broadcastJobIds.add(id);
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
@@ -10508,6 +10527,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
     res.json({
       success: true,
+      ...(addressPlan ? { addressUpdatedCount: addressUpdatedIds.length } : {}),
       recurringCreated,
       assignmentScope: normalizedAssignmentScope,
       assignmentUpdatedCount: assignmentUpdatedJobIds.length,

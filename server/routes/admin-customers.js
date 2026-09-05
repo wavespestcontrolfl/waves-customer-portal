@@ -2450,7 +2450,7 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
-    res.json({ properties });
+    res.json({ properties, canChangeAppointmentAddress: require('../config/feature-gates').isEnabled('editApptAddress') });
   } catch (err) { next(err); }
 });
 

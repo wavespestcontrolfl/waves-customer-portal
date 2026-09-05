@@ -1646,6 +1646,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
+  const [addressOptions, setAddressOptions] = useState([]);
+  const [addressState, setAddressState] = useState("loading");
+  const [selectedPropertyId, setSelectedPropertyId] = useState("");
+  const selectedProperty = addressOptions.find((property) => property.id === selectedPropertyId);
+  useEffect(() => {
+    let cancelled = false;
+    const customerId = service.customerId || service.customer_id;
+    setAddressState("loading");
+    setSelectedPropertyId("");
+    adminFetch(`/admin/customers/${customerId}/properties`)
+      .then((data) => {
+        if (cancelled) return;
+        setAddressOptions(data.properties || []);
+        setAddressState(data.canChangeAppointmentAddress === true ? "ready" : "disabled");
+      })
+      .catch(() => { if (!cancelled) setAddressState("error"); });
+    return () => { cancelled = true; };
+  }, [service.customerId, service.customer_id, service.id]);
   const [customerData, setCustomerData] = useState(null);
   const [customerLoading, setCustomerLoading] = useState(false);
   const [payers, setPayers] = useState([]);
@@ -2162,6 +2180,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
@@ -3411,13 +3430,38 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 Customer location
               </div>{" "}
+              {addressState === "ready" && addressOptions.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <label htmlFor="appointment-property" style={{ ...labelStyle, fontSize: 14 }}>Service address</label>
+                  <select id="appointment-property" value={selectedPropertyId}
+                    onChange={(event) => setSelectedPropertyId(event.target.value)}
+                    disabled={saving} style={{ ...inputStyle, maxWidth: "100%" }}>
+                    <option value="">Keep current appointment address</option>
+                    {addressOptions.map((property) => (
+                      <option key={property.id} value={property.id}>
+                        {[property.label, property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(", ")}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedPropertyId && (
+                    <p style={{ fontSize: 14, color: D.muted, margin: "8px 0 0" }}>
+                      {serviceHasSeries
+                        ? "Saving applies this address to this appointment and all upcoming appointments in this plan, including appointments created later."
+                        : "Saving changes this appointment’s address."}
+                      {" Services grouped at the same stop stay together."}
+                    </p>
+                  )}
+                </div>
+              )}
+              {addressState === "loading" && <p style={{ fontSize: 14, color: D.muted }}>Loading saved addresses…</p>}
+              {addressState === "error" && <p role="alert" style={{ fontSize: 14 }}>Saved addresses could not be loaded. Reopen this appointment to try again.</p>}
               <div style={{ display: "grid", gap: 12 }}>
                 {" "}
                 <div>
                   {" "}
                   <label style={labelStyle}>Street address</label>{" "}
                   <input
-                    value={service.address || customer.address?.line1 || ""}
+                    value={selectedProperty ? [selectedProperty.address_line1, selectedProperty.address_line2].filter(Boolean).join(" ") : service.address || customer.address?.line1 || ""}
                     readOnly
                     className="font-medium"
                     style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -3435,7 +3479,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {" "}
                     <label style={labelStyle}>City</label>{" "}
                     <input
-                      value={service.city || customer.address?.city || ""}
+                      value={selectedProperty ? selectedProperty.city || "" : service.city || customer.address?.city || ""}
                       readOnly
                       className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -3445,7 +3489,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {" "}
                     <label style={labelStyle}>State</label>{" "}
                     <input
-                      value={customer.address?.state || "Florida"}
+                      value={selectedProperty ? selectedProperty.state || "" : service.state || customer.address?.state || "Florida"}
                       readOnly
                       className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
