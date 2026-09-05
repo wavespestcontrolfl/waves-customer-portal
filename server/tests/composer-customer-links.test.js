@@ -1030,11 +1030,10 @@ describe('buildServiceReportLink', () => {
 });
 
 describe('buildProjectReportLink', () => {
-  const TEXTED = { sms: { ok: true }, email: { ok: true } };
-  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z', delivery_channels: TEXTED };
-  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z', delivery_channels: TEXTED };
+  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z' };
+  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z' };
 
-  test('the account\'s newest issued AND texted report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
+  test('the account\'s newest issued report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
     mockBuilders = {
       projects: chainBuilder({ rows: [HELD, ISSUED], firstRow: ISSUED }),
       customers: chainBuilder({ firstRow: { first_name: 'Dana', last_name: 'Lee' } }),
@@ -1050,14 +1049,13 @@ describe('buildProjectReportLink', () => {
     expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('status', ['sent', 'closed']);
     // Delivery evidence too: completing a visit closes a project and mints
     // its token even when the report was never sent (GH Codex #3893 r3 P1)
-    // — sent_at AND the send flow's own SMS leg: the composer re-shares a
-    // text the flow delivered, never sends a report's first text (an
-    // email-only delivery stamps sent_at too — r15 P1). A migrated
-    // 'legacy_sent' row carries no SMS leg and drops out with it, and so
-    // does a QUEUED after-hours text ({ ok: true, scheduled: true }) the
-    // provider has not delivered (r16 P1).
+    // — sent_at, the send stamp. The report email is the delivery and the
+    // composer text is an operator re-share, the service report's own bar
+    // (owner ruling, r17) — no per-leg SMS evidence. A migrated
+    // 'legacy_sent' row stays out (owner ruling): its delivery_status is its
+    // only issuance record and the send claim must never overwrite it.
     expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('sent_at');
-    expect(mockBuilders.projects.whereRaw).toHaveBeenCalledWith("delivery_channels->'sms'->>'ok' = 'true' AND COALESCE(delivery_channels->'sms'->>'scheduled', 'false') <> 'true'");
+    expect(mockBuilders.projects.whereRaw).toHaveBeenCalledWith("delivery_status IS DISTINCT FROM 'legacy_sent'");
     expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
     // Newest issued first; ties by creation (id is a random UUID, not
     // chronological — r8 P2).
@@ -1077,7 +1075,7 @@ describe('buildProjectReportLink', () => {
     mockBuilders = { projects: chainBuilder({ rows: [HELD] }) };
     const r = await buildProjectReportLink(['c1']);
     expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/No texted project report/);
+    expect(r.reason).toMatch(/No project report/);
     expect(mockBuilders.projects.first).not.toHaveBeenCalled();
   });
 });
@@ -1913,7 +1911,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
     describe('project report links resolve as the viewer does and bind to the account', () => {
       const FULL = 'f'.repeat(32);
-      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', delivery_channels: { sms: { ok: true }, email: { ok: true } }, report_token: FULL, report_hold_status: null, ...over });
+      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', report_token: FULL, report_hold_status: null, ...over });
       function wireProject({ full = project(), byPrefix = [project()], ...account } = {}) {
         wireAccount(account);
         mockBuilders.projects = chainBuilder({ firstRow: full, rows: byPrefix });
@@ -1928,7 +1926,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
         expect(mockBuilders.projects.where).toHaveBeenCalledWith({ report_token: FULL });
         // Eligibility columns only, never `*` (r16 P2).
-        const LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'delivery_channels', 'report_token', 'report_hold_status'];
+        const LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
         expect(mockBuilders.projects.first).toHaveBeenCalledWith(...LINK_COLUMNS);
         // The service-report seam never sees the project run.
         expect(mockBuilders.service_records.where).not.toHaveBeenCalled();
@@ -1956,20 +1954,17 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         // the token exists, the report was not issued (GH Codex #3893 r3 P1).
         wireProject({ full: project({ sent_at: null }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
-        // Issued by EMAIL only (no phone, or the report SMS template off /
-        // failed): sent_at is stamped, but the composer must not perform
-        // the report's first text outside the project send flow (r15 P1).
-        // A migrated 'legacy_sent' row carries no SMS leg either, and a
-        // QUEUED after-hours release text ({ ok: true, scheduled: true })
-        // is not a delivered one (r16 P1).
-        wireProject({ full: project({ delivery_channels: { email: { ok: true }, sms: { ok: false, error: 'no phone on file' } } }) });
-        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not been texted yet/);
-        wireProject({ full: project({ delivery_channels: { email: { ok: true }, sms: { ok: true, scheduled: true } } }) });
-        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not been texted yet/);
-        // A text the flow deduplicated against one already out IS delivered.
-        wireProject({ full: project({ delivery_channels: { email: { ok: true }, sms: { ok: true, deduplicated: true } } }) });
-        expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
-        wireProject({ full: project({ sent_at: null, delivery_channels: null, delivery_status: 'legacy_sent' }) });
+        // Issued by EMAIL only is still issued — the report email is the
+        // delivery and the text is an operator re-share, the service
+        // report's own bar (owner ruling, r17).
+        wireProject({ full: project({ delivery_status: 'partial', delivery_channels: { email: { ok: true }, sms: { ok: false, error: 'no phone on file' } } }) });
+        expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK('partial'));
+        // A migrated 'legacy_sent' delivery stays out (owner ruling) —
+        // with or without a sent_at — so the send claim never overwrites
+        // the only record that it was issued.
+        wireProject({ full: project({ sent_at: null, delivery_status: 'legacy_sent' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        wireProject({ full: project({ delivery_status: 'legacy_sent' }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: project({ report_hold_status: 'held' }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);
