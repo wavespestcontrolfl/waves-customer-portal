@@ -373,6 +373,11 @@ describe('reviewerSurnames', () => {
     expect(reviewerSurnames('John Smith, Jr.')).toEqual(['john smith', 'smith']);
     expect(reviewerSurnames('Smith, Jr.')).toEqual([]);
     expect(reviewerSurnames(', John')).toEqual([]);
+    // #3875 r1 P2s: a numeral is a suffix only behind two name tokens; an
+    // unfoldable given name after the comma is still a given name.
+    expect(reviewerSurnames('Alex Vi')).toEqual(['alex vi', 'vi']);
+    expect(reviewerSurnames('Smith, Søren')).toEqual(['smith']);
+    expect(reviewerSurnames('Smith, Łukasz, Jr.')).toEqual(['smith']);
     expect(reviewerSurnames('')).toEqual([]);
   });
 });
@@ -430,6 +435,9 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(alone).toMatchObject({ rung: 'click_name', evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window" });
     const withOther = await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [northgate(legacy), other()] }) });
     expect(withOther.evidence).toBe("the reviewer's last name matches this customer's; the 1 other clicker at this location in the window had other last names");
+    // An unstamped competitor is named as such, never "at this location" (#3875 r1 P2).
+    const withUnlocated = await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [northgate(legacy), other(), other({ customer_id: 'cust-legacy', last_name: 'Legacy', google_location: null, ...legacy })] }) });
+    expect(withUnlocated.evidence).toBe("the reviewer's last name matches this customer's; the 1 other clicker at this location and the 1 other clicker with no location recorded in the window had other last names");
   });
 
   test('refuses when a same-surname row with a NULL first location carries a newer tap stamped for another location inside the window (GH codex r2 P1)', async () => {

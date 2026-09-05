@@ -68,20 +68,26 @@ function normalizeName(value) {
  * surname and returns []. Trailing generational / professional suffixes
  * are dropped first: "John Smith Jr." offers "smith", never "jr" — a
  * customer stored "Jr" must not be the sole surname match (GH codex r8 P1);
- * generational numerals run through X, so "Smith VI" offers "smith", never
- * "vi" (GH codex r9 P1).
+ * generational numerals run through X, so "John Smith VI" offers "smith",
+ * never "vi" (GH codex r9 P1) — but a numeral is a suffix only behind at
+ * least two name tokens: "Alex Vi" is a person surnamed Vi (GH codex #3875
+ * r1 P2).
  * A comma fixes the order (GH codex r9 P1): "Smith, John" is last-name-
  * first, so the surname is the part BEFORE the comma — every whole-word
  * suffix of it, and a one-token head ("Smith") is a complete surname because
  * the comma said so. "John Smith, Jr." is a comma that only sets off a
- * suffix (nothing but suffixes after it) and reads in normal order.
+ * suffix (nothing but suffixes after it) and reads in normal order. A tail
+ * that normalizeName fails closed on ("Smith, Søren") is still a given
+ * name, not a suffix — the head stays the surname (GH codex #3875 r1 P2).
  */
-const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'md', 'dds', 'dvm', 'phd', 'esq', 'cpa']);
+const NAME_SUFFIXES = new Set(['jr', 'sr', 'md', 'dds', 'dvm', 'phd', 'esq', 'cpa']);
+const NUMERAL_SUFFIXES = new Set(['ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x']);
 
 // Normalized name tokens with the trailing suffixes dropped.
 function nameTokens(value) {
   const tokens = normalizeName(value).split(' ').filter(Boolean);
-  while (tokens.length && NAME_SUFFIXES.has(tokens[tokens.length - 1])) tokens.pop();
+  const isSuffix = (t, n) => NAME_SUFFIXES.has(t) || (NUMERAL_SUFFIXES.has(t) && n >= 3);
+  while (tokens.length && isSuffix(tokens[tokens.length - 1], tokens.length)) tokens.pop();
   return tokens;
 }
 
@@ -95,9 +101,11 @@ function reviewerSurnames(reviewerName) {
   const comma = raw.indexOf(',');
   if (comma < 0) return wholeWordSuffixes(nameTokens(raw), 2);
   const head = nameTokens(raw.slice(0, comma));
-  const tail = nameTokens(raw.slice(comma + 1));
-  // Only suffixes after the comma → normal order, suffix set off by a comma.
-  if (!tail.length) return wholeWordSuffixes(head, 2);
+  const tailRaw = raw.slice(comma + 1);
+  // A tail with letters is a given name (even one normalizeName fails
+  // closed on); only a suffix-only or empty tail leaves normal order.
+  const suffixOnlyTail = !nameTokens(tailRaw).length && !(normalizeName(tailRaw) === '' && /\p{L}/u.test(tailRaw));
+  if (suffixOnlyTail) return wholeWordSuffixes(head, 2);
   // Last-name-first: the head IS the surname (a one-token head included).
   return wholeWordSuffixes(head, 1);
 }
@@ -535,10 +543,15 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
       // location's scan, unstamped clicks included; every other entry
       // failed the surname test, and the inverse scan found no same-surname
       // click at any other location. The copy counts clickers, not clicks
-      // (GH codex r3 P2).
-      const others = all.length - 1;
+      // (GH codex r3 P2), and names a competitor "at this location" only
+      // when its pair was stamped here — an unstamped pair is reported as
+      // such (GH codex #3875 r1 P2).
+      const others = all.filter((c) => c.customerId !== named.customerId);
+      const here = others.filter((c) => c.locationMatch === true).length;
+      const unlocated = others.length - here;
+      const groups = [here && `the ${plural(here, 'clicker')} at this location`, unlocated && `the ${plural(unlocated, 'clicker')} with no location recorded`].filter(Boolean);
       return decision(named, 'click_name', `the reviewer's last name matches this customer's; ${
-        others ? `the ${plural(others, 'clicker')} at this location in the window had other last names` : 'no other clicker at this location in the window'}`);
+        groups.length ? `${groups.join(' and ')} in the window had other last names` : 'no other clicker at this location in the window'}`);
     }
 
     // click_near — the nearest click is minutes before the review and every
