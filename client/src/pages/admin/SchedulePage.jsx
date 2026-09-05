@@ -5072,6 +5072,12 @@ function JobCardTab({ card, loading, error, D }) {
       )}
       <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
       <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
+      {card.planBlocks?.length > 0 && (
+        <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
+          <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
+          {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
+        </div>
+      )}
       {products.length > 0 && (
         <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
           Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}

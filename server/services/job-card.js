@@ -654,7 +654,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       plan = await (deps.buildPlan || buildPlanForService)(facts.serviceId, { db: dbh, now });
     } catch (err) {
       logger.warn(`[job-card] plan unavailable for ${facts.serviceId}: ${err.message}`);
-      return { visit: null, lines: [] };
+      return { visit: null, lines: [], blocks: [{ code: 'plan_unavailable', message: 'Lawn plan unavailable right now.' }] };
     }
     const items = [...(plan?.mixCalculator?.items || []), ...(plan?.mixCalculator?.conditionalOptions || [])];
     const lines = [];
@@ -671,11 +671,15 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       });
     }
     const gate = plan?.propertyGate || {};
-    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines };
+    // The plan's blocking conditions (ordinance blackout, calibration,
+    // inventory, missing profile / area, PGR on stressed turf) ride along:
+    // a blocked plan shows its products but no amounts.
+    const blocks = (gate.blocks || []).map((b) => ({ code: b.code || null, message: clean(b.message, 200) })).filter((b) => b.message);
+    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
   }
   const match = matchServiceProtocol(protocols, facts.serviceType);
   const visit = match?.matchedVisit || match?.program?.visits?.[0] || null;
-  if (!visit) return { visit: null, lines: [] };
+  if (!visit) return { visit: null, lines: [], blocks: [] };
   const hints = new Map();
   for (const [raw, meta] of Object.entries(visit.lineMeta || {})) {
     for (const hint of meta?.catalogProductHints || []) {
@@ -687,10 +691,10 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
     if (product && !lines.some((l) => l.product.id === product.id)) lines.push({ raw, product, role: 'base', selected: true });
   }
-  return { visit, lines };
+  return { visit, lines, blocks: [] };
 }
 
-async function buildProductCards({ facts, lines, verdicts, packSizes, dbh = db }) {
+async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, dbh = db }) {
   // One card per catalog product: two protocol lines can resolve to the same
   // row (a base line plus a conditional). The selected line wins the card;
   // the other line's text rides along.
@@ -709,7 +713,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, dbh = db }
     const p = line.product;
     const verdict = verdicts.find((v) => v.productId === p.id) || { verdict: 'unknown', reason: 'No limit on file' };
     // The appointment plan's own mix (lawn only) — never recomputed here.
-    const plannedMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
+    const plannedMix = !blocked && line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
     const planned = plannedMix ? { amount: Math.round(plannedMix.amount * 100) / 100, unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
     // stock in the inventory unit (gal) — the plan engine's snapshot owns
@@ -775,11 +779,11 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
     (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null),
   ]);
   const tank = tankFromCalibrations(calibrations, now);
-  const { visit, lines } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
+  const { visit, lines, blocks } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
-  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, dbh });
+  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, dbh });
 
   return {
     enabled: true,
@@ -791,6 +795,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
     sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source },
     tank,
     products: cards,
+    planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
   };
 }

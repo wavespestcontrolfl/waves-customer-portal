@@ -329,7 +329,7 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     { id: 'hyd', name: 'Hydretain ES Plus', rate_unit: 'fl oz' },
   ];
   const plan = {
-    propertyGate: { month: 'Sep', visit: 9 },
+    propertyGate: { month: 'Sep', visit: 9, blocks: [{ code: 'nitrogen_blackout', severity: 'block', message: 'Nitrogen blackout is active for Manatee County.' }] },
     mixCalculator: {
       items: [{ raw: 'Celsius WG 0.113 oz', role: 'base', selected: true, product: { id: 'sub' }, mix: { amount: 12.4, amountUnit: 'fl oz' }, substitution: { originalProductName: 'Celsius WG' } }],
       conditionalOptions: [{ raw: 'Premium only: Hydretain', role: 'conditional', selected: false, product: { id: 'hyd' }, mix: { amount: 6, amountUnit: 'fl oz' }, substitution: null }],
@@ -342,6 +342,8 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });
     expect(buildPlan).toHaveBeenCalledWith('svc1', expect.objectContaining({ db: expect.any(Function) }));
     expect(out.visit).toEqual({ month: 'Sep', visit: 9 });
+    // The plan's blocking conditions ride along (Codex r8 P1).
+    expect(out.blocks).toEqual([{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active for Manatee County.' }]);
     expect(out.lines).toEqual([
       expect.objectContaining({ selected: true, product: catalog[1], planMix: { amount: 12.4, amountUnit: 'fl oz' }, substitutedFor: 'Celsius WG' }),
       expect.objectContaining({ selected: false, product: catalog[2], substitutedFor: null }),
@@ -351,7 +353,7 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
   test('a plan failure yields no lines instead of a crash', async () => {
     const buildPlan = jest.fn().mockRejectedValue(new Error('Scheduled service not found'));
     const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });
-    expect(out).toEqual({ visit: null, lines: [] });
+    expect(out).toEqual({ visit: null, lines: [], blocks: [{ code: 'plan_unavailable', message: 'Lawn plan unavailable right now.' }] });
   });
 });
 
