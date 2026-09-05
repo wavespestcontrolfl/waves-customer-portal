@@ -103,11 +103,6 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && repeat.estimate_id && String(root.estimate_id) !== String(repeat.estimate_id));
   if (!rootOurs) return repeat;
-  // A repeat whose own row already reached 'completed' (the revenue sync's
-  // sticky terminal) IS the deal's row: booking the root beside it would be
-  // two rows for one opportunity, so nothing settles (pre-push P1).
-  const own = await database('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
-  if (own && own.funnel_stage === 'completed') return null;
   const onlyIfLead = { ...identityOf(root), status: root.status };
   // Every read or write on the root's row below carries the lead claim the
   // advance carried: the root, as validated, still open, not deleted.
@@ -118,7 +113,14 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
   // the repeat's superseded row land together or not at all — a failure
   // between them would leave two rows counting one opportunity with no
   // caller left to retry (pre-push P1). The bridge nests a savepoint.
+  // A repeat whose own row reached 'completed' (the revenue sync's sticky
+  // terminal, carrying revenue attribution) IS the deal's row: nothing
+  // settles beside it, and a row the sync completes UNDER this transaction
+  // rolls the root's advance back rather than being deleted (pre-push P0).
+  const KEEP_OWN_ROW = Symbol('keep-own-row');
   return database.transaction(async (trx) => {
+    const own = await trx('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
+    if (own && own.funnel_stage === 'completed') return null;
     const bridged = await bridgeLeadFunnelStage(root.id, 'won', trx, { onlyIfLead });
     // A root row already at booked / completed counts as settled only under
     // the SAME lead claim the advance carried — the fallback read must not
@@ -132,8 +134,12 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     // customer is stamped onto it, never over one already there (codex #3834
     // r32 P1).
     if (customerId) await trx('ad_service_attribution').where({ lead_id: root.id }).whereNull('customer_id').whereExists(rootStillOurs).update({ customer_id: customerId, updated_at: new Date() });
-    await trx('ad_service_attribution').where({ lead_id: repeat.id }).del();
+    const dropped = await trx('ad_service_attribution').where({ lead_id: repeat.id }).whereNot({ funnel_stage: 'completed' }).del();
+    if (own && !dropped) throw KEEP_OWN_ROW;
     return null;
+  }).catch((err) => {
+    if (err === KEEP_OWN_ROW) return null;
+    throw err;
   });
 }
 
