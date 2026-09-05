@@ -63,10 +63,14 @@ function fromRow(run, steps = []) {
 // Sort / page key = the run's startedAt in fromRow, at ms precision.
 const START = db.raw("date_trunc('milliseconds', COALESCE(r.started_at, r.created_at))");
 const ID = 'r.id';
+// Step / tool-call counts are the CURRENT attempt's (attempt_no = r.attempts):
+// health.js reads them against the per-run budget, and a retry starts
+// its budget over. Steps with no attempt (a pre-attempt write) count too.
+const CURRENT_ATTEMPT = "(s.attempt_id IS NULL OR s.attempt_id = (SELECT a.id FROM agent_attempts a WHERE a.run_id = r.id AND a.attempt_no = r.attempts))";
 const STEP_COUNTS = [
-  db.raw("(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id AND s.status = 'done') AS steps_done"),
-  db.raw('(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id) AS steps_total'),
-  db.raw('(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id AND s.tool_name IS NOT NULL) AS tool_calls'),
+  db.raw(`(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id AND ${CURRENT_ATTEMPT} AND s.status = 'done') AS steps_done`),
+  db.raw(`(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id AND ${CURRENT_ATTEMPT}) AS steps_total`),
+  db.raw(`(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id AND ${CURRENT_ATTEMPT} AND s.tool_name IS NOT NULL) AS tool_calls`),
 ];
 
 function baseQuery() {

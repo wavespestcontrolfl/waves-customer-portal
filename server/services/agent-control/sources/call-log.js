@@ -88,7 +88,8 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .select(COLUMNS)
       .whereNotNull('processing_status')
       .where((q) => {
-        q.where('processing_status', 'processing');
+        // queued and in-flight calls stay listed however old (a stuck queue is the point)
+        q.whereIn('processing_status', ['pending', 'processing']);
         q.orWhere(START, '>=', from);
       }), { source: SOURCE, idColumn: 'call_log.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
