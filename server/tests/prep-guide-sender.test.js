@@ -564,6 +564,17 @@ describe('sendPrepToCustomer', () => {
 
     runRows = [{ status: 'sent', idempotency_key: 'run-k2' }];
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
+
+    // An UNKEYED visit with a runnable run for this guide is pending too: a
+    // pre-dispatch failure released the executor's fresh claim ahead of its
+    // retry, and a manual claim now would be followed by the retry's send
+    // (pre-push Codex P1 on 4f6261cc3).
+    upcomingVisitRow = { ...VISIT, prep_template_key: null };
+    servicePrepRow = { prep_token: null, prep_template_key: null };
+    runRows = [{ status: 'retry_scheduled', idempotency_key: 'run-k2' }];
+    serviceUpdates = [];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: false, reason: 'prep_send_pending' });
+    expect(serviceUpdates).toEqual([]);
   });
 
   test('a live enrolment holds the same-guide page whether or not its template is enabled (a held one resumes on re-enable); a confirmed manual send settles the customer\'s live enrolment (GH Codex #3856 r23 P1)', async () => {
@@ -708,6 +719,8 @@ describe('sendPrepToCustomer', () => {
         return q;
       }
       if (table === 'customer_interactions') return { insert: interactionsInsert };
+      // The unkeyed candidate's liveness read (no runnable run).
+      if (table === 'email_template_automation_runs') return livenessQuery([]);
       return customersQuery();
     });
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' }))

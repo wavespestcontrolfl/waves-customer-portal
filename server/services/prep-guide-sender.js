@@ -363,15 +363,16 @@ async function resolvePrepVisit(customer, config) {
   let visit = null;
   let taken = null;
   for (const candidate of visits) {
-    if (!candidate.prep_template_key) {
-      visit = candidate;
-      break;
-    }
-    if (candidate.prep_template_key === config.emailTemplateKey) {
-      // Our guide's page — but an automation for this same guide that is
-      // still queued / running will deliver it itself (the executor claims
-      // the key before dispatch): a manual send now would send the prep
-      // twice (pre-push Codex P1 on 52bbb43b1). Unknown = in flight.
+    if (!candidate.prep_template_key || candidate.prep_template_key === config.emailTemplateKey) {
+      // A free page, or our guide's — but an automation for this same guide
+      // that is still queued / running will deliver it itself (the executor
+      // claims the key before dispatch): a manual send now would send the
+      // prep twice (pre-push Codex P1 on 52bbb43b1). The unkeyed case is
+      // real, not just the keyed one: an attempt that failed before
+      // dispatch hands its fresh claim back and schedules a retry, so the
+      // visit sits unkeyed with a runnable run — claimed and sent manually
+      // here, the retry would read the key as owned and send again
+      // (pre-push Codex P1 on 4f6261cc3). Unknown = in flight.
       let inFlight = true;
       try {
         inFlight = await automationLaneLive(candidate, config.emailTemplateKey, customer.id);
