@@ -1,5 +1,7 @@
 const {
   amountToPounds,
+  buildPlanForService,
+  selectProtocolVisit,
   buildMixOrder,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
@@ -929,4 +931,40 @@ describe('waveguard-plan-engine helpers', () => {
       instruction: 'Add after flowables and before adjuvants.',
     });
   });
+});
+
+
+describe('missing grass protocol fallback', () => {
+  const date = new Date('2026-09-05T16:00:00Z');
+  test.each([null, {}, { grass_type: '', track_key: null }])('blank grass selects September St. Augustine: %j', (profile) => {
+    expect(selectProtocolVisit(profile, date)).toMatchObject({ trackKey: 'st_augustine', month: 'Sep', visit: { month: 'Sep' } });
+  });
+  test.each(['bermuda', 'zoysia', 'bahia', 'st_augustine'])('preserves recorded %s', (grass) => {
+    expect(selectProtocolVisit({ grass_type: grass }, date).trackKey).toBe(grass);
+    expect(selectProtocolVisit(null, date, grass).trackKey).toBe(grass);
+  });
+  test('preserves the explicit track and recognizes legacy customer grass names', () => {
+    expect(selectProtocolVisit({ track_key: 'zoysia', grass_type: 'st_augustine' }, date).trackKey).toBe('zoysia');
+    expect(selectProtocolVisit({}, date, 'Empire Zoysia').trackKey).toBe('zoysia');
+  });
+  test.each(['mixed', 'unknown', 'unrecognized turf'])('does not replace a recorded %s selection with St. Augustine', (grass) => {
+    expect(selectProtocolVisit({ grass_type: grass }, date).trackKey).toBeNull();
+  });
+});
+
+test('a failed profile lookup cannot become a St. Augustine plan', async () => {
+  const db = (table) => {
+    const query = {};
+    for (const method of ['leftJoin', 'where', 'select']) query[method] = () => query;
+    query.first = () => table === 'scheduled_services as ss'
+      ? Promise.resolve({ id: 'test-service', customer_id: 'test-property', scheduled_date: '2026-09-05' })
+      : Promise.reject(new Error('Turf profile lookup failed'));
+    return query;
+  };
+  await expect(buildPlanForService('test-service', { db })).rejects.toThrow('Turf profile lookup failed');
+});
+
+test.each(['unknown', 'mixed'])('explicit %s turf never falls back to legacy St. Augustine', (grass_type) => {
+  const { selectProtocolVisit } = require('../services/waveguard-plan-engine');
+  expect(selectProtocolVisit({ grass_type }, new Date('2026-09-05T12:00:00Z'), 'St. Augustine').trackKey).toBeNull();
 });

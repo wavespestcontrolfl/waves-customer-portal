@@ -238,7 +238,7 @@ function inchLabel(v) {
 }
 
 // ── 1. Lawn Health Snapshot (hero) ──────────────────────────────────────────────
-export function LawnSnapshotHero({ snapshot = {} }) {
+export function LawnSnapshotHero({ snapshot = {}, children }) {
   const { overallScore, statusHeadline, scoreExplanation, rootCause, seasonalNote, todaysFocus = [], watching = [], wavesNext, customerAction, noActionNeeded, nextVisit } = snapshot;
   const status = snapshot.status || scoreStatus(overallScore);
   const hasNextVisit = nextVisit && nextVisit.label && nextVisit.label !== 'Invalid Date';
@@ -314,6 +314,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
       {seasonalNote ? (
         <div style={{ marginTop: 14, fontSize: 14, color: MUTED, fontStyle: 'italic', lineHeight: 1.5 }}>{seasonalNote}</div>
       ) : null}
+      {children}
     </Card>
   );
 }
@@ -369,7 +370,7 @@ function SliderArrow({ dir, onClick, disabled }) {
   );
 }
 
-export function LawnPhotoStrip({ photos = [], summary = null }) {
+export function LawnPhotoStrip({ photos = [], summary = null, embedded = false }) {
   const print = usePrint();
   const pics = (photos || []).filter((p) => p && p.url);
   const scroller = useRef(null);
@@ -385,9 +386,10 @@ export function LawnPhotoStrip({ photos = [], summary = null }) {
     const el = scroller.current;
     if (el && el.clientWidth) setIdx(Math.round(el.scrollLeft / el.clientWidth));
   };
+  const Frame = embedded ? 'div' : Card;
   return (
-    <Card>
-      <CardTitle sub="Conditions your technician identified and photographed during today’s inspection — each one is tracked visit to visit as part of your lawn program.">Lawn Health Documentation</CardTitle>
+    <Frame>
+      {!embedded && <CardTitle>Lawn photos</CardTitle>}
       {pics.length && print ? (
         /* Static grid for PDF/print — no slider/arrows. */
         <div style={{ display: 'grid', gridTemplateColumns: pics.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
@@ -434,7 +436,7 @@ export function LawnPhotoStrip({ photos = [], summary = null }) {
         </div>
       ) : null}
       {summary ? <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{summary}</p> : null}
-    </Card>
+    </Frame>
   );
 }
 
@@ -659,7 +661,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
 
   return (
     <Card>
-      <CardTitle sub="Rain in your area plus the irrigation schedule we have on file.">Water This Week</CardTitle>
+      <CardTitle>Water This Week</CardTitle>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
         {hasRain ? <><span style={{ color: MUTED }}>Rain</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
         {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
@@ -896,7 +898,7 @@ export function MowingHeightGauge({ mowing = {} }) {
   const status = hasGauge ? (mowing.status || (measured < lo ? 'too_short' : measured > hi ? 'too_tall' : 'ideal')) : null;
   return (
     <Card>
-      <CardTitle sub="The maintained height of cut we measured before today’s visit.">Mowing Height</CardTitle>
+      <CardTitle>Mowing Height</CardTitle>
       {hasGauge ? (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 16 }}>
@@ -1196,7 +1198,8 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
 // ── 6. Trends across visits ──────────────────────────────────────────────────────
 // Reusable line chart. points = [{ label, value }]. Needs 2+ scored points to draw
 // (a single visit has no trend — matches V1, which hides the trend until 2+ visits).
-export function LawnTrendChart({ title, sub, points = [], domain, unit = '', accent = COLORS.glassNavy, zeroLine = false, band = null, compact = false, footnote = null }) {
+export function LawnTrendChart({ title, sub, points = [], domain, unit = '', accent = COLORS.glassNavy, zeroLine = false, band = null, compact = false, footnote = null, explanation = null }) {
+  const print = usePrint();
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const gidRef = useRef(`lg-${Math.random().toString(36).slice(2)}`);
@@ -1280,9 +1283,14 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
           <text x={x(pts.length - 1)} y={y(last.value) - 9} textAnchor="end" style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: accent }} fontSize="14">{fmt(last.value)}</text>
         )}
         {pts.map((p, i) => (
-          <text key={i} x={x(i)} y={H - 6} textAnchor="middle" style={{ fontFamily: FONTS.body, fill: active === i ? TEXT : MUTED, fontWeight: active === i ? 700 : 400 }} fontSize="14">{p.label}</text>
+          <text key={i} x={x(i)} y={H - 6} textAnchor={i === 0 ? 'start' : i === pts.length - 1 ? 'end' : 'middle'} style={{ fontFamily: FONTS.body, fill: active === i ? TEXT : MUTED, fontWeight: active === i ? 700 : 400 }} fontSize="14">{p.label}</text>
         ))}
       </svg>
+      {explanation && <details open={print || undefined} style={{ marginTop: 12, fontSize: 16, color: BODY, lineHeight: 1.5 }}>
+        <summary style={{ cursor: 'pointer', fontSize: 14 }}>What this means</summary>
+        <p style={{ margin: '8px 0' }}>{explanation}</p>
+        <p style={{ margin: '8px 0' }}>Latest reading: {fmt(last.value)}. Previous reading: {fmt(pts[pts.length - 2].value)}.</p>
+      </details>}
       {footnote ? (
         <div style={{ marginTop: 8, padding: '8px 11px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{footnote}</div>
       ) : null}
@@ -1310,10 +1318,11 @@ export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = f
     && Number.isFinite(Number(rawBand[0])) && Number.isFinite(Number(rawBand[1]))) ? rawBand : null;
   const hasOverall = (overall || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2;
   const minis = [
-    waterGap && { key: 'water', title: 'Water Gap', sub: 'vs. weekly target', points: waterGap, unit: '"', zeroLine: true, accent: gapAccent(lastVal(waterGap)) },
+    waterGap && { key: 'water', title: 'Water Gap', explanation: 'This compares recorded water with the weekly target. Zero is on target; negative values indicate a shortfall and positive values indicate a surplus.', sub: 'vs. weekly target', points: waterGap, unit: '"', zeroLine: true, accent: gapAccent(lastVal(waterGap)) },
     mowing && {
       key: 'mow',
       title: 'Mowing Height',
+      explanation: 'These are the lawn-length readings recorded during service. Compare them with the ideal band for your grass variety.',
       sub: mowingBand ? 'vs. ideal band' : 'recent readings',
       points: mowing,
       unit: '"',
@@ -1322,10 +1331,10 @@ export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = f
       // takes the neutral slate used for 'tracking' states
       accent: mowingBand ? bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) : COLORS.grayMid,
     },
-    weed && { key: 'weed', title: 'Weed Cleanliness', sub: 'higher is better', points: weed, domain: [0, 100], accent: scoreAccent(lastVal(weed)) },
-    coverage && { key: 'cov', title: 'Turf Coverage', sub: 'higher is better', points: coverage, domain: [0, 100], accent: scoreAccent(lastVal(coverage)) },
-    color && { key: 'color', title: 'Color & Vigor', sub: 'higher is better', points: color, domain: [0, 100], accent: scoreAccent(lastVal(color)) },
-    stress && { key: 'stress', title: 'Stress / Damage', sub: 'higher is better', points: stress, domain: [0, 100], accent: scoreAccent(lastVal(stress)) },
+    weed && { key: 'weed', title: 'Weed Cleanliness', explanation: 'This score tracks how clear the lawn is of weeds. A rising score means less visible weed coverage.', points: weed, domain: [0, 100], accent: scoreAccent(lastVal(weed)) },
+    coverage && { key: 'cov', title: 'Turf Coverage', explanation: 'This score tracks how full and evenly covered the lawn is. A rising score means fewer bare or thin areas.', points: coverage, domain: [0, 100], accent: scoreAccent(lastVal(coverage)) },
+    color && { key: 'color', title: 'Color & Vigor', explanation: 'This score tracks the lawn’s color and visible vigor. A drop can reflect seasonal changes or stress; color alone does not identify the cause.', points: color, domain: [0, 100], accent: scoreAccent(lastVal(color)) },
+    stress && { key: 'stress', title: 'Stress / Damage', explanation: 'This is a condition score: a rising score means fewer visible stress or damage signs. It does not confirm a disease or insect diagnosis.', points: stress, domain: [0, 100], accent: scoreAccent(lastVal(stress)) },
   ].filter(Boolean).filter((m) => (m.points || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2);
 
   // First scored visit: nothing charts yet (every series needs 2+ visits — a
@@ -1355,16 +1364,15 @@ export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = f
   return (
     <>
       {hasOverall ? (
-        <LawnTrendChart title="Lawn Health Trend" sub="Your overall lawn score across recent visits."
+        <LawnTrendChart title="Lawn Health Trend" explanation="This combines the recorded lawn-condition scores into an overall score out of 100. Compare changes over time alongside the individual categories below."
           points={overall} domain={[0, 100]} accent={scoreAccent(lastVal(overall))}
           footnote={seasonalNote} />
       ) : null}
       {minis.length ? (
-        /* min(220px, 100%) so the 220px track floor can't exceed the card on a
-           narrow phone — a bare minmax(220px, 1fr) overflowed at 320px. */
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 16, marginBottom: 16 }}>
+        /* Keep one metric per row at every viewport width. */
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, marginBottom: 16 }}>
           {minis.map((m) => (
-            <LawnTrendChart key={m.key} compact title={m.title} sub={m.sub} points={m.points}
+            <LawnTrendChart key={m.key} title={m.title} sub={m.sub} explanation={m.explanation} points={m.points}
               domain={m.domain} unit={m.unit} zeroLine={m.zeroLine} band={m.band} accent={m.accent} />
           ))}
         </div>

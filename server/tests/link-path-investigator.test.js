@@ -134,6 +134,7 @@ function makeDb(seed = {}) {
       whereNotIn(col, arr) { state.preds.push((row, get) => !arr.includes(get(row, col))); return q; },
       join(tableExpr, on1, on2) { state.join = { tableExpr, on1, on2 }; return q; },
       forUpdate() { ops.push({ op: 'lock', table }); return q; },
+      skipLocked() { return q; },
       groupBy() { return q; },
       select(...cols) { state.select = cols; return q; },
       orderBy(col, dir) { state.order.push({ col, dir }); return q; },

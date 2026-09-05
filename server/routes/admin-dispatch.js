@@ -4595,6 +4595,8 @@ const {
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
 
+const { LAWN_STRUCTURED_OBSERVATIONS } = require('../../shared/lawn-condition-findings');
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let legacyVisitToDissolve = null;
@@ -5580,7 +5582,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // with the dynamic actions its older client offered.
     const explicitSpecialtyLane = Boolean(specialtyServiceKey({ serviceKey: completionProfile?.serviceKey }));
     const allowedStructuredObservations = new Set(
-      observationsForSpecialtyService(resolvedSpecialtyServiceKey),
+      reportServiceLine === 'lawn' && !typedFindingsType
+        ? LAWN_STRUCTURED_OBSERVATIONS
+        : observationsForSpecialtyService(resolvedSpecialtyServiceKey),
     );
     // New clients separate controlled dropdown values from free text. For an
     // older specialty client that lacks that field, recover only exact values

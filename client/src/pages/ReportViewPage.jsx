@@ -16,6 +16,7 @@ import CockroachReportV2Section from '../components/report/cockroachV2/Cockroach
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication } from '../lib/product-application';
+import { isLawnFindingSelection } from '../lib/lawn-completion';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
   AlertTriangle,
@@ -3523,7 +3524,6 @@ function AppliedProductsSection({ data, mode = 'live' }) {
       <div className="applied-products-header">
         <div>
           <h2>Products Applied</h2>
-          <p>Why these products were selected for today&apos;s service.</p>
         </div>
       </div>
       {isLawn && (
@@ -5503,7 +5503,7 @@ function SmsReportPreview({ data }) {
                 ? `${data.lawnAssessment.scores.overallScore ?? '-'}% overall`
                 : dynamicContext.pressureTrend?.customerSummary || `${formatPressureIndex(data.pressureIndex)} pressure index`}
             </strong>
-            <span>{isLawn ? 'Higher is better' : 'Lower is better'}</span>
+            {!isLawn && <span>Lower is better</span>}
           </div>
           <div className="sms-preview-tile">
             <div className="sms-preview-eyebrow">Ready to re-enter</div>
@@ -5703,6 +5703,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
+  const lawnFindings = data.serviceLine === 'lawn'
+    ? [...new Set((data.protocol?.structuredObservations || []).filter(isLawnFindingSelection))]
+    : [];
   // Tree & Shrub V2 adopts the same "lead layout" as lawn V2: the visit timeline +
   // Ask-Waves + products render up top (under Re-entry), not in the generic non-lawn
   // slots lower down. `isV2LeadLayout` is the shared gate for that reordering.
@@ -9054,10 +9057,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             (V2 dashboard, legacy assessment, mowing block) keeps it. */}
         {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !cockroachV2Primary && !typedNarrativeOwnsSummary
           && !(data.isCallback && data.reserviceGateOn && todaysResultCarriesSummary
-            && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight) && (
+            && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !lawnFindings.length) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
+            {lawnFindings.length > 0 && (
+              <ul aria-label="Recorded lawn findings">
+                {lawnFindings.map((finding) => <li key={finding}>{finding}</li>)}
+              </ul>
+            )}
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
                 gallery is skipped for these reports so the photos show once.

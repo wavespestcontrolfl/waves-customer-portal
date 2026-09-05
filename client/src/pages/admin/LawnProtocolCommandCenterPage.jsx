@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   AlertTriangle,
+  Beaker,
   BookOpen,
   Clock,
   CheckCircle2,
@@ -15,6 +16,7 @@ import {
   Wrench,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import ProtocolReferenceTabV2 from "./ProtocolReferenceTabV2";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -170,6 +172,7 @@ function BridgeList({ title, items }) {
 }
 
 const PROTOCOL_SECTIONS = [
+  { key: "mixing", label: "Mixing & labels", Icon: Beaker },
   { key: "overview", label: "Overview", Icon: Sprout },
   { key: "products", label: "Products", Icon: Package },
   { key: "bridges", label: "Instructions", Icon: BookOpen },
@@ -178,7 +181,8 @@ const PROTOCOL_SECTIONS = [
 const PROTOCOL_TAB_KEYS = new Set(PROTOCOL_SECTIONS.map(({ key }) => key));
 
 function normalizeProtocolTab(value) {
-  return PROTOCOL_TAB_KEYS.has(value) ? value : "overview";
+  if (["readiness", "gates", "calibration"].includes(value)) return "overview";
+  return PROTOCOL_TAB_KEYS.has(value) ? value : "mixing";
 }
 
 // `onSecondaryNav` (from ServiceLibraryPage): the Services header owns the
@@ -190,7 +194,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
   const activeTab = normalizeProtocolTab(searchParams.get(queryKey));
 
   // Usage beacon for the leaf that actually RENDERS — invalid or missing
-  // ?protocolTab= resolves to Overview without rewriting the URL. The
+  // ?protocolTab= resolves to Mixing & labels without rewriting the URL. The
   // Service Library host defers to this page for its deepest leaf,
   // matching the nested-*Tab convention (Codex #2961 r17). Embedded-only:
   // the standalone route was retired.
@@ -217,7 +221,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
   const setActiveTab = (nextTab) => {
     const next = new URLSearchParams(searchParams);
     const normalized = normalizeProtocolTab(nextTab);
-    if (normalized === "overview") next.delete(queryKey);
+    if (normalized === "mixing") next.delete(queryKey);
     else next.set(queryKey, normalized);
     setSearchParams(next, { replace: true });
   };
@@ -237,8 +241,8 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
   };
 
   useEffect(() => {
-    load();
-  }, []); // run once on mount
+    if (activeTab !== "mixing" && !data) load();
+  }, [activeTab]);
 
   const protocol = data?.protocol || {};
   const window = protocol.window || {};
@@ -355,7 +359,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
     }
   }
 
-  const headerActions = [
+  const headerActions = activeTab === "mixing" ? [] : [
     {
       key: "create-draft",
       label: "Create Draft",
@@ -394,7 +398,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
       activeKey: activeTab,
       onChange: (key) => hubNavRef.current.setActiveTab(key),
       ariaLabel: "Protocol section",
-      navGridClassName: "grid-cols-2 lg:grid-cols-4",
+      navGridClassName: "grid-cols-2 lg:grid-cols-5",
       actions: hubNavRef.current.headerActions.map((a) => ({
         ...a,
         onClick: (...args) => {
@@ -420,11 +424,12 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
         onSectionChange={setActiveTab}
         headingLevel={embedded ? 2 : 1}
         sticky={!embedded}
-        navGridClassName="grid-cols-2 lg:grid-cols-4"
+        navGridClassName="grid-cols-2 lg:grid-cols-5"
         actions={headerActions}
       />
       )}
 
+      {activeTab === "mixing" ? <ProtocolReferenceTabV2 /> : <>
       {error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-13 text-red-700">
           {error}
@@ -853,6 +858,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
           )}
         </>
       )}
+      </>}
     </div>
   );
 }
