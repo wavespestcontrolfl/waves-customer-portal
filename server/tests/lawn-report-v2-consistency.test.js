@@ -212,3 +212,31 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
     expect(withSnap.snapshot.rootCause).not.toEqual(noSnap.snapshot.rootCause);
   });
 });
+
+
+describe('Lawn water coverage requires affirmative moisture evidence', () => {
+  const renderObservation = observations => buildLawnReportV2({
+    lawnAssessment: baseAssessment({ ...CASES.healthy, observations, aiSummary: 'Dense green turf with ordinary edge wear.' }),
+  });
+  test.each([
+    'Minor tan patches along the pavement are normal wear and not a concern.',
+    'No signs of weeds, disease, drought stress, or watering problems are visible.',
+    'The turf is free of drought stress.',
+    'The lawn is not dry.',
+    'Let damp areas dry out before the next inspection.',
+  ])('does not invent sprinkler advice from %s', observation => {
+    const report = renderObservation(observation);
+    expect(report.water.coverageWatch).toBe(false);
+    expect(report.insights.some(card => card.category === 'water')).toBe(false);
+    expect(report.smsSummary).not.toMatch(/sprinkler|watching watering/i);
+  });
+  test.each([
+    'Dry patches remain near the driveway.',
+    'No disease is visible, but the west side is dry.',
+    'No drought stress in the front; sprinkler coverage is uneven in the back.',
+  ])('preserves affirmative evidence in %s', observation => {
+    const report = renderObservation(observation);
+    expect(report.water.coverageWatch).toBe(true);
+    expect(report.insights.some(card => card.category === 'water')).toBe(true);
+  });
+});

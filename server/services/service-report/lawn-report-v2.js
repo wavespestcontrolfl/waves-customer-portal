@@ -557,13 +557,16 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // confirmed-overwatering read into a dry-coverage story).
   const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`
     .toLowerCase()
-    .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '');
+    .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '')
+    // Absence is not evidence of dryness. Keep contrasting affirmative clauses.
+    .replace(/\b(?:no|not|without|free of|absent|none|negative for)\b(?:(?!\b(?:but|however|yet)\b)[^.!?;])*/g, '');
   // DRY-specific signals only — not generic "stress" (heat/insect).
   // "uneven"/"coverage" need MOISTURE context: the repo uses "uneven" for
   // ordinary color variation and "coverage" for turf density, and a bare
   // match converted non-moisture observations into customer-facing drought
   // claims (codex P1 r22).
-  const drySignal = /\b(dry|drier|drought|tan|wilt)\b/.test(obsText)
+  // Tan color alone can be ordinary edge wear; it does not establish dryness.
+  const drySignal = /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
     // Reversed order — "irrigation is uneven across the west side"
     // (codex P2 r36). Bounded gap so the subject and qualifier stay in
