@@ -1430,6 +1430,10 @@ class RelayConversation {
       // ── PR 2A transfer ─────────────────────────────────────────────────
       transferRequested: () => this._transferRequested,
       markTransferRequested: () => { this._transferRequested = true; },
+      // The socket may close while the tool awaits its write (codex r3 P1):
+      // a closed session cannot send the end frame, so the tool undoes a
+      // stamp it can no longer act on.
+      sessionEnded: () => this.ended === true,
       say: (text) => { this.say(text); },
       // The relay leg ends with reason 'transfer'; /relay-complete rings the office.
       // The end frame carries this socket's claim owner: /relay-complete

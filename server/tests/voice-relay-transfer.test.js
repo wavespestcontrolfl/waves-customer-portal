@@ -434,6 +434,26 @@ describe('pre-push hook round 9', () => {
   });
 });
 
+describe('codex r3 follow-ups', () => {
+  test('the caller hung up while the packet write was in flight ⇒ the stamp is reverted and the transfer aborts without an end frame (P1)', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    let ended = false;
+    const writeHandoff = jest.fn(async () => { ended = true; return { rows: 1, contextAvailable: true }; }); // the socket closes mid-write
+    const revertHandoff = jest.fn(async () => 1);
+    const { ctx } = ctxFor({ writeHandoff, revertHandoff, sessionEnded: () => ended });
+    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/call has ended/);
+    await new Promise((r) => setImmediate(r));
+    expect(revertHandoff).toHaveBeenCalledWith(writeHandoff.mock.calls[0][0].attempt);
+    expect(ctx.say).not.toHaveBeenCalled();
+    expect(ctx.endForTransfer).not.toHaveBeenCalled();
+    const convo = new RelayConversation({ callSid: 'CA-se', from: '+19415551234', send: jest.fn() });
+    const tctx = convo._buildToolCtx();
+    expect(tctx.sessionEnded()).toBe(false);
+    convo.ended = true;
+    expect(tctx.sessionEnded()).toBe(true);
+  });
+});
+
 describe('whisper + AI segment', () => {
   test('≤20 words, sanitized, from the packet only', () => {
     const w = transfer.transferWhisper({ context_available: true, caller_name: 'Pat "Doe" <b>', intent: 'cancel service', unresolved_question: 'refund for June and the extra visit last week please' });

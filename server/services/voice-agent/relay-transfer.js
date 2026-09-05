@@ -242,6 +242,18 @@ async function transferToOfficeText(input = {}, ctx = {}) {
     return 'The transfer could not be started on this call. Do NOT try again — take their details with capture_lead '
       + 'and say a Waves team member will call them back.';
   }
+  // The caller hung up while the write was in flight (codex r3 P1): the
+  // socket is closed, no end frame can ring staff, and end() is waiting on
+  // this very tool chain before it can stamp the close — so the row would
+  // stay a transfer nobody rang. Undo the stamp (detached) and abort.
+  if (typeof ctx.sessionEnded === 'function' && ctx.sessionEnded() === true) {
+    logger.warn(`[voice-relay] transfer abandoned — session ended during the packet write callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
+    if (typeof ctx.revertHandoff === 'function') {
+      void Promise.resolve(ctx.revertHandoff(packet.attempt))
+        .catch((err) => logger.warn(`[voice-relay] abandoned-transfer revert failed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}: ${err.message}`));
+    }
+    return 'The call has ended. Do not say anything else and do not call any more tools.';
+  }
   // Speak, then end the relay leg: /relay-complete reads reason 'transfer'
   // from the end frame and rings the office.
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', facts.language));

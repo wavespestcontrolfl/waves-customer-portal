@@ -811,8 +811,13 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       // re-classifies: stamp voicemail here (bounded, best-effort) so a
       // transfer that reached nobody is not reported as a success (codex r2 P1).
       logger.error(`[relay-complete] transfer ring claim ${claimed} for ${maskSid(callSid)} — voicemail instead of an unconfirmed ring`);
+      // Same owner + eligible-state fence as the claim (codex r3 P1): a
+      // superseded socket's callback racing a reconnect must not stamp the
+      // replacement session's live row.
       await withDeadline(
         db('call_log').where('twilio_call_sid', callSid)
+          .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
+          .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
           .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
           .catch((err) => logger.warn(`[relay-complete] unconfirmed-ring voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
         STAMP_DEADLINE_MS,

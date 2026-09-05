@@ -29,7 +29,7 @@ function mockRes() {
   return res;
 }
 function primeDb({ rows = 1 } = {}) {
-  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
+  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis() };
   const update = jest.fn(async () => rows);
   const builder = { update, where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }), whereRaw: jest.fn(() => builder), first: jest.fn(async () => null), select: jest.fn(() => builder) };
   db.mockReturnValue(builder);
@@ -112,6 +112,13 @@ describe('/relay-complete', () => {
     expect(res2.body).toContain('<Record');
     expect(res2.body).not.toContain('<Dial');
     expect(b2.update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
+    // …and that stamp rides the claim's owner fence + an eligible-state guard (NULL or ai_transferred), so a
+    // superseded socket's callback can never stamp a reconnect's live row (codex r3 P1).
+    const ownerFences = b2.whereRaw.mock.calls.filter(([sql]) => String(sql).includes('relay_session_claim_owner'));
+    expect(ownerFences).toHaveLength(2);
+    expect(ownerFences[1][1]).toEqual([null]);
+    const stateGuard = b2.where.mock.calls.filter(([arg]) => typeof arg === 'function');
+    expect(stateGuard.length).toBeGreaterThanOrEqual(1);
   });
 
   test('transfer with no staff numbers configured ⇒ voicemail (never a stranded caller) — and the stamp is bounded', async () => {
