@@ -182,7 +182,7 @@ const NotificationService = {
     // unread beside the new one). Errors then PROPAGATE — swallowing one
     // inside a caller's transaction would leave it aborted and doom the
     // commit — so the caller owns containment.
-    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
     }
@@ -225,7 +225,26 @@ const NotificationService = {
     const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) });
     if (callerTrx) return shape(await dedupeAndInsert(callerTrx));
     try {
-      return shape(await db.transaction(dedupeAndInsert));
+      return shape(await db.transaction(async (trx) => {
+        if (!relayFailureCall) return dedupeAndInsert(trx);
+        // Extend the existing notification transaction: shared callback claims
+        // are final delivery evidence, never a durable pending lease. Holding
+        // the call row also fences session takeover until the bell commits.
+        await trx.raw("SET LOCAL statement_timeout = '3s'");
+        await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
+        const call = await trx('call_log').where('twilio_call_sid', relayFailureCall.callSid).forUpdate().first('id', 'metadata', 'voicemail_callback_alerted_at');
+        let meta = call?.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+        if (!call || call.voicemail_callback_alerted_at || (relayFailureCall.owner && meta?.relay_session_claim_owner !== relayFailureCall.owner)) {
+          return { notification: { suppressed: true }, deduped: true };
+        }
+        const persisted = await dedupeAndInsert(trx);
+        if (!persisted.notification.suppressed) await trx('call_log').where('id', call.id).update({
+          voicemail_callback_alerted_at: trx.fn.now(),
+          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_failure_callback_filed_at', now()::text)"),
+        });
+        return persisted;
+      }));
     } catch (err) {
       logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
       return null;

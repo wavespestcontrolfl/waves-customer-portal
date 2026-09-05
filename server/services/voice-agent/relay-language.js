@@ -64,10 +64,7 @@ const COPY = {
     en: 'Sorry, I lost you for a second — where were we?',
     es: 'Disculpe, se cortó por un segundo. ¿En qué estábamos?',
   },
-  troubleConnecting: {
-    en: "I'm having trouble pulling that up, so I'm going to connect you with the office rather than keep you waiting.",
-    es: 'Estoy teniendo problemas para acceder a eso, así que le comunico con la oficina en lugar de hacerle esperar.',
-  },
+
   troubleNoCallback: {
     en: "I'm having trouble pulling that up right now, and I couldn't save a callback either. Please call us back when you get a chance — thanks for calling.",
     es: 'Estoy teniendo problemas para acceder a eso y tampoco pude guardar una devolución de llamada. Por favor, llámenos de nuevo cuando pueda. Gracias por llamar.',

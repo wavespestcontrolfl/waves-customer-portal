@@ -19,6 +19,8 @@ jest.mock('../services/voice-agent/relay-alert', () => ({ alertOwnerReservice: j
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { claimOwnedElsewhere, beginRelaySessionClaim, stampCallLeadLinkage } = require('../services/voice-agent/relay-context');
+const NotificationService = jest.requireActual('../services/notification-service');
+jest.mock('../services/notification-bell-policy', () => ({ isBellPolicyEnabled: () => false }));
 const { fallbackFence } = require('../services/voice-agent/relay-recovery');
 const { requestReserviceText } = require('../services/voice-agent/relay-reservice');
 const connection = process.env.VOICE_RECOVERY_TEST_DATABASE_URL;
@@ -34,7 +36,12 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 4 } });
-    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); });
+    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.timestamp('voicemail_callback_alerted_at'); });
+    await mockPg.schema.createTable('notifications', (t) => {
+      t.increments('id');
+      for (const field of ['recipient_type', 'recipient_id', 'category', 'title', 'body', 'icon', 'link']) t.text(field);
+      t.jsonb('metadata'); t.timestamp('created_at').defaultTo(mockPg.fn.now());
+    });
     await mockPg.schema.createTable('artifacts', (t) => { t.text('id').primary(); });
     await mockPg.schema.createTable('customers', (t) => { t.text('id').primary(); t.timestamp('deleted_at'); t.boolean('active'); t.text('waveguard_tier'); t.decimal('monthly_rate'); });
     await mockPg.schema.createTable('service_requests', (t) => {
@@ -58,6 +65,8 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
   beforeEach(async () => {
     delete process.env.GATE_VOICE_RELAY_RECOVERY;
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    jest.restoreAllMocks();
+    await mockPg('notifications').delete();
     await mockPg('service_requests').delete();
     await mockPg('artifacts').delete();
     await mockPg('call_log').delete();
@@ -65,6 +74,73 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       relay_session_claimed_at: new Date().toISOString(), relay_session_claim_owner: 'old', relay_session_claim_gen: 1,
       relay_reconnect_ms: 2, relay_reconnects: 1,
     } });
+  });
+
+  function fileCallback(owner = 'old') {
+    return NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
+      dedupeKey: `relay-failure:${callSid}`, relayFailureCall: { callSid, owner },
+    });
+  }
+
+  test('callback bell and shared delivery evidence commit once in the same transaction', async () => {
+    const first = await fileCallback();
+    expect(first.id).toBeTruthy();
+    expect((await fileCallback()).suppressed).toBe(true);
+    expect(await mockPg('notifications')).toHaveLength(1);
+    const row = await mockPg('call_log').first();
+    expect(row.voicemail_callback_alerted_at).toBeTruthy();
+    expect(row.metadata.relay_failure_callback_filed_at).toBeTruthy();
+  });
+
+  test('an insertion or evidence failure rolls back the bell and callback stamp', async () => {
+    await mockPg.raw("CREATE FUNCTION reject_callback_evidence() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''fixture evidence failure''; END;'");
+    await mockPg.raw('CREATE TRIGGER reject_callback BEFORE UPDATE ON call_log FOR EACH ROW EXECUTE FUNCTION reject_callback_evidence()');
+    try {
+      expect(await fileCallback()).toBeNull();
+      expect(await mockPg('notifications')).toHaveLength(0);
+      expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeNull();
+    } finally {
+      await mockPg.raw('DROP TRIGGER reject_callback ON call_log');
+      await mockPg.raw('DROP FUNCTION reject_callback_evidence()');
+    }
+    expect((await fileCallback()).id).toBeTruthy(); // retry can deliver; no orphaned claim
+  });
+
+  test('a socket already superseded at the notification boundary cannot file a bell', async () => {
+    expect(await beginRelaySessionClaim(callSid, 'new', 2)).toBe(true);
+    expect((await fileCallback()).suppressed).toBe(true);
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeNull();
+  });
+
+  test('takeover waits for the callback bell transaction before changing ownership', async () => {
+    let entered;
+    let release;
+    const inCreate = new Promise((resolve) => { entered = resolve; });
+    const proceed = new Promise((resolve) => { release = resolve; });
+    const create = NotificationService.create.bind(NotificationService);
+    jest.spyOn(NotificationService, 'create').mockImplementation(async (opts) => { entered(); await proceed; return create(opts); });
+    const pending = fileCallback();
+    await inCreate;
+    const takeover = beginRelaySessionClaim(callSid, 'new', 2);
+    try { await waitForBlockedClaim(); } finally { release(); }
+    expect((await pending).id).toBeTruthy();
+    expect(await takeover).toBe(true);
+    expect(await mockPg('notifications')).toHaveLength(1);
+  });
+
+  test('a lost transaction connection leaves no permanent callback claim', async () => {
+    const create = NotificationService.create.bind(NotificationService);
+    jest.spyOn(NotificationService, 'create').mockImplementationOnce(async (opts) => {
+      const result = await create(opts);
+      const { rows } = await opts.connection.raw('SELECT pg_backend_pid() AS pid');
+      await admin.raw('SELECT pg_terminate_backend(?)', [rows[0].pid]);
+      return result;
+    });
+    expect(await fileCallback()).toBeNull();
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeNull();
+    expect((await fileCallback()).id).toBeTruthy();
   });
 
   async function waitForBlockedClaim() {
