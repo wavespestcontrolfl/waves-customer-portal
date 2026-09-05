@@ -48,6 +48,12 @@ npm run dev:doctor
 npm run dev
 ```
 
+`dev:migrate` prints an elapsed-time heartbeat every 30 seconds while the child
+process runs. Initial setup applies the full migration history and can take
+several minutes over a remote connection; the heartbeat indicates the process
+is still running, not a completed migration or a successful result. Wait for
+the command to exit, then run doctor.
+
 `dev:doctor` performs read-only migration readiness checks. `dev:migrate` is the
 explicit write step. Managed commands ignore the repository's `.env` and inherited
 integration credentials, and disable boot/recovery jobs. This is a development
