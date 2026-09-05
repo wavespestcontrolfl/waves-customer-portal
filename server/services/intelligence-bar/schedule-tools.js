@@ -9,7 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { assertAssignableTechnician } = require('../technician-eligibility');
+const { assertAssignableTechnician, applyAssignable } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
@@ -1361,7 +1361,9 @@ async function findScheduleGaps(input) {
   const from = date || date_from || etDateString();
   const to = date || date_to || etDateString(addETDays(new Date(), 6));
 
-  const techs = await db('technicians').where({ active: true }).select('id', 'name');
+  // Capacity = assignable staff only (technician-eligibility.js); an
+  // office-only admin has no route to have gaps in.
+  const techs = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name');
 
   const services = await db('scheduled_services')
     .whereBetween('scheduled_date', [from, to])

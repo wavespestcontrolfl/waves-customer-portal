@@ -588,7 +588,7 @@ function disconnectRevokedStaffSessions(technicianId, reason) {
 
 // A staff row with any operational or pay history is a person, not a slot.
 async function technicianHasHistory(conn, technicianId) {
-  for (const table of ['scheduled_services', 'time_entries', 'review_incentive_payouts']) {
+  for (const table of ['scheduled_services', 'service_records', 'time_entries', 'review_incentive_payouts']) {
     if (await conn(table).where({ technician_id: technicianId }).first('id')) return true;
   }
   return false;

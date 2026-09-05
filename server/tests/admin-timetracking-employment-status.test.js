@@ -62,6 +62,7 @@ function installTransaction(techChains, { history = {}, futureVisits = [] } = {}
   const trx = jest.fn((table) => {
     if (table === 'time_entries') return makeChain({ first: history.time_entries });
     if (table === 'scheduled_services') return makeChain({ first: history.scheduled_services });
+    if (table === 'service_records') return makeChain({ first: history.service_records });
     if (table === 'review_incentive_payouts') return makeChain({ first: history.review_incentive_payouts });
     if (table === 'scheduled_services as s') return makeChain({ rows: futureVisits });
     if (table !== 'technicians') throw new Error(`Unexpected transaction table: ${table}`);
@@ -121,6 +122,7 @@ describe('updateTechnician', () => {
 
   test.each([
     ['service history', { scheduled_services: { id: 'ss-1' } }],
+    ['completed service records', { service_records: { id: 'sr-1' } }],
     ['time entries', { time_entries: { id: 'te-1' } }],
     ['review payouts', { review_incentive_payouts: { id: 'rp-1' } }],
   ])('a row with %s cannot be renamed into a different person (409 IDENTITY_LOCKED, no write)', async (_label, history) => {

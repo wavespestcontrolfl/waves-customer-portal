@@ -86,7 +86,7 @@ function installTransaction(chains, { activeTimer } = {}) {
   const trx = jest.fn((table) => {
     if (table === 'time_entries') return activeTimers;
     if (table === 'scheduled_services as s') return makeChain({ rows: [] });
-    if (table === 'scheduled_services' || table === 'review_incentive_payouts') return makeChain({ first: undefined });
+    if (table === 'scheduled_services' || table === 'service_records' || table === 'review_incentive_payouts') return makeChain({ first: undefined });
     if (table !== 'technicians') throw new Error(`Unexpected transaction table: ${table}`);
     const chain = queue.shift();
     if (!chain) throw new Error('Unexpected technicians query');
