@@ -5100,7 +5100,7 @@ function JobCardTab({ card, loading, error, D }) {
       ))}
       {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
       {products.length === 0 && (
-        <div style={{ fontSize: 13, color: D.muted }}>No protocol products matched this visit.</div>
+        <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
     </div>
   );

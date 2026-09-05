@@ -923,6 +923,19 @@ describe('PR review r8', () => {
 });
 
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
+  test('the primary line is gated by catalog identity too; legacy rows keep the name match (hook P1)', async () => {
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, cockroach: { visits: [{ visit: 1, month: 'Any', primary: 'Advion Gel 1 tube' }] } };
+    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'a', name: 'Advion Gel' }];
+    const run = (serviceType, serviceCategory) => jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType, serviceCategory, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+    const inspection = await run('Pest Inspection Service', 'inspection');
+    expect(inspection.lines).toEqual([]);
+    expect(inspection.note).toBe('No treatment protocol for this service (inspection)');
+    expect((await run('Initial German Roach Knockdown', 'pest_control')).lines.map((l) => l.product.id)).toEqual(['a']);
+    expect((await run('Quarterly Pest Control', 'pest_control')).lines.map((l) => l.product.id)).toEqual(['d']);
+    // No identity (legacy row) → the name match as before.
+    expect((await run('Quarterly Pest Control', null)).lines.map((l) => l.product.id)).toEqual(['d']);
+  });
+
   test('card line text keeps the instruction, never the dosing value (hook P1)', () => {
     const { describeLine } = jobCard._test;
     expect(describeLine('Celsius WG 0.113 oz per 1,000 sq ft if rotation calls for IRAC 7C')).toBe('Celsius WG if rotation calls for IRAC 7C');

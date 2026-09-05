@@ -313,9 +313,13 @@ function unavailable(message, cause) {
 async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
   const svc = await dbh('scheduled_services as ss')
     .join('customers as c', 'ss.customer_id', 'c.id')
+    .leftJoin('services as s', 'ss.service_id', 's.id')
     .where('ss.id', serviceId)
     .select(
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes',
+      // The primary line's catalog identity (booking snapshot, else the live
+      // row); null on legacy rows booked before the catalog link existed.
+      dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
       'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
       'c.first_name', 'c.last_name', 'c.phone', 'c.lawn_water_area_id',
       // The booked property's pin: the visit's own lat/lng first; the
@@ -364,6 +368,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     customerId: svc.customer_id,
     scheduledDate: etCalendarDayOf(svc.scheduled_date),
     serviceType: svc.service_type,
+    serviceCategory: svc.service_category || null,
     serviceLine,
     isLawn: serviceLine === 'lawn',
     addons,
@@ -957,6 +962,15 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const blocks = planBlocksOf(loaded);
     return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
   }
+  // Identity gates the primary line exactly like an add-on: an inspection
+  // or assessment booked from the catalog resolves no treatment products
+  // even though its name would match the pest program. A legacy row with
+  // no catalog identity keeps the name match.
+  if (facts.serviceCategory) {
+    const programKey = addonProgramKey(facts.serviceCategory, facts.serviceType, protocols);
+    if (!programKey) return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
+    return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey }), blocks: [] };
+  }
   return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog), blocks: [] };
 }
 
@@ -1236,7 +1250,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
   const tank = tankFromCalibrations(calibrations, serviceInstant);
-  const { visit, lines, blocks, addons } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
+  const { visit, lines, blocks, addons, note } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
@@ -1254,6 +1268,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     products: cards,
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
+    lineNote: note || null,
     addons,
   };
 }
