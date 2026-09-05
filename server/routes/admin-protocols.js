@@ -21,6 +21,8 @@ const {
   getActiveLawnProtocol,
   getProtocolWindowContext,
   summarizeProtocolContext,
+  protocolReferenceSyncIssues,
+  lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -1238,7 +1240,7 @@ async function validateLawnProtocolForPublish(knex, protocolId) {
     };
   }
 
-  const issues = [];
+  const issues = await protocolReferenceSyncIssues(knex, protocol);
   const [windows, gates] = await Promise.all([
     knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).orderBy('month', 'asc'),
     knex('lawn_protocol_gates').where({ lawn_protocol_id: protocol.id }).orderBy('gate_key', 'asc'),
@@ -1857,7 +1859,7 @@ router.post('/lawn/drafts', requireAdmin, async (req, res, next) => {
 router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => {
   try {
     const published = await db.transaction(async (trx) => {
-      const draft = await trx('lawn_protocols').where({ id: req.params.id }).first();
+      const draft = await trx('lawn_protocols').where({ id: req.params.id }).forUpdate().first();
       if (!draft) {
         const err = new Error('Draft protocol not found');
         err.statusCode = 404;
@@ -1866,6 +1868,13 @@ router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => 
       if (draft.status !== 'draft') {
         const err = new Error('Only draft protocols can be published');
         err.statusCode = 400;
+        throw err;
+      }
+      // Hold the reviewed baseline through comparison and activation.
+      const active = await trx('lawn_protocols').where({ protocol_key: draft.protocol_key, status: 'active' }).forUpdate().first();
+      if (!active) {
+        const err = new Error('Active protocol changed during publication. Reload and retry.');
+        err.statusCode = 409;
         throw err;
       }
       const validation = await validateLawnProtocolForPublish(trx, draft.id);
@@ -2271,6 +2280,7 @@ router.put('/lawn/products/:id', requireAdmin, async (req, res, next) => {
     if (req.body.reportCopy !== undefined && typeof req.body.reportCopy === 'object') updates.report_copy = JSON.stringify(req.body.reportCopy || {});
 
     const [updated] = await db.transaction(async (trx) => {
+      await lockDraftProtocol(trx, existingProtocol.id);
       const [row] = await trx('lawn_protocol_products')
         .where({ id: existing.id })
         .update(updates)
@@ -2320,6 +2330,7 @@ router.put('/lawn/windows/:windowKey', requireAdmin, async (req, res, next) => {
     if (req.body.goal !== undefined) updates.goal = String(req.body.goal || '').trim() || existing.goal;
 
     const [updated] = await db.transaction(async (trx) => {
+      await lockDraftProtocol(trx, protocol.id);
       const [row] = await trx('lawn_protocol_windows')
         .where({ id: existing.id })
         .update(updates)
@@ -2397,6 +2408,7 @@ router.post('/lawn/windows/:windowKey/wiki-sync', requireAdmin, async (req, res,
       if (!existingRefs.includes(ref)) {
         const nextRefs = [...existingRefs, ref];
         await db.transaction(async (trx) => {
+          await lockDraftProtocol(trx, payload.protocol.id);
           const [updatedWindow] = await trx('lawn_protocol_windows')
             .where({ id: payload.window.id })
             .update({ wiki_refs: JSON.stringify(nextRefs), updated_at: new Date() })
@@ -2462,6 +2474,7 @@ router.put('/lawn/gates/:id', requireAdmin, async (req, res, next) => {
     if (req.body.wikiRefs !== undefined) updates.wiki_refs = JSON.stringify(stringArray(req.body.wikiRefs));
 
     const [updated] = await db.transaction(async (trx) => {
+      await lockDraftProtocol(trx, existingProtocol.id);
       const [row] = await trx('lawn_protocol_gates')
         .where({ id: existing.id })
         .update(updates)
