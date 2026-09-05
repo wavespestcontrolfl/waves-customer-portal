@@ -37,7 +37,7 @@ jest.mock('../services/visit-cancellation-followthrough', () => ({
 }));
 
 jest.mock('../models/db', () => {
-  const state = { rows: [], writes: [], hasTableCalls: [] };
+  const state = { rows: [], invoices: [], writes: [], hasTableCalls: [] };
   const makeBuilder = (table) => {
     const b = {
       _where: {},
@@ -71,7 +71,8 @@ jest.mock('../models/db', () => {
       // Awaiting the builder (the target select) resolves every scheduled
       // service — the harness owns the scope filtering by what it seeds.
       then(resolve, reject) {
-        const rows = table === 'scheduled_services' ? state.rows.map((r) => ({ ...r })) : [];
+        const rows = table === 'scheduled_services' ? state.rows.map((r) => ({ ...r }))
+          : table === 'invoices' ? state.invoices.map((r) => ({ ...r })) : [];
         return Promise.resolve(rows).then(resolve, reject);
       },
     };
@@ -117,7 +118,8 @@ const future = (days) => {
   const d = new Date(); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10);
 };
 
-function seed({ prepaidChild } = {}) {
+function seed({ prepaidChild, invoices = [] } = {}) {
+  db.__state.invoices = invoices;
   db.__state.rows = [
     { id: 'parent', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
     { id: 'child-1', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(33), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
@@ -156,9 +158,20 @@ describe.each([
     const ops = db.__state.writes.map((w) => `${w.table}:${w.op}`);
     expect(ops).toEqual(['<trx>:begin', '<trx>:rollback']);
     // Fee holds are the dispatch route's own business (fee rails + waiver):
-    // the guard must not consult the hold / card-request tables here.
-    expect(db.__state.hasTableCalls).toEqual([]);
+    // the guard must not consult the hold / card-request tables here — but
+    // it still reads invoices (money held there is money taken too).
+    expect(db.__state.hasTableCalls).toEqual(['invoices']);
   });
+});
+
+test('a target whose invoice already holds money (paid, neither visit field stamped) refuses too (pre-push hook P0)', async () => {
+  seed({ invoices: [{ scheduled_service_id: 'child-2', status: 'paid', credit_applied: 0, line_items: '[]', stripe_payment_intent_id: 'pi_1' }] });
+  const { status, body } = await cancel('series');
+  expect(status).toBe(409);
+  expect(body.code).toBe('BILLING_COVERED_VISIT');
+  expect(body.error).toMatch(/invoice that has money on it/);
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+  expect(db.__state.writes.map((w) => `${w.table}:${w.op}`)).toEqual(['<trx>:begin', '<trx>:rollback']);
 });
 
 test('an unpaid series still cancels through the same branch (guard is not a blanket refusal)', async () => {

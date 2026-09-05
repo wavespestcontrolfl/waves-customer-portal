@@ -11514,10 +11514,11 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // table must block the trim rather than wave it through. A pre-migration env
 // without the table is the one tolerated case — hasTable is checked first.
 //
-// `feeRails: false` limits the check to money already TAKEN (annual prepay
-// term, hand-collected prepayment) for callers that run the card-fee rails
-// themselves with a fee preview and waiver control — the dispatch series
-// cancel — where a live hold is handled, not a reason to refuse.
+// `feeRails: false` skips ONLY the two card-fee reads (estimate_card_holds,
+// appointment_card_requests) for callers that run the fee rails themselves
+// with a fee preview and waiver control — the dispatch series cancel — where
+// a live hold is handled, not a reason to refuse. Money already TAKEN (prepay
+// term, prepaid_amount, an invoice holding money) is checked either way.
 async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
@@ -11530,9 +11531,8 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
       mark(v.id, 'already prepaid');
     }
   }
-  if (!feeRails) return covered;
   const ids = visits.map((v) => v.id);
-  if (ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
+  if (feeRails && ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
     const holds = await conn('estimate_card_holds')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', ['released', 'cancelled', 'charged', 'failed'])
@@ -11555,7 +11555,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
   // terms, recorded consent and a charge target — and its fee event is either
   // absent or still in flight (charging / charge_review are unsettled, not
   // benign absence).
-  if (ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
+  if (feeRails && ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
     const requests = await conn('appointment_card_requests')
       .whereIn('scheduled_service_id', ids)
       .where('status', 'completed')

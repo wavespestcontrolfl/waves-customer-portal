@@ -3673,7 +3673,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
           if (!targets.length) return; // nothing written — 409 after commit
 
           // Money already taken for a target (annual prepay term, hand-
-          // collected prepayment) refuses the WHOLE cancel — the same contract
+          // collected prepayment, an invoice holding money) refuses the WHOLE cancel — the same contract
           // as the plan-length trim (findBillingCoveredVisits, admin-schedule):
           // a series cancel that silently dropped paid visits would leave
           // money taken for visits that never happen, with no refund or
