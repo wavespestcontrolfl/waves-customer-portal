@@ -1,8 +1,8 @@
 # Waves Chief of Staff: commitments, code, and operations
 
 Status: Hermes team installed on the Hostinger instance; Chief of Staff and
-Code Watcher schedules enabled. Operations and Promise Keeper remain paused
-pending verification/activation of their scoped integrations. See installation evidence below.
+Code Watcher and Operations Watcher schedules enabled. Promise Keeper remains
+paused pending release/activation of its new scoped integration. See installation evidence below.
 Inspected base: `a2bb0bc49b9f6a1ebb776af29ee58a3d1439c9cf`.
 
 ## Outcome
@@ -119,9 +119,10 @@ Hostinger instance. No gateway credential is stored in this document.
 - Chief cron `6c54caf00f56`: enabled, every 30 minutes.
 - Code cron `ead6c9155b54`: enabled, every 15 minutes; manual cron execution
   completed with source-linked cases. An overlapping builtin execution discarded
-  its stale result; the next builtin-only run remains to be verified.
+  its stale result. The next builtin-only run completed cleanly at 05:48:21 UTC
+  (execution `da20964310ea404f9d36be450813f196`, no error).
 - Promise cron `44043b39f539`: paused, pending scoped commitment access.
-- Ops cron `fdb04740886c`: paused, pending final host verification. Dedicated signing secret and
+- Ops cron `fdb04740886c`: enabled every 10 minutes after host verification. Dedicated signing secret and
   portal gate are installed; deployment `6e39658b-5430-4e2f-a955-3b186ba635e6`
   succeeded. An identifying User-Agent fixed the observed Cloudflare 403.
 - All cron delivery is local; no external notifications configured.
@@ -152,7 +153,9 @@ results with raw-message omission, and malformed-response unavailability.
 Ops wrapper and existing signer/poller are installed in the ops workspace.
 The dedicated `/data/workspace/.waves-link-worker-secret-watchdog` is installed
 and verified mode 0600. A signed parent-side read returned HTTP 200 with attention
-reasons for permit-sync, failed jobs and failed alerts; host recheck is in flight.
+reasons for permit-sync, failed jobs and failed alerts. Host task `t_7dacea99`
+then verified a fresh snapshot at 05:45:28 UTC and routed one case per reason.
+The initial connectivity blocker was closed on that fresh evidence.
 Existing backlink credentials do not grant watchdog or customer-data scope.
 The watchdog gate and dedicated secret were changed under approval, followed
 by the verified configuration redeploy. No customer records, communications,
@@ -179,7 +182,8 @@ migration and connection instructions are now implemented locally. Shared auth,
 route and public-surface tests passed; independent review identified missing
 flat-transcript character anchors, which were added with regression coverage.
 Migration up/down passed inside a rolled-back transaction on an identity-checked
-existing synthetic Railway preview database. This new route is not deployed.
+existing synthetic Railway preview database. After integrating current main, 204 auth/route/public-surface tests passed.
+The pre-push review reported zero P0/P1. This new route is not deployed.
 
 The managed Hermes runtime is non-root Debian 13, lacks Chromium libraries and
 sudo, and cannot currently perform the full browser audit. Preflight task
