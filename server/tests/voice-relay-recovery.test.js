@@ -220,6 +220,8 @@ describe('relay-recovery module', () => {
   });
 
   test('providerFailurePolicy hands off at the limit on either counter', () => {
+    expect(recovery.providerFailurePolicy({ modelFailures: 2 })).toBeNull();
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     expect(recovery.providerFailurePolicy({ modelFailures: 1, toolFailures: 1 })).toBeNull();
     expect(recovery.providerFailurePolicy({ modelFailures: 2 })).toBe('handoff');
     expect(recovery.providerFailurePolicy({ toolFailures: 2 })).toBe('handoff');
@@ -616,6 +618,17 @@ describe('the conversation side', () => {
     const convo = new RelayConversation({ callSid: 'CA-cb-dup', from: '+19415551234', send: jest.fn() });
     expect(await convo._fileFailureCallback()).toBe(true);
     expect(trig).not.toHaveBeenCalled();
+  });
+
+  test('a committed callback is promised even while push delivery remains pending', async () => {
+    primeDb({ firstRow: { id: 'cl-9', metadata: {} } });
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    trig.mockImplementationOnce((_key, _payload, options) => {
+      options.onBell(true);
+      return new Promise(() => {});
+    });
+    const convo = new RelayConversation({ callSid: 'CA-cb-push', from: '+19415551234', send: jest.fn() });
+    expect(await convo._fileFailureCallback()).toBe(true);
   });
 
   test('an unresolved callback makes no promise and leaves no separately persisted claim', async () => {

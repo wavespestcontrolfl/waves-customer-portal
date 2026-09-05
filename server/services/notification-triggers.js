@@ -803,7 +803,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, relayFailureCall = null, onBell = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -913,6 +913,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     const stats = { bellWritten, push: null };
+    onBell?.(bellWritten); // durable bell result is available before badge lookup or push
     if (relayFailureCall && !bellWritten) return stats; // an unclaimed callback never dispatches a push
     // Every active admin turned BOTH channels off: that is deliberate
     // preference suppression, not a delivery failure — report it so

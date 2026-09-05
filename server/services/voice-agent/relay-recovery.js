@@ -393,6 +393,7 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
 
 /** 'handoff' once either counter reaches the limit; null otherwise. */
 function providerFailurePolicy({ modelFailures = 0, toolFailures = 0 } = {}) {
+  if (!isRecoveryGateOn()) return null;
   return (modelFailures >= PROVIDER_FAILURE_LIMIT || toolFailures >= PROVIDER_FAILURE_LIMIT) ? 'handoff' : null;
 }
 
