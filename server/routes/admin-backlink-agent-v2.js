@@ -676,10 +676,16 @@ router.patch('/prospects/:id', async (req, res, next) => {
         const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key });
         if (taken) return { taken };
       }
+      if (['placed', 'live', 'indexed'].includes(patch.status)) {
+        await lockProspectDomain(trx, current.target_domain);
+        const confirmed = await require('../services/seo/link-execution-authority').reconcileOwnerPlacement(trx, { prospectId: current.id, status: patch.status, actorId: req.technician?.id || null });
+        if (!confirmed.ok) return { reconciliationError: confirmed.error };
+      }
       const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
       return { row };
     });
     if (result.missing) return res.status(404).json({ error: 'prospect not found' });
+    if (result.reconciliationError) return res.status(409).json({ error: result.reconciliationError });
     if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
     if (result.readdressed) return res.status(409).json({ error: 'the prospect was re-addressed while you edited it — reload and retry' });
     if (result.inbox) return res.status(409).json({ error: `another placement already has a conversation with this recipient (${result.inbox.status}${result.inbox.outreach_status ? ` / ${result.inbox.outreach_status}` : ''}) — one conversation per inbox`, id: result.inbox.id });

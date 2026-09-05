@@ -110,3 +110,28 @@ test.each(['sending', 'send_error'])('a %s follow-up refuses both acquisition au
   expect(await authorize(s)).toBeNull();
   expect(await E.beginSubmission(s.db, { prospectId: s.placement.id, leaseToken: s.placement.claimed_at.toISOString() })).toBe(false);
 });
+
+
+test('owner placement confirmation resolves a held attempt and its exact execution approval once', async () => {
+  const s = scenario();
+  s.db._tables.audit_log = [];
+  s.db._tables.seo_link_prospects[0].claimed_at = null;
+  const approvalId = uid();
+  s.db._tables.seo_link_approvals.push({ id: approvalId, prospect_id: s.placement.id, dimension: 'execution', action: 'acquire', consumed_at: null });
+  s.db._tables.seo_link_attempts.push({ id: uid(), prospect_id: s.placement.id, path_id: s.path.id, action: 'submit', outcome: 'submit_ambiguous', evidence_url: 'synthetic/evidence.png', detail: { authority_id: s.authority.id, approval_id: approvalId } });
+  const currentDecision = { ...s.authority, id: uid(), instance_key: 'revised-instance', satisfied_at: null };
+  s.db._tables.seo_link_placement_authorities[0].ended_at = new Date();
+  s.db._tables.seo_link_placement_authorities.push(currentDecision);
+  const args = { prospectId: s.placement.id, status: 'placed' };
+  expect(await E.reconcileOwnerPlacement(s.db, args)).toEqual({ ok: true });
+  expect(s.db._tables.seo_link_attempts[0]).toMatchObject({ outcome: 'placed', evidence_url: 'synthetic/evidence.png' });
+  expect(s.db._tables.seo_link_placement_authorities.every(r => r.satisfied_reason === 'placed')).toBe(true);
+  expect(s.db._tables.seo_link_approvals[0].consumed_at).toBeInstanceOf(Date);
+  expect(await E.reconcileOwnerPlacement(s.db, args)).toEqual({ ok: true });
+  expect(s.db._tables.audit_log).toHaveLength(1);
+});
+
+test('owner confirmation refuses an active acquisition lease', async () => {
+  const s = scenario();
+  expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, status: 'placed' })).toMatchObject({ ok: false });
+});

@@ -82,6 +82,20 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     const released = await trx('seo_link_prospects').where({ id: p.id }).first();
     assert.equal(released.claimed_at, null); assert.equal(released.lease_mode, null); assert.equal(released.leased_provider, null);
     console.log('PASS held submit preserves screenshot/reason/authority on the original attempt and releases lease stamps');
+    const authority = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution', instance_kind: '-' }).first();
+    await trx('seo_link_placement_authorities').where({ id: authority.id }).update({ satisfied_at: null, satisfied_reason: null });
+    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id } });
+    await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
+    const router = require(`${root}/server/routes/admin-backlink-agent-v2`);
+    const edit = router.stack.find(l => l.route?.path === '/prospects/:id' && l.route.methods.patch).route.stack.at(-1).handle;
+    const confirm = () => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { status: 'placed', live_url: `https://${domain}/confirmed` } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
+    assert.equal((await confirm()).prospect.status, 'placed');
+    assert.equal((await trx('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'placed');
+    assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_reason, 'placed');
+    await confirm();
+    assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 1);
+    console.log('PASS existing owner board edit atomically resolves the hold and execution authority with one audit record');
+
 
   } finally { await trx.rollback(); }
 })().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(() => db.destroy());
