@@ -577,21 +577,36 @@ describe('the conversation side', () => {
     expect(resumedSessionBudgetMs({ created_at: null, metadata: { relay_reconnects: 1 } }, { now })).toBe(WS_MAX_SESSION_MS);
   });
 
-  test('the provider-failure callback is filed ONCE per call: the atomic voicemail_callback_alerted_at claim — a reconnected leg finds it filed and makes no second bell, but the promise stands (codex r4 P1)', async () => {
+  test('the provider-failure callback is filed ONCE per call: the atomic voicemail_callback_alerted_at claim dedupes, and only the filed-bell EVIDENCE stamp lets a reconnected leg repeat the promise (codex r4 P1 / hook r31 P1)', async () => {
     const { triggerNotification: trig } = require('../services/notification-triggers');
-    const { builder } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', voicemail_callback_alerted_at: '2026-09-05T06:00:00Z' } });
-    builder.update.mockImplementation(async () => 0); // claim already taken by the first leg
+    // the first leg filed the bell: claim taken AND the evidence stamp present ⇒ no second bell, the promise stands
+    const { builder } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', metadata: { relay_failure_callback_filed_at: '2026-09-05T06:00:00Z' } } });
+    builder.update.mockImplementation(async () => 0);
     const convo = new RelayConversation({ callSid: 'CA-cb-dup', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
     trig.mockClear();
     expect(await convo._fileFailureCallback()).toBe(true);
     expect(trig).not.toHaveBeenCalled();
     expect(builder.whereNull).toHaveBeenCalledWith('voicemail_callback_alerted_at');
-    // an UNCONFIRMED claim (0 rows, no stamp on the row) ⇒ no bell, no promise
-    const { builder: b2 } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', voicemail_callback_alerted_at: null } });
+    // claim taken WITHOUT the evidence (delivery failed / suppressed, or a late-landing claim) ⇒ no bell, NO promise
+    const { builder: b2 } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', metadata: {} } });
     b2.update.mockImplementation(async () => 0);
     const second = new RelayConversation({ callSid: 'CA-cb-unc', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
     expect(await second._fileFailureCallback()).toBe(false);
     expect(trig).not.toHaveBeenCalled();
+    // this leg wins the claim and the bell lands ⇒ the evidence stamp is written
+    const { updates } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', metadata: {} } });
+    const third = new RelayConversation({ callSid: 'CA-cb-win', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    expect(await third._fileFailureCallback()).toBe(true);
+    expect(trig).toHaveBeenCalledTimes(1);
+    expect(updates.some((u) => u.metadata && String(u.metadata.bindings?.[0] || '').includes('relay_failure_callback_filed_at'))).toBe(true);
+    // this leg wins the claim but the bell is NOT written ⇒ the claim is released for a later leg, no evidence, no promise
+    trig.mockResolvedValueOnce({ bellWritten: false, push: null, suppressed: true });
+    const { updates: u4, builder: b4 } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', metadata: {} } });
+    const fourth = new RelayConversation({ callSid: 'CA-cb-rel', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    expect(await fourth._fileFailureCallback()).toBe(false);
+    expect(u4.some((u) => u.voicemail_callback_alerted_at === null)).toBe(true);
+    expect(b4.where).toHaveBeenCalledWith('voicemail_callback_alerted_at', expect.any(Date));
+    expect(u4.some((u) => u.metadata && String(u.metadata.bindings?.[0] || '').includes('relay_failure_callback_filed_at'))).toBe(false);
   });
 
   test('a lead captured on an earlier leg whose relay_lead_id stamp did not land is still restored as captured (segment lead_captured) (codex r3 P2)', async () => {
