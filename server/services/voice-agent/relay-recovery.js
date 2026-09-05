@@ -14,7 +14,6 @@ const logger = require('../logger');
 
 const RECONNECT_LIMIT = 1;
 const RESUME_STATE_TIMEOUT_MS = 2000;
-const PROVIDER_FAILURE_LIMIT = 2;
 const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
 // A segment keeps everything the transcript store keeps (relay-transcript's
 // own cap) — the composition must never be shorter than today's transcript.
@@ -102,7 +101,7 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [] }) {
   return {
     lookup_refs: lookupRefs,
     lookup_results: lookupResults,
@@ -118,9 +117,6 @@ function buildSegment({ generation, sessionKey, reason, text, turns, latency, ve
     // given — both restored on the resumed leg (codex r2 P1).
     hold_open: holdOpen === true,
     estimate_fields: nonEmptyFields(estimateFields),
-    // The provider-failure streak at this leg's close (restored on resume).
-    model_failures: Number(modelFailures) || 0,
-    tool_failures: Number(toolFailures) || 0,
     // This leg's capture state: a filed re-service deliberately creates NO
     // lead, and the resumed leg must not route it through lead capture again.
     reservice_filed: reserviceFiled === true,
@@ -301,8 +297,6 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
       return {
         reconnects,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
-        modelFailures: latest ? Number(latest.model_failures) || 0 : 0,
-        toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
         reserviceFiled: meta.relay_reservice_filed === true || legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
         // A lead captured on an earlier leg even when its relay_lead_id
@@ -391,14 +385,9 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
   try { return await Promise.race([read, timeout]); } catch { return null; } finally { clearTimeout(timer); }
 }
 
-/** 'handoff' once either counter reaches the limit; null otherwise. */
-function providerFailurePolicy({ modelFailures = 0, toolFailures = 0 } = {}) {
-  return (modelFailures >= PROVIDER_FAILURE_LIMIT || toolFailures >= PROVIDER_FAILURE_LIMIT) ? 'handoff' : null;
-}
 
 module.exports = {
   RECONNECT_LIMIT,
-  PROVIDER_FAILURE_LIMIT,
   SEGMENT_SEPARATOR,
   isRecoveryGateOn,
   claimReconnect,
@@ -416,6 +405,5 @@ module.exports = {
   readReconnectState,
   latestPromises,
   callerTurnsFromText,
-  providerFailurePolicy,
   RESUME_SEED_MAX_CHARS,
 };

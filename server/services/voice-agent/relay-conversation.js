@@ -540,8 +540,6 @@ class RelayConversation {
     this._resume = null;
     this._resumeReady = null;
     this._resumeSeeded = false;
-    this._modelFailures = 0; // consecutive model timeouts / errors
-    this._toolFailures = 0; // consecutive failed tools
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -1654,15 +1652,6 @@ class RelayConversation {
     // fields win over the earlier ones.
     if (state.holdOpen && this._holdOpenForRetry == null) this._holdOpenForRetry = true;
     if (state.estimateFields) this._estimateFields = { ...state.estimateFields, ...(this._estimateFields || {}) };
-    // The provider-failure streak continues across the drop (codex r1 P2):
-    // a second consecutive failure on the resumed leg hands off at the
-    // documented threshold instead of counting from zero again.
-    // …but never over a streak THIS leg already owns (codex r3 P2): a late
-    // reload after a round ran here must not resurrect a cleared counter.
-    if (!this._providerRoundSeen) {
-      this._modelFailures = Math.max(this._modelFailures, Number(state.modelFailures) || 0);
-      this._toolFailures = Math.max(this._toolFailures, Number(state.toolFailures) || 0);
-    }
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
@@ -1853,7 +1842,6 @@ class RelayConversation {
       const modelStartAt = now();
       stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
       try {
-        this._providerRoundSeen = true; // from here on the failure streak is this leg's own
         const stream = anthropic.messages.stream(
           {
             model: MODEL,
@@ -1878,18 +1866,15 @@ class RelayConversation {
         // turn keeps its FIRST stamp, not the last round's.
         stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
-        this._modelFailures = 0; // a completed round resets the streak
       } catch (err) {
         if (streamTimedOut) {
           stat.timedOut = true;
           logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
-          this._modelFailures += 1;
           this.say(require('./relay-language').copy('streamTimeout', this.language));
           return;
         }
         if (this._controller.signal.aborted) return; // barge-in; caller is talking
         logger.error(`[voice-relay] anthropic error callSid=${this.callSid}: ${err.message}`);
-        this._modelFailures += 1;
         this.say(require('./relay-language').copy('modelError', this.language));
         return;
       } finally {
@@ -1965,7 +1950,6 @@ class RelayConversation {
           const toolOk = !sentinel && toolCtx.toolFailed !== true;
           if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
           this._toolOutcomes.push({ name: block.name, ok: toolOk });
-          this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
           // The threshold is judged after EACH failed tool (codex r3 P2): a
           // later block in the same response must not run — and reset the
@@ -2107,8 +2091,6 @@ class RelayConversation {
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
           noLeadCreated: this._noLeadCreated === true,
-          modelFailures: this._modelFailures,
-          toolFailures: this._toolFailures,
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
@@ -2289,7 +2271,9 @@ class RelayConversation {
             status: 'completed',
             answered_by: 'ai_agent',
             call_outcome: 'ai_handled',
-            duration_seconds: Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
+            duration_seconds: recoveryOn
+              ? db.raw('GREATEST(COALESCE(duration_seconds, 0), ?)', [Math.max(0, Math.round((Date.now() - this._startedAt) / 1000))])
+              : Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
             updated_at: new Date(),
             ...(transcriptUpdate || {}),
             ...(composedTranscription ? { transcription: composedTranscription } : {}),
@@ -2434,10 +2418,18 @@ class RelayConversation {
     if (!this.callSid) return false;
     const recovery = require('./relay-recovery');
     const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
-    if (!callerTurns.length) return false;
     try {
+      const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
+      const starts = legs.map((leg) => Date.parse(leg.started_at)).filter(Number.isFinite);
+      const ends = legs.map((leg) => Date.parse(leg.ended_at)).filter(Number.isFinite);
+      if (ends.length) await withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid).update({
+          duration_seconds: db.raw("GREATEST(COALESCE(duration_seconds, 0), FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - COALESCE(?::timestamptz, created_at))))::integer, 0)",
+            [new Date(Math.max(...ends)), starts.length ? new Date(Math.min(...starts)) : null]),
+        }), WRITE_DRAIN_TIMEOUT_MS, 0,
+      );
+      if (!callerTurns.length) return false;
       const { buildCallSummary } = require('./relay-transcript');
-      const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
       const leadCaptured = Boolean(meta.relay_lead_id) || legs.some((seg) => seg && seg.lead_captured === true);
       const summary = buildCallSummary({ turns: callerTurns.map((text) => ({ role: 'caller', text })), leadCaptured });
       const rows = await withTimeout(

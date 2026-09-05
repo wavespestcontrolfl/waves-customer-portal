@@ -1842,7 +1842,7 @@ async function attemptRelayReconnect(req, callSid, failure) {
     const state = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
     if (!state) return { unconfirmed: true };
     fallbackGeneration = state.reconnectMs || 0;
-    if (state && state.reconnects >= 1) {
+    if (state.reconnects >= 1) {
       const gen = Number((req.query || {}).gen) || null;
       secondFailure = gen !== null && gen === state.reconnectMs;
       // A retry of the first leg's callback whose reconnect RESPONSE was
@@ -1867,7 +1867,7 @@ async function attemptRelayReconnect(req, callSid, failure) {
           // fallback; a claim at/after the stamp ⇒ the resumed leg is live.
           const now = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
           if (!now) return { unconfirmed: true };
-          duplicate = Boolean(now && now.reconnectMs && (now.reconnectMs !== state.reconnectMs || now.claimGen >= now.reconnectMs));
+          duplicate = Boolean(now.reconnectMs && (now.reconnectMs !== state.reconnectMs || now.claimGen >= now.reconnectMs));
         } else {
           return { unconfirmed: true };
         }
@@ -1876,7 +1876,7 @@ async function attemptRelayReconnect(req, callSid, failure) {
       }
     }
 
-    logger.info(`[relay-complete] no reconnect for ${maskSid(callSid)} (${duplicate ? 'duplicate callback' : secondFailure ? 'second failure' : 'not resumable'}) after ${failure}`);
+    logger.info(`[relay-complete] no reconnect for ${maskSid(callSid)} (duplicate=${duplicate}, secondFailure=${secondFailure}) after ${failure}`);
     return { xml: null, duplicate, secondFailure, fallbackGeneration };
   }
   return renderRelayReconnect(req, callSid, failure, nowMs);

@@ -34,7 +34,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 4 } });
-    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); });
+    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.integer('duration_seconds'); t.text('call_summary'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
     await mockPg.schema.createTable('artifacts', (t) => { t.text('id').primary(); });
     await mockPg.schema.createTable('customers', (t) => { t.text('id').primary(); t.timestamp('deleted_at'); t.boolean('active'); t.text('waveguard_tier'); t.decimal('monthly_rate'); });
     await mockPg.schema.createTable('service_requests', (t) => {
@@ -65,6 +65,25 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       relay_session_claimed_at: new Date().toISOString(), relay_session_claim_owner: 'old', relay_session_claim_gen: 1,
       relay_reconnect_ms: 2, relay_reconnects: 1,
     } });
+  });
+
+  test.each([null, 'A model-written summary'])('late segments repair duration independently of the summary (%s)', async (summary) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    await mockPg('call_log').where('id', 'call-1').update({ duration_seconds: 20, call_summary: summary, created_at: new Date('2026-01-01T12:00:00Z') });
+    const meta = { relay_segments: [
+      { started_at: '2026-01-01T12:00:00Z', ended_at: '2026-01-01T12:01:00Z', text: 'Caller: need pest service' },
+      { started_at: '2026-01-01T12:01:00Z', ended_at: '2026-01-01T12:01:20Z', text: 'Caller: please continue' },
+    ] };
+    await RelayConversation.prototype._refreshCallSummary.call({ callSid }, meta);
+    expect((await mockPg('call_log').first()).duration_seconds).toBe(80);
+    if (summary) expect((await mockPg('call_log').first()).call_summary).toBe(summary);
+    await mockPg('call_log').where('id', 'call-1').update({ duration_seconds: 100 });
+    await RelayConversation.prototype._refreshCallSummary.call({ callSid }, meta);
+    expect((await mockPg('call_log').first()).duration_seconds).toBe(100);
+    // Silent segments and missing segment start use the call's creation time.
+    await mockPg('call_log').where('id', 'call-1').update({ duration_seconds: 0 });
+    await RelayConversation.prototype._refreshCallSummary.call({ callSid }, { relay_segments: [{ ended_at: '2026-01-01T12:02:00Z' }] });
+    expect((await mockPg('call_log').first()).duration_seconds).toBe(120);
   });
 
   async function waitForBlockedClaim() {
