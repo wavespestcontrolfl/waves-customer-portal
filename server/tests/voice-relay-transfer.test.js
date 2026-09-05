@@ -188,7 +188,7 @@ describe('the session side (relay-conversation tool ctx)', () => {
     const rows = await convo._buildToolCtx().writeHandoff({ intent: 'x', context_available: true });
     expect(rows).toBe(1);
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA-w');
-    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']); // ai_transferred itself may be re-stamped
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']); // one transfer per CallSid, enforced by the row
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-1']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: 'ai_transferred' }));
     expect(update.mock.calls[0][0].metadata.bindings[0]).toContain('"relay_handoff"');

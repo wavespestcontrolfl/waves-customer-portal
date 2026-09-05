@@ -778,7 +778,16 @@ async function appendRelayTransfer(req, twiml, callSid) {
   }
   const forwardNumbers = getFallbackForwardNumbers();
   if (forwardNumbers.length === 0) {
+    // The recorder's action is /voicemail-complete, so /call-complete never
+    // runs to re-classify this call: stamp voicemail here, exactly as the
+    // relay-failure path does, or it reports as transferred to nobody.
     logger.error(`[relay-complete] transfer for ${maskSid(callSid)} but no staff forward numbers configured — voicemail`);
+    if (callSid) {
+      await db('call_log').where('twilio_call_sid', callSid)
+        .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+        .catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`));
+      queueVoiceMessageSync(callSid);
+    }
     appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
     return;
   }

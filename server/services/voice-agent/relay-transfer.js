@@ -142,13 +142,15 @@ function transferWhisper(handoff, fallbackName = '') {
 /**
  * The owner-fenced packet write. `fence` is relay-conversation's owner fence
  * (a knex-builder decorator); `terminal` the outcome list a socket close may
- * not overwrite. Returns the row count (0 = the row is already terminal or
- * owned elsewhere).
+ * not overwrite — ai_transferred INCLUDED, so one transfer per CallSid is
+ * enforced by the row itself: a reconnected socket's second attempt matches
+ * 0 rows and aborts (the session latch is only process-local). Returns the
+ * row count (0 = already terminal / transferred, or owned elsewhere).
  */
 async function writeHandoffPacket(db, { callSid, packet, fence = (q) => q, terminal = [] }) {
   const q = db('call_log')
     .where('twilio_call_sid', callSid)
-    .where((w) => w.whereNull('call_outcome').orWhereNotIn('call_outcome', terminal.filter((o) => o !== 'ai_transferred')));
+    .where((w) => w.whereNull('call_outcome').orWhereNotIn('call_outcome', terminal));
   return fence(q).update({
     call_outcome: 'ai_transferred',
     metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_handoff: packet })]),

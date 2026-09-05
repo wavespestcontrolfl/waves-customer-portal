@@ -76,11 +76,13 @@ describe('/relay-complete', () => {
   test('transfer with no staff numbers configured ⇒ voicemail (never a stranded caller)', async () => {
     process.env.WAVES_FALLBACK_FORWARD_NUMBERS = '';
     for (const k of ['OWNER_PHONE', 'ADAM_PHONE', 'VIRGINIA_PHONE', 'OFFICE_MANAGER_PHONE']) delete process.env[k];
-    primeDb();
+    const { update } = primeDb();
     const res = mockRes();
     await handlerFor('/relay-complete')({ body: { CallSid: 'CA-t2', HandoffData: TRANSFER }, query: {} }, res);
     expect(res.body).toContain('<Record');
     expect(res.body).not.toContain('<Dial');
+    // Re-classified as voicemail — /call-complete never runs on this recorder.
+    expect(update).toHaveBeenLastCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
   });
 
   test('a sandbox transfer hangs up — a test call never rings staff', async () => {
