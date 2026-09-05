@@ -1504,6 +1504,7 @@ class SmartRebooker {
       if (noticeTechChanged) {
         void techNotices.notifyAssignmentChange({
           visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
+          snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
         });
       } else if (priorTechId) {
         const priorDay = service.scheduled_date instanceof Date
@@ -1519,6 +1520,7 @@ class SmartRebooker {
             technicianId: priorTechId,
             actorId: noticeActor,
             previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
+            snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
           });
         }
       }

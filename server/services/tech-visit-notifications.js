@@ -190,7 +190,7 @@ async function loadVisit(visitId, conn) {
  * or { ok: true, ...notice }. Never throws.
  */
 async function prepareNotice({
-  visitId, kind, technicianId, actorId = null, previous = null, newTechnicianId = null, conn = db,
+  visitId, kind, technicianId, actorId = null, previous = null, newTechnicianId = null, snapshot = null, conn = db,
 } = {}) {
   try {
     if (!enabled()) return { ok: false, skipped: 'gate_off' };
@@ -202,8 +202,18 @@ async function prepareNotice({
       .first('id', 'name', 'employment_status', 'field_dispatchable');
     if (!isAssignable(tech)) return { ok: false, skipped: 'not_assignable' };
 
-    const visit = await loadVisit(visitId, conn);
-    if (!visit) return { ok: false, skipped: 'no_visit' };
+    const row = await loadVisit(visitId, conn);
+    if (!row) return { ok: false, skipped: 'no_visit' };
+    // The card describes the schedule the hook COMMITTED, not whatever the
+    // row holds by the time delivery runs (a later move must not rewrite
+    // this card's "Now …"). Callers pass what they wrote; the row supplies
+    // the rest (customer, service, address).
+    const visit = {
+      ...row,
+      ...(snapshot?.date !== undefined ? { scheduled_date: snapshot.date } : {}),
+      ...(snapshot?.windowStart !== undefined ? { window_start: snapshot.windowStart } : {}),
+      ...(snapshot?.windowEnd !== undefined ? { window_end: snapshot.windowEnd } : {}),
+    };
 
     const actorText = await describeActor(actorId, conn);
     let newTechnicianName = null;
@@ -229,14 +239,18 @@ async function prepareNotice({
 }
 
 // The feed row: same insert helper the geofence prompts use (lazy — the
-// handler module is heavy and this module is required from writers).
+// handler module is heavy and this module is required from writers). The
+// helper logs and returns false on a failed insert; that card is then NOT
+// pushed — a push with no card behind it would send the tech to an empty
+// feed.
 async function writeCard(notice) {
   const { sendTechNotification } = require('./geofence-handler');
-  await sendTechNotification(notice.technicianId, {
+  const ok = await sendTechNotification(notice.technicianId, {
     type: notice.type,
     message: notice.message,
     payload: notice.payload,
   });
+  if (ok === false) throw new Error(`feed insert failed for tech ${notice.technicianId}`);
 }
 
 // Best-effort push; the card is already durable when this runs.
@@ -259,10 +273,17 @@ async function pushCard(notice) {
 // can wait seconds per subscription, and two rapid reassignments (A→B,
 // B→C) must never let B's stale "new visit" land after its "moved off".
 async function deliver(notices) {
-  const ready = notices.filter((n) => n && n.ok);
-  for (const n of ready) await writeCard(n);
-  for (const n of ready) await pushCard(n);
-  return ready.length;
+  const written = [];
+  for (const n of notices.filter((x) => x && x.ok)) {
+    try {
+      await writeCard(n);
+      written.push(n);
+    } catch (err) {
+      logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId}: ${err.message}`);
+    }
+  }
+  for (const n of written) await pushCard(n);
+  return written.length;
 }
 
 /**
@@ -282,13 +303,8 @@ async function deliver(notices) {
 async function notifyTechVisitChange(args = {}) {
   const notice = await prepareNotice(args);
   if (!notice.ok) return { sent: false, skipped: notice.skipped };
-  try {
-    await deliver([notice]);
-    return { sent: true };
-  } catch (err) {
-    logger.error(`[tech-visit-notifications] ${args.kind} notice failed for visit ${args.visitId}: ${err.message}`);
-    return { sent: false, skipped: 'error' };
-  }
+  const written = await deliver([notice]);
+  return written ? { sent: true } : { sent: false, skipped: 'error' };
 }
 
 // Notices for one visit apply in the order their changes committed. Two
@@ -333,24 +349,24 @@ function afterCommit(trx, fn, visitId) {
  * new holder hears it arrived. Post-commit, best-effort. No-op when nothing
  * changed.
  */
-function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, trx = null } = {}) {
+function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, actorId = null, snapshot = null, trx = null } = {}) {
   const from = fromTechId || null;
   const to = toTechId || null;
   if (!visitId || from === to) return null;
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
     const notices = [];
-    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, newTechnicianId: to }));
-    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId }));
+    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, newTechnicianId: to, snapshot }));
+    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId, snapshot }));
     await deliver(notices);
   }, visitId);
 }
 
 /** Same visit, same tech, new date or window. Post-commit, best-effort. */
-function notifyVisitRescheduled({ visitId, technicianId, actorId = null, previous = null, trx = null } = {}) {
+function notifyVisitRescheduled({ visitId, technicianId, actorId = null, previous = null, snapshot = null, trx = null } = {}) {
   if (!visitId || !technicianId) return null;
   if (!enabled()) return null;
-  return afterCommit(trx, () => notifyTechVisitChange({ visitId, kind: 'rescheduled', technicianId, actorId, previous }), visitId);
+  return afterCommit(trx, () => notifyTechVisitChange({ visitId, kind: 'rescheduled', technicianId, actorId, previous, snapshot }), visitId);
 }
 
 /**
@@ -359,7 +375,7 @@ function notifyVisitRescheduled({ visitId, technicianId, actorId = null, previou
  * processor, after its live-state compensation check) — the assigned tech
  * is read from the row.
  */
-function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, trx = null } = {}) {
+function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, snapshot = null, trx = null } = {}) {
   if (!visitId) return null;
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
@@ -369,7 +385,7 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, tr
       recipient = row?.technician_id || null;
     }
     if (!recipient) return;
-    await notifyTechVisitChange({ visitId, kind: 'cancelled', technicianId: recipient, actorId });
+    await notifyTechVisitChange({ visitId, kind: 'cancelled', technicianId: recipient, actorId, snapshot });
   }, visitId);
 }
 

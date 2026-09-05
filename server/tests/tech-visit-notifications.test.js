@@ -122,6 +122,23 @@ describe('notifyTechVisitChange', () => {
     expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route was cancelled' }));
   });
 
+  test('a failed feed insert means NO push for that card (a push with no card behind it sends the tech to an empty feed)', async () => {
+    mockSendTechNotification.mockResolvedValueOnce(false);
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: false, skipped: 'error' });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('card not written'));
+  });
+
+  test('the committed snapshot wins over the row (a later move cannot rewrite this card)', async () => {
+    await notices.notifyTechVisitChange({
+      visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID,
+      snapshot: { date: '2026-09-12', windowStart: '13:00', windowEnd: '15:00' },
+    });
+    expect(mockSendTechNotification.mock.calls[0][1].payload.when).toBe('Sat Sep 12, 1–3 PM');
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+  });
+
   test('a push failure is logged and the card still counts as sent', async () => {
     mockSendToAdminUser.mockRejectedValueOnce(new Error('apns down'));
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
@@ -159,7 +176,7 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
 
   test('both cards are written BEFORE any push is awaited (a slow push cannot reorder a rapid A→B, B→C)', async () => {
     const order = [];
-    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`card:${techId}:${row.type}`); });
+    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`card:${techId}:${row.type}`); return true; });
     mockSendToAdminUser.mockImplementation(async (techId) => {
       order.push(`push:${techId}`);
       await new Promise((r) => setTimeout(r, 5));
@@ -172,7 +189,7 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
 
   test('two changes to the same visit apply in call order even when the first one reads slower (A→B, then B→C)', async () => {
     const order = [];
-    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`${techId}:${row.type}`); });
+    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`${techId}:${row.type}`); return true; });
     // The first hook's visit read is slow; the second's is instant.
     let visitReads = 0;
     db.mockImplementation((table) => {

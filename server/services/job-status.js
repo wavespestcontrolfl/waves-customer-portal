@@ -873,6 +873,7 @@ async function transitionJobStatus({
     if (String(toStatus) !== 'cancelled' || String(fromStatus) === 'cancelled' || !adminPayload?.tech_id) return;
     require('./tech-visit-notifications').notifyVisitCancelled({
       visitId: jobId, technicianId: adminPayload.tech_id, actorId: transitionedBy || null,
+      snapshot: { date: adminPayload.scheduled_date, windowStart: adminPayload.window_start, windowEnd: adminPayload.window_end },
     });
   }
 

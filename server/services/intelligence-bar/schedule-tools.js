@@ -653,6 +653,7 @@ async function assignTechnician(input, actionContext = {}) {
       if ((s.current_tech_id || null) === tech.id) continue;
       void notifyAssignmentChange({
         visitId: s.id, fromTechId: s.current_tech_id || null, toTechId: tech.id, actorId: actionContext.technicianId || null,
+        snapshot: { date: s.scheduled_date_str },
       });
     }
   }
@@ -1060,6 +1061,7 @@ async function moveStopsToDay(input, actionContext = {}) {
         technicianId: c.s.technician_id,
         actorId: actionContext.technicianId || null,
         previous: { date: c.oldDate, windowStart: c.s.window_start, windowEnd: c.s.window_end },
+        snapshot: { date: dateStr, windowStart: c.s.window_start, windowEnd: c.s.window_end },
       });
     }
   }
@@ -1362,8 +1364,13 @@ async function swapTechAssignments(input, actionContext = {}) {
   {
     const { notifyAssignmentChange } = require('../tech-visit-notifications');
     const swapActor = actionContext.technicianId || null;
-    for (const sid of aIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techA.id, toTechId: techB.id, actorId: swapActor });
-    for (const sid of bIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techB.id, toTechId: techA.id, actorId: swapActor });
+    const swapRows = new Map([...aServices, ...bServices].map((r) => [String(r.id), r]));
+    const swapSnapshot = (sid) => {
+      const r = swapRows.get(String(sid));
+      return r ? { date: r.scheduled_date, windowStart: r.window_start, windowEnd: r.window_end } : null;
+    };
+    for (const sid of aIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techA.id, toTechId: techB.id, actorId: swapActor, snapshot: swapSnapshot(sid) });
+    for (const sid of bIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techB.id, toTechId: techA.id, actorId: swapActor, snapshot: swapSnapshot(sid) });
   }
 
   // Visit-group seam (codex #3590 r9): a whole-day swap moves every child

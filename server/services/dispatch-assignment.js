@@ -232,6 +232,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // non-assignable recipient, and while GATE_TECH_VISIT_NOTIFICATIONS is off.
   require('./tech-visit-notifications').notifyAssignmentChange({
     visitId: jobId, fromTechId, toTechId: newTechId, actorId, trx,
+    snapshot: { date: updatedRow.scheduled_date, windowStart: updatedRow.window_start, windowEnd: updatedRow.window_end },
   });
 
   if (emit) {

@@ -68,6 +68,8 @@ describe('assignDispatchJob → tech notice', () => {
     expect(mockNotifyAssignmentChange).toHaveBeenCalledTimes(1);
     expect(mockNotifyAssignmentChange).toHaveBeenCalledWith({
       visitId: 'job-1', fromTechId: 't-old', toTechId: 't-new', actorId: 'adam', trx: null,
+      // The committed schedule rides along so the card never re-reads a later move.
+      snapshot: { date: '2026-09-10', windowStart: undefined, windowEnd: undefined },
     });
   });
 
@@ -134,7 +136,10 @@ describe('transitionJobStatus → cancelled tech notice', () => {
     await transitionJobStatus({ jobId: 'job-1', fromStatus: 'confirmed', toStatus: 'cancelled', transitionedBy: 'virginia' });
     await new Promise((r) => setImmediate(r));
 
-    expect(mockNotifyVisitCancelled).toHaveBeenCalledWith({ visitId: 'job-1', technicianId: 't-1', actorId: 'virginia' });
+    expect(mockNotifyVisitCancelled).toHaveBeenCalledWith({
+      visitId: 'job-1', technicianId: 't-1', actorId: 'virginia',
+      snapshot: { date: '2026-09-10', windowStart: '09:00', windowEnd: '11:00' },
+    });
   });
 
   test.each([

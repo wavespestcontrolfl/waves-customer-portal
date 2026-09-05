@@ -300,6 +300,7 @@ describe('live-status reschedule override (allowLive)', () => {
       technicianId: 'tech-1',
       actorId: 'virginia',
       previous: { date: BASE, windowStart: '09:00:00', windowEnd: '11:00:00' },
+      snapshot: { date: TARGET, windowStart: '13:00', windowEnd: '15:00' },
     });
   });
 
@@ -315,6 +316,7 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(notifyVisitRescheduled).not.toHaveBeenCalled();
     expect(notifyAssignmentChange).toHaveBeenCalledWith({
       visitId: 'svc-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: 'customer_self_serve',
+      snapshot: { date: TARGET, windowStart: '09:00', windowEnd: '11:00' },
     });
   });
 

@@ -6363,6 +6363,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (visitNoticeLive) {
           void techNotices.notifyTechVisitChange({
             visitId: svc.id, kind: 'assigned', technicianId: resolvedTechId, actorId: req.technicianId || null,
+            snapshot: { date: scheduledDate, windowStart: windowStart || null, windowEnd: windowEnd || null },
           });
         }
         if (sendTechNotification && resolvedTechId && !visitNoticeLive) {
@@ -9117,6 +9118,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             techMoveForNotice = {
               technicianId: requestedTechnicianId !== undefined ? requestedTechnicianId : (reminderBefore.technician_id || null),
               previous: { date: prevDate, windowStart: reminderBefore.window_start, windowEnd: reminderBefore.window_end },
+              snapshot: {
+                date: nextDate,
+                windowStart: updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
+                windowEnd: updates.window_end !== undefined ? updates.window_end : reminderBefore.window_end,
+              },
             };
           }
         }
@@ -10463,6 +10469,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         technicianId: techMoveForNotice.technicianId,
         actorId: req.technicianId || null,
         previous: techMoveForNotice.previous,
+        snapshot: techMoveForNotice.snapshot,
       });
     }
     if (scheduleMoveForNotice) {
