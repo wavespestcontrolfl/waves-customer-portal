@@ -153,6 +153,13 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null, esti
     if (!rootHeld) return rebuild(trx);
     const own = await trx('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
     if (own && own.funnel_stage === 'completed') return null;
+    // A root row still owned by ANOTHER customer (staff re-assigned the lead
+    // after its row was stamped; the bridge preserves a non-null customer)
+    // cannot carry this customer's win: booking it would credit the old
+    // customer and leave this one with no acquisition row once the repeat's
+    // is dropped. The repeat's own row carries the deal (codex #3834 r36 P1).
+    const rootOwner = await trx('ad_service_attribution').where({ lead_id: root.id }).first('customer_id');
+    if (customerId && rootOwner?.customer_id && String(rootOwner.customer_id) !== String(customerId)) return rebuild(trx);
     const bridged = await bridgeLeadFunnelStage(root.id, 'won', trx, { onlyIfLead });
     // A root row already at booked / completed counts as settled only under
     // the SAME lead claim the advance carried — the fallback read must not

@@ -1364,7 +1364,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
             forUpdate: () => { q._lock = true; locks.push({ table, where: a }); return q; },
             update: async (patch) => { updated.push({ table, where: a, whereNull: q._null, claimed: !!q._claimed, patch }); return 1; },
             first: async () => {
-              if (table === 'ad_service_attribution') return a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id] } : null;
+              if (table === 'ad_service_attribution') return a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id], customer_id: (opts.funnelOwners || {})[a.lead_id] || null } : null;
               const id = typeof a === 'string' ? b : a.id;
               const row = (q._lock && leadsNow[id]) || rows[id] || null;
               // An object clause beyond the id is a claim: every key must match the row AS IT IS NOW.
@@ -1501,6 +1501,24 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
       expect(database._deleted).toEqual([]);
+    });
+
+    test('a root whose funnel row is still owned by ANOTHER customer (staff re-assigned the lead after its row was stamped) cannot carry this win: the repeat\'s own row is rebuilt and the root\'s row is untouched (codex r36 P1)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead' }, { funnelOwners: { root: 'c-A' } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ customerId: 'c1', funnelStage: 'booked' }));
+      expect(database._deleted).toEqual([]);
+      expect(database._updated).toEqual([]);
+    });
+
+    test('a root row already owned by THIS customer is settled as before', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead' }, { funnelOwners: { root: 'c1' } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, ROOT_CLAIM);
+      expect(stampLeadFunnelRow).not.toHaveBeenCalled();
     });
 
     test('a root row ALREADY at booked (a replayed conversion: the monotonic bridge updates 0 rows) is settled — the repeat is not rebuilt into a second row (codex r28 P1)', async () => {
