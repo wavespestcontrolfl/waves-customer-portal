@@ -3677,6 +3677,26 @@ router.put('/:serviceId/status', async (req, res, next) => {
             ['recurring-series-maintenance', String(parentId)],
           );
 
+          // ONE lock order with the series prepaid stamp (Codex #3878 r3 P2 /
+          // r4 P2): stampSeriesPrepaid locks the family's LIVE rows (its
+          // TERMINAL_STATUSES excluded) in scheduled_date order. This branch
+          // locks only cancellable targets below but its family-wide
+          // recurring_ongoing clear later touches en_route / on_site
+          // siblings too — so take the identical live-family lock set, in
+          // the identical order, FIRST. Terminal rows are never locked by
+          // either path.
+          {
+            const { TERMINAL_STATUSES: PREPAID_SKIP } = require('../services/prepaid-series');
+            await trx('scheduled_services')
+              .where(function () {
+                this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+              })
+              .whereNotIn('status', [...PREPAID_SKIP])
+              .orderBy('scheduled_date', 'asc')
+              .forUpdate()
+              .select('id');
+          }
+
           const targetQuery = trx('scheduled_services')
             .where(function () {
               this.where('id', parentId).orWhere('recurring_parent_id', parentId);

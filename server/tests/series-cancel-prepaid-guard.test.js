@@ -58,7 +58,7 @@ jest.mock('../models/db', () => {
       leftJoin() { return b; },
       whereRaw() { return b; },
       orderBy() { return b; },
-      forUpdate() { return b; },
+      forUpdate() { b._locked = true; return b; },
       modify(cb) { cb(b); return b; },
       select() { b._selectCalled = true; return b; },
       async first() {
@@ -84,7 +84,7 @@ jest.mock('../models/db', () => {
       // Awaiting the builder (the target select) resolves every scheduled
       // service — the harness owns the scope filtering by what it seeds.
       then(resolve, reject) {
-        state.reads.push(String(table));
+        state.reads.push(String(table) + (b._locked ? ' FOR UPDATE' : '') + (b._statusNotIn ? ' live-only' : ''));
         const rows = table === 'scheduled_services' ? state.rows.map((r) => ({ ...r }))
           : table === 'invoices' ? state.invoices.map((r) => ({ ...r }))
           // coveredTermsAsOf reads 'annual_prepay_terms as t' — the harness
@@ -254,6 +254,14 @@ describe('term coverage is decided by the canonical reader, not a status list (p
     seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null } });
     await cancel('series');
     expect(db.__state.reads).toContain('annual_prepay_terms as t');
+  });
+
+  test('the cancel locks the LIVE family (same set + order as the series prepaid stamp) before selecting its targets (Codex #3878 r4 P2)', async () => {
+    seed();
+    await cancel('series');
+    const visitReads = db.__state.reads.filter((r) => r.startsWith('scheduled_services FOR UPDATE'));
+    expect(visitReads[0]).toBe('scheduled_services FOR UPDATE live-only');
+    expect(visitReads.length).toBeGreaterThanOrEqual(2);
   });
 
   test('coveredTermsAsOf keeps a cancelled term with renewal_decision=cancel (paid non-renewal) covered and drops refunded money', () => {
