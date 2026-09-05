@@ -4834,7 +4834,7 @@ function JobCardOrderButton({ productId, name, order, D, compact = false }) {
       try {
         const data = await adminFetch(`/admin/inventory/waveguard-forecast/${productId}/restock-request`, {
           method: "POST",
-          body: JSON.stringify({ requestedQuantity: 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}` }),
+          body: JSON.stringify({ requestedQuantity: order?.quantity || 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}` }),
         });
         setState("done");
         setMsg(data?.existing ? "Already on the order list" : "Added to the order list");
@@ -5038,14 +5038,14 @@ function JobCardTank({ tank, serviceId, D }) {
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                {fmtAmount(mix.amount, mix.unit)} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {gallons} gal{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {gallons} gal{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
             {mix && mix.ratePer1000 != null && (
               <div style={{ fontSize: 12, color: D.muted }}>
-                Label rate {fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft{mix.rateVerified ? "" : " (not yet verified)"}
+                Label rate {mix.ratePerGallon ? `${mix.ratePerGallon.lo}${mix.ratePerGallon.hi > mix.ratePerGallon.lo ? `–${mix.ratePerGallon.hi}` : ""} ${fmtUnit(mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>
             )}
             <JobCardOrderButton productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
@@ -5369,6 +5369,11 @@ export function ProtocolPanel({ service, onClose }) {
           <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Service Protocol
           </div>{" "}
+          {!jobCardEnabled && service && (
+            <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+              {service.serviceType} — {service.customerName}
+            </div>
+          )}
         </div>{" "}
         <button
           onClick={onClose}

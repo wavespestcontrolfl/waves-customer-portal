@@ -33,8 +33,10 @@ const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
 const {
   buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration, getActiveCalibrations,
-  itemHasNitrogen, itemHasPhosphorus,
+  itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
 } = require('./waveguard-plan-engine');
+const { stampedDivergesSql } = require('./stamped-address');
+const { convertInventoryQuantity } = require('./inventory-units');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 
 const PROMPT_VERSION = 'job_card_paragraph_v1';
@@ -76,7 +78,8 @@ function clean(value, max = 240) {
 function scrubKnownCodes(value, codes) {
   const known = codes.map((c) => String(c.code || '').trim()).filter((c) => c.length >= 3);
   if (!known.length) return value;
-  const re = new RegExp(known.map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  // Case-insensitive: a code stored as BLUE pasted as blue is still the code.
+  const re = new RegExp(known.map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
   const walk = (v) => {
     if (typeof v === 'string') return v.replace(re, '[code]');
     if (Array.isArray(v)) return v.map(walk);
@@ -230,7 +233,12 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     .select(
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes',
       'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
-      'c.first_name', 'c.last_name', 'c.phone', 'c.latitude', 'c.longitude', 'c.lawn_water_area_id',
+      'c.first_name', 'c.last_name', 'c.phone', 'c.lawn_water_area_id',
+      // The booked property's pin: the visit's own lat/lng first; the
+      // customer's primary pin only when the stamped address does not
+      // diverge from it (dispatch's rule) — else no pin, office forecast.
+      dbh.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
+      dbh.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`),
       'c.waveguard_tier',
     )
     .first();
@@ -339,7 +347,7 @@ const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
  * no emoji, no bullet/heading markup, no code-looking token, and no number
  * that the grounding does not contain.
  */
-function validateParagraph(text, grounding, codes = []) {
+function validateParagraph(text, grounding, codes = [], critical = []) {
   // Raw text on purpose: the code check below must see a code as written.
   // (The context-aggregator redactor is NOT run on model output — it masks
   // every token near the words "gate code", which the paragraph legitimately
@@ -351,14 +359,32 @@ function validateParagraph(text, grounding, codes = []) {
   const sentences = body.split(/(?<=[.!?])\s+/).filter(Boolean);
   if (sentences.length < 1 || sentences.length > 3) return 'sentence_count';
   if (body.split(/\s+/).length > MAX_PARAGRAPH_WORDS) return 'too_long';
+  const lower = body.toLowerCase();
   for (const { code } of codes) {
-    if (code && body.includes(code)) return 'code_leak';
+    if (code && lower.includes(String(code).toLowerCase())) return 'code_leak';
   }
   const groundedNumbers = new Set((grounding.match(/\d+(?:[.,]\d+)?/g) || []));
   for (const num of body.match(/\d+(?:[.,]\d+)?/g) || []) {
     if (!groundedNumbers.has(num)) return 'ungrounded_number';
   }
+  // A rewrite that drops a safety-critical fact is not a rewrite.
+  for (const fact of critical) {
+    if (fact && !lower.includes(String(fact).toLowerCase())) return 'critical_fact_dropped';
+  }
   return null;
+}
+
+/**
+ * Facts the model may rephrase but never omit: chemical sensitivity, the
+ * pet-securing plan, urgent open requests. Each must appear verbatim
+ * (case-insensitive) in the accepted paragraph.
+ */
+function criticalFacts(facts) {
+  const out = [];
+  if (facts.chemicalSensitivity) out.push(facts.chemicalSensitivity === 'yes' ? 'sensitiv' : facts.chemicalSensitivity);
+  if (facts.petsSecured) out.push(facts.petsSecured);
+  for (const issue of facts.issues || []) if (issue.urgent && issue.text) out.push(issue.text);
+  return out;
 }
 
 function groundingHash(template) {
@@ -369,11 +395,11 @@ function groundingHash(template) {
  * Model-written paragraph over the template grounding. Returns
  * { text, source: 'model' | 'template' }. Never throws.
  */
-async function writeParagraph(template, codes = [], deps = {}) {
+async function writeParagraph(template, codes = [], deps = {}, critical = []) {
   const fallback = { text: template, source: 'template' };
   if (!template) return fallback;
   if (!deps.callModel && !process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback;
-  const validate = (result) => validateParagraph(result?.text, template, codes);
+  const validate = (result) => validateParagraph(result?.text, template, codes, critical);
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.jobCardParagraph, {
       laneId: LANE_ID,
@@ -392,7 +418,7 @@ async function writeParagraph(template, codes = [], deps = {}) {
     }
     // Defense in depth for injected call paths that skip the dispatcher's
     // per-leg validate hook.
-    if (validateParagraph(resp.text, template, codes)) return fallback;
+    if (validateParagraph(resp.text, template, codes, critical)) return fallback;
     return { text: cleanRaw(resp.text, 600), source: 'model' };
   } catch (err) {
     logger.warn(`[job-card] paragraph failed: ${err.message}; using template`);
@@ -414,7 +440,7 @@ async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
   if (stored?.grounding_hash === hash && stored.source === 'model' && stored.text) {
     return { text: stored.text, source: 'model', cached: true };
   }
-  const written = await writeParagraph(template, facts.access.codes, deps);
+  const written = await writeParagraph(template, facts.access.codes, deps, criticalFacts(facts.facts));
   const row = { version: PROMPT_VERSION, grounding_hash: hash, text: written.text, source: written.source };
   const prior = facts.cache.generatedAt;
   await dbh('scheduled_services')
@@ -448,6 +474,12 @@ function productLimits(product) {
  * `unknown` when the product carries no limits; `ok` otherwise. A missing
  * forecast makes every product `unknown` with reason `no_forecast`.
  */
+// Null when nothing was measured — never a reassuring 0.
+function maxOrNull(values) {
+  const known = values.filter((v) => v != null && Number.isFinite(Number(v))).map(Number);
+  return known.length ? Math.max(...known) : null;
+}
+
 function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}) {
   const start = now.getTime();
   const window = Array.isArray(hourly)
@@ -459,8 +491,8 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
   const summary = window.length
     ? {
       tempF: [Math.min(...window.map((h) => h.temperatureF ?? Infinity)), Math.max(...window.map((h) => h.temperatureF ?? -Infinity))].map((v) => (Number.isFinite(v) ? v : null)),
-      windMph: Math.max(...window.map((h) => h.windMph ?? 0)),
-      rainPct: Math.max(...window.map((h) => h.rainChance ?? 0)),
+      windMph: maxOrNull(window.map((h) => h.windMph)),
+      rainPct: maxOrNull(window.map((h) => h.rainChance)),
       shortForecast: window[0].shortForecast || null,
     }
     : null;
@@ -729,7 +761,23 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
     if (product && !lines.some((l) => l.product.id === product.id)) lines.push({ raw, product, role: 'base', selected: true });
   }
+  // Protocol visits without lineMeta (tree & shrub, termite …) name their
+  // products in the text itself — the same parse + catalog match the plan
+  // engine runs on lawn lines. Secondary lines are the visit's "if needed".
+  for (const line of linesFromProtocolText(visit, catalog)) {
+    if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
+  }
   return { visit, lines, blocks: [] };
+}
+
+function linesFromProtocolText(visit, catalog) {
+  const parsed = [...parseProtocolLines(visit?.primary, 'base'), ...parseProtocolLines(visit?.secondary, 'conditional')];
+  const out = [];
+  for (const line of parsed) {
+    const product = matchCatalogProduct(line, catalog);
+    if (product && !out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: line.role, selected: line.role === 'base' });
+  }
+  return out;
 }
 
 async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, dbh = db }) {
@@ -782,14 +830,34 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       labelUrl: p.label_url || null,
       sdsUrl: p.sds_url || null,
       rotation,
-      order: {
-        packSize: packSizes[p.id] || null,
-        lastPrice: p.best_price_amount_cached != null ? Number(p.best_price_amount_cached) : null,
-        unit: p.inventory_unit || p.rate_unit || null,
-      },
+      order: orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null),
     });
   }
   return cards;
+}
+
+/**
+ * What "Order more" asks for, in the product's inventory unit: the visit's
+ * shortage when there is one, else one distributor pack converted to that
+ * unit, else a single unit.
+ */
+function orderFor(product, packSize, shortage) {
+  const unit = product.inventory_unit || product.rate_unit || null;
+  let quantity = null;
+  if (shortage > 0) quantity = Math.ceil(shortage * 100) / 100;
+  else {
+    const m = String(packSize || '').match(/(\d+(?:\.\d+)?)\s*([a-z_ ]+)/i);
+    if (m && unit) {
+      const packUnit = m[2].trim().toLowerCase().replace(/\s+/g, '_');
+      quantity = packUnit === String(unit).toLowerCase() ? Number(m[1]) : convertInventoryQuantity(Number(m[1]), packUnit, unit);
+    }
+  }
+  return {
+    packSize: packSize || null,
+    lastPrice: product.best_price_amount_cached != null ? Number(product.best_price_amount_cached) : null,
+    unit,
+    quantity: quantity > 0 ? quantity : 1,
+  };
 }
 
 async function rotationNote(dbh, facts, product) {
@@ -846,7 +914,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
  */
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date() } = {}) {
   const [product, svc] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
+    dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
     serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
@@ -861,6 +929,10 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
+  // Pest / tree products whose label rate is per gallon of finished spray
+  // (default_rate "X" or "X-Y" + default_unit "<unit>/gal") dilute straight
+  // into the tank — no carrier calibration involved.
+  const perGallon = ratePer1000 == null ? perGallonRate(product) : null;
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
@@ -884,24 +956,39 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   if (planWide.length) mix = { amount: null, unit: rateUnit || null, reason: 'Lawn plan blocked — amounts withheld' };
   else if (productBlocks.length) mix = { amount: null, unit: rateUnit || null, reason: clean(productBlocks[0].message, 160) };
   else if (!tankMixable) mix = { amount: null, unit: rateUnit || null, reason: 'Not a tank mix — apply as labeled' };
+  else if (perGallon) mix = buildPerGallonAmount(perGallon, gallons);
   else mix = buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
   const packSizes = await loadPackSizes(dbh, [product.id]);
   return {
     productId: product.id,
     name: product.name,
     ratePer1000: ratePer1000 != null ? Number(ratePer1000) : null,
+    ratePerGallon: perGallon,
     rateSource: planned ? 'plan' : 'catalog',
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
     ...mix,
     planBlocks,
     tank,
-    order: {
-      packSize: packSizes[product.id] || null,
-      lastPrice: product.best_price_amount_cached != null ? Number(product.best_price_amount_cached) : null,
-      unit: product.inventory_unit || product.rate_unit || null,
-    },
+    order: orderFor(product, packSizes[product.id], null),
   };
+}
+
+function perGallonRate(product) {
+  const m = String(product.default_unit || '').trim().toLowerCase().match(/^([a-z_]+)\/gal$/);
+  const r = String(product.default_rate || '').trim().match(/^(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?$/);
+  if (!m || !r) return null;
+  const lo = Number(r[1]);
+  const hi = r[2] != null ? Number(r[2]) : lo;
+  if (!(lo > 0)) return null;
+  return { lo, hi: hi > lo ? hi : lo, unit: m[1] };
+}
+
+function buildPerGallonAmount(rate, gallons) {
+  const gal = Number(gallons);
+  if (!TANK_GALLONS.includes(gal)) return { amount: null, unit: rate.unit, reason: 'Pick 110 or 1 gallons' };
+  const round = (v) => Math.round(v * 10000) / 10000;
+  return { amount: round(rate.lo * gal), amountMax: rate.hi > rate.lo ? round(rate.hi * gal) : null, unit: rate.unit, gallons: gal, basis: 'per_gallon', reason: null };
 }
 
 module.exports = {
@@ -919,5 +1006,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, criticalFacts, linesFromProtocolText, orderFor, perGallonRate },
 };

@@ -245,6 +245,13 @@ describe('buildSprayCheck', () => {
     expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 0, max_wind_mph: 10 }], hourly: wetNow.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
   });
 
+  test('the forecast headline keeps unmeasured wind / rain null, never 0 (PR r1 P2)', () => {
+    const noWind = hourly.map((h) => ({ ...h, windMph: null, rainChance: null }));
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_wind_mph: 10 }], hourly: noWind, now });
+    expect(out.forecast).toMatchObject({ windMph: null, rainPct: null });
+    expect(out.verdicts[0].verdict).toBe('unknown');
+  });
+
   test('no forecast → unknown with reason', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: null, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast' });
@@ -307,6 +314,47 @@ describe('tankFromCalibrations', () => {
   });
 });
 
+describe('safety-critical facts survive the rewrite (PR r1 P1)', () => {
+  test('criticalFacts lists sensitivity, pet plan, urgent issues; a rewrite that drops one falls back', () => {
+    const facts = { chemicalSensitivity: 'asthma, no pyrethroids', petsSecured: 'dog crated in garage', issues: [{ urgent: true, text: 'wasps at the front door' }, { urgent: false, text: 'ants' }] };
+    const critical = jobCard._test.criticalFacts(facts);
+    expect(critical).toEqual(['asthma, no pyrethroids', 'dog crated in garage', 'wasps at the front door']);
+    const grounding = 'Chemical sensitivity: asthma, no pyrethroids, pets: dog crated in garage. Open: URGENT wasps at the front door.';
+    expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
+    expect(jobCard.validateParagraph('Customer has a chemical sensitivity; dog crated in garage.', grounding, [], critical)).toBe('critical_fact_dropped');
+    expect(jobCard._test.criticalFacts({ chemicalSensitivity: 'yes', issues: [] })).toEqual(['sensitiv']);
+  });
+});
+
+describe('non-lawn protocol text resolves products without lineMeta (PR r1 P2)', () => {
+  test('primary lines are base, secondary lines are "if needed"', () => {
+    const catalog = [{ id: 's', name: 'Snapshot 2.5TG', cost_per_unit: 1 }, { id: 'm', name: 'Merit 2F', cost_per_unit: 1 }];
+    const visit = { primary: 'Snapshot 2.5TG Q1: 2.3 lb/1,000 sq ft beds ($17)', secondary: 'Merit 2F drench only for documented scale ($4)' };
+    expect(jobCard._test.linesFromProtocolText(visit, catalog)).toEqual([
+      expect.objectContaining({ product: catalog[0], role: 'base', selected: true }),
+      expect.objectContaining({ product: catalog[1], role: 'conditional', selected: false }),
+    ]);
+  });
+});
+
+describe('order quantity (PR r1 P2)', () => {
+  const { orderFor } = jobCard._test;
+  test('shortage wins, then one pack in the inventory unit, then 1', () => {
+    expect(orderFor({ inventory_unit: 'fl_oz' }, '2.5 gal', 3.2).quantity).toBe(3.2);
+    expect(orderFor({ inventory_unit: 'fl_oz' }, '2.5 gal', null).quantity).toBe(320);
+    expect(orderFor({ inventory_unit: 'gal' }, '2.5 gal', null).quantity).toBe(2.5);
+    expect(orderFor({ inventory_unit: 'each' }, null, null).quantity).toBe(1);
+  });
+});
+
+describe('per-gallon label rates (PR r1 P2)', () => {
+  test('perGallonRate parses X and X-Y with a /gal unit', () => {
+    expect(jobCard._test.perGallonRate({ default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' })).toEqual({ lo: 0.2, hi: 0.8, unit: 'fl_oz' });
+    expect(jobCard._test.perGallonRate({ default_rate: '0.5', default_unit: 'oz/gal' })).toEqual({ lo: 0.5, hi: 0.5, unit: 'oz' });
+    expect(jobCard._test.perGallonRate({ default_rate: '0.8', default_unit: 'oz/1000sf' })).toBeNull();
+  });
+});
+
 describe('loadLastVisit picks the most severe finding, not the alphabetically last (Codex r13 P1)', () => {
   test('critical beats medium and low', async () => {
     const tables = {
@@ -344,6 +392,9 @@ describe('access codes never enter the model-safe facts', () => {
     });
     // Codes carrying regex metacharacters are matched literally (pre-push P0).
     expect(jobCard._test.scrubKnownCodes({ entry: 'Try 12*34 or 1234+ or (77)' }, [{ code: '12*34' }, { code: '1234+' }, { code: '(77)' }])).toEqual({ entry: 'Try [code] or [code] or [code]' });
+    // Case-insensitive: BLUE on file, blue in the note (PR r1 P1).
+    expect(jobCard._test.scrubKnownCodes({ entry: 'say blue at the gate' }, [{ code: 'BLUE' }])).toEqual({ entry: 'say [code] at the gate' });
+    expect(jobCard.validateParagraph('Say blue at the gate.', 'say blue at the gate', [{ code: 'BLUE' }])).toBe('code_leak');
     // Nothing known → the object is untouched.
     expect(jobCard._test.scrubKnownCodes(facts, [])).toBe(facts);
   });
@@ -453,6 +504,14 @@ describe('mixForProduct', () => {
     expect(evaluateApprovals).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ plan: cleanPlan, products: [{ productId: 'p1', name: 'Celsius WG', rate: 0.113, rateUnit: 'oz' }] }));
     // Approved by every guard → doses normally under the same plan.
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: approve() }, ...at })).amount).toBe(6.215);
+  });
+
+  test('a per-gallon pest product dilutes straight into the tank, range and all (PR r1 P2)', async () => {
+    const demand = { id: 'd', name: 'Demand CS', category: 'insecticide', default_rate_per_1000: null, rate_unit: null, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const dbh = makeDb({ scheduled_services: [visit], products_catalog: [demand], equipment_calibrations: [] });
+    const out = await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh, ...at });
+    expect(out).toMatchObject({ amount: 22, amountMax: 88, unit: 'fl_oz', gallons: 110, basis: 'per_gallon', reason: null, ratePerGallon: { lo: 0.2, hi: 0.8, unit: 'fl_oz' }, rateVerified: true });
+    expect((await jobCard.mixForProduct('d', 1, { serviceId: 'svc1', dbh, ...at })).amount).toBe(0.2);
   });
 
   test('a product the lawn plan resolved is dosed at the plan\'s rate, not the catalog default (Codex r12 P1)', async () => {
