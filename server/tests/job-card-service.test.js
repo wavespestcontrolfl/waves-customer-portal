@@ -1595,5 +1595,11 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // A product the plan does not name stays under the add-on's line, and the plan's blackout says nothing about that mix.
     rows.products_catalog = [{ id: 'mn', name: 'Mn Combo', default_rate: '1-2', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' }];
     expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
+    // A plan that failed to load names nothing knowably: it keeps governing, add-on line or not (hook P1).
+    buildPlan.mockRejectedValue(new Error('turf profile read failed'));
+    expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: null, context: { line: null }, planBlocks: [{ code: 'plan_unavailable' }] });
+    // An alternate-address visit is not an outage: the add-on line governs there.
+    rows.scheduled_services = [{ ...rows.scheduled_services[0], address_diverges: true }];
+    expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
   });
 });

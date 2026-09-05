@@ -1478,8 +1478,11 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // plan with a Tree & Shrub add-on doses at the plan's rate, as the card
   // shows it, and the add-on's "if needed" never withholds a plan-selected
   // product. An add-on line governs only a product the plan does not name,
-  // and then the plan's blocks say nothing about that mix.
-  const protocolLine = planned ? null : addonLine;
+  // and then the plan's blocks say nothing about that mix. A plan that
+  // failed to load names nothing knowably: it keeps governing (its
+  // plan_unavailable block, no dose). An alternate-address visit is not an
+  // outage — its plan is known not to apply — so the add-on line governs.
+  const protocolLine = planned || lawnPlan?.error ? null : addonLine;
   const plan = protocolLine ? null : lawnPlan;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
