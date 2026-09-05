@@ -1054,21 +1054,26 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
 // sweep time) that the claim now finds undispatchable — vendor deactivated
 // or its gate flipped in between — would otherwise have neither bell: hand
 // it to the office with the sweep's own request-id-deduped bell (Codex r12
-// P2). Idempotent: a bell the sweep already rang is a no-op.
+// P2). Idempotent: a bell the sweep already rang is a no-op. Returns the
+// run's bell state: { belled } (delivered), { bellLost } (not persisted —
+// the run goes red, re-rung next run), or { requestClosed } — the request
+// was received or cancelled since it was scanned / claimed, so no bell:
+// staff must never be told to buy a closed need (Codex r26 P2).
 const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigured']);
 async function bellUndispatchable(conn, requestId, notify) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
-  const product = request && await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
-  if (!request || !product) return false;
+  if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return { requestClosed: true };
+  const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
+  if (!product) return { bellLost: true };
   // notifyAdmin resolves null when it could not persist the row: a null
   // hand-off is NOT a delivered bell (Codex r17 P2).
   const rung = await require('./auto-reorder').ringRestockBell({ notify, product, request });
-  if (!rung) return false;
+  if (!rung) return { bellLost: true };
   // The request-id dedupe returns the EXISTING row unchanged when the text
   // is the same — and the dispatcher's claim marked that row read on the
   // hand-off. A handback must be visible again: reopen it (Codex r20 P2).
   await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null, updated_at: new Date() });
-  return true;
+  return { belled: true };
 }
 
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
@@ -1076,17 +1081,13 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   // bell because this lane would order) and the dispatch is the same
   // hand-off as a vendor gate: the request gets the sweep's deduped bell
   // now, not after another silent day (Codex r18 P2).
-  if (!gateEnvValue(GATE)) {
-    const belled = await bellUndispatchable(conn, requestId, notify);
-    return { requestId, skipped: 'gated', ...(belled ? { belled: true } : { bellLost: true }) };
-  }
+  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify)) };
   const registry = adapters || loadAdapters();
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry }));
   if (claim.skipped) {
-    const belled = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : false;
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
-    const bellState = !HANDOFF_SKIPS.has(claim.skipped) ? {} : belled ? { belled: true } : { bellLost: true };
+    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : {};
     return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...bellState };
   }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });

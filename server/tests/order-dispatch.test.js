@@ -131,6 +131,14 @@ test('vendor without an adapter → skipped, no ledger row', async () => {
   expect(mockState.ledgerRows).toHaveLength(0);
 });
 
+test('a hand-off for a request received or cancelled since it was scanned rings NO bell — requestClosed, not bellLost (Codex r26 P2)', async () => {
+  delete process.env.GATE_AUTO_ORDER;
+  mockState.request = { ...baseRequest(), status: 'cancelled' };
+  expect(await run(mockAdapter())).toEqual({ requestId: 'req-1', skipped: 'gated', requestClosed: true });
+  expect(notify).not.toHaveBeenCalled();
+  expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(0);
+});
+
 test('placed: claim first, then ledger placed + request ordered + audit, no bell', async () => {
   mockState.advisoryLocks = [];
   const a = mockAdapter();

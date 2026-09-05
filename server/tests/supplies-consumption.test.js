@@ -29,11 +29,13 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   const trx = (table) => {
     const q = {};
     q.where = () => q;
-    q.whereRaw = () => q;
+    q._sql = '';
+    q.whereRaw = (sql) => { q._sql += sql; return q; };
     q.forUpdate = () => q;
     q.first = async () => {
       if (table === 'product_inventory_movements') return techLogged ? { id: 'mv-tech' } : null;
-      if (table === 'notifications') return handedOff ? { id: 'bell-1' } : null;
+      // handedOff 'auto' = the only matching bell is one this module retired itself (metadata.autoRetired): the settled read's predicate excludes it.
+      if (table === 'notifications') return handedOff === 'auto' ? (q._sql.includes('autoRetired') ? null : { id: 'bell-auto' }) : handedOff ? { id: 'bell-1' } : null;
       return products[0];
     };
     q.update = async (row) => { updates.push({ table, row }); return 1; };
@@ -303,6 +305,7 @@ test('a lookup bell rung after a concurrent retry already deducted the visit\'s 
     q.update = async (row) => { updates.push({ table, row }); return 1; };
     return q;
   };
+  db.raw = (sql) => sql;
   const res = await consumeCompletionSupplies(db, args);
   expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
@@ -315,6 +318,15 @@ test('a successful deduction retires the failure bells an earlier attempt rang f
   const retired = updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(1);
   expect(retired[0].row.read_at).toBeInstanceOf(Date);
+  expect(String(retired[0].row.metadata)).toContain('autoRetired'); // stamped so it never reads as a staff hand-off (Codex r26 P1)
+});
+
+test('a lookup bell this module auto-retired (a concurrent retry deducted the kit) does NOT hand off the next kit product — it is deducted (Codex r26 P1)', async () => {
+  const { db, inserts } = fakeDb({ products: [sign], handedOff: 'auto' });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.skipped).toEqual([]);
+  expect(res.consumed).toHaveLength(1);
+  expect(inserts).toHaveLength(1);
 });
 
 test('an already_consumed retry (the movement exists) still retires the stale failure bells (Codex r17 P2)', async () => {

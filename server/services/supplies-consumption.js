@@ -104,7 +104,10 @@ async function settledReason(trx, { productId, scheduledServiceId }) {
   if (await usageRows().whereRaw("coalesce(metadata->>'source', '') <> ?", [SOURCE]).first('id')) return 'already_logged_by_tech';
   if (await usageRows().whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')) return 'already_consumed';
   const keys = [`supplies-consumption-failed:${productId}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`];
-  if (await trx('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).first('id')) return 'handed_off';
+  // A bell this module retired itself (metadata.autoRetired — a real
+  // deduction superseded it) was never a hand-off: it must not skip the
+  // next kit product of the same visit (Codex r26 P1).
+  if (await trx('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereRaw("coalesce(metadata->>'autoRetired', '') <> 'true'").first('id')) return 'handed_off';
   return null;
 }
 
@@ -143,11 +146,13 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 // this hook again) retires the failure bell an earlier attempt rang for
 // the same (product, visit) — and the visit-scoped lookup bell — so staff
 // do not follow a stale "adjust by hand" on top of the real deduction
-// (Codex r15 P2). Best effort, never throws.
+// (Codex r15 P2). The row is stamped metadata.autoRetired so settledReason
+// never mistakes it for a staff hand-off (Codex r26 P1). Best effort,
+// never throws.
 async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
   const keys = [`supplies-consumption-failed:lookup:${scheduledServiceId}`, ...(productId ? [`supplies-consumption-failed:${productId}:${scheduledServiceId}`] : [])];
   try {
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date() });
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
   } catch (err) {
     logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
   }
