@@ -111,8 +111,11 @@ const CAPS_LOCK_KEY = 'vendor-order-caps';
 // received once more — its own receipt (Codex r27 P1, owner ruling).
 const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing', 'no_final_total', 'placed_on_received_request']);
 // A received request settles its ledger row — unless the order landed after
-// that receipt (evidence.landedAfterReceive): that row stays live.
-const RECEIVED_SETTLES_SQL = "(prr.status <> 'received' OR NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)";
+// that receipt (evidence.landedAfterReceive), or the claim is still
+// 'placing' (an older pod received while the call is out: the marker is
+// stamped only when the call returns, and the claim must stay live until
+// then — Codex r29 P1): those rows stay live.
+const RECEIVED_SETTLES_SQL = "(vo.status = 'placing' OR prr.status <> 'received' OR NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)";
 
 // vendors.code → adapter (.claude/vendor-codes.md). Name is the fallback for
 // a row that predates the code column.
@@ -703,7 +706,8 @@ async function lockedProductGuards(trx, { request }) {
     .join('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .where('prr.product_id', request.product_id)
     .whereNot('prr.id', request.id)
-    .whereNotNull('vo.placed_at')
+    // A sibling claim still placing counts too (its request may already be received — Codex r29 P1).
+    .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
     .whereRaw(RECEIVED_SETTLES_SQL)
     .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .first('vo.id');
@@ -1185,6 +1189,12 @@ async function bellUndispatchable(conn, requestId, notify) {
     await retireRequestBell(conn, requestId);
     return { requestClosed: true };
   }
+  // Another pod claimed it meanwhile (rolling gate change): its claim
+  // retired a bell that did not exist yet — retire this one (Codex r29 P1).
+  if (await findLiveAutoOrder(conn, request.product_id)) {
+    await retireRequestBell(conn, requestId);
+    return { autoOrderLive: true };
+  }
   return { belled: true };
 }
 
@@ -1231,7 +1241,7 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('vo.status', 'placing')
     .where('vo.updated_at', '<', cutoff) // last heartbeat, not creation time
-    .select('vo.id', 'vo.adapter', 'vo.amount_cents', 'vo.created_at', 'vo.updated_at', 'prr.id as request_id', 'pc.name as product_name', 'v.id as vendor_id', 'v.name as vendor_name');
+    .select('vo.id', 'vo.adapter', 'vo.amount_cents', 'vo.created_at', 'vo.updated_at', 'prr.id as request_id', 'prr.status as request_status', 'pc.name as product_name', 'v.id as vendor_id', 'v.name as vendor_name');
   const recovered = [];
   const bellPending = [];
   const unrecovered = [];
@@ -1240,6 +1250,9 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
       const parked = await park(conn, {
         ledger: { id: row.id }, request: { id: row.request_id }, product: { name: row.product_name || '?' }, vendor: { id: row.vendor_id, name: row.vendor_name || '?' }, adapterKey: row.adapter, notify,
         staleBefore: cutoff,
+        // Received by hand while the claim was out: the park keeps the
+        // marker that holds the live-order guards closed (Codex r29 P1).
+        evidence: row.request_status === 'received' ? { landedAfterReceive: new Date().toISOString() } : null,
         reason: 'stale_placing', message: `the dispatcher died mid-order (claimed ${new Date(row.created_at).toISOString()}, last heartbeat ${new Date(row.updated_at || row.created_at).toISOString()}); the ${row.vendor_name || 'vendor'} call may or may not have gone out.`, amountCents: row.amount_cents,
       });
       if (parked.skipped) continue; // settled by its own dispatcher between the scan and the park

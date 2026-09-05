@@ -161,8 +161,10 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
     // kit — between our failed attempt and this insert; its bell clear ran
     // before our bell existed. Re-check the settled movement AFTER the bell
     // persisted and retire our own bell when the kit is in fact deducted.
+    // ANY usage movement settles the product — a tech-logged one included,
+    // the same predicate settledReason applies (Codex r29 P2).
     const settled = product
-      ? await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')
+      ? await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).first('id')
       : await lookupSettled(db, { scheduledServiceId, serviceLine });
     if (settled) await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null });
   } catch (bellErr) {

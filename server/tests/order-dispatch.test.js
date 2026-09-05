@@ -44,7 +44,7 @@ jest.mock('../models/db', () => {
     for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
     q.first = async (...cols) => {
-      if (cols[0] === 'vo.status') return mockState.liveAutoOrder; // assertNoLiveAutoOrder's aliased join
+      if (cols[0] === 'vo.status') return mockState.liveAutoOrderAfterBell && mockState.bellRung ? mockState.liveAutoOrderAfterBell : mockState.liveAutoOrder; // findLiveAutoOrder's aliased join (a claim landing after the hand-off bell: liveAutoOrderAfterBell)
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
@@ -225,6 +225,27 @@ test('the claim retires the request\'s manual bell in its own transaction; a fai
     expect(b.place).not.toHaveBeenCalled();
     expect(mockState.ledgerRows).toHaveLength(0);
   } finally { mockState.bellRetireThrows = false; }
+});
+
+test('a claim another pod inserts while the hand-off bell is being written retires that bell after the write (Codex r29 P1)', async () => {
+  process.env.GATE_AUTO_ORDER = 'false';
+  mockState.liveAutoOrderAfterBell = { status: 'placing', external_order_number: null, vendor_name: 'Sticker Mule' };
+  notify = jest.fn(async () => { mockState.bellRung = true; return { id: 'n1' }; });
+  try {
+    const r = await run(mockAdapter());
+    expect(r).toEqual({ requestId: 'req-1', skipped: 'gated', autoOrderLive: true });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(mockState.updates.some((u) => u.table === 'notifications' && u.row.read_at instanceof Date)).toBe(true); // the just-written bell retired
+  } finally { mockState.liveAutoOrderAfterBell = null; mockState.bellRung = false; }
+});
+
+test('stale recovery of a claim whose request an older pod received meanwhile parks WITH landedAfterReceive (Codex r29 P1)', async () => {
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', request_status: 'received', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  const r = await dispatch.recoverStalePlacing({ notify });
+  expect(r.recovered).toEqual(['ledger-old']);
+  const patch = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status).row;
+  expect(patch.status).toBe('needs_review');
+  expect(JSON.parse(patch.evidence).landedAfterReceive).toEqual(expect.any(String));
 });
 
 test('master gate off with an automatic order already OUT for the product → no "order manually" hand-off bell (hook r27 P0/P1)', async () => {
