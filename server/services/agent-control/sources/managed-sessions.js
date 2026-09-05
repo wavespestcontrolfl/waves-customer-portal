@@ -6,11 +6,12 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, keyset, isMissingSchema } = require('./shape');
 const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
-const START = 'created_at';
+const START = db.raw("date_trunc('milliseconds', created_at)");
+const ID = 'provider_ref';
 const COLUMNS = [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',
   'latency_ms', 'input_tokens', 'output_tokens', 'created_at', 'run_id', 'trace_id', 'workload',
@@ -51,13 +52,10 @@ function baseQuery() {
     .where((q) => q.whereNull('workload').orWhere('workload', 'live'));
 }
 
-async function list({ from, before = null, limit = 200 } = {}) {
+async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await baseQuery()
-      .where(START, '>=', from)
-      .modify((q) => { if (before) q.where(START, '<=', before); })
-      .orderBy(START, 'desc')
-      .limit(limit);
+    const rows = await keyset(baseQuery()
+      .where(START, '>=', from), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

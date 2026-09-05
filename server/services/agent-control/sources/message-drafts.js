@@ -4,11 +4,12 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, modelLabel, keyset, isMissingSchema } = require('./shape');
 
 const SOURCE = 'message_drafts';
 const LANE = 'sms_draft';
-const START = 'd.created_at';
+const START = db.raw("date_trunc('milliseconds', d.created_at)");
+const ID = 'd.id';
 const COLUMNS = [
   'd.id', 'd.intent', 'd.drafter', 'd.draft_ms', 'd.created_at', 'd.approved_at', 'd.sent_at', 'd.status',
   'd.campaign_type', 'd.purpose', 'd.customer_id', 'd.sms_log_id', 'd.model', 'd.prompt_version',
@@ -69,16 +70,13 @@ function baseQuery() {
   return db('message_drafts as d').leftJoin('customers as c', 'c.id', 'd.customer_id').select(COLUMNS);
 }
 
-async function list({ from, before = null, limit = 200 } = {}) {
+async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await baseQuery()
+    const rows = await keyset(baseQuery()
       .where((q) => {
         q.where('d.status', 'pending');
         q.orWhere(START, '>=', from);
-      })
-      .modify((q) => { if (before) q.where(START, '<=', before); })
-      .orderBy(START, 'desc')
-      .limit(limit);
+      }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

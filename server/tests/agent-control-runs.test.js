@@ -54,10 +54,13 @@ jest.mock('../models/db', () => {
             for (const r of rows) {
               if (!matches(r, st.where)) continue;
               for (const [k, v] of Object.entries(st.payload)) {
-                r[k] = v && typeof v === 'object' && v.__merge ? { ...(r[k] || {}), ...v.__merge } : v;
+                if (v && typeof v === 'object' && v.__merge) r[k] = { ...(r[k] || {}), ...v.__merge };
+                else if (v && typeof v === 'object' && v.__inc) r[k] = Number(r[k] || 0) + 1;
+                else r[k] = v;
               }
               out += 1;
             }
+            if (st.returning) out = rows.filter((r) => matches(r, st.where)).map((r) => ({ [st.returning]: r[st.returning] }));
           } else {
             const found = rows.filter((r) => matches(r, st.where));
             out = st.first ? found[0] || null : found;
@@ -69,7 +72,7 @@ jest.mock('../models/db', () => {
     return chain;
   };
   // summary || ?::jsonb → a merge marker the fake update applies
-  db.raw = (sql, binds) => (/\|\|/.test(sql) ? { __merge: JSON.parse(binds[0]) } : { sql, binds });
+  db.raw = (sql, binds) => (/\|\|/.test(sql) ? { __merge: JSON.parse(binds[0]) } : /\+ 1$/.test(sql) ? { __inc: true } : { sql, binds });
   db.__store = store;
   db.__state = state;
   return db;
@@ -204,6 +207,37 @@ describe('start / step / finish', () => {
     expect(events(h.id).filter((e) => e === 'budget_exceeded')).toHaveLength(1);
     expect(runRow().summary).toEqual({ budget_exceeded: 'steps' });
     expect(store.agent_run_steps).toHaveLength(max + 2);
+  });
+});
+
+describe('concurrent starts', () => {
+  test('two starts on one source key get distinct attempts, and the older handle no longer writes the run', async () => {
+    const a = await runs.startRun(base);
+    const b = await runs.startRun(base);
+    expect(a.id).toBe(b.id);
+    expect([a.attemptNo, b.attemptNo]).toEqual([1, 2]);
+    expect(a.attemptId).not.toBe(b.attemptId);
+    expect(store.agent_attempts.map((x) => x.attempt_no)).toEqual([1, 2]);
+    await a.finish({ result: 'succeeded', disposition: 'applied' });
+    // fenced out: the run still belongs to attempt 2
+    expect(runRow()).toMatchObject({ lifecycle: 'running', attempts: 2, result: null, disposition: null });
+    expect(store.agent_attempts[0]).toMatchObject({ result: 'succeeded' });
+    await a.heartbeat({ progress: true });
+    expect(runRow().progress_sequence ?? 0).toBe(0);
+    await b.fail({ error: new Error('x'), errorCode: 'openai_500' });
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'errored', attempts: 2 });
+  });
+
+  test('a write failure logs the operation and error code, never the driver message', async () => {
+    const h = await runs.startRun(base);
+    // step past the rate limiter's window (one warn per minute)
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 120_000);
+    try {
+      state.failNext = 'run_events';
+      await h.checkpoint({ title: 'Jane Doe 941-555-0100' });
+    } finally { nowSpy.mockRestore(); }
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    expect(mockWarn.mock.calls[0][0]).toBe('[agent-runs] run_events failed (Error)');
   });
 });
 

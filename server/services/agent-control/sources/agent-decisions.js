@@ -6,10 +6,11 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, modelLabel, keyset, isMissingSchema } = require('./shape');
 
 const SOURCE = 'agent_decisions';
-const START = 'created_at';
+const START = db.raw("date_trunc('milliseconds', created_at)");
+const ID = 'id';
 const COLUMNS = [
   'id', 'workflow', 'agent_name', 'mode', 'status', 'entity_type', 'entity_id', 'customer_id', 'lead_id',
   'detected_intent', 'confidence', 'confidence_label', 'safety_flags', 'model', 'prompt_version',
@@ -79,17 +80,14 @@ function fromRow(d) {
   });
 }
 
-async function list({ from, before = null, limit = 200 } = {}) {
+async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await db('agent_decisions')
+    const rows = await keyset(db('agent_decisions')
       .select(COLUMNS)
       .where((q) => {
         q.whereIn('status', ['pending_review', 'scheduled', 'active']);
         q.orWhere(START, '>=', from);
-      })
-      .modify((q) => { if (before) q.where(START, '<=', before); })
-      .orderBy(START, 'desc')
-      .limit(limit);
+      }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

@@ -128,6 +128,21 @@ function canonicalRun(fields) {
   };
 }
 
+// Keyset paging every adapter applies the same way: rows order by (start
+// DESC, id DESC) and a `cursor` = { at, id } (the last row a previous page
+// consumed) selects only rows strictly after it in that order. `start` is
+// the adapter's start expression truncated to milliseconds so the JS Date
+// the cursor carries compares exactly (timestamptz keeps microseconds).
+function keyset(query, { start, id, cursor, limit }) {
+  if (cursor) {
+    query.where((q) => {
+      q.where(start, '<', cursor.at);
+      q.orWhere((w) => w.where(start, '=', cursor.at).andWhere(id, '<', cursor.id));
+    });
+  }
+  return query.orderBy([{ column: start, order: 'desc' }, { column: id, order: 'desc' }]).limit(limit);
+}
+
 // A source that has not been migrated on this deployment (or whose columns
 // predate this reader) contributes nothing, reported as unavailable; any
 // other failure is thrown — a monitoring surface must never present an
@@ -136,4 +151,4 @@ function isMissingSchema(err) {
   return !!err && (err.code === MISSING_TABLE_SQLSTATE || err.code === UNDEFINED_COLUMN_SQLSTATE);
 }
 
-module.exports = { canonicalRun, defined, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };
+module.exports = { canonicalRun, defined, keyset, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };

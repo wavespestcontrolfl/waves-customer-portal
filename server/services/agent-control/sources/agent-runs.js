@@ -5,7 +5,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, isMissingSchema } = require('./shape');
+const { canonicalRun, keyset, isMissingSchema } = require('./shape');
 
 const SOURCE = 'agent_runs';
 
@@ -60,8 +60,9 @@ function fromRow(run, steps = []) {
   });
 }
 
-// The column rows sort and page on = the run's startedAt in fromRow.
-const START = db.raw('COALESCE(r.started_at, r.created_at)');
+// Sort / page key = the run's startedAt in fromRow, at ms precision.
+const START = db.raw("date_trunc('milliseconds', COALESCE(r.started_at, r.created_at))");
+const ID = 'r.id';
 const STEP_COUNTS = [
   db.raw("(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id AND s.status = 'done') AS steps_done"),
   db.raw('(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id) AS steps_total'),
@@ -74,20 +75,15 @@ function baseQuery() {
     .select('r.*', 'w.title as work_item_title', 'w.entity_type', 'w.entity_id', ...STEP_COUNTS);
 }
 
-async function list({ from, before = null, laneId = null, limit = 200 } = {}) {
+async function list({ from, cursor = null, laneId = null, limit = 200 } = {}) {
   try {
-    const rows = await baseQuery()
+    const rows = await keyset(baseQuery()
       .where((q) => {
         // live runs stay listed however old; terminal ones by the window
         q.where('r.lifecycle', '<>', 'terminal');
         q.orWhere(START, '>=', from);
       })
-      .modify((q) => {
-        if (before) q.where(START, '<=', before);
-        if (laneId) q.where('r.lane_id', laneId);
-      })
-      .orderBy(START, 'desc')
-      .limit(limit);
+      .modify((q) => { if (laneId) q.where('r.lane_id', laneId); }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map((r) => fromRow(r)), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

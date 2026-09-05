@@ -183,7 +183,7 @@ describe('listRuns', () => {
   });
 
   test('status / area / lane filters; a lane filter skips single-lane adapters that cannot match', async () => {
-    spies.autonomousRuns.mockResolvedValue({ runs: [laneRun({ id: 'a1' }), laneRun({ id: 'a2', result: 'errored' })], unavailable: false });
+    spies.autonomousRuns.mockImplementation(sqlLike([laneRun({ id: 'a1' }), laneRun({ id: 'a2', result: 'errored' })]));
     spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: 'd1', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) })], unavailable: false });
     expect((await runIndex.listRuns({ status: 'failed', now: NOW })).runs.map((r) => r.key)).toEqual(['autonomous_runs:a2']);
     expect((await runIndex.listRuns({ status: 'done', now: NOW })).runs.map((r) => r.key)).toEqual(['autonomous_runs:a1']);
@@ -197,36 +197,72 @@ describe('listRuns', () => {
     expect(spies.agentDecisions).toHaveBeenCalled();
   });
 
-  test('keyset cursor: the cut is pushed into the source queries (before + limit), pages walk the window, counts only on page 1; bad params are 400', async () => {
+  // A source behaving like its SQL: order (start desc, id desc), resume strictly after the cursor, cap at limit.
+  const sqlLike = (rows) => async ({ cursor, limit }) => {
+    const key = (r) => [new Date(r.startedAt).getTime(), r.id];
+    const sorted = [...rows].sort((x, y) => (key(y)[0] - key(x)[0]) || (key(y)[1] < key(x)[1] ? -1 : key(y)[1] > key(x)[1] ? 1 : 0));
+    const after = cursor ? sorted.filter((r) => key(r)[0] < cursor.at.getTime() || (key(r)[0] === cursor.at.getTime() && r.id < cursor.id)) : sorted;
+    return { runs: after.slice(0, limit), unavailable: false };
+  };
+
+  test('keyset cursor: per-source positions resume each source strictly after its last row; pages walk the window; counts only on page 1; bad params are 400', async () => {
     const all = [1, 2, 3, 4, 5].map((i) => laneRun({ id: `a${i}`, createdAt: ago(i * 1000) }));
-    // a source behaves like SQL: newest first, cut at `before`, capped at `limit`
-    spies.autonomousRuns.mockImplementation(async ({ before, limit }) => ({
-      runs: all.filter((r) => !before || new Date(r.startedAt) <= before).slice(0, limit), unavailable: false,
-    }));
+    spies.autonomousRuns.mockImplementation(sqlLike(all));
     const p1 = await runIndex.listRuns({ limit: 2, now: NOW });
     expect(p1.runs.map((r) => r.id)).toEqual(['a1', 'a2']);
     expect(p1.counts.all).toBe(5);
     expect(p1.countsCapped).toBe(false);
-    expect(spies.autonomousRuns).toHaveBeenLastCalledWith(expect.objectContaining({ before: null, limit: 2000 }));
+    expect(spies.autonomousRuns).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: null, limit: 2000 }));
     const p2 = await runIndex.listRuns({ limit: 2, cursor: p1.nextCursor, now: NOW });
     expect(p2.runs.map((r) => r.id)).toEqual(['a3', 'a4']);
     expect(p2.counts).toBeNull();
-    expect(spies.autonomousRuns).toHaveBeenLastCalledWith(expect.objectContaining({ before: new Date(p1.runs[1].startedAt), limit: 3 }));
+    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ cursor: { at: new Date(p1.runs[1].startedAt), id: 'a2' }, limit: 3 }));
     const p3 = await runIndex.listRuns({ limit: 2, cursor: p2.nextCursor, now: NOW });
     expect(p3.runs.map((r) => r.id)).toEqual(['a5']);
     expect(p3.nextCursor).toBeNull();
-    // a source that filled the first-page scan cap: counts are flagged and a cursor is offered past the cap
-    spies.autonomousRuns.mockImplementation(async ({ limit }) => ({ runs: all.slice(0, limit), unavailable: false }));
-    const capped = await runIndex.listRuns({ limit: 10, now: NOW });
-    expect(capped.runs).toHaveLength(5);
-    expect(capped.countsCapped).toBe(false);
-    spies.messageDrafts.mockImplementation(async ({ limit }) => ({ runs: Array.from({ length: limit }, (_, i) => canonicalRun({ source: 'message_drafts', id: `d${i}`, laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i + 1) })), unavailable: false }));
-    const hit = await runIndex.listRuns({ limit: 10, now: NOW });
-    expect(hit.countsCapped).toBe(true);
-    expect(hit.nextCursor).not.toBeNull();
-    for (const bad of [{ cursor: '!!' }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }]) {
+    for (const bad of [{ cursor: '!!' }, { cursor: Buffer.from('{"p":{"nope":["x","y"]}}').toString('base64url') }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }]) {
       await expect(runIndex.listRuns({ ...bad, now: NOW })).rejects.toMatchObject({ status: 400 });
     }
+  });
+
+  test('a page never ends early: a status filter whose matches sit past non-matching slices keeps reading; equal timestamps page exactly', async () => {
+    const mixed = [1, 2, 3, 4, 5, 6, 7].map((i) => laneRun({ id: `m${i}`, createdAt: ago(i * 1000), result: i === 6 || i === 7 ? 'errored' : 'succeeded' }));
+    spies.autonomousRuns.mockImplementation(sqlLike(mixed));
+    const f1 = await runIndex.listRuns({ limit: 1, status: 'failed', now: NOW });
+    expect(f1.runs.map((r) => r.id)).toEqual(['m6']);
+    const f2 = await runIndex.listRuns({ limit: 1, status: 'failed', cursor: f1.nextCursor, now: NOW });
+    expect(f2.runs.map((r) => r.id)).toEqual(['m7']);
+    expect(f2.nextCursor).toBeNull();
+    // six rows at one timestamp, pages of two: every row exactly once
+    const band = [1, 2, 3, 4, 5, 6].map((i) => laneRun({ id: `b${i}`, createdAt: ago(1000) }));
+    spies.autonomousRuns.mockImplementation(sqlLike(band));
+    const seen = [];
+    let cursor = null;
+    for (let i = 0; i < 5 && (i === 0 || cursor); i += 1) {
+      const pg = await runIndex.listRuns({ limit: 2, cursor, now: NOW });
+      seen.push(...pg.runs.map((r) => r.id));
+      cursor = pg.nextCursor;
+    }
+    expect(seen).toEqual(['b6', 'b5', 'b4', 'b3', 'b2', 'b1']);
+    expect(cursor).toBeNull();
+  });
+
+  test('sources merge newest-first across pages, each resuming from its own position; a capped first page flags counts and offers a cursor', async () => {
+    const content = [1, 3, 5].map((i) => laneRun({ id: `c${i}`, createdAt: ago(i * 1000) }));
+    const drafts = [2, 4, 6].map((i) => canonicalRun({ source: 'message_drafts', id: `d${i}`, laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i * 1000) }));
+    spies.autonomousRuns.mockImplementation(sqlLike(content));
+    spies.messageDrafts.mockImplementation(sqlLike(drafts));
+    const p1 = await runIndex.listRuns({ limit: 4, now: NOW });
+    expect(p1.runs.map((r) => r.id)).toEqual(['c1', 'd2', 'c3', 'd4']);
+    const p2 = await runIndex.listRuns({ limit: 4, cursor: p1.nextCursor, now: NOW });
+    expect(p2.runs.map((r) => r.id)).toEqual(['c5', 'd6']);
+    expect(p2.nextCursor).toBeNull();
+    // a source that fills the first-page scan cap
+    spies.messageDrafts.mockImplementation(async ({ cursor, limit }) => ({ runs: cursor ? [] : Array.from({ length: limit }, (_, i) => canonicalRun({ source: 'message_drafts', id: `x${String(i).padStart(4, '0')}`, laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i + 1) })), unavailable: false }));
+    const hit = await runIndex.listRuns({ limit: 10, now: NOW });
+    expect(hit.countsCapped).toBe(true);
+    expect(hit.runs).toHaveLength(10);
+    expect(hit.nextCursor).not.toBeNull();
   });
 });
 

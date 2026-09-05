@@ -57,11 +57,15 @@ const WARN_INTERVAL_MS = 60_000;
 const WORKER_ID = `${os.hostname()}:${process.pid}`.slice(0, 120);
 
 let lastWarnAt = 0;
+// Logs the operation and the driver's error CODE only: a knex error message
+// carries the compiled SQL, and a ledger write carries work-item titles,
+// summaries and artifact text (AGENTS.md: no PII in logs).
 function warn(where, err) {
   const now = Date.now();
   if (now - lastWarnAt < WARN_INTERVAL_MS) return;
   lastWarnAt = now;
-  logger.warn(`[agent-runs] ${where} failed: ${err && err.message ? err.message : err}`);
+  const code = (err && (err.code || err.name)) || 'error';
+  logger.warn(`[agent-runs] ${where} failed (${code})`);
 }
 
 function runGateOn() {
@@ -182,18 +186,17 @@ async function insertRun(args, laneId, policy, workItemId, traceId, now) {
   return db('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).first();
 }
 
+// The attempt number is allocated by an atomic UPDATE … attempts + 1
+// RETURNING, so two concurrent starts on one source key get distinct
+// attempts (never one attempt id shared by two handles). Every later write
+// from a handle is fenced on `attempts = its attemptNo` (fenced() below):
+// once a newer attempt opened, the older handle's finish / fail / heartbeat
+// no longer touch the run — only its own attempt row.
 async function openAttempt(run, policy, now) {
-  const attemptNo = Number(run.attempts || 0) + 1;
-  const [attempt] = await db('agent_attempts')
-    .insert({ run_id: run.id, attempt_no: attemptNo, worker_id: WORKER_ID, started_at: now })
-    .onConflict(['run_id', 'attempt_no'])
-    .ignore()
-    .returning('id');
-  const attemptId = attempt ? attempt.id || attempt : (await db('agent_attempts').where({ run_id: run.id, attempt_no: attemptNo }).first('id'))?.id || null;
   // A reopened run gets a fresh lease and a clean current outcome — the
   // previous attempt's result and error live on in agent_attempts.
-  await db('agent_runs').where({ id: run.id }).update({
-    attempts: attemptNo,
+  const [updated] = await db('agent_runs').where({ id: run.id }).update({
+    attempts: db.raw('attempts + 1'),
     lifecycle: 'running',
     worker_id: WORKER_ID,
     leased_at: now,
@@ -207,8 +210,12 @@ async function openAttempt(run, policy, now) {
     error_message: null,
     last_heartbeat_at: now,
     updated_at: now,
-  });
-  return { attemptId, attemptNo };
+  }).returning('attempts');
+  const attemptNo = Number(updated && updated.attempts != null ? updated.attempts : updated);
+  const [attempt] = await db('agent_attempts')
+    .insert({ run_id: run.id, attempt_no: attemptNo, worker_id: WORKER_ID, started_at: now })
+    .returning('id');
+  return { attemptId: attempt ? attempt.id || attempt : null, attemptNo };
 }
 
 /**
@@ -252,10 +259,12 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   let toolCalls = 0;
   let budgetFlagged = false;
   let progress = Number(run.progress_sequence || 0);
+  // this handle's attempt is the run's current one (see openAttempt)
+  const fenced = () => db('agent_runs').where({ id: runId, attempts: attemptNo });
 
   async function touch(patch, extendLease = true) {
     const now = new Date();
-    return guarded('heartbeat', () => db('agent_runs').where({ id: runId }).update({
+    return guarded('heartbeat', () => fenced().update({
       last_heartbeat_at: now,
       ...(extendLease ? { lease_expires_at: new Date(now.getTime() + policy.stall_after_ms) } : {}),
       updated_at: now,
@@ -276,7 +285,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   async function flagBudget(kind) {
     if (budgetFlagged) return;
     budgetFlagged = true;
-    await guarded('budget', () => db('agent_runs').where({ id: runId }).update({
+    await guarded('budget', () => fenced().update({
       summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]),
       updated_at: new Date(),
     }));
@@ -385,7 +394,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     const now = new Date();
     const res = RESULT.includes(result) ? result : 'succeeded';
     const dispo = DISPOSITION.includes(disposition) ? disposition : null;
-    await guarded('finish', () => db('agent_runs').where({ id: runId }).update({
+    await guarded('finish', () => fenced().update({
       lifecycle: 'terminal',
       result: res,
       disposition: dispo,
@@ -424,7 +433,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
       ? { lifecycle: 'queued', result: null, finished_at: null, event: 'retry_scheduled' }
       : { lifecycle: 'terminal', result, finished_at: now, event: 'failed' };
     await closeAttempt(result, { failureClass: klass, errorCode: code, errorMessage: message });
-    await guarded('fail', () => db('agent_runs').where({ id: runId }).update({
+    await guarded('fail', () => fenced().update({
       lifecycle: outcome.lifecycle,
       result: outcome.result,
       failure_class: klass,

@@ -7,10 +7,11 @@
 
 const db = require('../../../models/db');
 const { LANE_RUNTIME } = require('../lane-policies');
-const { canonicalRun, humanize, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, keyset, isMissingSchema } = require('./shape');
 
 const SOURCE = 'job_health';
-const START = 'last_started_at';
+const START = db.raw("date_trunc('milliseconds', last_started_at)");
+const ID = 'job_name';
 const COLUMNS = ['job_name', 'last_started_at', 'last_finished_at', 'last_success_at', 'last_status', 'last_error', 'last_duration_ms', 'consecutive_failures', 'updated_at'];
 
 let workflowLane = null;
@@ -69,17 +70,14 @@ function fromRow(job) {
   });
 }
 
-async function list({ from, before = null, limit = 200 } = {}) {
+async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await db('job_health')
+    const rows = await keyset(db('job_health')
       .select(COLUMNS)
       .where((q) => {
         q.where('last_status', 'running').orWhere('last_status', 'failed').orWhere('consecutive_failures', '>', 0);
         q.orWhere(START, '>=', from);
-      })
-      .modify((q) => { if (before) q.where(START, '<=', before); })
-      .orderBy(START, 'desc')
-      .limit(limit);
+      }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

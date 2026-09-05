@@ -6,12 +6,13 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, isMissingSchema } = require('./shape');
+const { canonicalRun, humanize, modelLabel, keyset, isMissingSchema } = require('./shape');
 
 const SOURCE = 'call_log';
 const LANE = 'call_extraction';
-// The column rows sort and page on = the run's startedAt in fromRow.
-const START = db.raw('COALESCE(processing_started_at, created_at)');
+// Sort / page key = the run's startedAt in fromRow, at ms precision.
+const START = db.raw("date_trunc('milliseconds', COALESCE(processing_started_at, created_at))");
+const ID = 'id';
 const COLUMNS = [
   'id', 'direction', 'status', 'duration_seconds', 'processing_status', 'transcription_status', 'v2_extraction_status',
   'enrichment_status', 'classification', 'disposition', 'call_outcome', 'processing_started_at', 'processing_heartbeat_at',
@@ -81,18 +82,15 @@ function fromRow(c) {
   });
 }
 
-async function list({ from, before = null, limit = 200 } = {}) {
+async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
-    const rows = await db('call_log')
+    const rows = await keyset(db('call_log')
       .select(COLUMNS)
       .whereNotNull('processing_status')
       .where((q) => {
         q.where('processing_status', 'processing');
         q.orWhere(START, '>=', from);
-      })
-      .modify((q) => { if (before) q.where(START, '<=', before); })
-      .orderBy(START, 'desc')
-      .limit(limit);
+      }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

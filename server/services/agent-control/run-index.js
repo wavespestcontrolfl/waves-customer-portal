@@ -43,11 +43,9 @@ const STATUSES = Object.freeze(['all', 'active', 'waiting', 'attention', 'done',
 const ACTIVE = new Set(['queued', 'leased', 'running', 'waiting_external']);
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
-// First page: every source is scanned up to this many rows inside the
-// window so the status counts cover the window (countsCapped says when a
-// source hit it). Later pages read only what they need: the cursor is
-// pushed into each source query as a start-time cutoff, so paging walks
-// the whole window instead of re-reading the newest rows.
+// First page: every source is read up to this many rows inside the window
+// so the status counts cover the window (countsCapped says when a source
+// hit it — a cursor still walks past it).
 const COUNT_SCAN_LIMIT = 2000;
 const CALL_COLUMNS = [
   'id', 'created_at', 'provider', 'requested_model', 'served_model', 'ok', 'error_code', 'error_class', 'fallback_used',
@@ -88,49 +86,6 @@ function sortKey(run) {
   return `${run.startedAt || run.createdAt || ''}|${run.key}`;
 }
 
-function encodeCursor(run) {
-  return Buffer.from(JSON.stringify({ at: run.startedAt || run.createdAt || '', key: run.key }), 'utf8').toString('base64url');
-}
-
-// → { key: the sort key to page after, before: the start-time cutoff the
-// source queries apply (≤, ties resolved in memory by key) }
-function decodeCursor(cursor) {
-  if (!cursor) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
-    const before = new Date(parsed.at);
-    if (!parsed || typeof parsed.key !== 'string' || Number.isNaN(before.getTime())) throw new Error('shape');
-    return { key: `${parsed.at}|${parsed.key}`, before };
-  } catch {
-    throw badRequest('bad cursor');
-  }
-}
-
-async function loadSources({ window, laneId, before, limit, sourceFilter = null }) {
-  const args = { from: window.from, before, laneId, limit };
-  const readers = [agentRuns, ...LEGACY_SOURCES].filter((s) => !sourceFilter || sourceFilter(s));
-  const results = await Promise.all(readers.map((s) => s.list(args)));
-  const unavailable = [];
-  let capped = false;
-  const canonicalKeys = new Set();
-  const runs = [];
-  results.forEach((r, i) => {
-    const source = readers[i];
-    if (r.unavailable) unavailable.push(source.SOURCE);
-    if (r.runs.length >= limit) capped = true;
-    for (const run of r.runs) {
-      const mirrorKey = `${run.sourceSystem}:${run.sourceRunId}`;
-      if (run.canonical) {
-        canonicalKeys.add(mirrorKey);
-        runs.push(run);
-      } else if (!canonicalKeys.has(mirrorKey)) {
-        runs.push(run);
-      }
-    }
-  });
-  return { runs, unavailable, capped };
-}
-
 function validate({ preset, status, area, lane, now }) {
   const checks = [
     ['window', preset, (v) => !!resolveWindow(v, now)],
@@ -143,6 +98,116 @@ function validate({ preset, status, area, lane, now }) {
 
 const LIST_DEFAULTS = Object.freeze({ lane: null, area: null, status: 'all', window: '7d', cursor: null, limit: DEFAULT_LIMIT, now: null });
 
+// Cursor = every source's keyset position { at, id } after the last row
+// that source contributed (or was read past) — base64url JSON.
+function encodeCursor(positions) {
+  const p = {};
+  for (const [source, pos] of positions) if (pos) p[source] = [pos.at.toISOString(), pos.id];
+  return Buffer.from(JSON.stringify({ p }), 'utf8').toString('base64url');
+}
+
+function decodeCursor(cursor) {
+  if (!cursor) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
+    if (!parsed || typeof parsed.p !== 'object' || !parsed.p) throw new Error('shape');
+    const positions = new Map();
+    for (const [source, pair] of Object.entries(parsed.p)) {
+      if (!SOURCES.has(source) || !Array.isArray(pair) || typeof pair[1] !== 'string') throw new Error('shape');
+      const at = new Date(pair[0]);
+      if (Number.isNaN(at.getTime())) throw new Error('shape');
+      positions.set(source, { at, id: pair[1] });
+    }
+    return positions;
+  } catch {
+    throw badRequest('bad cursor');
+  }
+}
+
+function positionOf(run) {
+  return { at: new Date(run.startedAt || run.createdAt), id: run.id };
+}
+
+function countBuckets(scoped) {
+  const counts = { all: scoped.length, active: 0, waiting: 0, attention: 0, done: 0, failed: 0 };
+  for (const run of scoped) for (const [k, hit] of Object.entries(bucketsOf(run))) counts[k] += Number(hit);
+  return counts;
+}
+
+// One page: a k-way merge over the sources, newest start first. Every
+// source is read from its own keyset position (the cursor) in slices —
+// the whole window on the first page (the counting scan, COUNT_SCAN_LIMIT
+// per source), `pageSize + 1` on cursor pages — and refilled when its
+// slice runs dry while another source still has rows, so a page never
+// ends early because one slice held only filtered-out rows. A legacy row
+// whose (source_system, source_run_id) a canonical run mirrors is dropped
+// when that run is in the canonical slice or already emitted (a mirror is
+// opened when its legacy row starts, so they sit together in time).
+const MAX_SCAN_ROUNDS = 8;
+
+// The merge step: yields the newest head across the sources, advancing that
+// source's position, for as long as every source that may still hold newer
+// rows has a head to compare — it returns when one runs dry (the caller
+// refills) or all are spent.
+function* readyRows(state) {
+  for (;;) {
+    const sources = [...state.values()];
+    if (sources.some((st) => !st.done && !st.buf.length)) return;
+    const heads = sources.filter((st) => st.buf.length);
+    if (!heads.length) return;
+    const top = heads.reduce((best, st) => (sortKey(st.buf[0]) > sortKey(best.buf[0]) ? st : best));
+    const run = top.buf.shift();
+    top.pos = positionOf(run);
+    yield run;
+  }
+}
+
+async function collectPage({ window, lane, area, status, after, pageSize, now }) {
+  const readers = [agentRuns, ...LEGACY_SOURCES].filter((s) => !lane || !s.LANE || s.LANE === lane);
+  const scan = after ? pageSize + 1 : COUNT_SCAN_LIMIT;
+  const inScope = (run) => (!lane || run.laneId === lane) && (!area || run.area === area);
+  const matches = (run) => status === 'all' || bucketsOf(run)[status];
+  const state = new Map(readers.map((s) => [s.SOURCE, { reader: s, pos: (after && after.get(s.SOURCE)) || null, buf: [], done: false }]));
+  const mirrored = new Set();
+  const dropped = (run) => !run.canonical && mirrored.has(`${run.sourceSystem}:${run.sourceRunId}`);
+  const unavailable = [];
+  const page = [];
+  let counts = null;
+  let capped = false;
+  let snapshot = null;
+
+  for (let round = 0; round < MAX_SCAN_ROUNDS; round += 1) {
+    const dry = [...state.values()].filter((st) => !st.done && !st.buf.length);
+    if (!dry.length) break; // round 0: every source is dry
+    await Promise.all(dry.map(async (st) => {
+      const r = await st.reader.list({ from: window.from, cursor: st.pos, laneId: lane, limit: scan });
+      if (r.unavailable) unavailable.push(st.reader.SOURCE);
+      st.done = r.runs.length < scan;
+      st.buf = r.runs.map((run) => annotate(run, now));
+      for (const run of st.buf) if (run.canonical) mirrored.add(`${run.sourceSystem}:${run.sourceRunId}`);
+    }));
+    if (round === 0) {
+      capped = [...state.values()].some((st) => !st.done);
+      // the same rows the merge will emit: in scope, mirrored legacy rows dropped
+      if (!after) counts = countBuckets([...state.values()].flatMap((st) => st.buf).filter((run) => inScope(run) && !dropped(run)));
+    }
+    for (const run of readyRows(state)) {
+      if (dropped(run)) continue;
+      if (inScope(run) && matches(run)) {
+        page.push(run);
+        if (page.length === pageSize) snapshot = new Map([...state].map(([k, st]) => [k, st.pos]));
+      }
+      if (page.length > pageSize) break;
+    }
+    if (page.length > pageSize || [...state.values()].every((st) => st.done && !st.buf.length)) break;
+  }
+  const runs = page.slice(0, pageSize);
+  // more = a further match was seen, or some source still has unread rows
+  const more = page.length > pageSize || [...state.values()].some((st) => !st.done || st.buf.length);
+  const positions = snapshot || new Map([...state].map(([k, st]) => [k, st.pos]));
+  return { runs, counts, countsCapped: !after && capped, nextCursor: more && runs.length ? encodeCursor(positions) : null, unavailable };
+}
+
 async function listRuns(params = {}) {
   const { lane, area, status, window: preset, cursor, limit } = { ...LIST_DEFAULTS, ...defined(params) };
   const now = params.now ?? new Date();
@@ -150,37 +215,14 @@ async function listRuns(params = {}) {
   const window = resolveWindow(preset, now);
   const pageSize = Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT));
   const after = decodeCursor(cursor);
-
-  // A lane filter skips the single-lane adapters that cannot match.
-  const sourceFilter = lane ? (s) => !s.LANE || s.LANE === lane : null;
-  // First page = the counting scan; a cursor page reads only past the cut.
-  const scan = after ? pageSize + 1 : COUNT_SCAN_LIMIT;
-  const loaded = await loadSources({ window, laneId: lane, before: after ? after.before : null, limit: scan, sourceFilter });
-  const scoped = loaded.runs
-    .map((run) => annotate(run, now))
-    .filter((run) => (!lane || run.laneId === lane) && (!area || run.area === area));
-
-  // Counts belong to the first page (the window scan); a cursor page has
-  // read only a slice and reports none.
-  let counts = null;
-  if (!after) {
-    counts = { all: scoped.length, active: 0, waiting: 0, attention: 0, done: 0, failed: 0 };
-    for (const run of scoped) for (const [k, hit] of Object.entries(bucketsOf(run))) counts[k] += Number(hit);
-  }
-  const filtered = status === 'all' ? scoped : scoped.filter((run) => bucketsOf(run)[status]);
-  filtered.sort((a, b) => (sortKey(a) < sortKey(b) ? 1 : sortKey(a) > sortKey(b) ? -1 : 0));
-  const page = (after ? filtered.filter((run) => sortKey(run) < after.key) : filtered).slice(0, pageSize + 1);
-  const runs = page.slice(0, pageSize);
-  // More may exist past this page when the slice overflowed OR a source hit
-  // its scan cap (rows older than the cap are reachable by cursor).
-  const more = page.length > pageSize || (loaded.capped && runs.length > 0);
+  const page = await collectPage({ window, lane, area, status, after, pageSize, now });
   return {
-    runs,
-    counts,
-    countsCapped: !after && loaded.capped,
-    nextCursor: more ? encodeCursor(runs[runs.length - 1]) : null,
+    runs: page.runs,
+    counts: page.counts,
+    countsCapped: page.countsCapped,
+    nextCursor: page.nextCursor,
     window: { key: window.key, from: window.from.toISOString(), to: window.to.toISOString() },
-    unavailableSources: loaded.unavailable,
+    unavailableSources: page.unavailable,
     phases: { runs: runGateOn() },
     generatedAt: now.toISOString(),
   };
