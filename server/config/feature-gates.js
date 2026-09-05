@@ -801,7 +801,7 @@ const gates = {
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
 
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
-  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : true,
+  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : process.env.GATE_CRON_JOBS !== 'false',
 
   // Weekly lawn pricing invariant sweep — re-runs the pricing engine across the
   // full track×size×tier grid against LIVE DB config and raises an admin alert
