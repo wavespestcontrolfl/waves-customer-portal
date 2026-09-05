@@ -471,6 +471,10 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .whereIn('vo.status', ['needs_review', 'failed', 'placed'])
+    // A request received meanwhile settled the order, and one staff
+    // cancelled after a pre-submit park withdrew the need: either way the
+    // stored instruction is obsolete, never re-rung (Codex r24 P2, r25 P2).
+    .whereRaw("prr.status NOT IN ('received', 'cancelled')")
     .whereRaw("vo.evidence ? 'bell'")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
     .select('vo.id', 'vo.evidence', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name');
@@ -625,7 +629,16 @@ async function prefetchVendorLogin(conn, requestId, registry) {
 // Withdraw a request the catalog no longer authorizes — the owner's own
 // action or a receive made it moot, no bell. closed_by stays null: a system
 // cancel, not a technician's (the FK is technicians.id).
+// The sweep's own manual-order bell for a request (auto-reorder:<request>,
+// rung by a gated sweep) — retired in the claim transaction, and when the
+// claim CANCELS the request: a bell telling staff to buy a need that is gone
+// is an unnecessary purchase (Codex r20 P1, r24 P1).
+function retireRequestBell(trx, requestId) {
+  return trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNull('read_at').update({ read_at: new Date() });
+}
+
 async function cancelAtClaim(trx, { request, product, m, ineligible }) {
+  await retireRequestBell(trx, request.id);
   await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({
     status: 'cancelled',
     closed_at: new Date(),
@@ -751,7 +764,7 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   // retired IN the claim transaction: the claim exists only if the bell is
   // gone, so staff are never told to buy what the dispatcher is ordering. A
   // failed retire aborts the claim — nothing is ordered (Codex r20 P1).
-  await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${request.id}`]).whereNull('read_at').update({ read_at: new Date() });
+  await retireRequestBell(trx, request.id);
   const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity });
   if (!ledger) return { skipped: 'already_claimed' };
   return { request, vendor, adapterKey, product, quantity, ledger, pricing, order, credentials };
@@ -793,6 +806,17 @@ function unconfirmedAmount(env) {
   const amountCents = caps(env).perOrder ?? null;
   return { amountCents, counted: amountCents != null ? ` No total was confirmed or reserved, so it is counted against the monthly cap at the per-order cap (${dollars(amountCents)}) until received or revoked.` : '' };
 }
+// EVERY post-submit figure — the vendor's, a quote, or that fallback —
+// reaches the row UNDER the cap lock before the park: the park itself holds
+// no lock, and a concurrent dispatcher summing the month in the gap would
+// read this placing row at its stale or null amount (Codex r24 P1, hook P0).
+// The row's cap-accounting month is kept. claim_lost = the row already left
+// placing; the caller settles that as a late placement.
+async function reservePostSubmitAmount(conn, ledger, cents, env) {
+  if (cents == null) return { ok: false, reason: 'caps_unconfigured' };
+  const reservation = await ledgerReservation(conn, ledger);
+  return reserveUnderCaps(conn, ledger.id, cents, { env, accountingAt: reservation.createdAt, postPlacement: true });
+}
 
 async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
   // A refusal that names the vendor total it was decided on (SiteOne's cap
@@ -808,6 +832,13 @@ async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
   if (err.ambiguous) {
     const known = positiveCents(err.cents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ctx.ledger)).cents;
     const { amountCents, counted } = known == null ? unconfirmedAmount(env) : { amountCents: known, counted: '' };
+    const reserved = await reservePostSubmitAmount(conn, ctx.ledger, amountCents, env);
+    // The row left placing while the call ran (stale park, maybe a revoke on
+    // top): a skipped park would leave the revoke marker standing beside an
+    // order that MAY exist — a replacement purchase. Attach it as a late
+    // placement (marker replaced, request ordered, reconcile bell) that
+    // blocks a replacement until reconciled (hook P0).
+    if (reserved.reason === 'claim_lost') return recordPlaced(conn, { ctx, placed: { externalOrderNumber: null, amountCents, response: err.body || null, evidence: err.evidence || null, ambiguous: true }, finalCents: amountCents, quoteCents });
     return park(conn, { ...ctx, reason: 'ambiguous_after_submit', message: `${err.message} — the order MAY exist at ${vendor.name}.${counted}`, amountCents, evidence: err.evidence || null, placed: err.body ? { response: err.body } : null });
   }
   return park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
@@ -839,17 +870,22 @@ async function attachLatePlacement(trx, conn, { ctx, placed, orderFacts, quoteCe
   const parked = await trx('vendor_orders').where({ id: ledger.id }).first('evidence');
   const wasRevoked = !!meta(parked?.evidence).revokedAt;
   const after = wasRevoked ? 'the operator revoked it' : `it was parked and the request marked ${fresh?.status || 'missing'}`;
+  // An ambiguous submit (the call left the process, outcome unknown) is
+  // attached the same way — conservatively, as an order that MAY exist.
+  const landed = placed.ambiguous ? 'MAY have been placed (the submit outcome is unknown — check the account)' : 'was confirmed';
   const bell = versioned({
-    title: `Auto-order landed after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
-    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) was confirmed after ${after}. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.`,
+    title: `Auto-order ${placed.ambiguous ? 'may have landed' : 'landed'} after ${wasRevoked ? 'revoke' : 'stale recovery'}: ${product.name}`,
+    body: `${vendor.name} order ${placed.externalOrderNumber || '(number unknown)'} (${dollars(orderFacts.amount_cents ?? quoteCents)}) ${landed} after ${after}. The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke again.`,
   });
   await trx('vendor_orders').where({ id: ledger.id }).update({
     ...orderFacts,
-    evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked })]),
-    error: conn.raw("COALESCE(error, '') || ?", [` | order confirmed placed after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
+    // The adapter's confirmed facts (item / address / payment / read-back)
+    // are kept for the reconciliation, as the green path keeps them (Codex r24 P2).
+    evidence: conn.raw("(COALESCE(evidence, '{}'::jsonb) - 'revokedAt' - 'bellAt') || ?::jsonb", [JSON.stringify({ ...(placed.evidence || {}), bell, latePlacementAt: new Date().toISOString(), latePlacementAfterRevoke: wasRevoked })]),
+    error: conn.raw("COALESCE(error, '') || ?", [` | order ${placed.ambiguous ? 'MAY have been placed' : 'confirmed placed'} after stale recovery${wasRevoked ? ' and revoke' : ''}: ${placed.externalOrderNumber || '?'}`]),
   });
   await requestToOrdered(trx, request.id);
-  await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order exists`, trx });
+  await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: 'placed_after_stale_park', amount_cents: orderFacts.amount_cents, external_order_number: placed.externalOrderNumber || null, reason: `the row was parked by stale recovery${wasRevoked ? ' and revoked' : ''} while the vendor call ran; the order ${placed.ambiguous ? 'may exist (ambiguous submit)' : 'exists'}`, trx });
   return { bell, settledElsewhere: true };
 }
 
@@ -901,7 +937,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
     return { bell };
   });
   const bellDelivered = outcome.bell ? await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...outcome.bell }) : true;
-  logger.info(`[order-dispatch] placed ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
+  logger.info(`[order-dispatch] ${placed.ambiguous ? 'ambiguous submit attached for' : 'placed'} ${vendor.name} order ${placed.externalOrderNumber || '?'} for ${product.name} (${dollars(placed.amountCents ?? quoteCents)})`);
   return {
     requestId: request.id,
     ledgerId: ledger.id,
@@ -927,7 +963,7 @@ async function settleAfterError(conn, err, { ctx, vendor, submitted, placed, quo
   logger.error(`[order-dispatch] ${product.name}: ${err.message}`);
   try {
     if (submitted) {
-      const parked = await park(conn, { ...ctx, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
+      const parked = await park(conn, { ...ctx, markRequestOrdered: true, reason: 'persist_after_placement', message: `${vendor.name} order ${placed?.externalOrderNumber || '(number unknown)'}${placed?.amountCents != null ? ` (${dollars(placed.amountCents)})` : ''} was placed but recording it failed: ${err.message}.`, amountCents: placed?.amountCents ?? quoteCents ?? null, evidence: placed?.evidence || null, placed });
       // The row had already left 'placing' (stale recovery / revoke while
       // the vendor call ran) and the late-placement attachment itself
       // failed: a skipped park would read as harmless while the confirmed
@@ -1043,6 +1079,10 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     const finalCents = await settledFinalCents(conn, { ledger, placed, quoteCents });
     if (finalCents == null) {
       const { amountCents, counted } = unconfirmedAmount(env);
+      const reserved = await reservePostSubmitAmount(conn, ledger, amountCents, env);
+      // The row left placing while the vendor call ran: the order exists at
+      // (at least) the fallback figure — attach it as a late placement.
+      if (reserved.reason === 'claim_lost') return await recordPlaced(conn, { ctx, placed, finalCents: amountCents, quoteCents });
       return await park(conn, { ...ctx, markRequestOrdered: true, reason: 'no_final_total', message: `${vendor.name} order ${placed.externalOrderNumber || '?'} was placed but no positive total was confirmed or reserved — verify the charge with the vendor and record it.${counted}`, amountCents, evidence: placed.evidence || null, placed });
     }
     const overCap = await parkIfOverCapAfterPlacement(conn, { ctx, vendor, ledger, placed, finalCents, quoteCents, env });
@@ -1060,21 +1100,26 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
 // sweep time) that the claim now finds undispatchable — vendor deactivated
 // or its gate flipped in between — would otherwise have neither bell: hand
 // it to the office with the sweep's own request-id-deduped bell (Codex r12
-// P2). Idempotent: a bell the sweep already rang is a no-op.
+// P2). Idempotent: a bell the sweep already rang is a no-op. Returns the
+// run's bell state: { belled } (delivered), { bellLost } (not persisted —
+// the run goes red, re-rung next run), or { requestClosed } — the request
+// was received or cancelled since it was scanned / claimed, so no bell:
+// staff must never be told to buy a closed need (Codex r26 P2).
 const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigured']);
 async function bellUndispatchable(conn, requestId, notify) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
-  const product = request && await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
-  if (!request || !product) return false;
+  if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return { requestClosed: true };
+  const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
+  if (!product) return { bellLost: true };
   // notifyAdmin resolves null when it could not persist the row: a null
   // hand-off is NOT a delivered bell (Codex r17 P2).
   const rung = await require('./auto-reorder').ringRestockBell({ notify, product, request });
-  if (!rung) return false;
+  if (!rung) return { bellLost: true };
   // The request-id dedupe returns the EXISTING row unchanged when the text
   // is the same — and the dispatcher's claim marked that row read on the
   // hand-off. A handback must be visible again: reopen it (Codex r20 P2).
   await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null, updated_at: new Date() });
-  return true;
+  return { belled: true };
 }
 
 async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null } = {}) {
@@ -1082,18 +1127,14 @@ async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapt
   // bell because this lane would order) and the dispatch is the same
   // hand-off as a vendor gate: the request gets the sweep's deduped bell
   // now, not after another silent day (Codex r18 P2).
-  if (!gateEnvValue(GATE)) {
-    const belled = await bellUndispatchable(conn, requestId, notify);
-    return { requestId, skipped: 'gated', ...(belled ? { belled: true } : { bellLost: true }) };
-  }
+  if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify)) };
   const registry = adapters || loadAdapters();
   const login = await prefetchVendorLogin(conn, requestId, registry);
   const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login }));
   if (claim.skipped) {
-    const belled = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : false;
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
-    const bellState = !HANDOFF_SKIPS.has(claim.skipped) ? {} : belled ? { belled: true } : { bellLost: true };
+    const bellState = HANDOFF_SKIPS.has(claim.skipped) ? await bellUndispatchable(conn, requestId, notify) : {};
     return { requestId, skipped: claim.skipped, ...(claim.cancelled ? { cancelled: true } : {}), ...bellState };
   }
   return dispatchClaimed(conn, claim, { registry, notify, now, env });

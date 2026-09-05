@@ -104,7 +104,10 @@ async function settledReason(trx, { productId, scheduledServiceId }) {
   if (await usageRows().whereRaw("coalesce(metadata->>'source', '') <> ?", [SOURCE]).first('id')) return 'already_logged_by_tech';
   if (await usageRows().whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')) return 'already_consumed';
   const keys = [`supplies-consumption-failed:${productId}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`];
-  if (await trx('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).first('id')) return 'handed_off';
+  // A bell this module retired itself (metadata.autoRetired — a real
+  // deduction superseded it) was never a hand-off: it must not skip the
+  // next kit product of the same visit (Codex r26 P1).
+  if (await trx('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereRaw("coalesce(metadata->>'autoRetired', '') <> 'true'").first('id')) return 'handed_off';
   return null;
 }
 
@@ -126,13 +129,13 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
   try {
     const bell = await require('./notification-service').notifyAdmin('system', title, body, { bell: true, link: '/admin/inventory', dedupeKey, metadata: { productId: product?.id || null, scheduledServiceId } });
     if (!bell) throw new Error('notification not persisted');
-    // Race (Codex r18 P1): a concurrent retry may have deducted this product
-    // between our failed transaction and this insert — its bell clear ran
+    // Race (Codex r18 P1, r24 P1): a concurrent retry may have deducted
+    // this product — or, for the visit-wide lookup bell, any of the visit's
+    // kit — between our failed attempt and this insert; its bell clear ran
     // before our bell existed. Re-check the settled movement AFTER the bell
     // persisted and retire our own bell when the kit is in fact deducted.
-    if (product && await db('product_inventory_movements').where({ product_id: product.id, scheduled_service_id: scheduledServiceId, movement_type: 'usage' }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id')) {
-      await clearMissedDeductionBells(db, { scheduledServiceId, productId: product.id });
-    }
+    const settled = await db('product_inventory_movements').where({ scheduled_service_id: scheduledServiceId, movement_type: 'usage', ...(product ? { product_id: product.id } : {}) }).whereRaw("metadata->>'source' = ?", [SOURCE]).first('id');
+    if (settled) await clearMissedDeductionBells(db, { scheduledServiceId, productId: product?.id || null });
   } catch (bellErr) {
     logger.error(`[supplies-consumption] failure bell NOT sent for ${product ? product.name : 'the visit'} on visit ${scheduledServiceId}: ${bellErr.message}`);
     result.errors.push({ productId: product?.id || null, reason: 'failure_bell_not_sent', message: bellErr.message });
@@ -143,11 +146,13 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 // this hook again) retires the failure bell an earlier attempt rang for
 // the same (product, visit) — and the visit-scoped lookup bell — so staff
 // do not follow a stale "adjust by hand" on top of the real deduction
-// (Codex r15 P2). Best effort, never throws.
-async function clearMissedDeductionBells(db, { scheduledServiceId, productId }) {
-  const keys = [`supplies-consumption-failed:${productId}:${scheduledServiceId}`, `supplies-consumption-failed:lookup:${scheduledServiceId}`];
+// (Codex r15 P2). The row is stamped metadata.autoRetired so settledReason
+// never mistakes it for a staff hand-off (Codex r26 P1). Best effort,
+// never throws.
+async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
+  const keys = [`supplies-consumption-failed:lookup:${scheduledServiceId}`, ...(productId ? [`supplies-consumption-failed:${productId}:${scheduledServiceId}`] : [])];
   try {
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date() });
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
   } catch (err) {
     logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
   }
