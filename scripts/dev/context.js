@@ -37,13 +37,22 @@ async function availablePort(port) {
 
 async function setup(root = rootDirectory()) {
   root = fs.realpathSync(root);
-  if (fs.existsSync(contextPath(root))) return readContext(root);
+  if (fs.existsSync(contextPath(root))) {
+    const existing = JSON.parse(fs.readFileSync(contextPath(root), 'utf8'));
+    if (existing.root === root) return existing;
+    const free = await Promise.all(Object.values(existing.ports).map(availablePort));
+    if (!free.every(Boolean)) throw new Error('Moved worktree still has occupied ports. Stop its previous runner before repairing setup.');
+    const repaired = { ...existing, root };
+    fs.writeFileSync(contextPath(root), JSON.stringify(repaired, null, 2) + '\n', { mode: 0o600 });
+    return repaired;
+  }
   const used = new Set();
   const trees = git(root, 'worktree', 'list', '--porcelain').split('\n')
     .filter((line) => line.startsWith('worktree ')).map((line) => line.slice(9));
   for (const tree of trees) {
     if (fs.existsSync(contextPath(tree))) {
-      Object.values(readContext(tree).ports).forEach((port) => used.add(port));
+      const sibling = JSON.parse(fs.readFileSync(contextPath(tree), 'utf8'));
+      Object.values(sibling.ports).forEach((port) => used.add(port));
     }
   }
   const offset = crypto.createHash('sha256').update(root).digest().readUInt16BE(0) % 2000;

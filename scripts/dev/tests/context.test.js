@@ -56,6 +56,17 @@ test('fresh worktrees receive distinct stable port blocks and private state', as
     assert.deepEqual(await setup(root), a);
     assert.equal(fs.statSync(path.join(root, '.tmp/dev/context.json')).mode & 0o777, 0o600);
     assert.deepEqual(readContext(second), b);
+    const moved = path.join(root, 'moved');
+    execFileSync('git', ['-C', root, 'worktree', 'move', second, moved]);
+    assert.throws(() => readContext(moved), /Checkout moved/);
+    const third = path.join(root, 'third');
+    execFileSync('git', ['-C', root, 'worktree', 'add', '-qb', 'third', third]);
+    const c = await setup(third);
+    assert.equal(new Set([...Object.values(b.ports), ...Object.values(c.ports)]).size, 8);
+    const repaired = await setup(moved);
+    assert.equal(repaired.root, fs.realpathSync(moved));
+    assert.equal(repaired.id, b.id);
+    assert.deepEqual(repaired.ports, b.ports);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
