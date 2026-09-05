@@ -1358,6 +1358,9 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
           return q;
         },
       });
+      // The settlement's writes run in one transaction (pre-push P1 on
+      // 2aa9691); the mock runs the callback on the same handle.
+      database.transaction = async (fn) => fn(database);
       database._deleted = deleted;
       database._claims = claims;
       database._updated = updated;
