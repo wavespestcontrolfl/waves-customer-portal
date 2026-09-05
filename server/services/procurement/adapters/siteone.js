@@ -82,7 +82,11 @@ const SELECTORS = Object.freeze({
   loginError: '.alert-danger, .error-message, [role="alert"]',
   searchInput: 'input[name="text"], input[type="search"], input#js-site-search-input, input[placeholder*="Search"]',
   productLink: '.product-item a.name, .product-item-name a, a.product-name, .product-tile a',
-  productSku: '[data-product-code], .product-code, .sku, [itemprop="sku"]',
+  // The live storefront (checked anonymously 2026-09-05) shows the item
+  // number in `div.brand-itemnumber` (text = the bare number; hidden `.hide`
+  // responsive copies beside it) and in `[data-itemnumber]` attributes —
+  // none of the generic Hybris SKU selectors match it.
+  productSku: '[data-product-code], [data-itemnumber], .brand-itemnumber, .product-code, .sku, [itemprop="sku"]',
   qtyInput: 'input[name="qty"], input.qty, input[name="quantity"], input[type="number"]',
   addToCart: 'button.add-to-cart, button#addToCartButton, button[data-action="add-to-cart"], button:has-text("Add to Cart")',
   // Scoped to the product's own availability / stock element — a bare
@@ -605,7 +609,7 @@ async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
   const skuNode = (await matches(page, SELECTORS.productSku)).shown[0]; // the SKU the page SHOWS, never a hidden copy's
   // A node matched by its data-product-code attribute carries the code in
   // the attribute, not necessarily in its text (Codex #3853 r20 P2).
-  const skuAttr = skuNode ? await skuNode.getAttribute('data-product-code').catch(() => null) : null;
+  const skuAttr = skuNode ? (await skuNode.getAttribute('data-product-code').catch(() => null)) || (await skuNode.getAttribute('data-itemnumber').catch(() => null)) : null;
   const pageSkuRaw = (skuAttr || (skuNode ? (await skuNode.textContent().catch(() => '') || '') : '')).replace(/\s+/g, ' ').trim();
   if (!pageSkuRaw) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_unreadable', `could not read the product SKU on the page for ${vendorSku} (SELECTORS.productSku)`, evidence); }
   if (normalizeSku(pageSkuRaw) !== normalizeSku(vendorSku)) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_mismatch', `product page shows "${pageSkuRaw.slice(0, 60)}", expected ${vendorSku}`, evidence); }
