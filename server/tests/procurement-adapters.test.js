@@ -255,7 +255,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.loginSubmit) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenSubmitClicked = (st.hiddenSubmitClicked || 0) + 1; } }) : submit) });
       if (sel === S.loginError) return el();
       // The signed-in account page shows the sign-out link; noAccountMarker models an intermediate (MFA / maintenance) page (r22 P1)
-      if (sel === S.accountMarker) return st.loggedIn && !st.noAccountMarker ? el({ count: 1, visible: true }) : el();
+      // accountMarkerOnLoginPage: the unauthenticated login page's header carries a generic account link (r24 P1)
+      if (sel === S.accountMarker) return (st.loggedIn && !st.noAccountMarker) || st.accountMarkerOnLoginPage ? el({ count: 1, visible: true }) : el();
       if (sel === S.searchInput) return el({ count: 1, visible: true });
       // productLinkHiddenFirst: a hidden responsive copy of the result link precedes the visible one
       const hitLink = el({ count: 1, visible: true, onClick: () => { st.hitClicked = (st.hitClicked || 0) + 1; } });
@@ -665,6 +666,28 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_unverified', adapterDown: true });
     expect(st.loginSubmits || 0).toBe(0);
     expect(st.pressed || []).not.toContain('Enter');
+    expect(st.addClicked).toBe(0);
+  });
+
+  test('an Enter submission whose press rejects AFTER the credential went out is not retried — the signed-in page is accepted, one submit (r24 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ formSubmitCount: 0, loginClickThrows: 'sent' });
+    await expect(s1.place(args({ dryRun: true }), deps)).resolves.toMatchObject({ dryRun: true });
+    expect(st.loginSubmits).toBe(1);
+    expect(st.pressed).toEqual(['Enter']);
+  });
+
+  test('an Enter submission whose press rejects with the login form still up is never retried: login_unverified, adapter down (r24 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ formSubmitCount: 0, loginClickThrows: 'unsent' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_unverified', adapterDown: true });
+    expect(st.loginSubmits || 0).toBe(0);
+    expect(st.pressed).toEqual(['Enter']); // one press, no second attempt
+    expect(st.addClicked).toBe(0);
+  });
+
+  test('a login page that keeps its password field up beside a generic account link is a REJECTED login, not a session — one submit, nothing done on the page (r24 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ loginRejects: true, accountMarkerOnLoginPage: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_rejected', adapterDown: true });
+    expect(st.loginSubmits).toBe(1);
     expect(st.addClicked).toBe(0);
   });
 
