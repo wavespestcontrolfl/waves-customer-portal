@@ -19,7 +19,7 @@ function getHandler() {
   return layer.route.stack[layer.route.stack.length - 1].handle;
 }
 
-test('visit_* rows sort behind fresh prompts AND stale/storm rows, before recency', async () => {
+test('buckets: fresh prompts (0) → fresh storms (1) → visit notices AND stale rows on recency (2)', async () => {
   const calls = { orderByRaw: [], orderBy: [], limit: [] };
   const chain = {};
   for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw']) {
@@ -36,9 +36,11 @@ test('visit_* rows sort behind fresh prompts AND stale/storm rows, before recenc
 
   expect(calls.orderByRaw).toHaveLength(1);
   const sql = calls.orderByRaw[0];
-  // visit rows → bucket 2; fresh non-storm prompts → 0; everything else → 1.
+  // visit rows → 2; storms → 1; fresh other prompts → 0; stale others → 2
+  // (stale legacy rows compete with visits on recency, never ahead of them).
   expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' THEN 2/);
-  expect(sql.indexOf("visit\\_%")).toBeLessThan(sql.indexOf("type != 'storm_watch_alert'"));
+  expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 1/);
+  expect(sql).toMatch(/interval '6 hours' THEN 0 ELSE 2 END/);
   expect(calls.orderBy).toEqual([['created_at', 'desc']]);
   expect(calls.limit).toEqual([20]);
   expect(res.json).toHaveBeenCalledWith({ notifications: [] });

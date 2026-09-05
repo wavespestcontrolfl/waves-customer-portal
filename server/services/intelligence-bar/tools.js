@@ -380,7 +380,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'cancel_plan': return await cancelPlan(input, actionContext);
       case 'create_appointment': return await createAppointment(input);
       case 'get_recent_completions': return await getRecentCompletions(input);
-      case 'reschedule_appointment': return await rescheduleAppointment(input);
+      case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
       case 'cancel_appointment': return await cancelAppointment(input);
       case 'draft_sms': return await draftSms(input);
       default:
@@ -2244,7 +2244,7 @@ async function createAppointment(input) {
 }
 
 
-async function rescheduleAppointment(input) {
+async function rescheduleAppointment(input, actionContext = {}) {
   const { appointment_id, new_date, new_time_window, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
@@ -2486,6 +2486,18 @@ async function rescheduleAppointment(input) {
   });
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
+  }
+  // Tech-facing notice (tech-visit-notifications.js): this writer moves the
+  // row itself, so it tells the holder itself. Post-commit, best-effort,
+  // never awaited; the operator's own move stays silent.
+  if (appt.technician_id) {
+    void require('../tech-visit-notifications').notifyVisitRescheduled({
+      visitId: appt.id,
+      technicianId: appt.technician_id,
+      actorId: actionContext.technicianId || null,
+      previous: { date: observedDate, windowStart: appt.window_start, windowEnd: appt.window_end },
+      snapshot: { date: dateStr, windowStart: newStart, windowEnd: newWindowEnd },
+    });
   }
 
   // Rebooker-parity side effects of the live → confirmed flip above:
