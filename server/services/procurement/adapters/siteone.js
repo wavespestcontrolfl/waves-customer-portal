@@ -802,9 +802,8 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
 // The CHECKOUT total (tax + shipping applied) is the binding amount: exactly
 // one VISIBLE element (responsive checkouts keep hidden desktop/mobile
 // copies; a stale hidden node is not the figure the vendor charges), parsed
-// as exactly one $ amount. Returns cents.
-// `screenshot: false` = a pure read for the at-click check: nothing is
-// awaited between the read and the click (pre-push P0 on #3876).
+// as exactly one $ amount. Returns cents. (PR 3c's at-click re-read adds a
+// pure, screenshot-free variant with the click that consumes it.)
 async function readCheckoutTotal(page, { evidence, upload }) {
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   const total = await readExactlyOne(page, SELECTORS.checkoutTotal, { same: parseMoney });
