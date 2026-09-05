@@ -792,6 +792,23 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(result.results[0].reason).toBe('automatic_retirement_pending');
   });
 
+  test('the full poll path repairs supporting blogs when the remediation flag is unset', async () => {
+    delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockRejectedValueOnce(Object.assign(new Error('findings remain'), { code: 'CODEX_REVIEW_REQUIRED' }));
+    const remediation = require('../services/content/codex-remediation');
+    const bar = jest.spyOn(remediation, 'p2OnlyMergeEligible').mockResolvedValueOnce({ eligible: false });
+    const repair = jest.spyOn(remediation, 'maybeRemediateAutonomousPr').mockResolvedValueOnce({ remediated: true, round: 1 });
+    try {
+      await poller.pollPending();
+      expect(repair).toHaveBeenCalledWith(expect.objectContaining({ number: 42 }), expect.objectContaining({ action_type: 'new_supporting_blog' }), expect.any(Object));
+    } finally { bar.mockRestore(); repair.mockRestore(); }
+  });
+
   test('explicit kill switch leaves the open PR alone', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
     const updates = setupDb({ pending: [makeRun()] });

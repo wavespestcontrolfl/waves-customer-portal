@@ -1287,7 +1287,7 @@ async function maybeAutoMerge(run, pr) {
       // is on; never merges (that still needs a genuine Codex-clean signal).
       try {
         const { maybeRemediateAutonomousPr, remediationEnabled } = require('./codex-remediation');
-        if (remediationEnabled()) {
+        if (remediationEnabled(run.action_type)) {
           // Fresh queue re-check, same as the merge path's last-instant guard
           // below: remediation MUTATES the PR branch, so an operator requeue/
           // dismiss that landed after tick-start validation must block it the
