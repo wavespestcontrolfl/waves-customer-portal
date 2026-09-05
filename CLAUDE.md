@@ -4,7 +4,7 @@ Context for Claude Code sessions working on the waves-customer-portal monorepo.
 
 ## Dev Workflow
 
-- Start `npm run dev` in background on session start
+- Implementation sessions: follow `docs/development.md`; run `worktree:setup` then `dev:doctor` before starting the managed app. Frontend-only work uses `dev:managed-client`. Audits do not need a server.
 - Monitor build output; fix errors immediately before continuing other work
 
 ## Project Overview
