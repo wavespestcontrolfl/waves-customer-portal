@@ -843,9 +843,10 @@ async function verifyBillToAccount(page, { evidence, upload }) {
 
 // The tender and the blockers, re-checked immediately before the click: a
 // delayed checkout rerender during the earlier awaits (screenshot upload,
-// cap reservation) can reset the verified radio to a saved card or reveal
-// an MFA / terms step after the last scan (Codex #3876 r3 P1). Page reads
-// only — nothing is awaited off the page between here and the click.
+// cap reservation, the identity / line / baseline reads) can reset the
+// verified radio to a saved card or reveal an MFA / terms step after the
+// last scan (Codex #3876 r3 P1, #3900 r8 P1). Page reads only — nothing is
+// awaited off the page between here and the click but the pure total read.
 async function recheckTenderAtClick(page, radio, { evidence, upload }) {
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   await scanCheckoutBlockers(page, refuse);
@@ -999,10 +1000,16 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // during which the page may recalculate once more; the click happens only
   // when the figure on screen is the one the cap approved (pre-push P0).
   // Order at the boundary (Codex #3876 r4 P1): total read → (changed: gate,
-  // start over) → claim re-asserted → Place Order proven actionable → tender + blockers
-  // re-checked → account + ship-to re-checked → order lines re-checked →
-  // confirmation baseline → total read AGAIN — the very last await before the click is that pure
-  // read, and it must equal the figure the cap approved.
+  // start over) → claim re-asserted → Place Order proven actionable →
+  // account + ship-to re-checked → order lines re-checked → the validated
+  // control still shown → confirmation baseline → tender + blockers
+  // re-checked → total read AGAIN — the very last await before the click is
+  // that pure read, and it must equal the figure the cap approved.
+  // The tender proof is the LAST proof but the total (Codex #3900 r8 P1): a
+  // saved-card tender can keep the same account, ship-to, lines and total,
+  // so none of the longer reads detects a reset that lands during them —
+  // read first, the tender proof was stale by the click. After it only the
+  // pure total read stands before the dispatch.
   // The identity re-check (Codex #3876 r5 P1): a delayed rerender that
   // swaps the displayed billing account or ship-to while the radio stays
   // checked and the total stable would otherwise submit on a stale proof.
@@ -1040,7 +1047,6 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // during the wait is caught by those re-checks.
     await gate(cents, 'final claim check');
     placeHandle = await trialPlaceOrder(page, await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence), refuse);
-    await recheckTenderAtClick(page, radio, { evidence, upload });
     await identity();
     await lines();
     // Still the validated element, still shown: a detached handle is a
@@ -1048,13 +1054,16 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // the baseline and the final total read; a control replaced during
     // those is a detached handle the forced click cannot dispatch → ambiguous.
     if (!(await placeHandle.isVisible().catch(() => false))) await refuse('place_order_replaced', 'the Place Order control was replaced after the final checks — nothing submitted');
-    // The baseline is the LAST read but one: only the final pure total read
-    // stands between it and the click, so a reference node that appears
-    // during the earlier awaits is in the baseline (Codex #3900 r5 P1); the
-    // total read stays last (Codex #3876 r4 P1) — a node appearing inside
-    // that single read is the residual window, and it still has to survive
-    // two settle polls to be recorded.
+    // The baseline precedes only the tender proof and the final pure total
+    // read, so a reference node that appears during the longer awaits is in
+    // the baseline (Codex #3900 r5 P1); the total read stays last (Codex
+    // #3876 r4 P1) — a node appearing inside the tender re-check or that
+    // single read is the residual window, and it still has to survive two
+    // settle polls to be recorded.
     baseline = await preClickOrderBaseline(page, refuse);
+    // Tender + blockers LAST but the total (Codex #3900 r8 P1): page reads
+    // only from here to the click.
+    await recheckTenderAtClick(page, radio, { evidence, upload });
     shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
     if (shownCents === cents) break;
     if (i >= 3) throw unstable(shownCents);

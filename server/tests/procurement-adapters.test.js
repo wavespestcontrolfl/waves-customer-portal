@@ -323,7 +323,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // The option: a radio input, or (billIsLabel) a wrapping label whose radio is the sub-locator
       // uncheckAccountAtClick: a delayed rerender resets the verified radio once the Place Order stage has begun
       // uncheckAccountAtTrial: the reset lands during the trial click's wait (r6 P1)
-      const isChecked = () => st.accountChecked === true && !(st.uncheckAccountAtClick && st.atClick) && !(st.uncheckAccountAtTrial && st.trialDone);
+      // uncheckAccountAtIdentity: the reset lands during the at-click identity re-check — AFTER a tender proof read ahead of it would have passed (r8 P1 on #3900)
+      const isChecked = () => st.accountChecked === true && !(st.uncheckAccountAtClick && st.atClick) && !(st.uncheckAccountAtTrial && st.trialDone) && !(st.uncheckAccountAtIdentity && st.identityReadAtClick);
       // hideRadioAtClick: a rerender hides the checked account radio once the Place Order stage has begun
       // Every real radio carries name="tender" (its payment group); radioUnnamed models markup without a name (the value-selector fallback)
       const grp = () => ({ name: st.radioUnnamed ? null : 'tender' });
@@ -356,6 +357,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (st.unreadableFirst && sel === S[st.unreadableFirst]) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, isVisibleThrows: true, text: 'x' }) : el({ count: 1, visible: true, text: { checkoutAccount: 'Account # 12345', checkoutShipTo: 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', checkoutTotal: 'Order total $99.00' }[st.unreadableFirst] })) });
       // accountAtClick: a delayed rerender swaps the displayed billing account once the Place Order stage has begun (r5 P1)
       // accountAtTrial: the swap lands during the trial click's wait (r6 P1)
+      if (sel === S.checkoutAccount && st.atClick) st.identityReadAtClick = true; // the at-click identity re-check is under way
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountAtTrial && st.trialDone ? st.accountAtTrial : st.accountAtClick && st.atClick ? st.accountAtClick : st.accountText === undefined ? 'Account # 12345' : st.accountText });
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       // checkoutTotalText: the checkout total (default = the cart total, so a dry run's bell reports 9900);
@@ -1018,6 +1020,15 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ uncheckAccountAtTrial: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
     expect(st.trialDone).toBe(true);
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
+  test('the tender proof is read AFTER the identity / line / baseline reads: a saved-card reset that lands during the identity re-check (same account, lines and total) is refused — no click (r8 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ uncheckAccountAtIdentity: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    expect(st.trialDone).toBe(true);
+    expect(st.identityReadAtClick).toBe(true);
     expect(st.placeClicked || 0).toBe(0);
     expect(st.cart).toEqual([]);
   });
