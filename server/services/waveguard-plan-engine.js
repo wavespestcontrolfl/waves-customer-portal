@@ -852,7 +852,7 @@ function summarizeOrdinanceStatus({ date, ordinances, candidateItems }) {
   return { activeWindows, blocks, warnings };
 }
 
-function summarizeCalibration({ calibration, calibrations, date }) {
+function summarizeCalibration({ calibration, calibrations }) {
   const activeCalibrations = Array.isArray(calibrations)
     ? calibrations
     : (calibration ? [calibration] : []);
@@ -894,22 +894,6 @@ function summarizeCalibration({ calibration, calibrations, date }) {
   const selected = calibration || activeCalibrations[0];
   const warnings = [];
   const blocks = [];
-  if (selected.expires_at && new Date(selected.expires_at) < date) {
-    blocks.push({
-      code: 'expired_calibration',
-      severity: 'block',
-      message: `Calibration for ${selected.system_name || selected.name || 'selected equipment'} is expired.`,
-    });
-  }
-
-  if (selected.calibration_status !== 'field_verified') {
-    blocks.push({
-      code: 'calibration_not_field_verified',
-      severity: 'block',
-      message: `Calibration for ${selected.system_name || selected.name || 'selected equipment'} is not field verified.`,
-    });
-  }
-
   if (!selected.tank_capacity_gal) {
     warnings.push({
       code: 'missing_tank_capacity',

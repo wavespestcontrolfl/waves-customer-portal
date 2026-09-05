@@ -34,14 +34,14 @@ const SCHEDULE_TOOLS = [
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD' },
-        technician_name: { type: 'string', description: 'Tech name (Adam, Jose, Jacob)' },
+        technician_name: { type: 'string', description: 'Technician name as shown on the schedule' },
       },
       required: ['date', 'technician_name'],
     },
   },
   {
     name: 'assign_technician',
-    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to Adam" or "assign the Parrish stops to Jose." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
+    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to <technician>" or "assign the Parrish stops to <technician>." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -67,7 +67,7 @@ const SCHEDULE_TOOLS = [
   },
   {
     name: 'swap_tech_assignments',
-    description: `Swap all stops between two technicians for a date. Use when "give Adam's route to Jose and Jose's to Adam." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion. This touches every stop for both techs on the date — preview is essential.`,
+    description: `Swap all stops between two technicians for a date. Use when "swap those two techs' routes for today." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion. This touches every stop for both techs on the date — preview is essential.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -127,7 +127,7 @@ Use for: "find time for", "when can we schedule", "best slot for", "fit in a new
         duration_minutes: { type: 'number', description: 'How long the service takes (default 60)' },
         date_from: { type: 'string', description: 'YYYY-MM-DD start of search range (default: today)' },
         date_to: { type: 'string', description: 'YYYY-MM-DD end of search range (default: today + 7 days)' },
-        technician_name: { type: 'string', description: 'Optional: restrict to one tech (Adam, Jose, Jacob)' },
+        technician_name: { type: 'string', description: 'Optional: restrict to one technician (name as shown on the schedule)' },
         top_n: { type: 'number', description: 'How many slots to return (default 10)' },
       },
     },

@@ -555,26 +555,9 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   }
 
   // 7. Persisted admin command-center alerts. These are event-backed
-  // operating alerts created by domain workflows such as WaveGuard lawn
-  // readiness snapshots.
+  // operating alerts created by inventory and pricing workflows.
   try {
     if (await db.schema.hasTable('admin_alerts')) {
-      const readiness = await db('admin_alerts')
-        .where({ status: 'open', type: 'lawn_protocol_readiness' })
-        .orderBy('last_seen_at', 'desc')
-        .first('severity', 'title', 'href', 'metadata');
-      if (readiness) {
-        const metadata = readiness.metadata || {};
-        const blocked = Number(metadata?.statusCounts?.blocked || 1);
-        alerts.push({
-          id: 'admin_lawn_protocol_readiness',
-          severity: readiness.severity === 'critical' ? 'critical' : 'warn',
-          count: blocked,
-          label: readiness.title || `${blocked} WaveGuard lawn appointment${blocked === 1 ? '' : 's'} blocked`,
-          href: readiness.href || '/admin/lawn-protocol?tab=readiness',
-        });
-      }
-
       const forecast = await db('admin_alerts')
         .where({ status: 'open', type: 'waveguard_inventory_forecast' })
         .orderBy('last_seen_at', 'desc')
@@ -611,7 +594,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
         });
       }
     }
-  } catch (err) { logger.error(`[dashboard-alerts] admin_lawn_protocol_readiness: ${err.message}`); }
+  } catch (err) { logger.error(`[dashboard-alerts] persisted_admin_alerts: ${err.message}`); }
 
   // ——— Action Inbox generators (kind: 'action') — "do this now" items, as
   // opposed to the watch-state alarms above. Same fail-soft contract: each

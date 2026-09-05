@@ -12,7 +12,9 @@ let planResolvers;
 let delayPlan;
 let mixAmount;
 let improvementsEnabled;
+let history;
 beforeEach(async () => {
+  history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
   improvementsEnabled = true;
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -28,7 +30,7 @@ beforeEach(async () => {
     if (url.includes('feature-flags')) data = { flags: { 'lawn-completion-improvements': improvementsEnabled } };
     if (url.includes('turf-profile')) data = { profile: { lawn_sqft: 5000 } };
     if (url.includes('lawn-assessment/service')) data = { assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
-    if (url.includes('lawn-assessment/history')) data = { history: [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }] };
+    if (url.includes('lawn-assessment/history')) data = { history };
     if (url.includes('treatment-plans')) {
       if (delayPlan) await new Promise((resolve) => { planResolvers.push(resolve); });
       data = { plan: { protocol: {}, mixCalculator: { items: [{ product: products[0], mix: { ratePer1000: 3, rateUnit: 'fl_oz', amount: mixAmount, amountUnit: 'fl_oz', treatedSqft: 5000 } }] } } };
@@ -125,4 +127,16 @@ it('prunes an out-of-line tip restored after the current lawn library has loaded
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].techTips.ids).toEqual(['lawn_water_morning']);
+});
+
+
+it('normalizes legacy previous scores using the same four categories as the customer report', async () => {
+  history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 99,
+    turf_density: 80, weed_suppression: 80, color_health: 80, stress_damage: null,
+    fungus_control: 60, thatch_level: 70 }];
+  mount();
+  const card = await screen.findByLabelText('Previous lawn visit');
+  await waitFor(() => expect(card.textContent).toContain('Overall score 76/100'));
+  expect(card.textContent).toContain('Condition60/100');
+  expect(card.textContent).not.toContain('99/100');
 });

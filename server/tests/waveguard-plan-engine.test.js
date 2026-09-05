@@ -151,7 +151,7 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.blocks.map((b) => b.code)).toContain('nitrogen_blackout');
   });
 
-  test('summarizeCalibration hard-blocks missing and expired calibration', () => {
+  test('mix inputs remain required but calibration expiry and verification are not approvals', () => {
     expect(summarizeCalibration({
       calibration: null,
       date: new Date('2026-05-01T12:00:00'),
@@ -167,7 +167,8 @@ describe('waveguard-plan-engine helpers', () => {
       date: new Date('2026-05-01T12:00:00'),
     });
 
-    expect(expired.blocks[0].code).toBe('expired_calibration');
+    expect(expired.blocks).toEqual([]);
+    expect(expired.selected.carrier_gal_per_1000).toBe(2);
   });
 
   test('summarizeCalibration blocks ambiguous active equipment calibrations', () => {

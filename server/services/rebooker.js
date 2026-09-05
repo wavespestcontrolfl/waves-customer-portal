@@ -1419,6 +1419,13 @@ class SmartRebooker {
       if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
         await assertAssignableSlotTechnician(updates.technician_id, trx);
       }
+      // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
+      // re-reads the receiving tech's capabilities here; the unit mover runs the
+      // matching options.memberGuard for grouped members). Refuses before the
+      // first write; nothing to undo.
+      if (typeof options.moveGuard === 'function') {
+        await options.moveGuard({ trx, technicianId: keptTechId, service });
+      }
       // A tech CHANGE pins the observed prior technician in the CAS: the
       // pre-read is unlocked, and a dispatch reassignment A→B landing
       // between read and write would otherwise let this move commit and

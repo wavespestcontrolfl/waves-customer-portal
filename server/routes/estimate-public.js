@@ -9966,6 +9966,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         services: recurringSvcList,
       })
       : null;
+    // The per-row figures the reserved row's price is built from — the rows
+    // sameDayVisitTotal summed (WaveGuard-net, preference-adjusted), each
+    // netted by its own plan-credit slice when the first visit is (the same
+    // allocation firstApplicationInvoiceAmount applies below). Handed to the
+    // converter so a multi-program reserved accept can split the reserved
+    // row's price back into per-line follow-up prices from the SAME
+    // authority (codex #3938 r2/r4 P1: the converter can reconstruct
+    // neither a preference credit nor a plan-credit slice). Empty when the
+    // total came from a fallback with no per-row composition.
+    const firstApplicationRowAmounts = !treatAsOneTime && !selectedServiceTierBillsMonthly
+      ? (sameDayVisitRowAmounts(pricingVisitFrequency, { preferences: acceptPrefs, services: recurringSvcList }) || [])
+        .map(({ row, amount }, index) => ({
+          service: row?.service ?? row?.serviceKey ?? row?.service_key ?? row?.key ?? null,
+          name: row?.name ?? row?.label ?? row?.displayName ?? null,
+          amount: acceptPlanCreditSlice && sameDayVisitTotal
+            ? Math.round((amount - (Number(acceptPlanCreditSlice.rowSlices?.[index]) || 0)) * 100) / 100
+            : amount,
+        }))
+      : [];
     // The display flag is the accept's authorization to net the invoice — if
     // the customer was shown sliced section prices (flag true) but the
     // accept-time slice cannot be computed for their selection FOR ANY REASON
@@ -11354,6 +11373,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which
           // cannot see this transaction's uncommitted customer/appointment
@@ -22101,18 +22121,23 @@ function planCreditFirstVisitSlice(frequency = {}, { preferences = null, service
   let firstVisitSlice = 0;
   let annualSliceTotal = 0;
   let visitTotal = 0;
+  // Per-row slices, aligned to rowAmounts (0 for an ineligible row) — the
+  // converter nets the forwarded row amounts with the SAME allocation the
+  // first-visit invoice uses (codex #3938 r4 P1).
+  const rowSlices = [];
   for (const entry of rowAmounts) {
     const visits = treatmentVisitsForPricingRow(entry.row);
     if (!(visits > 0)) return null;
     const key = recurringServiceKey(entry.row);
     const eligible = (!eligibleList || manualDiscountServiceKeyMatches(eligibleList, key))
       && !manualDiscountServiceKeyMatches(md.excludedServices, key);
-    if (!eligible) continue;
+    if (!eligible) { rowSlices.push(0); continue; }
     // Slices price on the PRE-preference base (codex #3185 r1): the credit
     // object is preference-blind and the section stamper slices the same
     // unadjusted price — an opt-out earns its own preference credit AND the
     // full promised slice, never a shrunken one.
     const rowSlice = round2(entry.baseAmount * (pct / 100));
+    rowSlices.push(rowSlice);
     firstVisitSlice = round2(firstVisitSlice + rowSlice);
     annualSliceTotal = round2(annualSliceTotal + round2(rowSlice * visits));
     visitTotal += visits;
@@ -22153,7 +22178,7 @@ function planCreditFirstVisitSlice(frequency = {}, { preferences = null, service
   // never hide inside it.
   if (Math.abs(annualSliceTotal - recurringAnnual) > 0.005 * visitTotal + 0.02) return null;
   const label = String(md.label || 'Discount').trim() || 'Discount';
-  return { label, firstVisitSlice };
+  return { label, firstVisitSlice, rowSlices };
 }
 
 function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, services = []) {
