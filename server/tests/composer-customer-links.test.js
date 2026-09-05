@@ -867,10 +867,31 @@ describe('buildCardRequestLink', () => {
 });
 
 describe('buildPrepGuideLink', () => {
+  // The post-mint key re-read (r27 P0): what the row carries after the mint.
+  let keyedAfterMint = null;
   beforeEach(() => {
     nextUpcomingVisit.mockReset();
     ensureServicePrepToken.mockReset().mockResolvedValue('a'.repeat(32));
     loadTemplateByKey.mockReset().mockResolvedValue({ template: { id: 't1' }, activeVersion: { id: 'tv1' } });
+    keyedAfterMint = null;
+    mockBuilders = { scheduled_services: { where: jest.fn(function () { return this; }), first: jest.fn(async () => ({ prep_template_key: keyedAfterMint })) } };
+  });
+
+  test('a concurrent mint for ANOTHER guide won the unkeyed visit: the line names the guide the page renders, or refuses one the composer cannot name (GH Codex #3856 r27 P0)', async () => {
+    nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
+      keyword === 'flea' ? { id: 'v-flea', customer_id: 'c1', scheduled_date: '2026-09-20', prep_template_key: null, prep_expires_at: null } : null
+    ));
+    keyedAfterMint = 'prep.bed_bug';
+    let r = await buildPrepGuideLink(['c1']);
+    expect(ensureServicePrepToken).toHaveBeenCalledWith('v-flea', 'prep.flea');
+    expect(r.line).toContain('Bed Bug Treatment Service');
+    expect(r.line).not.toContain('Flea Treatment');
+    expect(r.prep.pestType).toBe('bed_bug');
+
+    keyedAfterMint = 'prep.wildlife';
+    r = await buildPrepGuideLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/cannot name/);
   });
 
   test('a guide with no active version refuses — the public page would 404 (same predicate as prep-public)', async () => {
@@ -1344,6 +1365,14 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       wire();
       resolvePrepSource.mockReset().mockResolvedValue({ templateKey: 'prep.flea', customerId: 'c1' });
       loadTemplateByKey.mockReset().mockResolvedValue({ template: { id: 't1' }, activeVersion: { id: 'tv1' } });
+    });
+
+    test('the composer line must name the guide the page renders: a mismatched label refuses, an operator-edited line is not checked (GH Codex #3856 r27 P0)', async () => {
+      const mismatched = `Your prep checklist for the upcoming Rodent Service is here: portal.wavespestcontrol.com/prep/${PREP}`;
+      expect((await bearerLinkSendCheck(mismatched, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/names Rodent Service but the page now shows the Flea Treatment guide/);
+      const matching = `Your prep checklist for the upcoming Flea Treatment is here: https://portal.wavespestcontrol.com/prep/${PREP}`;
+      expect((await bearerLinkSendCheck(matching, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(true);
+      expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(true);
     });
 
     test('a resolving token whose guide has an active version, owned by the recipient, passes — its customer + pest ride back for the dedupe marker', async () => {

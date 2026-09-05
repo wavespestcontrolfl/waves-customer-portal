@@ -1177,6 +1177,26 @@ async function dispatchRun(run, automation, executionPayload) {
   }
 }
 
+// The prep-send lease was held by a manual or composer send: nothing was
+// claimed and the provider was never reached, so this is not a delivery
+// attempt — the run goes back to runnable a minute out with its attempt
+// count restored, never spending the retry budget on contention (GH Codex
+// #3856 r27 P2).
+const PREP_LOCK_DEFER_MS = 60 * 1000;
+async function deferForPrepLock(run, attemptNumber, now) {
+  const runAfter = new Date(now.getTime() + PREP_LOCK_DEFER_MS);
+  const [deferred] = await db('email_template_automation_runs').where({ id: run.id }).update({
+    status: 'retry_scheduled',
+    attempts: attemptNumber - 1,
+    run_after: runAfter,
+    next_retry_at: runAfter,
+    last_error: PREP_LOCK_HELD,
+    updated_at: new Date(),
+  }).returning('*');
+  await logRunEvent(run.id, 'retry_scheduled', 'Deferred: prep send lock held by another sender', { next_retry_at: runAfter, attempt_consumed: false });
+  return deferred || { ...run, status: 'retry_scheduled' };
+}
+
 async function finalizeFailedRun(run, err, attemptNumber, retryPolicy) {
   const [failed] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'failed',
@@ -1262,6 +1282,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     }
     return outcome.updated;
   } catch (err) {
+    if (err.message === PREP_LOCK_HELD) return deferForPrepLock(claimedRun, attemptNumber, now);
     if (attemptNumber < retryPolicy.maxAttempts) {
       return scheduleRetry(claimedRun, err, attemptNumber, retryPolicy, now);
     }

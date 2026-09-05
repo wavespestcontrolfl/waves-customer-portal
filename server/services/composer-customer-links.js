@@ -873,6 +873,20 @@ function recipientAccountBinder({ toLast10, trustedCustomerId }) {
 // the send (GH Codex #3844 r3 P2).
 // Every verified prep page's customer + pest identity lands in `preps` so a
 // real send can write the tagger's dedupe marker (markPrepGuidesSent).
+function guideLabelForTemplateKey(templateKey) {
+  const { PREP_CONFIG } = require('./prep-guide-sender');
+  return Object.values(PREP_CONFIG).find((c) => c.emailTemplateKey === templateKey)?.label || null;
+}
+// The guide the composer's prep line names for this page token, or null
+// when the body carries no such line for it.
+function namedGuideForToken(body, token) {
+  const needle = `/prep/${String(token).toLowerCase()}`;
+  for (const m of String(body || '').matchAll(PREP_LINE_RE)) {
+    if (String(m[2]).toLowerCase().includes(needle)) return m[1].trim();
+  }
+  return null;
+}
+
 async function checkPrepLinks(ctx, preps) {
   const { PREP_CONFIG } = require('./prep-guide-sender');
   for (const run of linkRuns(ctx.runs, /\/prep\//i)) {
@@ -901,6 +915,17 @@ async function checkPrepLinks(ctx, preps) {
     }
     const bad = await ownedByRecipient(ctx, source.customerId, 'prep guide link');
     if (bad) return bad;
+    // The text must name the guide the page renders: the composer's line
+    // carries the label the insert saw, and the page's key can differ
+    // (a concurrent mint for another guide won the unkeyed visit; a fresh
+    // claim released and re-claimed by another guide keeps the same token).
+    // An operator-edited line that no longer matches the shape is not
+    // checked — nothing to compare (GH Codex #3856 r27 P0).
+    const named = namedGuideForToken(ctx.body, token);
+    const rendersLabel = guideLabelForTemplateKey(source.templateKey);
+    if (named && rendersLabel && named.toLowerCase() !== rendersLabel.toLowerCase()) {
+      return refuseSend(`This prep guide link names ${named} but the page now shows the ${rendersLabel} guide — remove the link and insert a fresh one.`);
+    }
     ctx.bearers += 1;
     // The marker is keyed by the tagger's pest type; a guide outside
     // PREP_CONFIG (a project prep page) has no replay guard to satisfy.
@@ -1140,6 +1165,7 @@ async function checkCardLinks(ctx, cards) {
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true, contractId = null } = {}) {
   const ctx = {
     runs: decodedRuns(body),
+    body,
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
@@ -1197,6 +1223,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
 async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
   const ctx = {
     runs: decodedRuns(body),
+    body,
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
@@ -1500,6 +1527,14 @@ async function buildCardRequestLink(visit) {
  * delivery, and this text is the operator's own send. Raw URL — the prep
  * sender never shortens prep links either.
  */
+// The composer's prep line. The send fence (checkPrepLinks) parses this
+// exact shape back out of the body: the guide it NAMES must be the guide
+// the page RENDERS.
+const PREP_LINE_RE = /prep checklist for the upcoming (.+?) is here: (\S+)/gi;
+function prepGuideLine(label, url) {
+  return `Your prep checklist for the upcoming ${label} is here: ${url}\n\n`;
+}
+
 async function buildPrepGuideLink(customerIds) {
   const { PREP_CONFIG, nextUpcomingVisit } = require('./prep-guide-sender');
   const { ensureServicePrepToken } = require('./project-email');
@@ -1545,10 +1580,23 @@ async function buildPrepGuideLink(customerIds) {
     return { url: null, line: '', reason: `The ${config.label} prep guide has no active version in Email Templates — activate it before texting a prep link` };
   }
   const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
+  // The mint is not locked against a concurrent manual send or automation
+  // claiming this unkeyed visit for ANOTHER guide: the losing mint still
+  // returns the winning token, whose page renders that other guide. Re-read
+  // the key the row actually carries and name THAT guide in the line — or
+  // refuse when it is one the composer cannot name (GH Codex #3856 r27 P0).
+  const keyed = await db('scheduled_services').where({ id: visit.id }).first('prep_template_key');
+  if (keyed?.prep_template_key && keyed.prep_template_key !== config.emailTemplateKey) {
+    const stored = Object.entries(PREP_CONFIG).find(([, c]) => c.emailTemplateKey === keyed.prep_template_key);
+    if (!stored) {
+      return { url: null, line: '', reason: 'This appointment\'s prep page is set to a guide the composer cannot name — send it from Send prep guide instead' };
+    }
+    [pestType, config] = stored;
+  }
   const url = `${publicPortalUrl()}/prep/${token}`;
   return {
     url,
-    line: `Your prep checklist for the upcoming ${config.label} is here: ${url}\n\n`,
+    line: prepGuideLine(config.label, url),
     // Immediate sends only — /sms binds the page to the recipient.
     immediateOnly: true,
     prep: { pestType, label: config.label, scheduledDate: dateOnly(visit.scheduled_date) },

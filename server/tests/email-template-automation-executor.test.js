@@ -1183,14 +1183,17 @@ describe('email template automation executor', () => {
     expect(lockTaken).toBeLessThan(EmailTemplates.sendTemplate.mock.invocationCallOrder[0]);
     expect(stampQuery.update.mock.invocationCallOrder[0]).toBeLessThan(lockReleased.mock.invocationCallOrder[0]);
 
-    // Held elsewhere: no claim, no provider call, the attempt is retried.
+    // Held elsewhere: no claim, no provider call — deferred a minute out
+    // WITHOUT consuming the attempt (contention is not a delivery attempt;
+    // r27 P2).
+    const deferQuery = chain({ returning: [{ ...queuedRun, status: 'retry_scheduled', attempts: 0 }] });
     setDbQueues({
       'email_template_automations as a': [chain({ result: [prepAutomation] })],
       email_template_automation_runs: [
         chain({ first: null }),
         chain({ returning: [queuedRun] }),
         chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
-        chain({ returning: [{ ...queuedRun, status: 'retry_scheduled', attempts: 1 }] }),
+        deferQuery,
       ],
       email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
       // Only the live-payload read: a claim or release would throw "Unexpected db table".
@@ -1202,6 +1205,7 @@ describe('email template automation executor', () => {
     runExclusive.mockImplementation(async () => ({ skipped: true, reason: 'lease_held' }));
     expect((await trigger()).results[0].run.status).toBe('retry_scheduled');
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(deferQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'retry_scheduled', attempts: 0, run_after: expect.any(Date) }));
     runExclusive.mockImplementation(async (_name, fn) => fn());
   });
 

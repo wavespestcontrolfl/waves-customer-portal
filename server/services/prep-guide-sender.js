@@ -144,10 +144,11 @@ function isSupportedChannel(channel) {
 // limit could hide a valid upcoming visit behind elapsed same-day rows);
 // soonest by date THEN window, id tie-breaker. Takes one customer id or an
 // account's ids (the composer's prep-guide insert looks across siblings).
-// A few candidates, not one: the soonest visit's page may legitimately
-// belong to another guide while a later visit's is free (GH Codex #3856
-// r16 P2). Empty when nothing matches; THROWS on a lookup error.
-const VISIT_CANDIDATES = 5;
+// Candidates, not one: the soonest visit's page may legitimately belong to
+// another guide while a later visit's is free (GH Codex #3856 r16 P2) — the
+// manual sender walks the WHOLE family (max Infinity) so a free visit behind
+// any number of taken ones is still found (GH Codex #3856 r27 P2). Empty
+// when nothing matches; THROWS on a lookup error.
 const VISIT_PAGE = 10;
 async function upcomingFamilyVisits(customerIds, { serviceKeywords, excludeKeywords = [] }, max) {
   const ids = [].concat(customerIds).filter(Boolean);
@@ -214,7 +215,7 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
 }
 
 async function nextUpcomingVisits(customerId, config) {
-  return upcomingFamilyVisits([customerId], config, VISIT_CANDIDATES);
+  return upcomingFamilyVisits([customerId], config, Infinity);
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes
