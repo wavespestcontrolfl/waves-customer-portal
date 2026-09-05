@@ -4,6 +4,7 @@
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { rootDirectory, setup, readContext, identity } = require('./context');
+const { checkRuntime } = require('./runtime');
 
 function command(executable, args, cwd) {
   const result = spawnSync(executable, args, { cwd, stdio: 'inherit' });
@@ -16,14 +17,17 @@ async function main() {
   const root = rootDirectory();
   if (action === 'create') {
     if (!/^[a-z0-9][a-z0-9-]{0,59}$/.test(slug || '')) throw new Error('Usage: npm run worktree:create -- <slug> [destination]');
+    checkRuntime(root);
     const target = path.resolve(destination || path.join(root, '..', `wt-${slug}`));
     command('git', ['fetch', 'origin', 'main'], root);
     command('git', ['worktree', 'add', '-b', `feat/${slug}`, target, 'origin/main'], root);
+    checkRuntime(target);
     command('npm', ['ci', '--no-audit', '--no-fund'], target);
     console.log(JSON.stringify(identity(await setup(target)), null, 2));
     return;
   }
   if (action === 'setup') {
+    checkRuntime(root);
     console.log(JSON.stringify(identity(await setup()), null, 2));
     return;
   }

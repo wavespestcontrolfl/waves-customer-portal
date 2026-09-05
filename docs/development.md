@@ -5,14 +5,25 @@ runner installs no packages and performs no migrations at startup.
 
 ## Fresh checkout
 
-Use the Node version selected in CI (currently Node 20), then:
+The root `.nvmrc` selects Node 20 for development and all jobs in the main CI
+workflow. Use your version manager to select it before installing dependencies.
+With nvm already installed, run:
 
 ```sh
+nvm install
+nvm use
 npm ci
 npm run worktree:setup
 npm run dev:doctor -- --frontend
 npm run dev:managed-client
 ```
+
+The file selects a major line, not an exact patch; Node 20.9 is the minimum.
+Doctor reports the actual Node version and rejects a different major or an older
+20.x runtime with instructions to switch and reinstall dependencies. Worktree
+setup and creation use the same check; creation checks before fetching or
+creating the checkout and again against the new checkout before `npm ci`.
+Status and stop remain usable after changing Node versions.
 
 The runner prints the URL, checkout path, commit SHA and assigned ports. Its API,
 Vite, debugger and control listener bind to loopback. Ports never silently move.
