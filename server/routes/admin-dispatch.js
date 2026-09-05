@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const { applyAssignable } = require('../services/technician-eligibility');
+const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
@@ -14376,6 +14376,19 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
           err.isOperational = true;
           err.code = 'VISIT_OWNER_CHANGED';
           throw err;
+        }
+        // Follow-up bookings inherit the source visit's tech (or an admin
+        // override). Assert on the writing trx: an inherited tech who has
+        // since been offboarded/de-listed lands the follow-up unassigned; an
+        // explicit override that is not assignable is a 422.
+        if (insertData.technician_id) {
+          try {
+            await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+          } catch (eligErr) {
+            if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
+            logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
+            insertData.technician_id = null;
+          }
         }
         const inserted = await trx('scheduled_services').insert(insertData).returning('*');
         // Visit groups (visit-group-scope.md §2): stamp at scheduling —

@@ -586,6 +586,27 @@ function disconnectRevokedStaffSessions(technicianId, reason) {
   }
 }
 
+// Non-terminal visits from today (ET) forward still assigned to a tech —
+// listed on offboarding for manual reassignment, never modified.
+function listFutureAssignedVisits(conn, technicianId) {
+  return conn('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where('s.technician_id', technicianId)
+    .where('s.scheduled_date', '>=', etDateString(new Date()))
+    .whereNotIn('s.status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
+    .orderBy('s.scheduled_date')
+    .select('s.id', 's.scheduled_date', 's.service_type', 'c.first_name', 'c.last_name');
+}
+
+function formatFutureAssignedVisits(rows) {
+  return (rows || []).map((v) => ({
+    id: v.id,
+    scheduledDate: v.scheduled_date,
+    serviceType: v.service_type,
+    customerName: [v.first_name, v.last_name].filter(Boolean).join(' ') || null,
+  }));
+}
+
 // A staff row with any operational or pay history is a person, not a slot.
 async function technicianHasHistory(conn, technicianId) {
   for (const table of ['scheduled_services', 'service_records', 'time_entries', 'review_incentive_payouts']) {
@@ -772,8 +793,12 @@ async function updateTechnician(req, res, next) {
       const revokeAccess = credentialsChanged || active === false;
       if (revokeAccess) await PushService.deactivateStaffUser(target.id, trx);
       const tech = await trx('technicians').where({ id: target.id }).first();
+      // Leaving active through Edit surfaces the same remaining-assignment
+      // list the DELETE path returns; visits are never touched here.
+      const futureAssignedVisits = active === false ? await listFutureAssignedVisits(trx, target.id) : [];
       return {
         tech,
+        futureAssignedVisits,
         revokeAccess,
         revocationReason: active === false
           ? 'account_deactivated'
@@ -807,7 +832,11 @@ async function updateTechnician(req, res, next) {
       disconnectRevokedStaffSessions(tech.id, outcome.revocationReason);
     }
     logger.info(`[team] Updated technician id=${tech.id} (employment_status=${tech.employment_status}, field_dispatchable=${tech.field_dispatchable}, auto_flip_enabled=${tech.auto_flip_enabled})`);
-    return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
+    return res.json({
+      success: true,
+      technician: sanitizeTechForAdmin(tech),
+      futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
+    });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
     return next(err);
@@ -1046,13 +1075,7 @@ async function deactivateTechnician(req, res, next) {
         : target;
       // Future work still on this tech is surfaced for reassignment — never
       // cancelled or rewritten here. Completed visits keep their attribution.
-      const futureAssignedVisits = await trx('scheduled_services as s')
-        .leftJoin('customers as c', 's.customer_id', 'c.id')
-        .where('s.technician_id', target.id)
-        .where('s.scheduled_date', '>=', etDateString(new Date()))
-        .whereNotIn('s.status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
-        .orderBy('s.scheduled_date')
-        .select('s.id', 's.scheduled_date', 's.service_type', 'c.first_name', 'c.last_name');
+      const futureAssignedVisits = await listFutureAssignedVisits(trx, target.id);
       return { tech, changed: wasOnStaff, futureAssignedVisits };
     });
 
@@ -1070,12 +1093,7 @@ async function deactivateTechnician(req, res, next) {
       success: true,
       deactivated: true,
       technician: sanitizeTechForAdmin(outcome.tech),
-      futureAssignedVisits: outcome.futureAssignedVisits.map((v) => ({
-        id: v.id,
-        scheduledDate: v.scheduled_date,
-        serviceType: v.service_type,
-        customerName: [v.first_name, v.last_name].filter(Boolean).join(' ') || null,
-      })),
+      futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
     });
   } catch (err) {
     return next(err);

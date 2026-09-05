@@ -160,13 +160,15 @@ describe('updateTechnician', () => {
     }
   });
 
-  test('active → prospective is a leave-active transition: sessions revoked, push deactivated, legacy flag false', async () => {
+  test('active → prospective is a leave-active transition: sessions revoked, push deactivated, legacy flag false, remaining visits listed', async () => {
     const target = makeChain({ first: { ...ADAM, id: 'tech-9', role: 'technician', auth_token_version: 5 } });
     const write = makeChain();
     const reread = makeChain({ first: { ...ADAM, id: 'tech-9', employment_status: 'prospective', active: false } });
-    installTransaction([target, write, reread]);
+    installTransaction([target, write, reread], { futureVisits: [{ id: 'ss-7', scheduled_date: '2026-09-20', service_type: 'Pest Control', first_name: 'Ana', last_name: 'Ruiz' }] });
     const res = await invoke(updateTechnician, { params: { id: 'tech-9' }, body: { employmentStatus: 'prospective' }, technicianId: 'adam' });
     expect(res.statusCode).toBe(200);
+    // Offboarding through Edit surfaces the same list as DELETE; nothing on the visit is written.
+    expect(res.body.futureAssignedVisits).toEqual([{ id: 'ss-7', scheduledDate: '2026-09-20', serviceType: 'Pest Control', customerName: 'Ana Ruiz' }]);
     expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
       employment_status: 'prospective', active: false, auth_token_version: 6, password_reset_token_hash: null,
     }));

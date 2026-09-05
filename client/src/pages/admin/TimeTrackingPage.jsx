@@ -2448,11 +2448,19 @@ export function TeamTab({ showToast }) {
     setSaving(true);
     try {
       if (editingId) {
-        await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
+        const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
           body: JSON.stringify(form),
         });
-        showToast("Technician updated");
+        // Offboarding through Edit (Employment → Inactive) surfaces the same
+        // remaining-assignment notice as the Deactivate button: future work
+        // stays on the schedule for manual reassignment.
+        const pending = (res && res.futureAssignedVisits) || [];
+        showToast(
+          pending.length
+            ? `Technician updated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
+            : "Technician updated",
+        );
       } else {
         await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
