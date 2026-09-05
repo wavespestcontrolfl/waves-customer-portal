@@ -924,8 +924,8 @@ describe('PR review r8', () => {
 
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
   test('the primary line is gated by catalog identity too; legacy rows keep the name match (hook P1)', async () => {
-    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, cockroach: { visits: [{ visit: 1, month: 'Any', primary: 'Advion Gel 1 tube' }] }, bed_bug: { visits: [{ visit: 1, month: 'Any', primary: 'CrossFire 13 fl oz/gal' }] } };
-    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'a', name: 'Advion Gel' }, { id: 'x', name: 'CrossFire' }];
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, cockroach: { visits: [{ visit: 1, month: 'Any', primary: 'Advion Gel 1 tube' }] }, bed_bug: { visits: [{ visit: 1, month: 'Any', primary: 'CrossFire 13 fl oz/gal' }] }, termite: { visits: [{ visit: 1, month: 'Any', primary: 'Termidor SC trench' }, { visit: 2, month: 'Any', primary: 'Recruit HD bait cartridges' }] } };
+    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'a', name: 'Advion Gel' }, { id: 'x', name: 'CrossFire' }, { id: 'r', name: 'Recruit HD' }, { id: 'td', name: 'Termidor SC' }];
     const run = (serviceType, serviceCategory) => jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType, serviceCategory, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
     const inspection = await run('Pest Inspection Service', 'inspection');
     expect(inspection.lines).toEqual([]);
@@ -940,6 +940,12 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect((await run('Bed Bug Inspection', 'inspection')).lines).toEqual([]);
     expect((await run('Initial German Roach Knockdown', 'pest_control')).lines.map((l) => l.product.id)).toEqual(['a']);
     expect((await run('Quarterly Pest Control', 'pest_control')).lines.map((l) => l.product.id)).toEqual(['d']);
+    // The composite pest + termite-bait service (r4 P1): the matcher's
+    // deliberate termite pick (visit 2, the station steps) is honoured
+    // inside pest_control's set, never replaced by general pest.
+    const composite = await run('Quarterly Pest + Termite Bait Station', 'pest_control');
+    expect(composite.visit.visit).toBe(2);
+    expect(composite.lines.map((l) => l.product.id)).toEqual(['r']);
     // No identity (legacy row) → the name match as before.
     expect((await run('Quarterly Pest Control', null)).lines.map((l) => l.product.id)).toEqual(['d']);
     // A lawn-named inspection never builds the lawn plan (hook P1).

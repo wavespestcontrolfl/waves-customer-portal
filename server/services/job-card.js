@@ -280,13 +280,15 @@ async function loadAddons(dbh, serviceId) {
 // Catalog category → the treatment programs it may resolve to (the
 // matcher's pick is honoured only inside `any`, else the category's
 // `fallback`), so "Initial German Roach Knockdown" under pest_control
-// resolves the cockroach program while "Pest Inspection Service" —
-// inspection by identity, pest by name — resolves nothing. Specialty is a
+// resolves the cockroach program and "Quarterly Pest + Termite Bait
+// Station" the termite-bait protocol (the matcher's deliberate composite
+// pick — the tech needs the station steps), while "Pest Inspection
+// Service" — inspection by identity, pest by name — resolves nothing. Specialty is a
 // grab-bag (tick, wildlife, bee/wasp, the general appointment …) whose one
 // treatment protocol is bed bug: named only, no category default.
 // Inspection / other and an unknown category resolve no products.
 const ADDON_PROGRAMS = Object.freeze({
-  pest_control: { any: ['pest', 'cockroach', 'bed_bug'], fallback: 'pest' },
+  pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
   lawn_care: { any: ['lawn'], fallback: 'lawn' },
   mosquito: { any: ['mosquito'], fallback: 'mosquito' },
   termite: { any: ['termite'], fallback: 'termite' },
