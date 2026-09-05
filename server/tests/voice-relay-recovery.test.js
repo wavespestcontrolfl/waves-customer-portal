@@ -489,6 +489,12 @@ describe('the conversation side', () => {
     const convo = resumedConvo({ callSid: 'CA-lead' });
     await convo._resumeReady;
     expect(convo.leadCaptured).toBe(true);
+    expect(convo._buildToolCtx().leadId()).toBe('L1'); // the booking card after the reconnect links THIS call's lead (hook r36 P1)
+    const own = resumedConvo({ callSid: 'CA-lead-own' });
+    own._leadId = 'L-mine';
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1' } } });
+    own._applyResumeState({ reconnects: 1, relayLeadId: 'L1', promises: [], callerTurns: [] });
+    expect(own._leadId).toBe('L-mine'); // a lead this leg captured itself is kept
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
     const none = resumedConvo({ callSid: 'CA-nolead' });
     await none._resumeReady;

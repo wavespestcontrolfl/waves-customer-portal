@@ -1661,6 +1661,10 @@ class RelayConversation {
     this._resume = state || null;
     if (!state) return;
     if (state.relayLeadId || state.leadCaptured) this.leadCaptured = true;
+    // The earlier leg's lead is THIS call's lead for the booking card too
+    // (hook r36 P1): request_booking after the reconnect reads ctx.leadId().
+    // A lead this leg captured itself is kept.
+    if (state.relayLeadId && !this._leadId) this._leadId = state.relayLeadId;
     // The call started when its FIRST leg did (hook r25 P1): the close-time
     // duration_seconds covers the whole call, not the resumed leg alone.
     if (state.startedAtMs && state.startedAtMs < this._startedAt) this._startedAt = state.startedAtMs;
