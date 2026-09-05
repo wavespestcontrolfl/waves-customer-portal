@@ -320,8 +320,23 @@ function builtinTranscriptMayReplace(row) {
   if (!row) return false;
   if (!row.transcription) return true;
   const provider = row.transcription_provider ? String(row.transcription_provider) : null;
-  return !provider || provider === 'twilio_builtin';
+  if (!provider || provider === 'twilio_builtin') return true;
+  // Sandy PR 2A: a transferred call's row may still carry the relay's OWN
+  // transcript when the recording's built-in text arrives (Sandy closed
+  // before the unanswered ring reached voicemail). That text is the only
+  // recording transcript the row will get if the providers fail — and the
+  // AI segment is durable in metadata.relay_transcript (end()'s stash), from
+  // which the processor rebuilds the composite. Never for a non-transfer.
+  return provider === 'conversation_relay' && isTransferredRow(row) && relayTranscriptStashed(row);
 }
+
+/** The AI segment is safe in metadata.relay_transcript (PR 2A). */
+function relayTranscriptStashed(row) {
+  const meta = parseJsonObject(row && row.metadata);
+  return Boolean(meta.relay_transcript && typeof meta.relay_transcript === 'object' && String(meta.relay_transcript.text || '').trim());
+}
+// The SQL twin of the rule above, re-checked in the write.
+const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND COALESCE(metadata->'relay_transcript'->>'text', '') <> '' AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred'))";
 
 // A second recording that arrived while the row's recording was load-bearing
 // (decideRecordingAttach → park). Nothing is lost: the recording rides in
@@ -2551,7 +2566,7 @@ router.post('/transcription', async (req, res) => {
       // recording-status/recovery guards key on that stamp
       // (Codex #2676 round-10 P1).
       let targetRow = null;
-      const TRANSCRIPTION_COLUMNS = ['id', 'twilio_call_sid', 'recording_sid', 'transcription', 'transcription_provider', 'transcription_metadata'];
+      const TRANSCRIPTION_COLUMNS = ['id', 'twilio_call_sid', 'recording_sid', 'transcription', 'transcription_provider', 'transcription_metadata', 'metadata', 'call_outcome'];
       if (ParentCallSid) {
         targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first(...TRANSCRIPTION_COLUMNS);
       }
@@ -2604,7 +2619,8 @@ router.post('/transcription', async (req, res) => {
             .where(function builtinMayReplace() {
               this.whereNull('transcription')
                 .orWhereNull('transcription_provider')
-                .orWhere('transcription_provider', 'twilio_builtin');
+                .orWhere('transcription_provider', 'twilio_builtin')
+                .orWhereRaw(RELAY_STASHED_TRANSFER_SQL);
             })
             // …and still the recording this text describes (a swap landing
             // between the read and this write makes it skip).
