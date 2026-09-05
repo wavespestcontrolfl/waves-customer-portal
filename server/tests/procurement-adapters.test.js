@@ -417,7 +417,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     // routeWebSocket: undefined → a working interception; null → the API is missing; a function → that registration
     if (st.routeWebSocket !== null) context.routeWebSocket = st.routeWebSocket || (async () => {});
     const browser = { newContext: async () => context, close: jest.fn(async () => {}) };
-    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'], upload: async () => 'evidence-key' };
+    // confirmationTimeoutMs: the fake's waitForTimeout is a no-op, so the ambiguity tests must not spin for the 20 s production deadline (Codex #3900 P1)
+    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'], upload: async () => 'evidence-key', confirmationTimeoutMs: 40 };
     return { st, deps, browser };
   }
   const creds = { email: 'buyer@example.com', password: 'pw', accountNumber: '12345' };
@@ -568,6 +569,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Ships to 34205')).toBeNull();
     expect(s1._internals.orderNumberIn('Reorder # 12345')).toBeNull(); // another concept's label (word boundary — #3900 P2)
     expect(s1._internals.orderNumberIn('Backorder # 12345 · Order # SO-778899')).toBe('SO-778899');
+    expect(s1._internals.orderNumberIn('Purchase Order # PO-12345')).toBeNull(); // prefixed order concepts (#3900 P2)
+    expect(s1._internals.orderNumberIn('Back Order # BO-12345')).toBeNull();
+    expect(s1._internals.orderNumberIn('Sales order 778899 · Work order 42')).toBeNull();
+    expect(s1._internals.orderNumberIn('Purchase Order # PO-12345 · Your order number is 55501234')).toBe('55501234');
     expect(s1._internals.orderNumberIn('Order ref SO-778899')).toBe('SO-778899');
     expect(s1._internals.orderNumberIn('Reference 55501 · Ready')).toBeNull();
     expect(s1._internals.orderNumberIn('Total 1,234.56 · Order # SO-778899')).toBe('SO-778899');

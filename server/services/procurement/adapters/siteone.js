@@ -111,7 +111,10 @@ const SELECTORS = Object.freeze({
   // ancestor's text — and place() requires exactly ONE match (pre-push P0).
   checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .checkout .payment-method.selected .account-number, .checkout [data-test="bill-to-account"] .account-number',
   checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, .checkout [data-test="shipping-address"]',
-  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, h1:has-text("Order #"), h2:has-text("Order #"), h3:has-text("Order #"), p:has-text("Order #"), strong:has-text("Order #")',
+  // The confirmation node: dedicated number elements, plus the textual
+  // formats `orderNumbersIn` accepts ("Order #", "order number is",
+  // "confirmation number") in ordinary headings / paragraphs (Codex #3900 P2).
+  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, :is(h1, h2, h3, p, strong):has-text("Order #"), :is(h1, h2, h3, p, strong):has-text("order number"), :is(h1, h2, h3, p, strong):has-text("confirmation number"), :is(h1, h2, h3, p, strong):has-text("Confirmation #")',
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   // Confirmation-number element only — never a bare :has-text() that an
   // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
@@ -935,7 +938,7 @@ async function trialPlaceOrder(page, placeOrder, refuse) {
   return handle;
 }
 
-async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines }) {
+async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines, confirmationTimeoutMs = CONFIRMATION_TIMEOUT }) {
   await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   // Confirmation must be evidence created AFTER the click: a node the
@@ -1033,7 +1036,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // (bounded) for a SHOWN confirmation-number node rather than sampling
     // once after a fixed delay (Codex #3876 r2 P2). A timeout falls through
     // to the ambiguous path below.
-    number = await waitForNewOrderNumber(page, baseline, CONFIRMATION_TIMEOUT);
+    number = await waitForNewOrderNumber(page, baseline, confirmationTimeoutMs); // injectable: the fake-page tests wait milliseconds, not the 20 s production deadline (Codex #3900 P1)
   } catch (e) {
     const err = new Error(`siteone submit outcome unknown: ${String(e.message).slice(0, 120)}`);
     err.ambiguous = true; err.evidence = evidence; err.cents = cents;
@@ -1141,9 +1144,11 @@ function orderNumbersIn(text) {
   // recorded with it, the same number rerendered without it would read as a
   // new one, and the date / money exclusions would miss (Codex #3876 r17 P2).
   const ids = [];
-  // A word boundary before the label: "Reorder # 12345" / "Backorder # 12345"
-  // are other concepts, never the confirmation (Codex #3900 P2).
-  for (const m of String(text).matchAll(/\b(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1]) && !ids.some((x) => x.toUpperCase() === m[1].toUpperCase())) ids.push(m[1]);
+  // A word boundary before the label, and no known prefix concept before
+  // it: "Reorder # 12345", "Backorder # 12345", "Purchase Order # PO-12345",
+  // "Back Order # BO-12345", "Sales order 778", "Work order 42" are other
+  // concepts, never the confirmation (Codex #3900 P2 ×2).
+  for (const m of String(text).matchAll(/(?<!\b(?:purchase|back|sales|work|change|pre|re)[\s-]*)\b(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1]) && !ids.some((x) => x.toUpperCase() === m[1].toUpperCase())) ids.push(m[1]);
   if (ids.length) return ids;
   // A dedicated number element (`[data-test="order-number"]`, `.order-number`)
   // carries the bare identifier and no label: the WHOLE text, when it is one
@@ -1156,7 +1161,7 @@ function orderNumbersIn(text) {
 // The checkout stage: bill-to proof, identity + final total, the cap gate on
 // that total, the one click, the confirmation number. Every check refuses
 // BEFORE the click; only the click flips the caller's cart-cleanup guard.
-async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, markSubmitted, dryRun = false }) {
+async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, markSubmitted, confirmationTimeoutMs, dryRun = false }) {
   await (await visibleControl(page, SELECTORS.checkoutButton, 'checkout_button', evidence)).click();
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
   await page.waitForTimeout(2000);
@@ -1182,7 +1187,7 @@ async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToToke
   let placed;
   const identity = () => verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
   const lines = () => verifyCheckoutLines(page, { vendorSku, qty, evidence, upload });
-  try { placed = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines }); }
+  try { placed = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines, confirmationTimeoutMs }); }
   catch (e) {
     // The click happened at THIS total: an ambiguous outcome parks with it
     // (a null amount on a placed_at row would count $0 against the
@@ -1195,7 +1200,7 @@ async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToToke
 
 async function place(
   { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
-  { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
+  { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence, confirmationTimeoutMs = CONFIRMATION_TIMEOUT } = {},
 ) {
   if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
   const { qty, shipToTokens } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
@@ -1228,7 +1233,7 @@ async function place(
     // stops inside checkoutAndSubmit, before the click.
     // `await` is load-bearing: the finally below reads `submitted`, so the
     // stage must have run before it (a bare `return promise` runs finally first).
-    return await checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, dryRun, markSubmitted: () => { submitted = true; } });
+    return await checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, dryRun, confirmationTimeoutMs, markSubmitted: () => { submitted = true; } });
   } finally {
     // Nothing was submitted (dry run, refusal, error): leave no cart behind
     // for the next run to find. Best effort — the next run clears it anyway.
