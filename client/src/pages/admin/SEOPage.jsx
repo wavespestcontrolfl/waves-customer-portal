@@ -3895,8 +3895,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                   </button>
                 </>
               ) : (
-                <span style={{ fontSize: 12, color: D.muted }}>
-                  {`Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
+                <span style={{ fontSize: 14, color: D.muted }}>
+                  {c.submission_ambiguity ? "Recording a submission verdict does not reopen acquisition for this domain." : `Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
                 </span>
               )}
             </div>

@@ -123,7 +123,7 @@ test('owner placement confirmation resolves a held attempt and its exact executi
   const currentDecision = { ...s.authority, id: uid(), instance_key: 'revised-instance', satisfied_at: null };
   s.db._tables.seo_link_placement_authorities[0].ended_at = new Date();
   s.db._tables.seo_link_placement_authorities.push(currentDecision);
-  const args = { prospectId: s.placement.id, status: 'placed', attemptId: s.db._tables.seo_link_attempts[0].id };
+  const args = { prospectId: s.placement.id, status: 'placed', liveUrl: 'https://publisher.example/confirmed', attemptId: s.db._tables.seo_link_attempts[0].id };
   expect(await E.reconcileOwnerPlacement(s.db, args)).toEqual({ ok: true });
   expect(s.db._tables.seo_link_attempts[0]).toMatchObject({ outcome: 'placed', evidence_url: 'synthetic/evidence.png' });
   expect(s.db._tables.seo_link_placement_authorities.every(r => r.satisfied_reason === 'placed')).toBe(true);
@@ -167,4 +167,31 @@ test('submission without a durable citation snapshot cannot cross the mutation b
   await E.reserveSlot(s.db, s.placement, s.path, auth, s.token, new Date());
   expect(await E.beginSubmission(s.db, { prospectId: s.placement.id, leaseToken: s.token })).toBe(false);
   expect(s.db._tables.seo_link_attempts[0].outcome).toBe('slot_reserved');
+});
+
+
+test.each([
+  ['sarasota', '/pest-control/', 'sarasota'],
+  ['-', '/venice-pest-control/', 'venice'],
+  ['-', '/pest-control/', 'bradenton'],
+])('legacy runner hold recovers citation identity for %s / %s', async (location_key, target_page, expectedLocation) => {
+  const s = scenario({ placement: { location_key, target_page } });
+  s.db._tables.audit_log = [];
+  s.db._tables.seo_link_prospects[0].claimed_at = null;
+  const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', detail: { authority_id: s.authority.id } };
+  s.db._tables.seo_link_attempts.push(attempt);
+  expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed', liveUrl: 'https://www.publisher.example/confirmed' })).toEqual({ ok: true });
+  expect(s.db._tables.seo_link_prospects[0]).toMatchObject({ location_key: expectedLocation, quality_signals: { cited_homepage: true, location: expectedLocation, submitted_website: 'https://wavespestcontrol.com' } });
+  expect(attempt).toMatchObject({ outcome: 'placed', detail: { citation: { website: 'https://wavespestcontrol.com', location: expectedLocation } } });
+});
+
+test('a hold with unknown provider identity remains unresolved', async () => {
+  const s = scenario(); s.db._tables.audit_log = [];
+  s.db._tables.seo_link_prospects[0].claimed_at = null;
+  const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'hermes', action: 'submit', outcome: 'submit_ambiguous', detail: { authority_id: s.authority.id } };
+  s.db._tables.seo_link_attempts.push(attempt);
+  expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed', liveUrl: 'https://publisher.example/confirmed' })).toMatchObject({ ok: false, error: expect.stringMatching(/identity/) });
+  expect(attempt.outcome).toBe('submit_ambiguous');
+  expect(s.db._tables.audit_log).toHaveLength(0);
+  expect(s.db._tables.seo_link_placement_authorities[0].satisfied_at).toBeUndefined();
 });

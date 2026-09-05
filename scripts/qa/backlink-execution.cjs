@@ -108,15 +108,38 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     console.log('PASS held submit preserves screenshot/reason/authority on the original attempt and releases lease stamps');
     const authority = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution', instance_kind: '-' }).first();
     await trx('seo_link_placement_authorities').where({ id: authority.id }).update({ satisfied_at: null, satisfied_reason: null });
-    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
+    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id } });
     await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
     const edit = router.stack.find(l => l.route?.path === '/prospects/:id' && l.route.methods.patch).route.stack.at(-1).handle;
     const queue = await require(`${root}/server/services/seo/link-owner-queue`).listOwnerQueue(proxy);
     assert.equal(queue.cards.find((card) => card.placement.id === p.id).submission_ambiguity.evidence_url, 'https://synthetic.example/evidence.png');
+    const Q = require(`${root}/server/services/seo/link-owner-queue`);
+    for (const agent_state of ['rejected', 'watching', 'not_reproducible']) {
+      await trx('seo_link_domains').where({ id }).update({ agent_state });
+      const recoveryCards = (await Q.listOwnerQueue(proxy)).cards;
+      assert.equal(recoveryCards.length, 1);
+      assert.equal(recoveryCards[0].submission_ambiguity.id, rejectedAttempt);
+      assert.deepEqual(recoveryCards[0].rows, []);
+      assert.equal(recoveryCards[0].backlink_match, null);
+      assert.equal(recoveryCards[0].outreach_draft_exhausted, false);
+      assert.equal(recoveryCards[0].decidable, false);
+    }
+    await trx('seo_link_domains').where({ id }).update({ agent_state: 'rejected' });
+    console.log('PASS held submission remains visible outside acquisition states without approval/assignment actions');
     const confirm = (overrides = {}) => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { submission_attempt_id: rejectedAttempt, submission_verdict: 'placed', live_url: `https://${domain}/confirmed`, ...overrides } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
     await assert.rejects(confirm({ submission_attempt_id: randomUUID() }), /409/);
     await assert.rejects(confirm({ live_url: 'javascript:alert(1)' }), /400/);
-    assert.equal((await confirm()).prospect.status, 'placed');
+    for (const live_url of ['https://unrelated.example/listing', `https://${domain}.unrelated.example/listing`]) {
+      await assert.rejects(confirm({ live_url }), /409/);
+      assert.equal((await trx('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'submit_ambiguous');
+      assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_at, null);
+      assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
+    }
+    assert.equal((await confirm({ live_url: `https://www.${domain}/confirmed` })).prospect.status, 'placed');
+    assert.equal((await trx('seo_link_domains').where({ id }).first()).agent_state, 'rejected');
+    assert.equal((await Q.listOwnerQueue(proxy)).cards.length, 0);
+    await trx('seo_link_domains').where({ id }).update({ agent_state: 'acquiring' });
+
     assert.equal((await trx('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'placed');
     const recoveredCitation = await trx('seo_link_prospects').where({ id: p.id }).first();
     assert.equal(recoveredCitation.quality_signals.cited_homepage, true);

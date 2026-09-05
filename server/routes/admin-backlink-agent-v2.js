@@ -636,7 +636,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'live_url', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id');
       if (!current) return { missing: true };
       // "In outreach" = active-outreach status AND an outreach-lane link_type:
       // a status flip OR a link_type change out of the signup lane can put a
@@ -703,7 +703,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
       }
       if (negativeVerdict || ['placed', 'live', 'indexed'].includes(patch.status)) {
         await lockProspectDomain(trx, current.target_domain);
-        const confirmed = await require('../services/seo/link-execution-authority').reconcileOwnerPlacement(trx, { prospectId: current.id, status: patch.status, attemptId: req.body.submission_attempt_id || null, notSubmitted: negativeVerdict, actorId: req.technician?.id || null });
+        const confirmed = await require('../services/seo/link-execution-authority').reconcileOwnerPlacement(trx, { prospectId: current.id, status: patch.status, attemptId: req.body.submission_attempt_id || null, notSubmitted: negativeVerdict, liveUrl: patch.live_url || current.live_url, actorId: req.technician?.id || null });
         if (!confirmed.ok) return { reconciliationError: confirmed.error };
         if (negativeVerdict) await require('../services/seo/link-registry').settleRetiredPlacements(trx, { prospectIds: [current.id] });
       }

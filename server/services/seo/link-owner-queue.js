@@ -235,13 +235,14 @@ async function listOwnerQueue(db) {
   const parked = candidates.filter((p) => (p.quality_signals?.outreach_match_ambiguous || exhaustedDraft(p) || uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
     : liveRows.some((r) => r.prospect_id === p.id && !r.satisfied_at && isOwner(r.level) && whyNotHere(p, r) === null))));
   if (!parked.length) return { cards: [] };
-  const domains = await db('seo_link_domains').whereIn('id', [...new Set(parked.map((p) => p.domain_id))]).whereIn('agent_state', [...BRIDGE_STATES])
+  const domains = await db('seo_link_domains').whereIn('id', [...new Set(parked.map((p) => p.domain_id))])
     .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
   const matchIds = [...new Set(parked.map((p) => p.quality_signals?.outreach_match_ambiguous).filter(Boolean))];
   const matchRows = matchIds.length ? await db('seo_backlinks').whereIn('id', matchIds).where({ status: 'active' }).select('id', 'source_url') : [];
   const matchById = new Map(matchRows.map((b) => [b.id, b]));
   const domainById = new Map(domains.map((d) => [d.id, d]));
-  const cardsFor = parked.filter((p) => domainById.has(p.domain_id));
+  const eligibleDomains = new Set(domains.filter((d) => BRIDGE_STATES.includes(d.agent_state)).map((d) => d.id));
+  const cardsFor = parked.filter((p) => domainById.has(p.domain_id) && (eligibleDomains.has(p.domain_id) || uncertainById.has(p.id)));
   if (!cardsFor.length) return { cards: [] };
   // the selection's hold, per domain: EVERY placement of the domain (not only the cards) against its best path
   const allPlacements = await db('seo_link_prospects').whereIn('domain_id', domains.map((d) => d.id)).select('id', 'domain_id', 'location_key', 'payment_group_id');
@@ -253,7 +254,7 @@ async function listOwnerQueue(db) {
   const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
   const pathById = new Map(paths.map((p) => [p.id, p]));
   const heldDomain = new Set(domains.filter((d) => heldFor(d, pathById.get(d.best_path_id), allPlacements.filter((p) => p.domain_id === d.id), paid)).map((d) => d.id));
-  const cardIds = new Set(cardsFor.map((p) => p.id));
+  const cardIds = new Set(cardsFor.filter((p) => eligibleDomains.has(p.domain_id)).map((p) => p.id));
   const rows = await loadApprovals(db, liveRows.filter((r) => cardIds.has(r.prospect_id)));
   const waivers = await db('seo_link_floor_waivers').whereIn('domain_id', domains.map((d) => d.id)).whereNull('invalidated_at').orderBy('approved_at', 'desc')
     .select('id', 'domain_id', 'path_id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
@@ -369,8 +370,8 @@ async function listOwnerQueue(db) {
     });
     return {
       submission_ambiguity: uncertainById.get(p.id) || null,
-      outreach_draft_exhausted: exhaustedDraft(p),
-      backlink_match: matchById.get(p.quality_signals?.outreach_match_ambiguous) || null,
+      outreach_draft_exhausted: eligibleDomains.has(d.id) && exhaustedDraft(p),
+      backlink_match: eligibleDomains.has(d.id) ? matchById.get(p.quality_signals?.outreach_match_ambiguous) || null : null,
       placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {
@@ -390,7 +391,7 @@ async function listOwnerQueue(db) {
       } : null,
       // Reject / Watch apply while the domain is still the owner's to decide; once a sibling is approved or in flight
       // (lane-owned) those buttons would only ever 409 — the card says so instead
-      decidable: !R.LANE_OWNED_STATES.includes(d.agent_state),
+      decidable: eligibleDomains.has(d.id) && !R.LANE_OWNED_STATES.includes(d.agent_state),
       // shown only while the bridge would still honour it: the same floors-hash test approveRow / activeWaiver apply
       waiver: path && activeWaiverFor.has(`${d.id}|${path.id}`) ? waiverFor.get(`${d.id}|${path.id}`) : null,
       d30_confidence: null, // step 7 (D30 loop) — no evidence yet

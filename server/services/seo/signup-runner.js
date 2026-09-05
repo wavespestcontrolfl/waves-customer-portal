@@ -336,5 +336,5 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   return { ...counts, ...(dryRun ? { samples } : {}) };
 }
 
-module.exports = { run };
+module.exports = { run, pickLocation };
 module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify, attemptRowFor, LOCATION_MATCH_SQL };
