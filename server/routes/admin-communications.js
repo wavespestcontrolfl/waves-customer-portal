@@ -1152,6 +1152,7 @@ const PREP_REFUSAL_COPY = {
   unsupported_channel: () => 'Choose Email, Text, or Both.',
   // The sprinkler timer guide is a seasonal tip, sent once.
   seasonal_tips_off: () => 'This customer turned off Seasonal Lawn Tips, and the sprinkler timer guide is one — it was not sent.',
+  email_opted_out: () => 'This customer turned off email — choose Text to send the sprinkler timer guide link instead.',
   guide_already_sent: (r) => `This customer already received the sprinkler timer guide${r.sentAt ? ` on ${new Date(r.sentAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : ''} — it is sent once. The guide link is in the composer's link library if they need it again.`,
   guide_check_failed: () => "Couldn't confirm this customer's preferences or send history — try again.",
 };
@@ -1184,6 +1185,7 @@ function manualPrepMessage(result) {
     const why = PREP_TEXT_DOWN_COPY[result.smsLinkReason];
     return `${sent} ${why ? why(result) : 'The text did not go out — send it again as Text once the number is confirmed.'}`;
   }
+  if (result.emailSkipReason === 'email_opted_out') return `${sent} The email was not sent — this customer turned off email.`;
   return result.emailUncertain
     ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`
     : `${sent} The email did not go out — send it again as Email once the address is confirmed.`;

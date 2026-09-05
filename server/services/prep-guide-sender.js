@@ -801,10 +801,13 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
 // Why a standalone guide is not sent right now, or null. Reads fail closed:
 // an unreadable preference or history is treated as a refusal, never as a
 // send (a guide is a courtesy; a second copy or an unwanted one is not).
-async function guideRefusal(customer, config, pestType) {
+async function guideRefusal(customer, config, pestType, { wantEmail = true } = {}) {
   try {
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
     if (prefs && prefs.seasonal_tips === false) return { reason: 'seasonal_tips_off' };
+    // The customer's email opt-out (the weekly irrigation sweep's own
+    // np.email_enabled fence); a text-only send is unaffected by it.
+    if (wantEmail && prefs && prefs.email_enabled === false) return { reason: 'email_opted_out' };
     const prior = await db('customer_interactions')
       .where({ customer_id: customer.id })
       .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
@@ -880,8 +883,15 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     // again — the interaction row logPrepInteraction writes is the durable
     // proof (GH Codex #3953 r1 P1 + P2).
     if (config.guide) {
-      const refusal = await guideRefusal(customer, config, pestType);
-      if (refusal) return { ...result, ...refusal };
+      const refusal = await guideRefusal(customer, config, pestType, { wantEmail: contacts.wantEmail });
+      // Email opted out on Both: the text still carries the hub link; the
+      // email leg is reported as the one that did not go.
+      if (refusal?.reason === 'email_opted_out' && contacts.wantSms) {
+        contacts.wantEmail = false;
+        result.emailSkipReason = 'email_opted_out';
+      } else if (refusal) {
+        return { ...result, ...refusal };
+      }
     }
     const page = config.guide
       ? { visit: null, prepUrl: null, ownsPage: false, linkReason: null }
@@ -905,6 +915,10 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     }
 
     await deliverPrep({ customer, config, contacts, page, smsPlan, pestType, actorId, result });
+    if (result.ok && result.emailSkipReason) {
+      result.reason = 'partial';
+      result.failedChannel = 'email';
+    }
     if (result.ok) {
       await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
       await settleHeldEnrollment(customer.id, config.emailTemplateKey);

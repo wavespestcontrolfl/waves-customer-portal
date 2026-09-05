@@ -984,6 +984,19 @@ describe('sprinkler timer guide', () => {
     expect(flea.ok).toBe(true);
   });
 
+  test('a customer who turned off email: Email is refused, Both texts the hub link and names the email as the leg that did not go, Text is unaffected', async () => {
+    notificationPrefsRow = { seasonal_tips: null, email_enabled: false };
+    const email = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(email).toMatchObject({ ok: false, reason: 'email_opted_out' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    const both = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+    expect(both).toMatchObject({ ok: true, emailSent: false, smsSent: true, reason: 'partial', failedChannel: 'email', emailSkipReason: 'email_opted_out' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    const sms = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(sms).toMatchObject({ ok: true, smsSent: true });
+    expect(sms.reason).toBeUndefined();
+  });
+
   test('sent once: a customer who already received the guide is refused, with the date', async () => {
     interactionMarkerRow = { id: 'i-1', subject: 'sprinkler_timer prep info sent', created_at: '2026-09-01T14:00:00Z' };
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
@@ -1015,7 +1028,7 @@ describe('sprinkler timer guide', () => {
 
   test('every visit-prep entry carries a service family; only a guide may omit it (the composer scan iterates PREP_CONFIG)', () => {
     const { PREP_CONFIG } = require('../services/prep-guide-sender');
-    for (const [key, config] of Object.entries(PREP_CONFIG)) {
+    for (const config of Object.values(PREP_CONFIG)) {
       if (config.guide) expect(config.serviceKeywords).toBeUndefined();
       else expect(Array.isArray(config.serviceKeywords) && config.serviceKeywords.length > 0).toBe(true);
     }
