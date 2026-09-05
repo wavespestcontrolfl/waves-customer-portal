@@ -1120,6 +1120,10 @@ treats `resumed` as a hint and re-proves it from the row before seeding the
 earlier turns or skipping its capture floor. A second failure: office open
 AND `GATE_VOICE_RELAY_TRANSFER` ⇒ the staff ring above (owner-bound to the
 row's current claim owner, generic whisper); otherwise today's voicemail.
+With recovery enabled, an unconfirmed reconnect claim/state read returns
+503 with no fallback instructions. Voicemail, sandbox failure, and staff-ring
+claims are fenced to the proven reconnect generation; a predicate that loses
+to a newer reconnect returns a bare response instead of stale fallback TwiML.
 Any change to the claim, the owner fence, the reconnect fence, the sandbox
 branch or what the whisper may speak is security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;

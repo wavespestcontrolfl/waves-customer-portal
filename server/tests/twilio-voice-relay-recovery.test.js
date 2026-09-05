@@ -3,7 +3,7 @@
  *
  * First failure ⇒ ONE fenced reconnect claim + the relay re-rendered for the
  * same CallSid (resumed greeting, `resumed=1`, same action / language /
- * sandbox); unconfirmed claim ⇒ today's fallback (a late-landing claim is
+ * sandbox); unconfirmed claim ⇒ 503 without fallback instructions (a late claim is
  * put back); second failure ⇒ the 2A staff ring when the office is open and
  * the transfer gate is on, else today's voicemail; sandbox second failure ⇒
  * today's relay_failed hangup. Gate off ⇒ byte-identical to today (pinned).
@@ -140,7 +140,7 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(res.body).not.toContain('<Hangup');
   });
 
-  test('an UNCONFIRMED claim (timeout) ⇒ today\'s voicemail, and a claim that lands later is put back (fenced on its own stamp)', async () => {
+  test('an UNCONFIRMED claim (timeout) ⇒ 503 without fallback instructions, and a claim that lands later is put back (fenced on its own stamp)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     jest.useFakeTimers();
     const { builder, updates } = primeDb();
@@ -150,10 +150,11 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     const p = handlerFor('/relay-complete')({ body: { CallSid: 'CA-rc-hung', ErrorCode: '64105' }, query: {} }, res);
     await jest.advanceTimersByTimeAsync(4000);
     await p;
-    expect(res.body).toContain('<Record');
+    expect(res.statusCode).toBe(503);
+    expect(res.body).not.toContain('<Record');
     expect(res.body).not.toContain('ConversationRelay');
-    expect(updates.some((u) => u.call_outcome === 'voicemail' && u.answered_by === 'voicemail')).toBe(true);
-    settleClaim(1); // the queued claim lands after the recorder started
+    expect(updates.some((u) => u.call_outcome === 'voicemail' && u.answered_by === 'voicemail')).toBe(false);
+    settleClaim(1); // the queued claim lands after the unconfirmed response
     await jest.advanceTimersByTimeAsync(0);
     jest.useRealTimers();
     await new Promise((r) => setImmediate(r));
@@ -305,7 +306,7 @@ describe('/relay-complete — the second failure', () => {
     expect(res3.body).toContain('<Record');
   });
 
-  test('a replay whose re-stamp is REFUSED: a compensated (terminal) row takes today\'s voicemail; a row the resumed leg claimed meanwhile is ignored; an unconfirmed re-stamp falls to voicemail and a late one is put back (hook r21 P1)', async () => {
+  test('a replay whose re-stamp is REFUSED: a compensated (terminal) row takes today\'s voicemail; a row the resumed leg claimed meanwhile is ignored; an unconfirmed re-stamp returns 503 and a late one is put back (hook r21 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const firstLegStillOwns = { metadata: { relay_session_claim_owner: 'nonce-1', relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 500 } };
     const isReissue = (patch) => patch.metadata && String(patch.metadata.sql).includes("'relay_reconnect_ms'") && !String(patch.metadata.sql).includes('relay_reconnects');
@@ -333,7 +334,7 @@ describe('/relay-complete — the second failure', () => {
     await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
     expect(res.body).toMatch(/^<\?xml[^>]*\?><Response\/>$/);
     expect(updates.some((u) => u.call_outcome === 'voicemail')).toBe(false);
-    // unconfirmed re-stamp ⇒ voicemail now; when it lands later it is put back, fenced on its own stamp AND on no claim at/after it
+    // unconfirmed re-stamp ⇒ 503 with no fallback instructions; when it lands later it is put back, fenced on its own stamp AND on no claim at/after it
     ({ builder, updates } = primeDb({ claimRows: 0, firstRow: firstLegStillOwns }));
     let landReissue;
     builder.update.mockImplementation((patch) => {
@@ -343,7 +344,8 @@ describe('/relay-complete — the second failure', () => {
     });
     res = mockRes();
     await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
-    expect(res.body).toContain('<Record');
+    expect(res.statusCode).toBe(503);
+    expect(res.body).not.toContain('<Record');
     expect(res.body).not.toContain('<ConversationRelay');
     builder.whereRaw.mockClear();
     landReissue();
@@ -353,6 +355,30 @@ describe('/relay-complete — the second failure', () => {
     expect(putBack).toBeTruthy();
     expect(builder.whereRaw).toHaveBeenCalledWith("(metadata->>'relay_reconnect_ms')::bigint = ?", [reissueMs]);
     expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?", [reissueMs]);
+  });
+
+  test.each([false, true])('an unconfirmed reconnect-state read never sends a healthy call to voicemail (reissue=%s)', async (reissue) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder, updates } = primeDb({ claimRows: 0 });
+    builder.update.mockImplementation(async (patch) => { updates.push(patch); return 0; });
+    if (reissue) builder.first.mockResolvedValueOnce({ metadata: { relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 500 } });
+    builder.first.mockRejectedValue(new Error('unavailable'));
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    expect(res.statusCode).toBe(503);
+    expect(res.body).not.toMatch(/Record|Dial|Hangup/);
+    expect(updates.some((patch) => patch.call_outcome === 'voicemail')).toBe(false);
+  });
+
+  test.each([{}, { sandbox: '1' }])('a fallback whose generation changed after the read issues no stale instructions: %j', async (query) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder } = primeDb({ claimRows: 0, firstRow: { metadata: {} } });
+    builder.update.mockResolvedValue(0); // the atomic fallback predicate lost to a reconnect
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query }, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toMatch(/Record|Dial|Hangup/);
+    expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [0]);
   });
 
   test('a failed session carrying a transfer frame still takes the recovery path (the frame is not trusted on a failure)', async () => {

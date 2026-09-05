@@ -19,6 +19,7 @@ jest.mock('../services/voice-agent/relay-alert', () => ({ alertOwnerReservice: j
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { claimOwnedElsewhere, beginRelaySessionClaim, stampCallLeadLinkage } = require('../services/voice-agent/relay-context');
+const { fallbackFence } = require('../services/voice-agent/relay-recovery');
 const { requestReserviceText } = require('../services/voice-agent/relay-reservice');
 const connection = process.env.VOICE_RECOVERY_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -131,6 +132,19 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     } finally {
       await mockPg.raw('ALTER TABLE call_log DROP CONSTRAINT reject_reservice_evidence');
     }
+  });
+
+  test.each([
+    [0, 1, 0, 0, 1], // first failure, no reconnect
+    [777, 900, 777, 0, 0], // first-leg retry, resumed socket claimed
+    [777, 900, 777, 777, 1], // resumed leg's own failure
+    [888, 900, 777, 777, 0], // reconnect reissued after the read
+    [777, 500, 777, 0, 1], // compensated reconnect, no resumed socket
+    [777, 900, 0, 0, 0], // reconnect landed after a no-reconnect read
+  ])('fallback fences row generation %s / claim %s against proven %s / callback %s', async (rowGeneration, claimGeneration, generation, callbackGeneration, expected) => {
+    await mockPg('call_log').where('twilio_call_sid', callSid).update({ metadata: { relay_reconnect_ms: rowGeneration, relay_session_claim_gen: claimGeneration } });
+    const rows = await fallbackFence(mockPg('call_log').where('twilio_call_sid', callSid), { generation, callbackGeneration }).update({ id: 'call-1' });
+    expect(rows).toBe(expected);
   });
 
 });
