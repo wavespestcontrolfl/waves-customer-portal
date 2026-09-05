@@ -231,6 +231,9 @@ describe('start / step / finish', () => {
     const scope = await h.step({ key: 'brief', label: 'Brief' }, async () => context.current());
     expect(scope.stepId).toBe(store.agent_run_steps[0].id);
     expect(scope.spanId).toBe(store.agent_run_steps[0].span_id);
+    // a standalone handle (no runManaged) still scopes the step body to its run identity, so LLM calls inside correlate to the run; nothing leaks outside the step
+    expect(scope).toMatchObject({ runId: h.id, attemptId: h.attemptId, workItemId: h.workItemId, traceId: h.traceId, laneId: 'blog_draft' });
+    expect(context.current().runId).toBeNull();
     expect(store.agent_run_steps[0]).toMatchObject({ seq: 1, status: 'done', step_key: 'brief', attempt_id: h.attemptId });
     expect(runRow().progress_sequence).toBe(1);
 

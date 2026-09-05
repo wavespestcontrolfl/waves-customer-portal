@@ -396,8 +396,18 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     await transition('budget_exceeded', { summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]) }, { extendLease: false, metadata: { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls } });
   }
 
+  // Every step body runs under the handle's RESOLVED identity (a reopen
+  // keeps the persisted lane / workflow): a standalone handle's LLM calls
+  // then carry this run id / trace / lane in the ledger the same as a
+  // runManaged body's, so getRun() finds them (pre-push audit). Joining
+  // the ambient scope when it is already this trace keeps its step nesting.
+  const inScope = (fn) => {
+    const scoped = () => context.runInRun({ runId, workItemId: workItemId || null, attemptId: attemptId || null, traceId, agentVersionId, workflowId }, fn);
+    return laneId ? context.runInLane(laneId, scoped) : scoped();
+  };
+
   async function step({ key, label = null, toolName = null } = {}, fn) {
-    if (spent()) return context.withStep(crypto.randomUUID(), () => fn());
+    if (spent()) return inScope(() => context.withStep(crypto.randomUUID(), () => fn()));
     seq += 1;
     stepsThisAttempt += 1;
     if (toolName) toolCalls += 1;
@@ -439,7 +449,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         status, finished_at: finishedAt, duration_ms: durationMs, detail: clip(detail, 2000),
       }));
     };
-    return context.withStep(stepId, async () => {
+    return inScope(() => context.withStep(stepId, async () => {
       await open();
       try {
         const value = await fn();
@@ -451,7 +461,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         await touch({});
         throw err;
       }
-    });
+    }));
   }
 
   // Transitions write their event only when the fenced update moved the
@@ -616,6 +626,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     workflowId,
     agentVersionId,
     isOpen: () => !closed, // false once finish / fail persisted or proved stale
+    inScope,
     heartbeat,
     step,
     wait,
@@ -635,17 +646,10 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
  */
 async function runManaged(startArgs, fn) {
   const handle = await startRun(startArgs);
-  // the scope carries the handle's RESOLVED identity (a reopen keeps the
-  // persisted lane / workflow, which may differ from what was asked)
-  const scoped = () => context.runInRun({
-    runId: handle.id,
-    workItemId: handle.workItemId,
-    attemptId: handle.attemptId,
-    traceId: handle.traceId,
-    agentVersionId: handle.agentVersionId,
-    workflowId: handle.workflowId,
-  }, () => fn(handle));
-  const body = () => (handle.laneId ? context.runInLane(handle.laneId, scoped) : scoped());
+  // the handle's own scope: its RESOLVED identity (a reopen keeps the
+  // persisted lane / workflow, which may differ from what was asked); an
+  // inert handle has none, so its body runs in the ambient scope
+  const body = () => (handle.inert ? fn(handle) : handle.inScope(() => fn(handle)));
   // a terminal write that rolled back leaves the handle open: one more try
   // before the wrapper lets go of it (Codex r8) — still never a throw
   try {
