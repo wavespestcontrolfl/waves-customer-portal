@@ -232,3 +232,37 @@ describe('admin-schedule update-details (source order)', () => {
     }
   });
 });
+
+describe('direct creators tell the tech (source order)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('IB create_appointment queues the "new visit" card right after commit, with the acting staff row', () => {
+    const src = read('../services/intelligence-bar/tools.js');
+    expect(src).toContain("case 'create_appointment': return await createAppointment(input, actionContext);");
+    const fn = src.slice(src.indexOf('async function createAppointment(input, actionContext = {})'), src.indexOf('async function rescheduleAppointment('));
+    const notice = fn.indexOf("notifyTechVisitChange({\n      visitId: appointment.id, kind: 'assigned', technicianId: technician_id, actorId: actionContext.technicianId || null,");
+    expect(notice).toBeGreaterThan(-1);
+    // Before the awaited redemption and reminder registration.
+    expect(notice).toBeLessThan(fn.indexOf('redeemInspectionCreditForBooking('));
+    expect(notice).toBeLessThan(fn.indexOf("require('../appointment-reminders')"));
+  });
+
+  test('a phone booking announces the fresh primary and a fresh follow-up child, never a reused row', () => {
+    const src = read('../services/call-recording-processor.js');
+    const at = src.indexOf('scheduledServiceId = svc.id;');
+    const block = src.slice(at, at + 1500);
+    expect(block).toContain('...(!reusedExistingSchedule ? [svc] : [])');
+    expect(block).toContain('...(followUpCreated && followUpCreated.id ? [followUpCreated] : [])');
+    expect(block).toContain("kind: 'assigned', technicianId: row.technician_id, actorId: null,");
+  });
+
+  test('IB assign_technician snapshots the window it assigned, and move_stops_to_day names the committed holder', () => {
+    const src = read('../services/intelligence-bar/schedule-tools.js');
+    expect(src).toContain("snapshot: { date: s.scheduled_date_str, windowStart: s.window_start || null, windowEnd: s.window_end || null },");
+    expect(src).toContain("'scheduled_services.window_start', 'scheduled_services.window_end',");
+    expect(src).toContain(".returning(['id', 'technician_id']);\n      if (committedRows.length === 0) {");
+    expect(src).toContain('technicianId: c.committedTechId,');
+  });
+});

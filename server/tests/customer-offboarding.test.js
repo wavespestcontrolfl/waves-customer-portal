@@ -37,6 +37,10 @@ const mockTransition = jest.fn(async ({ jobId }) => { callOrder.push(`cancel:${j
 jest.mock('../services/job-status', () => ({
   transitionJobStatus: (...args) => mockTransition(...args),
 }));
+const mockNotifyVisitCancelled = jest.fn();
+jest.mock('../services/tech-visit-notifications', () => ({
+  notifyVisitCancelled: (...args) => mockNotifyVisitCancelled(...args),
+}));
 const mockHandleCancellation = jest.fn(async () => {});
 jest.mock('../services/appointment-reminders', () => ({
   handleCancellation: (...args) => mockHandleCancellation(...args),
@@ -339,6 +343,15 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(callOrder[0]).toBe('void:inv-1');
     expect(callOrder[callOrder.length - 1]).toBe('refund');
     expect(callOrder).toEqual(['void:inv-1', 'cancel:v-1', 'cancel:v-2', 'refund']);
+    // The shared status writer's tech notice is suppressed; this caller
+    // sends it itself once the post-flip live check says the cancel stands.
+    for (const call of mockTransition.mock.calls.filter((c) => c[0].toStatus === 'cancelled')) {
+      expect(call[0]).toMatchObject({ suppressTechNotice: true });
+    }
+    expect(mockNotifyVisitCancelled.mock.calls.map((c) => c[0])).toEqual([
+      { visitId: 'v-1', actorId: 'tech-1' },
+      { visitId: 'v-2', actorId: 'tech-1' },
+    ]);
 
     expect(mockRefundUnconsumed).toHaveBeenCalledWith({
       estimateId: 'est-1',
@@ -483,6 +496,8 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/went en_route mid-cancel/) }]);
     // v-1: cancel + compensating revert; v-2: cancel.
     expect(mockTransition).toHaveBeenCalledTimes(3);
+    // The reverted cancel never told v-1's tech; v-2's stands and does.
+    expect(mockNotifyVisitCancelled.mock.calls.map((c) => c[0].visitId)).toEqual(['v-2']);
     expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({
       jobId: 'v-1',
       fromStatus: 'cancelled',

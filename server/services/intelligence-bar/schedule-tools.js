@@ -496,6 +496,10 @@ async function assignTechnician(input, actionContext = {}) {
       'customers.first_name', 'customers.last_name',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
+      // The window rides the assignment notice's snapshot (Codex r4 P2): a
+      // reschedule landing while the notice waits on its recipient lookup
+      // must not make the "new visit" card describe the LATER window.
+      'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.technician_id as current_tech_id',
       // Grouped-visit membership rides the preview (GH r14 P1): the
       // post-commit seam can adopt the new technician for the whole visit
@@ -653,7 +657,7 @@ async function assignTechnician(input, actionContext = {}) {
       if ((s.current_tech_id || null) === tech.id) continue;
       void notifyAssignmentChange({
         visitId: s.id, fromTechId: s.current_tech_id || null, toTechId: tech.id, actorId: actionContext.technicianId || null,
-        snapshot: { date: s.scheduled_date_str },
+        snapshot: { date: s.scheduled_date_str, windowStart: s.window_start || null, windowEnd: s.window_end || null },
       });
     }
   }
@@ -987,7 +991,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       // Grouped/frozen refusal under the stop lock, AFTER the tech-day
       // fence (lock order; codex #3609 r29 P1) — here it ABORTS the batch.
       await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
-      const updated = await applyTrackLifecycleCas(
+      const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)
           .where('status', String(s.status))
@@ -1016,10 +1020,15 @@ async function moveStopsToDay(input, actionContext = {}) {
           ...(c.wasLive ? { status: 'confirmed' } : {}),
           ...c.liveReset,
           updated_at: new Date(),
-        });
-      if (updated === 0) {
+        })
+        // The technician on the COMMITTED row: the CAS does not pin
+        // technician_id, so the move notice goes to whoever holds the stop
+        // now, not the unlocked pre-read (Codex r4 P1).
+        .returning(['id', 'technician_id']);
+      if (committedRows.length === 0) {
         throw Object.assign(new Error('move_set_changed'), { code: 'MOVE_SET_CHANGED', stopId: s.id });
       }
+      c.committedTechId = committedRows[0]?.technician_id || null;
     }
     return overlappedIds;
   });
@@ -1055,10 +1064,10 @@ async function moveStopsToDay(input, actionContext = {}) {
   {
     const { notifyVisitRescheduled } = require('../tech-visit-notifications');
     for (const c of classified) {
-      if (!c.s.technician_id) continue;
+      if (!c.committedTechId) continue;
       void notifyVisitRescheduled({
         visitId: c.s.id,
-        technicianId: c.s.technician_id,
+        technicianId: c.committedTechId,
         actorId: actionContext.technicianId || null,
         previous: { date: c.oldDate, windowStart: c.s.window_start, windowEnd: c.s.window_end },
         snapshot: { date: dateStr, windowStart: c.s.window_start, windowEnd: c.s.window_end },

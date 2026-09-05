@@ -13622,6 +13622,26 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              // Tech-facing "new visit" cards (tech-visit-notifications.js):
+              // a phone booking inserts its assigned rows directly, bypassing
+              // assignDispatchJob, so it tells the tech itself — the fresh
+              // primary (never a reused row: the original insert already
+              // announced it) and a fresh follow-up child. Post-commit,
+              // best-effort, never awaited; gate-dark; system actor.
+              {
+                const techNotices = require('./tech-visit-notifications');
+                const freshRows = [
+                  ...(!reusedExistingSchedule ? [svc] : []),
+                  ...(followUpCreated && followUpCreated.id ? [followUpCreated] : []),
+                ];
+                for (const row of freshRows) {
+                  if (!row.technician_id) continue;
+                  void techNotices.notifyTechVisitChange({
+                    visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: null,
+                    snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
+                  });
+                }
+              }
               if (scheduleWasReused) {
                 // The reused row can be a LEGACY outbound-review booking
                 // (created pending before the 2026-08-11 hold removal): the

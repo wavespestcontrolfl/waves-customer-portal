@@ -378,7 +378,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
-      case 'create_appointment': return await createAppointment(input);
+      case 'create_appointment': return await createAppointment(input, actionContext);
       case 'get_recent_completions': return await getRecentCompletions(input);
       case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
       case 'cancel_appointment': return await cancelAppointment(input, actionContext);
@@ -1957,7 +1957,7 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
-async function createAppointment(input) {
+async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
   const dateStr = validScheduleDate(scheduled_date);
@@ -2165,6 +2165,19 @@ async function createAppointment(input) {
       };
     }
     throw err;
+  }
+
+  // Tech-facing "new visit" card (tech-visit-notifications.js): this writer
+  // inserts the assigned row itself, bypassing assignDispatchJob, so it tells
+  // the tech itself. Queued FIRST after commit, before the awaited redemption
+  // and reminder steps, so a reassignment seconds after creation cannot
+  // overtake it in the visit's notice queue. Best-effort, never awaited;
+  // gate-dark; silent when the operator IS the tech.
+  if (technician_id) {
+    void require('../tech-visit-notifications').notifyTechVisitChange({
+      visitId: appointment.id, kind: 'assigned', technicianId: technician_id, actorId: actionContext.technicianId || null,
+      snapshot: { date: dateStr, windowStart: win.start || null, windowEnd: windowEnd || null },
+    });
   }
 
   // Card-confirmed bookings are approved credit-free (W0B): skip ONLY the
