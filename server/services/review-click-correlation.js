@@ -377,10 +377,9 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // other-location rows count too — a second review_requests row
       // stamped elsewhere is the "any pair" conflict the main scan cannot
       // see (pre-push r5 P1). Auto-link path only.
-      // Only when the surname rung can act (GATE_REVIEW_CLICK_AUTOLINK_SURNAME
-      // via `_meta.surnameRung`) — dark, the scan would be a wasted query.
-      _meta.surnameClickerElsewhere = Boolean(_meta.surnameRung && reviewLocationId && surnames.length)
-        && await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames });
+      _meta.surnameClickerElsewhere = await surnameClickerElsewhere({
+        conn, enabled: _meta.surnameRung, reviewLocationId, windowStart, windowEnd, surnames,
+      });
     }
 
     // A customer already linked to a synced review is attributed — excluded
@@ -410,9 +409,13 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
  * window can't be proven clean). The pair predicate repeats JS-side, as in
  * the main scan. Archived customers count (GH codex r6 P1), as in the main
  * scan. Unstamped latest taps are the MAIN scan's job — its location
- * filter admits them for every rung (GH codex r7/r8 P1).
+ * filter admits them for every rung (GH codex r7/r8 P1). Runs only when
+ * the surname rung can act (`enabled` = GATE_REVIEW_CLICK_AUTOLINK_SURNAME
+ * via `_meta.surnameRung`) for a located review with a surname to test —
+ * dark, the scan would be a wasted query; false otherwise.
  */
-async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames }) {
+async function surnameClickerElsewhere({ conn, enabled, reviewLocationId, windowStart, windowEnd, surnames }) {
+  if (!enabled || !reviewLocationId || !surnames.length) return false;
   const rows = await conn('review_requests as rr')
     .join('customers as c', 'rr.customer_id', 'c.id')
     .whereNotNull('rr.redirected_at')
