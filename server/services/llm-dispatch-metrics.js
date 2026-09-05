@@ -505,8 +505,10 @@ function messageText(value) {
 // per-turn usage to do better with. The hub states this as
 // basis.sessions = 'per_turn' with its caveat.
 //
-// A turn is identified by (session id, turn start): step_id = uuid v5 of
-// that pair, unique per turn row (migration 000030). Every re-record of the
+// A turn is identified by step_id = uuid v5 of (session id, turn id) —
+// the caller's `turnId` when it passes one (the assistant mints one per
+// turn; a start time alone could collide inside one millisecond), else
+// the turn start — unique per turn row (migration 000030). Every re-record of the
 // same turn — a runner's finally re-billing, a retried terminal write, a
 // recovered usage GET — lands on the SAME row through the same monotone
 // merge the session row uses (pre-push audits on #3869): counters and
@@ -515,8 +517,9 @@ function messageText(value) {
 // counters; the recovered snapshot fills it in place.
 const SESSION_COUNTERS = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens'];
 const SESSION_TURN_NS = '60c2b5a4-2f0e-4f3b-9a4e-3f7e6d2c1b0a';
-function sessionTurnKey(sessionId, startedAt) {
-  return startedAt ? uuidv5(`${sessionId}:${Number(startedAt)}`, SESSION_TURN_NS) : null;
+function sessionTurnKey(sessionId, startedAt, turnId) {
+  const turn = turnId || (startedAt ? Number(startedAt) : null);
+  return turn ? uuidv5(`${sessionId}:${turn}`, SESSION_TURN_NS) : null;
 }
 function sessionTurnRow(row, prev, turnKey) {
   const turn = { ...row, row_kind: 'session_turn', step_id: turnKey };
@@ -588,7 +591,7 @@ async function upsertSessionRow(trx, row, turnKey) {
  * `agentId` is accepted for the runners' convenience but has no column yet —
  * the session id (provider_ref) resolves it in the Console.
  */
-async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, failure = null } = {}) {
+async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null } = {}) {
   try {
     if (!ledgerEnabled() || !sessionId) return null;
     const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
@@ -627,7 +630,7 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
         tokens,
         latencyMs,
         providerRef: sessionId,
-      }), sessionTurnKey(sessionId, startedAt));
+      }), sessionTurnKey(sessionId, startedAt, turnId));
     });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);

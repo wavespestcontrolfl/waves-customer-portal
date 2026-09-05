@@ -684,10 +684,15 @@ describe('llm call ledger', () => {
       global.fetch = jest.fn(() => Promise.reject(new Error('network')));
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA + 3000 });
       expect(turnRows()[4]).toMatchObject({ input_tokens: null, output_tokens: null });
-      // no turn start → no turn row, the session row alone
+      // an explicit turnId wins over the start time (two turns in one millisecond stay two rows)
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, turnId: 't-1' });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, turnId: 't-2' });
+      expect(turnRows()).toHaveLength(7);
+      expect(new Set([turnRows()[0].step_id, turnRows()[5].step_id, turnRows()[6].step_id]).size).toBe(3);
+      // no turn start and no turn id → no turn row, the session row alone
       await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
-      expect(turnRows()).toHaveLength(5);
-      expect(mergesFor('session')).toHaveLength(6);
+      expect(turnRows()).toHaveLength(7);
+      expect(mergesFor('session')).toHaveLength(8);
       sessionPrev = null;
     });
 
