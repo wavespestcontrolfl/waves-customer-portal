@@ -2022,6 +2022,12 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 
 **Verification.** vitest: candidate ordering + label (`AdminInvoicesPage.test.jsx`); ui-verify desktop 1440 + mobile 390 screenshots on the PR.
 
+## 2026-09-04 — Sandy transfer card on the Calls tab (PR 2A)
+
+**Surface:** `/admin/communications#tab=calls` (CallLogTabV2, Tier 1 V2).
+**What:** when a call row carries `metadata.relay_handoff` (a Sandy → office transfer), a compact read-only "Sandy transfer" block renders in the expanded row above the Call intelligence panel: intent, summary, unresolved question, facts collected, tools (ok/failed), commitments, verification tier badge, turn count; a "context unavailable" state when the packet write failed. Data already flows through the list's `metadata` — no new endpoint.
+**Style:** `components/ui` Badge + zinc ramp + `border-hairline`, the same `bg-zinc-50 ml-8` block shape as the Recording / Transcription blocks; `text-14 md:text-12` body. `alert-fg` only on a failed tool (a genuine failure signal). Verified at 1440 and 390.
+
 ## 2026-09-05 — Agents hub Overview → Control center (feat/agent-control-b-control-center)
 
 **Why.** The agent-control server phase (S1 taxonomy, S2a call ledger, S2b/S2c lane labels, S2d hub read API) put every AI lane's calls, outcomes, latency and tokens behind `/api/admin/agents/control/lanes`, but nothing rendered it: the Overview was still the fleet-era health page. The owner asked for one place to see which lanes are working, which need a look, and on what evidence.
