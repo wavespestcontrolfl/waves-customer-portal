@@ -95,6 +95,22 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     await confirm();
     assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 1);
     console.log('PASS existing owner board edit atomically resolves the hold and execution authority with one audit record');
+    for (const releaseMode of ['runner', 'releaseClaims', 'sweep']) {
+      const did = randomUUID(), oldPath = randomUUID(), newPath = randomUUID(), pid = randomUUID(), attemptId = randomUUID();
+      const oldLease = new Date(Date.now() - 9 * 3600000), host = `synthetic-${did}.example`;
+      await trx('seo_link_domains').insert({ id: did, domain: host, source: 'owner_seed', agent_state: 'acquiring' });
+      for (const [path, key] of [[newPath, 'new'], [oldPath, 'old']]) await trx('seo_link_acquisition_paths').insert({ id: path, domain_id: did, path_key: key, acquisition_type: 'self_service_free', link_type: 'directory', account_required: false, email_verification: false, payment_required: false, legal_attestation: false, agent_completable: true, submission_url: `https://${host}/${key}`, confidence: 0.9, revision: 1, ...(key === 'old' ? { superseded_by: newPath } : {}) });
+      await trx('seo_link_prospects').insert({ id: pid, domain_id: did, path_id: oldPath, target_domain: host, target_page: '/', status: 'prospect', link_type: 'directory', claimed_at: oldLease, leased_provider: 'deterministic_runner', lease_mode: 'acquire', leased_path_revision: 1 });
+      await trx('seo_link_attempts').insert({ id: attemptId, prospect_id: pid, path_id: oldPath, provider: 'deterministic_runner', action: 'submit', outcome: 'submitting', lease_token: oldLease.toISOString() });
+      const lease = { id: pid, lease_token: oldLease.toISOString() };
+      if (releaseMode === 'runner') await runner.leaseGuardedReclassify(lease, { automation_policy: 'skip' });
+      else if (releaseMode === 'releaseClaims') await W.releaseClaims([lease]);
+      else await W.sweepExpiredClaims();
+      assert.equal((await trx('seo_link_prospects').where({ id: pid }).first()).path_id, oldPath);
+      assert.equal((await trx('seo_link_attempts').where({ id: attemptId }).first()).outcome, 'submit_ambiguous');
+    }
+    console.log('PASS runner/releaseClaims/expired sweep keep ambiguous submissions pinned to their original path');
+
 
 
   } finally { await trx.rollback(); }

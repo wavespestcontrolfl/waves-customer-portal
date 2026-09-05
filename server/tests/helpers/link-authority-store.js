@@ -79,6 +79,7 @@ function makeDb(seed = {}) {
       // `col as alias` projections (the recipient lookup selects `id as id` / `customer_id as id`)
       select(...cols) { const named = cols.filter((c) => typeof c === 'string'); st.cols = named.length ? named : null; return q; },
       forUpdate() { raws.push(`FOR UPDATE ${table}`); return q; },
+      skipLocked() { return q; },
       async first(...cols) { if (cols.length) st.cols = cols; if (st.countRows) return { n: String(rows.filter(matches).length) }; if (st.count) return { c: String(rows.filter(matches).reduce((n, r) => n + st.count(r), 0)) }; return resolve()[0]; },
       // resolves to the affected count; `.returning('*')` yields the updated rows (the sender's CAS + finalize)
       update(patch) {
