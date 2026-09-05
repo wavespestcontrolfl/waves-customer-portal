@@ -39,9 +39,27 @@ const VISIT_NEVER_RAN_STATUSES = Object.freeze(['cancelled', 'canceled', 'no_sho
 // Read the linked visit's status under the caller's transaction (FOR UPDATE
 // — same lock the settlement paths already take on the visit) and return
 // the terminal status when the invoice must refuse money, else null.
+//
+// NOWAIT (Codex #3882 r3 P2, same reasoning as click-estimate-mint's
+// lineage lock): the callers hold the invoice lock here, while the schedule
+// edit's re-service conversion holds the visit and then waits on the same
+// invoice (admin-schedule voidConversionInvoicesRestoringCredits). Both
+// orders exist in the repo, so no ordering closes every cycle; what removes
+// the deadlock is never WAITING on the visit while holding the invoice. A
+// held visit row means staff is editing that very visit right now — PG
+// answers 55P03 immediately and the caller's transaction rolls back whole;
+// the operator retries once the edit lands.
 async function visitRefusesSettlement(trx, scheduledServiceId) {
   if (!scheduledServiceId) return null;
-  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id', 'status');
+  let visit;
+  try {
+    visit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().noWait().first('id', 'status');
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    const busy = new Error("This invoice's visit is being edited right now — nothing was recorded. Retry in a moment.");
+    busy.statusCode = 409; busy.isOperational = true; busy.code = 'visit_busy';
+    throw busy;
+  }
   const status = invoiceStatusKey(visit?.status);
   return VISIT_NEVER_RAN_STATUSES.includes(status) ? status : null;
 }
