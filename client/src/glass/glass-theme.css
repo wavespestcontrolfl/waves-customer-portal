@@ -512,11 +512,13 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass="chip"]:hover,
   html[data-glass-theme] [data-glass="chip"]:active {
     background: rgba(255, 255, 255, 0.93) !important;
+    border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
   }
   html[data-glass-theme] [data-glass-accent],
   html[data-glass-theme] [data-glass-accent]:hover,
   html[data-glass-theme] [data-glass-accent]:active {
     background: #F4B014 !important;
+    border-color: #9A6200 !important;
   }
   html[data-glass-theme] [data-glass]::before,
   html[data-glass-theme] [data-glass]::after,
@@ -539,6 +541,7 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass="chip"]:hover,
   html[data-glass-theme] [data-glass="chip"]:active {
     background: rgba(255, 255, 255, 0.93) !important;
+    border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
@@ -547,6 +550,7 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass-accent]:hover,
   html[data-glass-theme] [data-glass-accent]:active {
     background: #F4B014 !important;
+    border-color: #9A6200 !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
