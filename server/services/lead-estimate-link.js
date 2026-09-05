@@ -115,6 +115,11 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null } = {
     .first('funnel_stage');
   const settled = !!bridged.updated || (!!rootRow && FUNNEL_STAGE_RANK[rootRow.funnel_stage] >= FUNNEL_STAGE_RANK.booked);
   if (!settled) return repeat;
+  // The root's row now carries this customer's win: an unlinked root (matched
+  // by contact) leaves the bridge's COALESCE-from-lead customer NULL, and the
+  // revenue sync loads rows by customer_id — so the accepting customer is
+  // stamped onto it, never over one already there (codex #3834 r32 P1).
+  if (customerId) await database('ad_service_attribution').where({ lead_id: root.id }).whereNull('customer_id').update({ customer_id: customerId, updated_at: new Date() });
   await database('ad_service_attribution').where({ lead_id: repeat.id }).whereNot({ funnel_stage: 'completed' }).del();
   return null;
 }

@@ -264,7 +264,10 @@ describe('lead-funnel-bridge call sites', () => {
     const src = read('../routes/admin-leads.js');
     expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, updates\.status\)/);
     expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'contacted'\)/);
-    expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'won'\)/);
+    // The book route's won mirror is the shared settlement (bridge + wizard
+    // repeat settlement), not a bare bridge (codex #3834 r32 P1).
+    expect(src).toMatch(/leadAttribution\.settleWonFunnelRow\(req\.params\.id, customerId\)/);
+    expect(src).not.toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'won'\)/);
   });
 
   test('lead-response agent contacted transition bridges', () => {

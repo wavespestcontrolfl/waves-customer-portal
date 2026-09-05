@@ -1338,9 +1338,12 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     const dbOf = (rows, funnelRows = {}, { rootChanged = false } = {}) => {
       const deleted = [];
       const claims = [];
+      const updated = [];
       const database = (table) => ({
         where: (a, b) => {
           const q = {
+            whereNull: (c) => { q._null = c; return q; },
+            update: async (patch) => { updated.push({ table, where: a, whereNull: q._null, patch }); return 1; },
             first: async () => (table === 'ad_service_attribution'
               ? (a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id] } : null)
               : rows[typeof a === 'string' ? b : a.id] || null),
@@ -1357,6 +1360,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       });
       database._deleted = deleted;
       database._claims = claims;
+      database._updated = updated;
       return database;
     };
     const ROOT_CLAIM = { onlyIfLead: { customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'contacted' } };
@@ -1381,6 +1385,10 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       // validated here (identity + status + estimate link) — codex r29 P1.
       expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, ROOT_CLAIM);
       expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: { funnel_stage: 'completed' } }]);
+      // The accepting customer lands on the root's row when it has none
+      // (an unlinked, contact-matched root) — never over one already there
+      // (codex r32 P1).
+      expect(database._updated).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'root' }, whereNull: 'customer_id', patch: expect.objectContaining({ customer_id: 'c1' }) }]);
     });
 
     test('the root changed under the settlement (the conditioned advance updates 0 rows and its row is still below booked) — the repeat carries its own row and the root is untouched (codex r29 P1)', async () => {
@@ -1389,6 +1397,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const database = dbOf(rows, { root: 'lead' });
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
       expect(database._deleted).toEqual([]);
+      expect(database._updated).toEqual([]);
     });
 
     test('a lead-stage row the repeat kept (its /calculate delete failed) is dropped once the root\'s row carries the win — one row per deal (codex r29 P2)', async () => {

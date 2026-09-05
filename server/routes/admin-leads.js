@@ -1725,10 +1725,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       logger.warn(`[leads] booking pre-draft hook unavailable: ${predraftErr.message}`);
     }
 
-    // Funnel-row mirror for the in-transaction 'won' conversion above.
-    // Post-commit deliberately: the bridge must never abort the booking
-    // transaction, and it is monotonic + idempotent on its own.
-    await bridgeLeadFunnelStage(req.params.id, 'won');
+    // Funnel-row mirror for the in-transaction 'won' conversion above — the
+    // same settlement markConverted runs (a booked wizard repeat lands on its
+    // root's row or its own rebuilt one, codex #3834 r32 P1). Post-commit
+    // deliberately: it must never abort the booking transaction, and it is
+    // monotonic + idempotent on its own.
+    await leadAttribution.settleWonFunnelRow(req.params.id, customerId);
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({

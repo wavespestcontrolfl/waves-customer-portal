@@ -203,34 +203,8 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
     return false;
   }
 
-  // Mirror the win onto the lead's ad_service_attribution funnel row
-  // (won → 'booked'; 'completed' stays the revenue sync's to write). Monotonic
-  // in SQL and best-effort — never blocks the conversion.
-  // A wizard repeat's win the bridge could not land on any row — /calculate
-  // dropped the row's lead-stage funnel row when it was filed as a repeat —
-  // is settled by settleRepeatFunnelRow: its root's row advances to booked
-  // when the root is still this customer's open opportunity, else the
-  // repeat's own row is rebuilt here from its stored touch, at booked (codex
-  // #3834 r14 P2, r22 P2, r27 P1/P2). ONLY a repeat (quote_wizard row
-  // carrying the marker): every other lead with no row has none on purpose —
-  // an inbound call on the Ads bridge number leaves its slot empty for the
-  // delayed bridge to claim as paid, and a generic rebuild would stamp it
-  // organic first (codex r24 P1). Settled even when the bridge DID land: a
-  // row the repeat kept because /calculate's own delete failed advances here
-  // while its root's row also stands, and the settlement is what reconciles
-  // the two (codex r29 P2). Inside the conversion write, so a preview stub
-  // swaps it out with the rest (r18 P1), and best-effort like the bridge and
-  // the stamp: the status write has committed, so a settlement read that
-  // fails must not fail the conversion (codex r28 P2). Lazy require: the
-  // lead-estimate-link ⇄ lead-attribution cycle.
-  await bridgeLeadFunnelStage(leadId, 'won');
   const linkedCustomer = customerId || null;
-  try {
-    const rebuild = await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId: linkedCustomer });
-    if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId: linkedCustomer, funnelStage: 'booked' });
-  } catch (err) {
-    logger.warn(`[LeadAttribution] funnel-row settlement failed for lead ${leadId}: ${err.message}`);
-  }
+  await settleWonFunnelRow(leadId, linkedCustomer);
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
@@ -257,6 +231,37 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 
   logger.info(`[LeadAttribution] Lead ${leadId} converted${triggerSource ? ` (${triggerSource})` : ''}`);
   return true;
+}
+
+// Where a won lead's win lands in the ad funnel — the ONE mechanism for every
+// writer of status='won' (markConverted; the admin book route, which converts
+// inside its booking transaction and mirrors the funnel post-commit — codex
+// #3834 r32 P1). Mirror the win onto the lead's ad_service_attribution row
+// (won → 'booked'; 'completed' stays the revenue sync's to write) — monotonic
+// in SQL and best-effort, never blocks the conversion. A wizard repeat's win
+// the bridge could not land on any row — /calculate dropped the row's
+// lead-stage funnel row when it was filed as a repeat — is settled by
+// settleRepeatFunnelRow: its root's row advances to booked when the root is
+// still this customer's open opportunity, else the repeat's own row is
+// rebuilt here from its stored touch, at booked (codex #3834 r14 P2, r22 P2,
+// r27 P1/P2). ONLY a repeat (quote_wizard row carrying the marker): every
+// other lead with no row has none on purpose — an inbound call on the Ads
+// bridge number leaves its slot empty for the delayed bridge to claim as
+// paid, and a generic rebuild would stamp it organic first (codex r24 P1).
+// Settled even when the bridge DID land: a row the repeat kept because
+// /calculate's own delete failed advances here while its root's row also
+// stands, and the settlement is what reconciles the two (codex r29 P2).
+// Best-effort like the bridge and the stamp: the status write has committed,
+// so a settlement read that fails must not fail the conversion (codex r28
+// P2). Lazy require: the lead-estimate-link ⇄ lead-attribution cycle.
+async function settleWonFunnelRow(leadId, customerId = null) {
+  await bridgeLeadFunnelStage(leadId, 'won');
+  try {
+    const rebuild = await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId });
+    if (rebuild) await stampLeadFunnelRow(db, rebuild, { customerId, funnelStage: 'booked' });
+  } catch (err) {
+    logger.warn(`[LeadAttribution] funnel-row settlement failed for lead ${leadId}: ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -712,6 +717,7 @@ module.exports = {
   normalizePhone,
   attributeInboundContact,
   markConverted,
+  settleWonFunnelRow,
   markLost,
   logFirstResponse,
   logSourceTouch,

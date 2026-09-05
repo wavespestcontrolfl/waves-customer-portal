@@ -35,7 +35,7 @@ jest.mock('../services/lead-estimate-link', () => ({
 const db = require('../models/db');
 const { bridgeLeadFunnelStage, stampLeadFunnelRow } = require('../services/lead-funnel-bridge');
 const { settleRepeatFunnelRow } = require('../services/lead-estimate-link');
-const { markConverted } = require('../services/lead-attribution');
+const { markConverted, settleWonFunnelRow } = require('../services/lead-attribution');
 // The claim = every leads predicate chained before the status UPDATE (the
 // estimate→customer backfill re-reads the row afterwards).
 const claimCalls = () => mockCalls.slice(0, mockCalls.findIndex((c) => c[1] === 'update')).filter((c) => c[0] === 'leads');
@@ -69,6 +69,15 @@ describe('markConverted claims', () => {
     expect(ok).toBe(true);
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
     expect(mockCalls.some((c) => c[0] === 'lead_activities')).toBe(true);
+  });
+
+  test('settleWonFunnelRow is the shared won-funnel mechanism (the admin book route calls it post-commit): bridge, then settle, then stamp what settlement hands back (codex r32 P1)', async () => {
+    mockRepeatRow = { id: 'lead-booked', lead_type: 'quote_wizard', extracted_data: { duplicate_of_lead_id: 'root' } };
+    await settleWonFunnelRow('lead-booked', 'c1');
+    expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('lead-booked', 'won');
+    expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-booked', { customerId: 'c1' });
+    expect(stampLeadFunnelRow).toHaveBeenCalledWith(db, mockRepeatRow, { customerId: 'c1', funnelStage: 'booked' });
+    expect(mockCalls.some((c) => c[0] === 'leads' && c[1] === 'update')).toBe(false);
   });
 
   test('a win the bridge DID land is still settled — a row the repeat kept when /calculate\'s delete failed is reconciled against its root (codex r29 P2)', async () => {
