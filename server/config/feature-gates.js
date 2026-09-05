@@ -42,6 +42,7 @@
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
+ *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -1386,6 +1387,15 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+  // The surname rung of that matcher (click_name: the ONE in-window clicker
+  // whose complete last name is the reviewer's; see
+  // findConfidentClickMatch). Ships DARK on its own switch because its
+  // ambiguity semantics were still converging at review time (#3822 r6):
+  // off, the rung never links and its inverse-location scan never runs —
+  // sole_click and click_near stay on reviewClickAutoLink alone; the
+  // surname still ranks SUGGESTIONS. Needs reviewClickAutoLink too. Kill:
+  // unset.
+  reviewClickAutoLinkSurname: process.env.GATE_REVIEW_CLICK_AUTOLINK_SURNAME === 'true',
 
   // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
   // environment, same rationale as treatmentAutomationEnroll; each kill =
@@ -2329,6 +2339,16 @@ const gates = {
   // (default, dev AND prod): nothing is written. Kill switch: unset. Read at
   // CALL time via gateEnvValue.
   llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
+
+  // Agent-control hub read — routes/admin-agents.js /control/areas +
+  // /control/lanes via services/agent-control/hub-read.js. ON: the Control
+  // center reads per-lane calls, ok / fallback rates, latency, tokens and
+  // attention status from the llm_dispatch_log call ledger, and the hub
+  // probe reports features.ledger = true. OFF (default, dev AND prod): both
+  // routes 404 and the probe says no ledger, so the client renders nothing
+  // new. Read-only either way. Kill switch: unset. This entry is for
+  // logGateStatus; the route reads gateEnvValue at CALL time.
+  agentControlRead: gateEnvValue('GATE_AGENT_CONTROL_READ'),
 
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
