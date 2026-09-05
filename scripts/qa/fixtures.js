@@ -1,0 +1,81 @@
+'use strict';
+const crypto = require('node:crypto');
+const bcrypt = require('bcryptjs');
+const { v5 } = require('uuid');
+const { etDateString, addETDays } = require('../../server/utils/datetime-et');
+
+// MUTATES only the dedicated dev database supplied by the managed launcher.
+// Fixture IDs are deterministic within a run. No production data is copied.
+function fixtureIdentity(runId = crypto.randomUUID()) {
+  const id = (name) => v5(name, runId);
+  const suffix = runId.slice(0, 8);
+  return { runId, customerId: id('customer'), adminId: id('admin'), technicianId: id('technician'),
+    estimateId: id('estimate'), appointmentId: id('appointment'), invoiceId: id('invoice'),
+    conflictId: id('conflict'),
+    token: crypto.randomBytes(32).toString('hex'), invoiceToken: crypto.randomBytes(32).toString('hex'),
+    password: crypto.randomBytes(24).toString('base64url'),
+    adminEmail: `qa-admin-${suffix}@example.invalid`, techEmail: `qa-tech-${suffix}@example.invalid`,
+    customerEmail: `qa-customer-${suffix}@example.invalid`,
+    phone: `+194155501${String(parseInt(suffix, 16) % 100).padStart(2, '0')}`,
+    date: etDateString(addETDays(new Date(), 14)), nextDate: etDateString(addETDays(new Date(), 15)),
+    paymentIntentId: `pi_qa_${suffix}`, eventId: `evt_qa_${suffix}` };
+}
+
+async function seed(db, f) {
+  const passwordHash = await bcrypt.hash(f.password, 12);
+  await db.transaction(async (trx) => {
+    const existing = await trx('customers').where({ phone: f.phone }).first('id');
+    if (existing && existing.id !== f.customerId) throw new Error('Fixture phone already in use; use a fresh run or clean up the previous fixtures.');
+    await trx('technicians').insert([
+      { id: f.adminId, name: 'QA Admin', email: f.adminEmail, role: 'admin', active: true, password_hash: passwordHash, auth_token_version: 1, must_change_password: false },
+      { id: f.technicianId, name: 'QA Technician', email: f.techEmail, role: 'technician', active: true, password_hash: passwordHash, auth_token_version: 1, must_change_password: false },
+    ]).onConflict('id').ignore();
+    await trx('customers').insert({ id: f.customerId, first_name: 'QA', last_name: 'Customer',
+      email: f.customerEmail, phone: f.phone, active: true, pipeline_stage: 'active_customer',
+      address_line1: '100 Example Court', city: 'Parrish', state: 'FL', zip: '34219',
+      onboarding_complete: true, is_primary_profile: true, property_type: 'residential',
+      gate_code: 'QA-PRIVATE-ACCESS-DO-NOT-PUBLISH', autopay_enabled: false,
+    }).onConflict('id').ignore();
+    const service = await trx('services').where('name', 'Waves Assessment').where({ is_active: true }).first();
+    if (!service) throw new Error('Migrated Waves Assessment catalog row is required.');
+    f.serviceId = service.id;
+    f.serviceName = service.name;
+    await trx('estimates').insert({ id: f.estimateId, customer_id: f.customerId, status: 'sent',
+      token: f.token, customer_name: 'QA Customer', customer_email: f.customerEmail, customer_phone: f.phone,
+      sent_at: new Date(), expires_at: addETDays(new Date(), 30), bill_by_invoice: true,
+      use_v2_view: true, category: 'RESIDENTIAL', onetime_total: 99,
+      estimate_data: { oneTime: { items: [{ service: 'assessment', name: service.name, price: 99 }] } },
+    }).onConflict('id').ignore();
+    await trx('scheduled_services').insert({ id: f.appointmentId, customer_id: f.customerId,
+      technician_id: f.technicianId, service_id: service.id, service_type: service.name,
+      scheduled_date: f.date, window_start: '09:00:00', window_end: '10:30:00',
+      status: 'pending', estimated_duration_minutes: 90, estimated_price: 99,
+      source_estimate_id: f.estimateId, reservation_expires_at: new Date(Date.now() + 15 * 60000),
+      is_recurring: false, create_invoice_on_complete: false,
+    }).onConflict('id').ignore();
+    await trx('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, token: f.invoiceToken,
+      invoice_number: `QA-${f.runId.slice(0, 8)}`, title: 'QA assessment invoice', subtotal: 99, total: 99,
+      status: 'sent', stripe_payment_intent_id: f.paymentIntentId,
+      line_items: JSON.stringify([{ description: service.name, quantity: 1, unit_price: 99, amount: 99 }]),
+    }).onConflict('id').ignore();
+  });
+  return f;
+}
+
+async function cleanup(db, f) {
+  const customer = await db('customers').where({ id: f.customerId }).first('email');
+  if (customer && customer.email !== f.customerEmail) throw new Error('Fixture ownership mismatch; refusing cleanup.');
+  // Only these run-owned root IDs are eligible. FK cascades remove dependent
+  // records; an unhandled restrictive FK fails visibly, never broadens cleanup.
+  await db.transaction(async (trx) => {
+    await trx('stripe_webhook_events').where({ id: f.eventId }).del();
+    await trx('payments').where({ customer_id: f.customerId }).del();
+    await trx('invoices').where({ customer_id: f.customerId }).del();
+    await trx('service_records').where({ customer_id: f.customerId }).del();
+    await trx('scheduled_services').where({ customer_id: f.customerId }).del();
+    await trx('estimates').where({ id: f.estimateId }).del();
+    await trx('customers').where({ id: f.customerId }).del();
+    await trx('technicians').whereIn('id', [f.adminId, f.technicianId]).del();
+  });
+}
+module.exports = { fixtureIdentity, seed, cleanup };
