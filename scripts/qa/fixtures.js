@@ -71,6 +71,14 @@ async function cleanup(db, f) {
   // records; an unhandled restrictive FK fails visibly, never broadens cleanup.
   await db.transaction(async (trx) => {
     await trx('stripe_webhook_events').where({ id: f.eventId }).del();
+    await trx('activity_log').where({ customer_id: f.customerId }).del();
+    await trx('visit_billing_dispositions').whereIn('scheduled_service_id',
+      trx('scheduled_services').select('id').where({ customer_id: f.customerId })).del();
+    for (const table of ['property_application_history', 'customer_cards']) {
+      await trx(table).whereIn('service_record_id',
+        trx('service_records').select('id').where({ customer_id: f.customerId })).del();
+    }
+    for (const table of ['sms_log', 'emails']) await trx(table).where({ customer_id: f.customerId }).del();
     await trx('payments').where({ customer_id: f.customerId }).del();
     await trx('invoices').where({ customer_id: f.customerId }).del();
     await trx('service_records').where({ customer_id: f.customerId }).del();

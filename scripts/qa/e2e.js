@@ -10,6 +10,7 @@ const { readContext, childEnvironment } = require('../dev/context');
 const { doctor } = require('../dev/doctor');
 const { launchBrowser, evidence } = require('./browser');
 const { fixtureIdentity, seed, cleanup } = require('./fixtures');
+const { etDateString } = require('../../server/utils/datetime-et');
 
 async function main() {
   const context = readContext();
@@ -122,6 +123,11 @@ async function main() {
     });
     await step('reschedule-detects-unassigned-conflict-and-preserves-duration', async () => {
       const headers = { Authorization: `Bearer ${adminToken}` };
+      // Acceptance uses the catalog's default duration. Arrange a longer
+      // synthetic appointment to exercise a non-hourly end in rescheduling.
+      await db('scheduled_services').where({ id: fixture.appointmentId }).update({
+        window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 90,
+      });
       await db('scheduled_services').insert({ id: fixture.conflictId, customer_id: fixture.customerId,
         technician_id: null, service_id: fixture.serviceId, service_type: fixture.serviceName,
         scheduled_date: fixture.nextDate, window_start: '11:00:00', window_end: '12:30:00', status: 'confirmed' });
@@ -135,7 +141,7 @@ async function main() {
       const invalid = await page.request.post(`${baseUrl}/api/admin/dispatch/${fixture.appointmentId}/reschedule`, {
         headers, data: { newDate: fixture.nextDate, newWindow: { start: '11:15', end: '12:45' }, notifyCustomer: false },
       });
-      assert.equal(invalid.status(), 400);
+      assert.equal(invalid.status(), 422);
     });
     await step('payment-webhook-settles-once', async () => {
       const event = { id: fixture.eventId, type: 'payment_intent.succeeded', created: Math.floor(Date.now() / 1000),
@@ -156,6 +162,13 @@ async function main() {
       await page.screenshot({ path: path.join(artifactDir, 'receipt.png'), fullPage: true });
     });
     await step('completion-and-report-redaction', async () => {
+      const premature = await json(await page.request.post(`${baseUrl}/api/admin/dispatch/${fixture.appointmentId}/complete`, {
+        headers: { Authorization: `Bearer ${adminToken}` }, data: {},
+      }), 409);
+      assert.equal(premature.code, 'future_scheduled_date');
+      // Arrange a due-today synthetic visit after proving future visits
+      // cannot complete. The production day-of guard remains active.
+      await db('scheduled_services').where({ id: fixture.appointmentId }).update({ scheduled_date: etDateString(new Date()) });
       await json(await page.request.post(`${baseUrl}/api/admin/dispatch/${fixture.appointmentId}/complete`, {
         headers: { Authorization: `Bearer ${adminToken}`, 'Idempotency-Key': fixture.runId },
         data: { technicianNotes: 'QA-PRIVATE-TECH-NOTE-DO-NOT-PUBLISH', customerRecap: 'Service completed.',
