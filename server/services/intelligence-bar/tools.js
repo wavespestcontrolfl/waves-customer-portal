@@ -2401,6 +2401,9 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // schedule conflicts): the move commits and the tool result carries a
   // warning.
   let updatedRows = 0;
+  // The technician on the COMMITTED row (the CAS does not pin technician_id,
+  // so the pre-read `appt` may name a tech who was swapped out meanwhile).
+  let committedTechId = null;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
@@ -2424,7 +2427,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // would strand its siblings and parent at the old stop. Throws an
       // operational 409 the executor surfaces as the tool error.
       await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
-      updatedRows = await applyTrackLifecycleCas(
+      const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
           .where('status', String(appt.status))
@@ -2482,7 +2485,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
           ...(wasLive ? { status: 'confirmed' } : {}),
           ...liveReset,
           updated_at: new Date(),
-        });
+        })
+        .returning(['id', 'technician_id']);
+      updatedRows = committed.length;
+      committedTechId = committed[0]?.technician_id || null;
   });
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
@@ -2490,10 +2496,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // Tech-facing notice (tech-visit-notifications.js): this writer moves the
   // row itself, so it tells the holder itself. Post-commit, best-effort,
   // never awaited; the operator's own move stays silent.
-  if (appt.technician_id) {
+  if (committedTechId) {
     void require('../tech-visit-notifications').notifyVisitRescheduled({
       visitId: appt.id,
-      technicianId: appt.technician_id,
+      technicianId: committedTechId,
       actorId: actionContext.technicianId || null,
       previous: { date: observedDate, windowStart: appt.window_start, windowEnd: appt.window_end },
       snapshot: { date: dateStr, windowStart: newStart, windowEnd: newWindowEnd },
