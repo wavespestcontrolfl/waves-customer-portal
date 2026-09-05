@@ -42,8 +42,8 @@ Rules:
   inside `.where(...)` is a finding until proven offset-aware.
 - The trap runs the other way too: a `timestamptz` column takes a SINGLE
   `AT TIME ZONE` — reviewers have falsely flagged correct timestamptz SQL
-  as naive. Verify the column's `udt_name` against prod before complying
-  with a timezone finding.
+  as naive. Verify the column's `udt_name` in the target environment before
+  accepting the finding; production access still requires §3 authorization.
 
 ## 3. Local DB access — dev/preview by default, prod is break-glass
 
@@ -150,16 +150,17 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
 
 ## 5. Raw SQL verification
 
-- Any new raw SQL destined for prod is executed read-only against prod
-  BEFORE the PR merges. Never trust column names/types from migration
-  files — verify against the live schema (see traps below).
-- This covers knex column identifiers too, not just `db.raw()`: jest mock
-  builders accept ANY string in `.select()`/`.where()`/joins, so a fully
-  green suite proves nothing about column names. Every new column reference
-  on a table gets its query shape run once against a real Postgres (local
-  `waves_portal` or read-only prod) — `.select('sv.service_name')` against
-  a column named `name` shipped green through 33k mocked tests and 500'd
-  live cancel flows (#3671 r6, six files).
+- Execute new query shapes and column references against a verified
+  dev/preview PostgreSQL database with the relevant schema before claiming
+  database verification. Mock builders do not verify SQL identifiers,
+  types, constraints, or transaction behavior.
+- For a task whose acceptance criteria concern the deployed schema, obtain
+  deployment evidence or separately authorized restricted read-only
+  production evidence under §3. Dev verification alone does not establish
+  production state.
+- Without the required safe database or authorization, report verification
+  blocked and continue independent implementation or static checks.
+  Never substitute production credentials for missing development access.
 - `db.raw()` with request-derived input must use `?` placeholders; string
   interpolation is a SQL-injection P0 (AGENTS.md).
 
@@ -255,7 +256,7 @@ by the real-DB ui-verify walkthrough (the step 4 PR 2b "Acquire anyway" 500).
   never written.
 - The uuid-vs-integer split is PER-TABLE: `referrals.id` is UUID but
   `referral_invites.promoter_id` / `referral_promoters.id` ARE integer —
-  verify each table against prod.
+  verify each table in the target environment under §5.
 - `scheduled_services.scheduled_date` is a plain DATE (`::text` to
   inspect; no timestamptz comparisons), and any direct SQL date move must
   sync `appointment_reminders` too.

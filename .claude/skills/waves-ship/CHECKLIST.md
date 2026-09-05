@@ -7,7 +7,9 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Staged explicit paths only (no `git add -A`)
 - [ ] Diff touches `client/` → `npm run check:portal-brand` passes
 - [ ] Diff touches blog schema → `npm run verify:blog-schema` passes
-- [ ] New raw SQL / migration → waves-db skill verification done (read-only prod check; BEGIN…ROLLBACK dry-run on dev/preview)
+- [ ] New raw SQL / migration → waves-db verification completed against
+  verified dev/preview PostgreSQL; deployment-specific claims have the
+  separately required production evidence
 - [ ] Money-touching diff → waves-billing invariants reviewed
 
 ## Post-push

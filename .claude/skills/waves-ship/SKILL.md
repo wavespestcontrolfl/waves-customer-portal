@@ -1,6 +1,6 @@
 ---
 name: waves-ship
-description: Use for any code change bound for a wavespestcontrolfl repo — branch/worktree through push, Codex review, merge, Railway deploy verification, and dark-ship gate flips.
+description: Use for Waves implementation workspace safety, PR preparation, review remediation, authorized merge/deploy verification, and interrupted-task handoff. Apply only the stages authorized by the task. Do not activate merely because an audit or explanation mentions shipping.
 ---
 
 # Waves Ship — PR lifecycle for the portal and astro repos
@@ -13,14 +13,42 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 - Pushing commits, opening PRs, responding to Codex reviews, merging, or verifying deploys.
 - Deciding how to hand off fixes to a branch another session owns.
 
+## Scope and completion
+
+Identify the requested outcome and existing approval before applying the
+procedure. A local implementation does not require push, PR, merge, deploy,
+or a gate flip to be complete. A read-only task does not authorize writes.
+Tool permissions and the explicit merge, blast-radius, gate, and customer
+communication boundaries remain in force.
+
+Report the achieved state precisely: audit complete; implementation
+complete locally; verification blocked; PR ready for review; merge-ready,
+awaiting authorization; or deployed and verified. Include missing evidence
+without implying it was obtained.
+
+Run required checks for the applicable stage. Reuse recorded results only
+when the checked code, environment, and relevant inputs are unchanged.
+Repeat checks for changed code, failures, or unresolved risk; preserve
+all final-HEAD CI and Codex requirements.
+
 ## Procedure
 
 ### 1. Start clean
-- Work in a worktree, never in the bare host repo (`~/waves-customer-portal` is a bare/stale host): `git -C ~/waves-customer-portal fetch origin main && git -C ~/waves-customer-portal worktree add ~/wt-<slug> -b <branch> origin/main`.
-- Branch off `origin/main`, never local main (base contamination). Audits and reviews also run against `origin/main`, not the current checkout — stale feature branches produce phantom findings; verify the ref before fanning out review agents.
-- An audit finding needs TWO proofs before it's reported as live: it exists on `origin/main` AND it's reachable (page routed in `App.jsx`, function imported outside tests, path actually fires in prod). One phantom finding → re-verify every other finding in the same batch.
-- Fresh portal worktrees need `npm ci` before tests — `@waves/*` workspace packages are absolute symlinks; an interrupted install makes jest hang silently (fix: `rm -rf node_modules && npm ci`).
-- Edit/Write files at the WORKTREE path. Writing to the original repo path edits the wrong branch's tree.
+- Record the repository/worktree path, branch, HEAD, and existing changes.
+  Verify checkout state; do not assume a named path is bare, stale, or idle.
+- For implementation, use a task-owned worktree. Reuse the selected
+  task-owned worktree when suitable; create another only when the authorized
+  work requires isolation. Preserve unrelated changes.
+- For audits and reviews, use the user's selected branch, worktree, diff,
+  or commit. Record the resolved SHA(s). Read-only review does not require
+  creating a worktree.
+- For an audit explicitly seeking current production defects, establish
+  the deployed revision and reachability. State whether origin/main was
+  refreshed and whether deployment was verified; never silently substitute
+  origin/main for another selected target.
+- Check dependency availability before installing. Follow the selected
+  checkout's setup procedure only when execution requires it. Write only
+  at the task-owned worktree path.
 
 ### 2. Before every commit
 - `git branch --show-current` — auto-applied CLAUDE.md edits and parallel sessions can silently flip HEAD.
@@ -58,7 +86,9 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 - Under a standing "merge when clean" authorization, clean = the §4 gate on the final HEAD: zero unresolved P0/P1 (a P0/P1 rebuttal is resolved only after Adam accepts it or a confirmation round on the same head leaves it undisputed; a re-disputed one is unresolved), every P2 fixed, rebutted, or listed as deferred in the PR body. A rebutted round qualifies. A round-cap stop (new P0/P1 at round 5+) does NOT — that PR goes back to Adam with a split proposal.
 - Standing authorization never covers a blast-radius diff: anything touching an AGENTS.md P0 domain or ANY CLAUDE.md rule-18 contract. Rule 18 is the authority and its list is the whole list — money movement, customer comms, DB schema and CHECK-constrained values, public `/:token` routes, every inbound webhook payload, admin auth, iOS/Android-consumed endpoints (push/app-link payloads included), astro spoke-fleet form posts and feeds, the retained V1 named exports, persisted identifiers. Read rule 18 before deciding a diff is not blast-radius. Those stop at MERGE-READY with the severity summary and wait for Adam's in-session authorization.
 - After merge: confirm your final commit actually landed — "PR merged" doesn't prove it. Squash merges rewrite SHAs, so ancestry checks fail even on success: check `gh pr view <n> --json state,headRefOid,mergeCommit` and confirm `headRefOid` equals your final push SHA. Only for true merge commits does `git merge-base --is-ancestor <final-sha> <merge-sha>` apply. If your last push isn't in the merged head, recover via cherry-pick.
-- Confirm the Railway deploy went green before reporting done. A merged PR with a red deploy is not shipped.
+- For an authorized merged release, confirm the Railway deploy went green
+  before reporting it deployed. Local and PR-only tasks use the completion
+  states above.
 - Clean up the worktree when the lane closes: `git worktree remove ~/wt-<slug>`.
 
 ### 6. Dark-ship pattern (user-visible features)
@@ -70,6 +100,19 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 - Another session's hot branch (tip moved recently): deliver fixes as committable PR review suggestions, never competing pushes. One PR = one session.
 - Pull the LIVE PR state before commenting or re-tagging @codex — pasted snapshots go stale.
 - **Paginate every Codex comment read**: `gh api --paginate "repos/{owner}/{repo}/pulls/N/comments?per_page=100"`. The REST default is 30 per page; once threads plus replies pass 30, the newest findings fall off the end and a round reads as 2 findings when it was 3 (#3818 r5 missed a P1 this way, 2026-09-03). Counting by `created_at > tag time` does not help — the cut-off is positional.
+
+When interrupted or handing off, record:
+- Objective and acceptance criteria.
+- Repository/worktree, branch, HEAD, and relevant dirty/index state.
+- Changes made and unrelated work to preserve.
+- Checks, exact checked state, and results.
+- First concrete blocker.
+- Existing approval, its source, and scope.
+- Next safe action.
+
+Keep secrets, customer records, and raw transcripts out. On resume,
+revalidate the code state and ownership before relying on the handoff.
+A quiet worktree or old memory note alone does not establish ownership.
 
 ### Astro-repo differences
 - Every push fans out builds across the whole Cloudflare Pages fleet (1 concurrent build account-wide; hub lags 30–45 min) — batch changes, pace commits.
@@ -86,7 +129,7 @@ Before reporting a shipped change as done, all of: final-commit-in-merge check p
 - Piping jest through `grep`/`tail` for pass/fail — it masks the exit code (a failing test shipped this way once). Run bare and check the exit code.
 - Trusting "PR merged" as proof your last push landed.
 - Pushing client/ changes without the brand check.
-- Editing files in the bare host or another worktree's path.
+- Editing files outside the selected task-owned worktree or overwriting unrelated work.
 - Claiming "deployed" when only "merged".
 - `git checkout <ref> -- <path>` to read an old version (overwrites working tree) — use `git show <ref>:<path>`.
 
