@@ -2260,7 +2260,12 @@ async function claimProjectReportSends(projectReports) {
   const crypto = require('crypto');
   const won = [];
   const CLAIMED = 'This project report is being re-sent right now — give it a moment, then send again.';
-  for (const { id, deliveryStatus } of projectReports) {
+  // One claim per project: the same report linked twice (vanity and full
+  // form, or a repeated URL) is one send, and a second claim against the
+  // state the first replaced would refuse a message with no competitor
+  // (pre-push Codex P1).
+  const unique = [...new Map(projectReports.map((p) => [p.id, p])).values()];
+  for (const { id, deliveryStatus } of unique) {
     const token = crypto.randomBytes(12).toString('hex');
     const seenSending = deliveryStatus === 'sending';
     const q = db('projects').where({ id });

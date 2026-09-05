@@ -2423,6 +2423,15 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(new Set(r.claim.projects.map((p) => p.token)).size).toBe(3);
     });
 
+    test('claim: the same report linked twice (vanity + full form, a repeated URL) is ONE claim, not a self-competing second one (pre-push Codex P1)', async () => {
+      const projects = chainBuilder();
+      mockBuilders = { projects };
+      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: 'closed' }]);
+      expect(r.ok).toBe(true);
+      expect(claimUpdate(projects)).toHaveLength(2);
+      expect(r.claim.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    });
+
     test('claim lost (the flow is sending right now, or the state moved): every claim this call won is handed back, token-guarded, and the send refuses', async () => {
       const projects = chainBuilder();
       projects.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
