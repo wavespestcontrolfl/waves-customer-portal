@@ -147,6 +147,29 @@ describe('/relay-complete', () => {
   });
 });
 
+describe('/call-complete after an unanswered transfer ring', () => {
+  test('goes to voicemail — never back to Sandy — and isTransferredRow reads every durable marker', async () => {
+    const { isTransferredRow } = voiceRouter._test;
+    expect(isTransferredRow(null)).toBe(false);
+    expect(isTransferredRow({ metadata: {} })).toBe(false);
+    expect(isTransferredRow({ metadata: { relay_handoff: {} } })).toBe(true);
+    expect(isTransferredRow({ metadata: JSON.stringify({ relay_transfer_ring_at: 'x' }) })).toBe(true);
+    expect(isTransferredRow({ metadata: null, call_outcome: 'ai_transferred' })).toBe(true);
+
+    const { isEnabled } = require('../config/feature-gates');
+    isEnabled.mockImplementation(() => true); // voiceAiAgent ON: the backstop would normally re-render the relay
+    const callLog = { update: jest.fn(async () => 1), where: jest.fn(() => callLog), whereRaw: jest.fn(() => callLog), select: jest.fn(() => callLog), first: jest.fn(async () => ({ metadata: { relay_transfer_ring_at: '2026-09-05T00:00:00Z' }, call_outcome: 'ai_transferred' })) };
+    const other = { update: jest.fn(async () => 1), where: jest.fn(() => other), whereRaw: jest.fn(() => other), first: jest.fn(async () => null), select: jest.fn(() => other), insert: jest.fn(async () => [1]) };
+    db.mockImplementation((table) => (table === 'call_log' ? callLog : other));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const res = mockRes();
+    await handlerFor('/call-complete')({ body: { CallSid: 'CA-noans', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res);
+    expect(res.body).toContain('<Record');
+    expect(res.body).not.toContain('ConversationRelay');
+    expect(res.body).not.toContain('<Connect');
+  });
+});
+
 describe('press-1 whisper', () => {
   test('a transferred row speaks the ≤20-word whisper; other rows keep today\'s lines', () => {
     const row = { metadata: JSON.stringify({ screen_caller_name: 'Pat Doe', relay_handoff: { context_available: true, caller_name: 'Pat Doe', intent: 'cancel service', unresolved_question: 'refund' } }) };

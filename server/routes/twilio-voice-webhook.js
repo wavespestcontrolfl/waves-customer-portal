@@ -830,6 +830,14 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
   appendStaffRingDial(twiml, forwardNumbers, 30);
 }
 
+/** A call_log row that went through a Sandy transfer: the packet, the ring claim, or the outcome. */
+function isTransferredRow(row) {
+  if (!row) return false;
+  const meta = parseJsonObject(row.metadata);
+  return Boolean((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)
+    || row.call_outcome === 'ai_transferred';
+}
+
 /** The relay end frame's HandoffData: a JSON object string, or nothing. Never throws. */
 function parseHandoffData(raw) {
   if (typeof raw !== 'string' || !raw.trim()) return {};
@@ -1510,12 +1518,23 @@ router.post('/call-complete', async (req, res) => {
     if (shouldRecordVoicemail) {
       const twiml = new VoiceResponse();
       let handedToAgent = false;
+      // Sandy PR 2A: an UNANSWERED transfer ring must not hand the caller —
+      // who asked for a person — straight back to Sandy (hook P1). The
+      // durable transfer markers decide; a read that fails or times out
+      // reads as "not a transfer" (today's path).
+      const transferRow = await withDeadline(
+        db('call_log').where('twilio_call_sid', CallSid).first('metadata', 'call_outcome'),
+        STAMP_DEADLINE_MS,
+        null,
+      );
+      const wasTransfer = isTransferredRow(transferRow);
+      if (wasTransfer) logger.info(`[call-complete] unanswered Sandy transfer ${maskSid(CallSid)} — voicemail, no AI backstop`);
       // Fail-open AI backstop: replace dumb voicemail with the bilingual agent
       // when enabled (the greeting/disclosure already played at /voice, so
       // consent persists). Any error → fall through to voicemail below.
       try {
         const { isEnabled } = require('../config/feature-gates');
-        if (isEnabled('voiceAiAgent')) {
+        if (isEnabled('voiceAiAgent') && !wasTransfer) {
           const routingConfig = await getCallRoutingConfig(db);
           const decision = decideVoiceRoute({
             phase: 'after_dial',
@@ -2961,6 +2980,7 @@ router._test = {
   connectingAnnouncement,
   appendStaffRingDial,
   parseHandoffData,
+  isTransferredRow,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
   foldVoiceMetadata,

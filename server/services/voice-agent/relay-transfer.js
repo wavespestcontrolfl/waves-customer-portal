@@ -264,7 +264,11 @@ function composeRelaySegment(call) {
   if (!call) return null;
   let meta = call.metadata;
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-  if (!meta || typeof meta !== 'object' || !meta.relay_handoff || typeof meta.relay_handoff !== 'object') return null;
+  // Either durable transfer marker qualifies: the packet, or the ring claim
+  // /relay-complete stamps even when both packet writes failed (hook P1).
+  const transferred = meta && typeof meta === 'object'
+    && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || Boolean(meta.relay_transfer_ring_at));
+  if (!transferred) return null;
   const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
   // The durable copy first: end() stashes the relay transcript under
   // metadata.relay_transcript because the recording-status swap CLEARS the

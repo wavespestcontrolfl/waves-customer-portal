@@ -249,6 +249,7 @@ describe('whisper + AI segment', () => {
     expect(transfer.composeRelaySegment({ ...row, call_outcome: 'voicemail' })).not.toBeNull(); // nobody pressed 1 ⇒ voicemail, AI segment survives
     expect(transfer.composeRelaySegment({ ...row, metadata: { relay_handoff: { context_available: false } } })).not.toBeNull();
     expect(transfer.composeRelaySegment({ ...row, metadata: {} })).toBeNull(); // an ordinary relay call: the processor path is unchanged
+    expect(transfer.composeRelaySegment({ ...row, metadata: { relay_transfer_ring_at: '2026-09-05T00:00:00Z' } })).not.toBeNull(); // both packet writes failed, the ring claim still marks the transfer
     // The recording-status swap cleared the transcript columns: the metadata copy end() stashed still rebuilds the segment (P1).
     const swapped = { call_outcome: 'voicemail', transcription: null, transcription_provider: null, transcription_metadata: null, metadata: { relay_handoff: { context_available: true }, relay_transcript: { text: 'Caller: hi\nSandy: hello', metadata: { provider: 'conversation_relay' } } } };
     expect(transfer.composeRelaySegment(swapped)).toEqual({ text: '[AI segment]\nCaller: hi\nSandy: hello', metadata: { provider: 'conversation_relay' } });
