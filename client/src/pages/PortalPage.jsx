@@ -295,7 +295,10 @@ function WavesAiBar({ tab, onAsk }) {
   // 48px input + one gold Ask, and the suggestions as stacked rows — not a
   // second row of gold bars competing with the page's real action.
   return (
-    <section className="waves-ask-card" data-glass="card" aria-label="Ask Waves AI" style={{ ...PORTAL_CARD_STYLE, marginBottom: 16 }}>
+    // The shared sheet owns the card's margin (a top-only shorthand), so the
+    // gap to the tab content below lives on this wrapper.
+    <div style={{ marginBottom: 16 }}>
+    <section className="waves-ask-card" data-glass="card" aria-label="Ask Waves AI" style={PORTAL_CARD_STYLE}>
       <div className="waves-ask-eyebrow" data-gt="eyebrow" style={{ color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
         Waves AI
       </div>
@@ -323,6 +326,7 @@ function WavesAiBar({ tab, onAsk }) {
         ))}
       </div>
     </section>
+    </div>
   );
 }
 
@@ -2942,8 +2946,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   </div>
                 );
               })()}
+              {/* The eyebrow role forces the sheet grey; pending prepay keeps its
+                  warning colour, so the role is dropped there (the inline styles
+                  already spell out the eyebrow type). */}
               {annualPrepay && (
-                <div data-gt="eyebrow" style={{
+                <div data-gt={annualPrepay.status === 'payment_pending' ? undefined : 'eyebrow'} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 8,
                   color: annualPrepay.status === 'payment_pending' ? '#9A3412' : PORTAL_SHELL.muted,
                   fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
