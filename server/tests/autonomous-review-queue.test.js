@@ -17,6 +17,11 @@ const {
 } = require('../services/content/autonomous-review-queue');
 
 describe('autonomous-review-queue read model helpers', () => {
+  test('review controls follow the routed action instead of the provisional opportunity type', () => {
+    expect(reviewActions({ opportunity: { status: 'pending_review', action_type: 'refresh_existing_page' }, run: { action_type: 'new_supporting_blog' } }).can_requeue).toBe(false);
+    expect(reviewActions({ opportunity: { status: 'pending_review', action_type: 'new_supporting_blog' }, run: { action_type: 'refresh_existing_page' } }).can_requeue).toBe(true);
+  });
+
   test('normalizes public query controls', () => {
     expect(normalizeStatus('pending_review')).toBe('pending_review');
     expect(normalizeStatus('not-real')).toBe('pending_review');

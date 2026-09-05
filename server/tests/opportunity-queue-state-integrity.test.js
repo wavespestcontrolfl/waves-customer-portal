@@ -133,7 +133,7 @@ describe('claimNext lifetime attempt budget', () => {
     expect(swept).toBe(2);
     expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("status = 'pending' AND attempt_count >= ?"), [5]);
     expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT EXISTS'), [5]);
-    expect(db.raw).toHaveBeenCalledWith("CASE WHEN action_type = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END");
+    expect(db.raw).toHaveBeenCalledWith(expect.stringMatching(/CASE WHEN COALESCE[\s\S]+THEN 'skipped' ELSE 'pending_review' END/));
     expect(db.raw).toHaveBeenCalledWith("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END");
 
   });

@@ -22,6 +22,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const effectiveActionSql = require('./opportunity-action-sql');
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
@@ -161,7 +162,7 @@ class OpportunityQueue {
        WHERE id = (
          SELECT id FROM opportunity_queue
          WHERE (status = 'pending' OR (
-           action_type = 'new_supporting_blog' AND status = 'pending_review'
+           ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
            AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
              OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
            -- Existing approval holds re-enter the SAME guarded draft pipeline.
@@ -406,7 +407,7 @@ class OpportunityQueue {
   async sweepExhaustedAttempts() {
     const result = await db('opportunity_queue')
       .whereRaw(`(status = 'pending' AND attempt_count >= ?) OR (
-        action_type = 'new_supporting_blog' AND status = 'pending_review'
+        ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
         AND COALESCE(skip_reason, '') NOT IN ('named_competitor_review', 'affiliate_review')
         AND COALESCE(skip_reason, '') !~ '^trust_build_[0-9]+_of_[0-9]+$'
         AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
@@ -414,7 +415,7 @@ class OpportunityQueue {
             AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
       )`, [maxClaimAttempts()])
       .update({
-        status: db.raw("CASE WHEN action_type = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END"),
+        status: db.raw(`CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END`),
         skip_reason: db.raw("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END"),
         completed_at: new Date(),
         updated_at: new Date(),
