@@ -1479,23 +1479,6 @@ async function updateRestockRequest(input) {
     return outcome;
   });
 
-  if (result.success && action === 'receive') {
-    // Same WaveGuard-readiness recheck the admin receive endpoint runs —
-    // non-fatal, the stock is already committed.
-    try {
-      const adminInventoryRoute = require('../../routes/admin-inventory');
-      if (typeof adminInventoryRoute.syncLawnReadinessAfterRestock === 'function') {
-        result.readiness_recheck = await adminInventoryRoute.syncLawnReadinessAfterRestock();
-      }
-    } catch (recheckErr) {
-      logger.warn(`[intelligence-bar:procurement] restock readiness recheck failed: ${recheckErr.message}`);
-      result.readiness_recheck = { error: recheckErr.message };
-      // The card renders only result.warning, and the contract promises a
-      // recheck failure is reported (GH r16 P2) — promote it there, never
-      // leave it buried in a field the operator never sees.
-      result.warning = [result.warning, 'Stock received, but the WaveGuard lawn-readiness recheck failed — open readiness alerts in the Command Center may be stale until the next recheck.'].filter(Boolean).join(' ');
-    }
-  }
   return result;
 }
 

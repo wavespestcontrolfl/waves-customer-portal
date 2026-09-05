@@ -779,67 +779,6 @@ function protocolTemplateCounts() {
   };
 }
 
-async function syncLawnReadinessAfterRestock() {
-  if (!(await db.schema.hasTable('admin_alerts'))) return null;
-
-  const { buildReadinessQueue } = require('../services/lawn-protocol-readiness-cron');
-  const queue = await buildReadinessQueue({ days: 14, limit: 100 });
-  const blocked = Number(queue.statusCounts?.blocked || 0);
-  const warning = Number(queue.statusCounts?.warning || 0);
-  const appointmentCount = queue.appointments?.length || 0;
-  const now = new Date();
-  const metadata = {
-    source: 'inventory_restock_receive_recheck',
-    recheckedAt: now.toISOString(),
-    scanStartDate: queue.startDate,
-    scanEndDate: queue.endDate,
-    days: queue.days,
-    statusCounts: queue.statusCounts,
-  };
-
-  if (blocked === 0) {
-    const resolvedAlerts = await db('admin_alerts')
-      .where({ type: 'lawn_protocol_readiness', status: 'open' })
-      .update({
-        status: 'resolved',
-        resolved_at: now,
-        last_seen_at: now,
-        description: 'Resolved after inventory restock readiness recheck.',
-        metadata: JSON.stringify(metadata),
-        updated_at: now,
-      });
-    return {
-      alertStatus: 'resolved',
-      blocked,
-      warning,
-      appointmentCount,
-      resolvedAlerts,
-      updatedAlerts: 0,
-    };
-  }
-
-  const updatedAlerts = await db('admin_alerts')
-    .where({ type: 'lawn_protocol_readiness', status: 'open' })
-    .update({
-      severity: blocked >= 5 ? 'critical' : 'high',
-      title: `WaveGuard readiness: ${blocked} blocked appointment${blocked === 1 ? '' : 's'}`,
-      description: `${blocked} of ${appointmentCount} upcoming WaveGuard lawn appointment${appointmentCount === 1 ? '' : 's'} remain blocked after inventory restock recheck. ${warning} appointment${warning === 1 ? '' : 's'} have warnings.`,
-      href: '/admin/lawn-protocol?tab=readiness',
-      last_seen_at: now,
-      metadata: JSON.stringify(metadata),
-      updated_at: now,
-    });
-
-  return {
-    alertStatus: updatedAlerts > 0 ? 'still_blocked' : 'no_open_alert',
-    blocked,
-    warning,
-    appointmentCount,
-    resolvedAlerts: 0,
-    updatedAlerts,
-  };
-}
-
 // =========================================================================
 // GET / — Dashboard: all products with pricing
 // =========================================================================
@@ -3303,16 +3242,7 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         .returning('*');
       return { request: updated, movement };
     });
-    let readinessRecheck = null;
-    if (action === 'receive') {
-      try {
-        readinessRecheck = await syncLawnReadinessAfterRestock();
-      } catch (recheckErr) {
-        logger.warn(`[admin-inventory] restock readiness recheck failed: ${recheckErr.message}`);
-        readinessRecheck = { error: recheckErr.message };
-      }
-    }
-    res.json({ success: true, ...result, readinessRecheck });
+    res.json({ success: true, ...result });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -3908,9 +3838,6 @@ router._test = {
   vendorRowPricePerOz,
 };
 
-// Shared with the Intelligence Bar stock tools (update_restock_request
-// receive) so both receive paths run the same WaveGuard readiness recheck.
-router.syncLawnReadinessAfterRestock = syncLawnReadinessAfterRestock;
 // The ONE best-price writer (codex #3465 r2 P1): every approval surface —
 // review queue, legacy approvals, Intelligence Bar — must recalculate the
 // catalog through this instead of writing best_price by hand.
