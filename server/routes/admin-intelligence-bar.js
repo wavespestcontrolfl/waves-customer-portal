@@ -1959,7 +1959,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeCloseoutTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
-    return executeScheduleTool(toolName, input);
+    return executeScheduleTool(toolName, input, actionContext);
   }
   if (DASHBOARD_TOOL_NAMES.has(toolName)) {
     return executeDashboardTool(toolName, input);

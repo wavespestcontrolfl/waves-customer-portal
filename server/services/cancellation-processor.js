@@ -1146,6 +1146,10 @@ async function processCancellationRequest({
           // land after a compensating revert and close the reminder row of
           // a re-armed active visit (codex r3).
           notifyCustomer: 'caller_suppress',
+          // The tech notice waits for the live-state check below: a cancel
+          // the tech raced by going en route is reverted, and must never
+          // have told them their visit was cancelled.
+          suppressTechNotice: true,
         });
         flipped = true;
       } catch (err) {
@@ -1207,6 +1211,14 @@ async function processCancellationRequest({
         }
         cancelledCount += 1;
         cancelledIds.push(svc.id);
+        // The cancel stands — now the assigned tech hears it (post-commit,
+        // best-effort, gate-dark; recipient read from the row). The actor
+        // is the customer (portal path) or the acting staff row, so the card
+        // reads "by the customer online" / "by <name>", and a staff member
+        // cancelling their own visit stays silent.
+        void require('./tech-visit-notifications').notifyVisitCancelled({
+          visitId: svc.id, actorId: actorType === 'customer' ? 'customer' : (actor?.userId || null), previousStatus: svc.status,
+        });
       }
     }
 

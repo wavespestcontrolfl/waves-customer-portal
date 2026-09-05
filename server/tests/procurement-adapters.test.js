@@ -277,7 +277,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       const hitLink = el({ count: 1, visible: true, onClick: () => { st.hitClicked = (st.hitClicked || 0) + 1; } });
       if (sel === S.productLink) return st.productLinkHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenControlClicked = (st.hiddenControlClicked || 0) + 1; } }) : hitLink) }) : hitLink;
       // productSkuInAttribute: the matched node carries the code in data-product-code and shows unrelated text
-      if (sel === S.productSku) return st.productSkuInAttribute ? el({ count: 1, visible: true, text: 'Add to list', attrs: { 'data-product-code': 'S1-77' } }) : el({ count: 1, visible: true, text: 'SKU: S1-77' });
+      // productSkuInItemNumberAttr: SiteOne's live markup — the code in data-itemnumber, unrelated text (live check 2026-09-05)
+      if (sel === S.productSku) return st.productSkuInItemNumberAttr ? el({ count: 1, visible: true, text: 'Regulated', attrs: { 'data-itemnumber': 'S1-77' } }) : st.productSkuInAttribute ? el({ count: 1, visible: true, text: 'Add to list', attrs: { 'data-product-code': 'S1-77' } }) : el({ count: 1, visible: true, text: 'SKU: S1-77' });
       if (sel === S.unavailable) return el();
       // productControlsHiddenFirst: hidden desktop/mobile copies of the quantity + Add to Cart controls precede the visible ones
       const qtyInput = el({ count: 1, visible: true, onFill: (v) => { st.qty = Number(v); } });
@@ -958,6 +959,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   test('a row showing a data-product-code node BESIDE a "SKU: <code>" text child is ONE SKU reading — the order places (#3876 r25 P2)', async () => {
     const { st, deps } = fakeSiteOne({ cartSkuAttrBesideText: true });
     await expect(s1.place(args(), deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('the product SKU selector covers SiteOne\'s live item-number markup (.brand-itemnumber text, [data-itemnumber] attribute) and the attribute form is read from the attribute', async () => {
+    expect(s1._internals.SELECTORS.productSku).toContain('.brand-itemnumber');
+    expect(s1._internals.SELECTORS.productSku).toContain('[data-itemnumber]');
+    const { st, deps } = fakeSiteOne({ productSkuInItemNumberAttr: true });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
     expect(st.placeClicked).toBe(1);
   });
 
