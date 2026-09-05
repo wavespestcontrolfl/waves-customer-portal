@@ -676,6 +676,11 @@ const gates = {
   // status/log listing. Kill switch: unset.
   voiceRelayTransfer: process.env.GATE_VOICE_RELAY_TRANSFER === 'true',
 
+  // Durable capture evidence for voice-session recovery. Strict opt-in,
+  // read at write time; unset is the kill switch. Reconnect behavior follows
+  // in the recovery PR built on this prerequisite.
+  voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
