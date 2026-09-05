@@ -1101,9 +1101,27 @@ response, never a second ring; an unconfirmed claim (timeout / error) and
 a call with no staff forward numbers are stamped `voicemail` (bounded,
 best-effort) and get the voicemail recorder; `?sandbox=1` (the signed
 query the sandbox route rendered) hangs up — a test call never rings
-staff. The caller's own text is never in the URL or the TwiML. Any change
-to the claim, the owner fence, the sandbox branch or what the whisper may
-speak is security-critical).
+staff. The caller's own text is never in the URL or the TwiML. **Sandy PR
+2B adds session recovery** (`GATE_VOICE_RELAY_RECOVERY` exactly 'true',
+read at call time; off ⇒ the failed branch is byte-identical to the above):
+a FAILED session (`ErrorCode` / failed status) is reconnected ONCE — one
+bounded, fenced UPDATE claims the reconnect on the call_log row
+(`metadata.relay_reconnects` 0 → 1 + `relay_reconnect_ms`, outcome back to
+NULL / status in-progress; a voicemail / transferred / relay_failed row is
+never resumed; an unconfirmed claim never re-renders, a late-landing one is
+put back) and the handler renders the same `<Connect><ConversationRelay>`
+the call started with (same action incl. `?lang=es` / `?sandbox=1`, plus
+`gen=<the row's relay_reconnect_ms>` so the resumed leg's own failure is
+told apart from a Twilio retry of the first leg's — a retry on a row that
+already reconnected gets a bare `<Response/>` and never ends the healthy
+session; a resumed welcome greeting, `<Parameter resumed="1">`, a token
+minted AFTER the stamp so the new socket's generation is ≥ the fence). The session
+treats `resumed` as a hint and re-proves it from the row before seeding the
+earlier turns or skipping its capture floor. A second failure: office open
+AND `GATE_VOICE_RELAY_TRANSFER` ⇒ the staff ring above (owner-bound to the
+row's current claim owner, generic whisper); otherwise today's voicemail.
+Any change to the claim, the owner fence, the reconnect fence, the sandbox
+branch or what the whisper may speak is security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up

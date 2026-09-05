@@ -29,6 +29,10 @@ const FROM = '+19415550142';
 
 // The end() reconcile builder: captures the fenced guard calls and the final
 // update payload so both the guard and the transcript can be asserted.
+// The close-time writes WITHOUT the capture floor's call→lead linkage stamp
+// (relay_lead_id, codex #3884 r3 P2) — the reconcile pins below read by position.
+const writes = (update) => update.mock.calls.map((c) => c[0]).filter((patch) => !(patch && patch.metadata && Array.isArray(patch.metadata.bindings) && String(patch.metadata.bindings[0]).includes('relay_lead_id')));
+
 function primeCallLog({ rows = 1, updateImpl } = {}) {
   const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis() };
   const update = updateImpl || jest.fn().mockResolvedValue(rows);
@@ -189,7 +193,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
 
     expect(db).toHaveBeenCalledWith('call_log');
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA-transcript-1');
-    const row = update.mock.calls[0][0];
+    const row = writes(update)[0];
     // The reconcile columns are untouched by the transcript fold-in.
     expect(row).toMatchObject({
       status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled',
@@ -233,7 +237,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     const convo = conversationWithTurns('CA-drop-then-voicemail');
     await convo.end('ws_close'); // WS dropped mid-call
 
-    const row = update.mock.calls[0][0];
+    const row = writes(update)[0];
     expect(row.transcription).toBeTruthy(); // the audit trail is still written
     // Statuses call-recording-processor REFUSES to claim (processRecording's
     // early return + the atomic claim's IS DISTINCT FROM predicates).
@@ -251,11 +255,11 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     await convo.end('ws_close');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
     expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
-    expect(update).toHaveBeenCalledTimes(2);
+    expect(writes(update)).toHaveLength(2);
     expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['relay_failed', 'ai_transferred']);
-    expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
-    expect(update.mock.calls[1][0]).not.toHaveProperty('status');
-    expect(update.mock.calls[1][0]).not.toHaveProperty('answered_by');
+    expect(writes(update)[1]).not.toHaveProperty('call_outcome');
+    expect(writes(update)[1]).not.toHaveProperty('status');
+    expect(writes(update)[1]).not.toHaveProperty('answered_by');
   });
 
   // ⭐ THE FLOOR RUNS BEFORE THE STAMP. The transcript records `lead_captured`
@@ -268,7 +272,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     // leadCaptured stays false — the caller hung up mid-call.
     await convo.end('ws_close');
 
-    const row = update.mock.calls[0][0];
+    const row = writes(update)[0];
     expect(row.transcription).toContain('Caller: 12 Shore Drive, Bradenton');
     expect(row.call_summary).not.toMatch(/no lead captured/i); // the floor DID capture one
     expect(JSON.parse(row.transcription_metadata)).toMatchObject({ end_reason: 'ws_close', lead_captured: true });
@@ -283,7 +287,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     const convo = conversationWithTurns('CA-hangup-2');
     await convo.end('ws_close');
 
-    const row = update.mock.calls[0][0];
+    const row = writes(update)[0];
     expect(row.call_summary).toMatch(/no lead captured/i);
     expect(JSON.parse(row.transcription_metadata)).toMatchObject({ lead_captured: false });
     // …and the failure never took the transcript down with it.
@@ -296,7 +300,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     convo._reserviceFiled = true;
     convo.leadCaptured = true; // request_reservice suppresses the capture floor
     await convo.end('agent_complete');
-    expect(JSON.parse(update.mock.calls[0][0].transcription_metadata)).toMatchObject({ reservice_filed: true });
+    expect(JSON.parse(writes(update)[0].transcription_metadata)).toMatchObject({ reservice_filed: true });
     expect(createLeadFromExtraction).not.toHaveBeenCalled();
   });
 
@@ -305,7 +309,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     const convo = conversationWithTurns('CA-idle-1');
     convo.leadCaptured = true;
     await convo.end('ws_idle_timeout');
-    expect(JSON.parse(update.mock.calls[0][0].transcription_metadata)).toMatchObject({ end_reason: 'ws_idle_timeout' });
+    expect(JSON.parse(writes(update)[0].transcription_metadata)).toMatchObject({ end_reason: 'ws_idle_timeout' });
   });
 
   test('VOICEMAIL-CLOBBER GUARD NOT REGRESSED: 0 rows → nothing else written, logged LOUDLY', async () => {
@@ -318,9 +322,8 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     // Still ONE outcome statement — the transcript never escapes the guard
     // via an unfenced write: the only second write is keyed to a relay_failed
     // stamp (0 rows on a voicemail row) and carries no outcome.
-    expect(update).toHaveBeenCalledTimes(2);
-    expect(db).toHaveBeenCalledTimes(2);
-    expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
+    expect(writes(update)).toHaveLength(2);
+    expect(writes(update)[1]).not.toHaveProperty('call_outcome');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
     expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
     expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/transcript NOT persisted/i));
@@ -349,7 +352,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     convo._recordTurn('caller', 'this is Pat at 12 Shore Drive, pat@example.com');
     convo.leadCaptured = true;
     await convo.end('ws_close');
-    expect(update.mock.calls[0][0].transcription).toContain('pat@example.com');
+    expect(writes(update)[0].transcription).toContain('pat@example.com');
     const logged = [...logger.info.mock.calls, ...logger.warn.mock.calls, ...logger.error.mock.calls].flat().join(' ');
     expect(logged).not.toContain('pat@example.com');
     expect(logged).not.toContain('12 Shore Drive');
