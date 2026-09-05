@@ -146,6 +146,7 @@ const {
   markCardRequestSends,
   claimProjectReportSends,
   releaseProjectReportSends,
+  recheckPriceChangeLinks,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -2026,16 +2027,28 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       mockBuilders.price_change_notices = chainBuilder({ firstRow: row });
     }
 
+    // The verified notice rides back so /sms dispatches under the customer's
+    // notice lock and re-checks it inside (r13 P1).
+    const OK = { ok: true, priceNotices: [{ customerId: 'c1', noticeId: 'n1' }] };
+
     test('a delivered notice for a change still ahead, owned by the recipient, passes as a bearer', async () => {
       wireNotice({ row: notice({ status: 'viewed' }) });
-      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK);
       expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
       expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c1' });
       // An upper-cased token is the same working page (the public route
       // lowercases before its lookup) — looked up lower-cased, not refused.
       wireNotice();
-      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN.toUpperCase()}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN.toUpperCase()}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK);
       expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
+    });
+
+    test('recheckPriceChangeLinks re-runs the same predicates inside the notice lock — a correction delivered meanwhile refuses, an unchanged notice passes (r13 P1)', async () => {
+      wireNotice();
+      expect(await recheckPriceChangeLinks(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK);
+      wireNotice();
+      mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2' }));
+      expect((await recheckPriceChangeLinks(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
     });
 
     test('an undelivered (draft / sending / unreachable) notice, a past change, a vanished token, or another customer\'s notice refuses', async () => {

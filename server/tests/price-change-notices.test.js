@@ -19,6 +19,12 @@ jest.mock('../services/sms-template-renderer', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
+// The per-customer notice lock (shared with the composer's re-share path):
+// run the body inline; the held-lock skip is exercised explicitly.
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_key, fn) => fn()),
+  wasLockSkipped: (r) => !!(r && r.skipped === true),
+}));
 jest.mock('../services/annual-prepay-renewals', () => ({
   getActivelyCoveredCustomerIds: jest.fn(async () => []),
   getPaymentPendingCustomerIds: jest.fn(async () => []),
@@ -251,11 +257,29 @@ describe('createAndSendBatch delivery', () => {
     const smsArgs = sendCustomerMessage.mock.calls[0][0];
     expect(smsArgs).toMatchObject({ purpose: 'billing', customerId: 'c-1', hasEmailLeg: true });
 
+    // The whole per-customer send runs under the customer's notice lock —
+    // the one the composer's re-share of this customer's notice also takes
+    // (GH Codex #3893 r13 P1).
+    const { runExclusive } = require('../utils/cron-lock');
+    expect(runExclusive).toHaveBeenCalledWith('price-notice:c-1', expect.any(Function), { recordHealth: false, waitForSlot: false });
+    expect(runExclusive.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+
     // claim (draft→sending) then final state
     expect(noticeUpdates[0]).toMatchObject({ status: 'sending' });
     expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
     expect(activityInserts).toHaveLength(1);
     expect(activityInserts[0].action).toBe('price_change_batch_sent');
+  });
+
+  it('a held notice lock (a composer re-share mid-send) counts the row as failed — nothing inserted, claimed or sent; the rerun resumes it', async () => {
+    customerRows = [CUSTOMER];
+    const { runExclusive } = require('../utils/cron-lock');
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: false, created: 0, emailed: 0, texted: 0, failed: 1 });
+    expect(noticeInserts).toHaveLength(0);
+    expect(noticeUpdates).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   it('never modifies monthly_rate — notices only', async () => {

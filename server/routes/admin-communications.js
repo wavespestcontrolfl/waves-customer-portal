@@ -249,6 +249,31 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
   return outcome;
 }
 
+// A composer-carried price-change notice link: the provider call runs under
+// the customer's `price-notice:<customer>` lock — the one the notices lane
+// (price-change-notices createAndSendBatch) holds while it delivers and
+// finalizes that customer's notice — with the newest-notice check re-run
+// inside it, so a correction finishing between the pre-send check and the
+// handoff refuses the stale re-share instead of texting obsolete terms
+// (GH Codex #3893 r13 P1). A held lock reports not-sent (retry in a moment).
+async function dispatchPriceNoticeLinkSend(notices, dispatch, recheck) {
+  const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+  const customerIds = [...new Set(notices.map((n) => n.customerId))];
+  const locked = async (i) => {
+    if (i < customerIds.length) {
+      return runExclusive(`price-notice:${customerIds[i]}`, () => locked(i + 1), { recordHealth: false, waitForSlot: false });
+    }
+    const fresh = await recheck();
+    if (!fresh.ok) return { sent: false, blocked: false, reason: fresh.error };
+    return dispatch();
+  };
+  const outcome = await locked(0);
+  if (wasLockSkipped(outcome)) {
+    return { sent: false, blocked: false, reason: 'A price change notice is being sent to this customer right now — try again in a moment.' };
+  }
+  return outcome;
+}
+
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
@@ -274,6 +299,9 @@ router.post('/sms', async (req, res, next) => {
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
   let prepLinkSends = null;
+  // Verified composer price-change notice links — dispatched under the
+  // customer's notice lock with the newest-notice check re-run inside it.
+  let priceNoticeSends = null;
   // Composer-carried contract signing links: a prepared link is ACTIVATED
   // (delivered state stamped, windowed from the send) before the provider
   // call — handed back on every no-send exit, recorded after a real send.
@@ -605,6 +633,7 @@ router.post('/sms', async (req, res, next) => {
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
+      if (bearerCheck.priceNotices) priceNoticeSends = bearerCheck.priceNotices;
       // A bearer send to a number exactly one live customer owns is that
       // customer's text (a pasted URL never passes /customer-link to adopt
       // its owner): trust the row the seam verified so the recipient's own
@@ -792,13 +821,18 @@ router.post('/sms', async (req, res, next) => {
         humanAuthored: !bodyIsUnchangedAgentDraft,
       },
     });
-    const result = prepLinkSends
-      ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
-        .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), {
-          trustedCustomerId: trustedCustomerId || null,
-          usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
-        }))
-      : await dispatch();
+    const recheckOptions = () => ({
+      trustedCustomerId: trustedCustomerId || null,
+      usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
+    });
+    const dispatchPreps = prepLinkSends
+      ? () => dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
+        .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), recheckOptions()))
+      : dispatch;
+    const result = priceNoticeSends
+      ? await dispatchPriceNoticeLinkSend(priceNoticeSends, dispatchPreps, () => require('../services/composer-customer-links')
+        .recheckPriceChangeLinks(cleanBody, normalizePhoneLast10(to), recheckOptions()))
+      : await dispatchPreps();
     // The reservation has done its job — the real provider row now exists (on
     // success) or no send happened (on failure). Clear it so it can't linger as
     // a stuck 'sending' row blocking auto-sends to the thread.

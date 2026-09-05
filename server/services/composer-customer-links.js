@@ -1113,7 +1113,7 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
 // Price-change notices: the notice must still be one the composer would
 // insert (a delivered notice for a change still ahead — the builder's
 // predicate, re-run) and belong to the recipient's own row.
-async function checkPriceChangeLinks(ctx) {
+async function checkPriceChangeLinks(ctx, notices) {
   for (const run of linkRuns(ctx.runs, /\/price-change\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, PRICE_CHANGE_TOKEN_RE);
     if (!token) return refuseSend('A price change notice link in this message is not on the Waves portal — remove it before sending.');
@@ -1141,6 +1141,11 @@ async function checkPriceChangeLinks(ctx) {
     const bad = await ownedByRecipient(ctx, notice.customer_id, 'price change notice link');
     if (bad) return bad;
     ctx.bearers += 1;
+    // The caller dispatches under this customer's notice lock and re-runs
+    // this check inside it (recheckPriceChangeLinks) — the notices lane
+    // takes the same lock per customer, so a correction cannot finish
+    // between this read and the provider handoff (GH Codex #3893 r13 P1).
+    notices.push({ customerId: notice.customer_id, noticeId: notice.id });
   }
   return null;
 }
@@ -1283,11 +1288,12 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
   const statements = [];
   const preps = [];
   const projectReports = [];
+  const priceNotices = [];
   const checks = [
     () => checkContractLinks(ctx, contracts),
     () => checkPrepLinks(ctx, preps),
     () => checkStatementLinks(ctx, statements),
-    () => checkPriceChangeLinks(ctx),
+    () => checkPriceChangeLinks(ctx, priceNotices),
     () => checkAccountBoundLinks(ctx, projectReports),
     () => checkCardLinks(ctx, cards),
   ];
@@ -1303,6 +1309,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
     ...(projectReports.length ? { projectReports } : {}),
+    ...(priceNotices.length ? { priceNotices } : {}),
   };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that
@@ -1322,6 +1329,30 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     if (rows.length === 1) out.customerId = rows[0].id;
   }
   return out;
+}
+
+/**
+ * Price-change notice links only, re-run INSIDE the customer's
+ * `price-notice:<customer>` lock immediately before dispatch: the notices
+ * lane finalizes a correction under the same lock, so the newest-notice read
+ * here is the one the provider handoff acts on (GH Codex #3893 r13 P1).
+ * Same predicates as the pre-lock check; the caller reports a refusal as a
+ * not-sent result.
+ */
+async function recheckPriceChangeLinks(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
+  const ctx = {
+    runs: decodedRuns(body),
+    body,
+    hosts: ownedPortalHosts(),
+    toLast10: String(toLast10 || ''),
+    trustedCustomerId,
+    usDestination,
+    bearers: 0,
+    contractId: null,
+  };
+  const priceNotices = [];
+  const refusal = await checkPriceChangeLinks(ctx, priceNotices);
+  return refusal || { ok: true, priceNotices };
 }
 
 /**
@@ -2219,6 +2250,7 @@ module.exports = {
   markCardRequestSends,
   claimProjectReportSends,
   releaseProjectReportSends,
+  recheckPriceChangeLinks,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,
