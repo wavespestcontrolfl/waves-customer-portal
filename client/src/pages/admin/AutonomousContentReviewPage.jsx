@@ -9,10 +9,12 @@ import {
   GitPullRequest,
   Link2,
   RefreshCw,
+  RotateCcw,
+  XCircle,
   Search,
   TrendingUp,
 } from "lucide-react";
-import { CardBody, cn } from "../../components/ui";
+import { CardBody, Textarea, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -92,6 +94,10 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [linkDetailLoading, setLinkDetailLoading] = useState(false);
   const [error, setError] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+  const [linkReviewNote, setLinkReviewNote] = useState("");
+  const [actionPending, setActionPending] = useState("");
+  const [linkActionPending, setLinkActionPending] = useState("");
   const [impactData, setImpactData] = useState(null);
   const [impactLoading, setImpactLoading] = useState(true);
   // On phones the list and the detail can't share the screen — tapping a row
@@ -102,23 +108,24 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [status, setStatus] = useState("all");
   const [detailVersion, setDetailVersion] = useState(0);
   const listRequest = useRef(0);
+  const actionType = view === "review" ? "other" : "new_supporting_blog";
 
   const load = useCallback(async () => {
     const request = ++listRequest.current;
     setLoading(true);
     setError("");
     try {
-      const next = await adminFetch(`/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=new_supporting_blog`);
+      const next = await adminFetch(`/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=${actionType}`);
       if (request !== listRequest.current) return;
       setData(next);
       setDetailVersion((version) => version + 1);
       setSelectedId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
     } catch (err) {
-      setError(err.message);
+      if (request === listRequest.current) setError(err.message);
     } finally {
       if (request === listRequest.current) setLoading(false);
     }
-  }, [offset, status]);
+  }, [offset, status, actionType]);
 
   const loadLinks = async () => {
     setLinkLoading(true);
@@ -197,6 +204,46 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     return () => { stale = true; };
   }, [selectedLinkId]);
 
+  const submitDecision = async (decision) => {
+    if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending) return;
+    setActionPending(decision);
+    setError("");
+    try {
+      const next = await adminFetch(`/admin/content/autonomous/review/${selectedId}/decision`, {
+        method: "POST",
+        // Bind the decision to the run currently displayed — the server rejects
+        // it if a requeue/re-run replaced it since this view loaded.
+        body: { decision, note: reviewNote, run_id: selected?.run?.id || null },
+      });
+      setDetail(next.item);
+      setReviewNote("");
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setActionPending("");
+    }
+  };
+
+  const submitLinkDecision = async (decision) => {
+    if (!selectedLinkId || linkActionPending) return;
+    setLinkActionPending(decision);
+    setError("");
+    try {
+      const next = await adminFetch(`/admin/content/internal-links/${selectedLinkId}/decision`, {
+        method: "POST",
+        body: { decision, note: linkReviewNote },
+      });
+      setLinkDetail(next.item);
+      setLinkReviewNote("");
+      await loadLinks();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLinkActionPending("");
+    }
+  };
+
   const items = data?.items || [];
   const linkItems = linkData?.items || [];
   const selected = detail || items.find((item) => item.id === selectedId) || null;
@@ -204,6 +251,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const counts = data?.counts || {};
   const linkCounts = linkData?.counts || {};
   const gateSummary = selected?.run?.gate_summary;
+  const reviewActions = selected?.review_actions || {};
   const selectedGate = gateTag(gateSummary);
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
@@ -220,7 +268,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const busy = loading || linkLoading || impactLoading;
 
   const refreshAll = () => { load(); loadLinks(); loadImpact(); };
-  const changeView = (next) => { setView(next); setMobileDetailOpen(false); };
+  const changeView = (next) => { setView(next); setMobileDetailOpen(false); setOffset(0); setStatus(next === "review" ? "pending_review" : "all"); setDetail(null); setReviewNote(""); };
   const openContent = (id) => { setSelectedId(id); setMobileDetailOpen(true); };
   const openLink = (id) => { setSelectedLinkId(id); setMobileDetailOpen(true); };
 
@@ -247,10 +295,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
             </div>
             <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Autonomous blog activity</h1>
             <p className="mt-1.5 max-w-md text-13 text-white/65 sm:text-14">
-              Posts are drafted, checked, repaired, and published automatically. Failed checks are retried or skipped with a recorded reason. No approval is needed.
+              Blog posts are drafted, checked, repaired, and published automatically. Failed checks are retried or skipped with a recorded reason. No approval is needed.
             </p>
             <div className="mt-4 flex gap-1.5 overflow-x-auto">
               <PillTab active={view === "content"} onClick={() => changeView("content")}>Content</PillTab>
+              <PillTab active={view === "review"} onClick={() => changeView("review")}>Other content</PillTab>
               <PillTab active={view === "links"} onClick={() => changeView("links")}>Links</PillTab>
               <PillTab active={view === "impact"} onClick={() => changeView("impact")}>Impact</PillTab>
             </div>
@@ -272,7 +321,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       )}
 
       {/* ── Content Queue ── */}
-      {view === "content" && (
+      {(view === "content" || view === "review") && (
         <div className="pt-4">
           <KpiRow>
             <Kpi label="In progress" value={pendingCount} emphasize={pendingCount > 0} />
@@ -363,7 +412,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                       <Field label="Target" value={selected.target_url || "—"} />
                       <Field label="Keyword" value={selected.target_keyword || "—"} />
                       <Field label="Reason" value={selected.skip_reason || "—"} />
-                      <Field label="Run" value={selected.run?.outcome === "completed_pending_review" ? "Automatic processing" : selected.run?.outcome || "—"} />
+                      <Field label="Run" value={view === "content" && selected.run?.outcome === "completed_pending_review" ? "Automatic processing" : selected.run?.outcome || "—"} />
                     </div>
 
                     {selected.run?.astro_pr_url && <ExternalAnchor href={selected.run.astro_pr_url} label="Open Astro PR" />}
@@ -392,6 +441,39 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                           )}
                         </div>
                       </Section>
+                    )}
+
+                    {view === "review" && selected.action_type !== "new_supporting_blog" && selected.status === "pending_review" && (
+                      <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
+                        <Textarea
+                          value={reviewNote}
+                          onChange={(e) => setReviewNote(e.target.value)}
+                          placeholder="Reviewer note (optional)"
+                          rows={3}
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <ActionBtn variant="secondary" disabled={!reviewActions.can_requeue || !!actionPending} onClick={() => submitDecision("requeue")}>
+                            <RotateCcw size={15} strokeWidth={2} />
+                            {actionPending === "requeue" ? "Working…" : "Requeue"}
+                          </ActionBtn>
+                          {reviewActions.can_approve_trust_build && (
+                            <ActionBtn disabled={!!actionPending} onClick={() => submitDecision("approve_trust_build")}>
+                              <CheckCircle2 size={15} strokeWidth={2} />
+                              {actionPending === "approve_trust_build" ? "Working…" : "Approve"}
+                            </ActionBtn>
+                          )}
+                          {reviewActions.can_approve_named_competitor && (
+                            <ActionBtn disabled={!!actionPending} onClick={() => submitDecision("approve_named_competitor")}>
+                              <CheckCircle2 size={15} strokeWidth={2} />
+                              {actionPending === "approve_named_competitor" ? "Working…" : "Approve & publish"}
+                            </ActionBtn>
+                          )}
+                          <ActionBtn variant="danger" disabled={!reviewActions.can_dismiss || !!actionPending} onClick={() => submitDecision("dismiss")}>
+                            <XCircle size={15} strokeWidth={2} />
+                            {actionPending === "dismiss" ? "Working…" : "Dismiss"}
+                          </ActionBtn>
+                        </div>
+                      </div>
                     )}
 
                     <Section
@@ -547,6 +629,29 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                     </div>
 
                     {selectedLink.astro_pr_url && <ExternalAnchor href={selectedLink.astro_pr_url} label="Open Astro PR" />}
+
+                    <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
+                      <Textarea
+                        value={linkReviewNote}
+                        onChange={(e) => setLinkReviewNote(e.target.value)}
+                        placeholder="Reviewer note (optional)"
+                        rows={3}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <ActionBtn variant="secondary" disabled={!selectedLink.review_actions?.can_requeue || !!linkActionPending} onClick={() => submitLinkDecision("requeue")}>
+                          <RotateCcw size={15} strokeWidth={2} />
+                          {linkActionPending === "requeue" ? "Working…" : "Requeue"}
+                        </ActionBtn>
+                        <ActionBtn disabled={!selectedLink.review_actions?.can_verify_now || !!linkActionPending} onClick={() => submitLinkDecision("verify_now")}>
+                          <CheckCircle2 size={15} strokeWidth={2} />
+                          {linkActionPending === "verify_now" ? "Working…" : "Verify"}
+                        </ActionBtn>
+                        <ActionBtn variant="danger" disabled={!selectedLink.review_actions?.can_dismiss || !!linkActionPending} onClick={() => submitLinkDecision("dismiss")}>
+                          <XCircle size={15} strokeWidth={2} />
+                          {linkActionPending === "dismiss" ? "Working…" : "Dismiss"}
+                        </ActionBtn>
+                      </div>
+                    </div>
 
                     <LinkContext title="Before" value={selectedLink.link_context_before || selectedLink.context_snippet} />
                     <LinkContext title="After" value={selectedLink.link_context_after} />

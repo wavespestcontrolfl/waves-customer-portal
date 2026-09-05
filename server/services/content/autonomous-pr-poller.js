@@ -1727,7 +1727,7 @@ async function pollRun(run, { allowMerge = true } = {}) {
     // two days is closed, then the existing closed-PR reconciler records the
     // failure. Never discard a merged PR or a deliberate budget/gate hold.
     const blockedSince = Date.parse(run.poll_pending_since || '');
-    if (verdict.pending && !verdict.transient && verdict.reason === run.poll_pending_reason
+    if (verdict.pending && !verdict.transient && pendingReasonKey(verdict.reason) === run.poll_pending_reason
       && run.action_type === 'new_supporting_blog' && Number.isFinite(blockedSince)
       && Date.now() - blockedSince >= 48 * 60 * 60 * 1000
       && run.poll_pending_reason && !['daily_publish_cap_reached', 'auto_merge_disabled', 'awaiting_human_merge'].includes(run.poll_pending_reason)) {

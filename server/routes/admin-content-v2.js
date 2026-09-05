@@ -287,7 +287,7 @@ router.get('/autonomous/review', async (req, res, next) => {
       status: req.query.status,
       limit: req.query.limit,
       offset: req.query.offset,
-      actionType: req.query.actionType === 'new_supporting_blog' ? 'new_supporting_blog' : null,
+      actionType: ['new_supporting_blog', 'other'].includes(req.query.actionType) ? req.query.actionType : null,
     });
     res.json(review);
   } catch (err) { next(err); }

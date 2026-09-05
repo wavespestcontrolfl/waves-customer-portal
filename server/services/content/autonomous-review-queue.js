@@ -19,7 +19,8 @@ async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMI
   try {
     const counts = await countsByStatus(actionType);
     const query = db('opportunity_queue');
-    if (actionType) query.where('action_type', actionType);
+    if (actionType === 'other') query.whereNot('action_type', 'new_supporting_blog');
+    else if (actionType) query.where('action_type', actionType);
     if (normalizedStatus !== 'all') query.where('status', normalizedStatus);
     const opportunities = await query
       .orderBy('updated_at', 'desc')
@@ -339,7 +340,8 @@ async function updatePendingReviewOpportunity(trx, opportunityId, updates) {
 
 async function countsByStatus(actionType = null) {
   const query = db('opportunity_queue');
-  if (actionType) query.where('action_type', actionType);
+  if (actionType === 'other') query.whereNot('action_type', 'new_supporting_blog');
+    else if (actionType) query.where('action_type', actionType);
   const rows = await query
     .select('status')
     .count('* as count')

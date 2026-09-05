@@ -777,6 +777,20 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(result.results[0].reason).toBe('preview_build_pending');
   });
 
+  test('detailed blocker reasons retire after the same normalized blocker persists', async () => {
+    const run = makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '0 distinct images, minimum 2' });
+    const result = await poller.pollPending();
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(result.results[0].reason).toBe('automatic_retirement_pending');
+  });
+
   test('explicit kill switch leaves the open PR alone', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'false';
     const updates = setupDb({ pending: [makeRun()] });
