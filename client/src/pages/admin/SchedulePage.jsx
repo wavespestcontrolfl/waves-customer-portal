@@ -5144,7 +5144,7 @@ export function ProtocolPanel({ service, onClose }) {
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
   const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
-  const jobCardEnabled = Boolean(jobCard?.enabled);
+  const jobCardEnabled = Boolean(jobCard?.enabled) || jobCardError;
   const defaultSection = jobCardEnabled
     ? "job_card"
     : isLawn
@@ -5165,6 +5165,7 @@ export function ProtocolPanel({ service, onClose }) {
       return undefined;
     }
     setJobCardLoading(true);
+    setJobCardError(false);
     adminFetch(`/admin/protocols/job-card/${service.id}`)
       .then((data) => {
         if (cancelled) return;
@@ -5172,8 +5173,10 @@ export function ProtocolPanel({ service, onClose }) {
       })
       .catch(() => {
         if (cancelled) return;
-        // Fail closed: only an affirmative { enabled: true } shows the tab.
-        setJobCard({ enabled: false });
+        // A failed request (503 safety-data outage, network) keeps the tab
+        // and shows its unavailable state — never a silent fall-back to
+        // the legacy view. Only a successful { enabled: false } hides it.
+        setJobCard(null);
         setJobCardError(true);
       })
       .finally(() => {

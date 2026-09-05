@@ -729,10 +729,12 @@ async function loadCatalog(dbh = db) {
     .select(PRODUCT_COLUMNS)
     .catch((err) => { throw unavailable('Product catalog unavailable', err); });
   if (!products.length) return [];
+  // Alias-only protocol lines (EDDHA iron, organic acidifier …) resolve
+  // through this table, so its outage is the catalog's outage.
   const aliases = await dbh('product_aliases')
     .whereIn('product_id', products.map((p) => p.id))
     .select('product_id', 'alias_name')
-    .catch(() => []);
+    .catch((err) => { throw unavailable('Product catalog unavailable', err); });
   const byProduct = aliases.reduce((acc, row) => {
     (acc[row.product_id] = acc[row.product_id] || []).push(row.alias_name);
     return acc;
@@ -740,17 +742,28 @@ async function loadCatalog(dbh = db) {
   return products.map((p) => ({ ...p, aliases: byProduct[p.id] || [] }));
 }
 
-// Null when the read failed (ordering is withheld — a 1-unit fallback would
-// under-order a multi-unit pack); {} when nothing is mapped.
+// The canonical pack per product: the active, verified mapping with the
+// highest confidence; its structured case quantity + uom first, the free-
+// text pack_size only as a fallback. Null when the read failed (ordering is
+// withheld — a 1-unit fallback would under-order a multi-unit pack); {}
+// when nothing verified is mapped.
 async function loadPackSizes(dbh, productIds) {
   if (!productIds.length) return {};
   const rows = await dbh('distributor_product_map')
     .whereIn('product_id', productIds)
-    .whereNotNull('pack_size')
-    .select('product_id', 'pack_size')
+    .where({ active: true, mapping_status: 'verified' })
+    .orderBy('mapping_confidence', 'desc')
+    .orderBy('updated_at', 'desc')
+    .select('product_id', 'pack_size', 'case_quantity', 'uom')
     .catch(() => null);
   if (!rows) return null;
-  return rows.reduce((acc, r) => { if (!acc[r.product_id]) acc[r.product_id] = r.pack_size; return acc; }, {});
+  return rows.reduce((acc, r) => {
+    if (acc[r.product_id]) return acc;
+    const structured = Number(r.case_quantity) > 0 && r.uom ? `${Number(r.case_quantity)} ${r.uom}` : null;
+    const pack = structured || r.pack_size || null;
+    if (pack) acc[r.product_id] = pack;
+    return acc;
+  }, {});
 }
 
 // The appointment's rig assignment (the Lawn plan's equipment pick).

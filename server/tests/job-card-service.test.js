@@ -834,7 +834,7 @@ describe('PR review r6', () => {
   });
 
   test('a failed pack-size read withholds ordering (P2)', async () => {
-    const dbh = () => { const chain = {}; for (const m of ['whereIn', 'whereNotNull', 'select']) chain[m] = () => chain; chain.catch = (fn) => Promise.resolve(fn(new Error('db down'))); return chain; };
+    const dbh = () => { const chain = {}; for (const m of ['whereIn', 'whereNotNull', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = (fn) => Promise.resolve(fn(new Error('db down'))); return chain; };
     expect(await jobCard._test.loadPackSizes(dbh, ['p'])).toBeNull();
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' } };
     const [card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: [line], verdicts: [], packSizes: null });
@@ -885,5 +885,35 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     const facts = { ...baseFacts(), pets: 'dog' };
     expect(jobCard._test.criticalFacts(facts)).toContain('dog');
     expect(jobCard.validateParagraph('First visit on record.', jobCard.buildTemplateParagraph(facts), [], jobCard._test.criticalFacts(facts))).toBe('critical_fact_dropped');
+  });
+});
+
+describe('PR review r8', () => {
+  test('a failed product_aliases read is the catalog outage (P2)', async () => {
+    const dbh = (table) => {
+      const chain = {};
+      for (const m of ['where', 'whereIn', 'select']) chain[m] = () => chain;
+      chain.catch = (fn) => (table === 'product_aliases' ? Promise.resolve(fn(new Error('db down'))) : Promise.resolve([{ id: 'p', name: 'P' }]));
+      return chain;
+    };
+    await expect(jobCard._test.loadCatalog(dbh)).rejects.toMatchObject({ statusCode: 503, message: 'Product catalog unavailable' });
+  });
+
+  test('pack sizes come from the active verified mapping, structured quantity first (P2)', async () => {
+    const seen = [];
+    const dbh = () => {
+      const chain = {};
+      for (const m of ['whereIn', 'orderBy', 'select']) chain[m] = () => chain;
+      chain.where = (arg) => { seen.push(arg); return chain; };
+      chain.catch = async () => [
+        { product_id: 'a', pack_size: '1 gal', case_quantity: '2.5', uom: 'gal' },
+        { product_id: 'a', pack_size: '1 gal', case_quantity: null, uom: null },
+        { product_id: 'b', pack_size: '32 fl_oz', case_quantity: null, uom: null },
+        { product_id: 'c', pack_size: null, case_quantity: null, uom: null },
+      ];
+      return chain;
+    };
+    expect(await jobCard._test.loadPackSizes(dbh, ['a', 'b', 'c'])).toEqual({ a: '2.5 gal', b: '32 fl_oz' });
+    expect(seen).toContainEqual({ active: true, mapping_status: 'verified' });
   });
 });
