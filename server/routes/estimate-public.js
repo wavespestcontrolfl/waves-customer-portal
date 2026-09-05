@@ -7799,6 +7799,16 @@ ${shellQuestionsBar()}
         setBookingChoiceControlsDisabled(false);
         return;
       }
+      if (r.status === 409 && data.code === 'ANNUAL_PREPAY_OVERLAP') {
+        // Fail-closed billing refusal (docs/public-route-contracts.md), not
+        // a scheduling conflict: nothing was booked and the office must
+        // adjust coverage. Keep the reservation and preference and show the
+        // server's billing explanation instead of a slot-taken retry.
+        toast(data.error || 'This account already has an active annual prepay plan. Please call or text us to adjust your coverage.');
+        if (btn) btn.disabled = false;
+        setBookingChoiceControlsDisabled(false);
+        return;
+      }
       if (r.status === 409) {
         toast(/expired|no active reservation/i.test(data.error || '')
           ? 'Reservation expired — pick another time.'
