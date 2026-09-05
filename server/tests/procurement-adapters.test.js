@@ -1157,8 +1157,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('nested identity markup (a wrapper around the account / ship-to child) is ONE reading — the innermost text; a mixed-case account radio value is the account tender (r24 P2)', async () => {
     const nested = fakeSiteOne({ identityTexts: { checkoutAccount: ['Account # 12345', '12345'], checkoutShipTo: ['Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', 'Waves Pest Control, 123 Example Ave, Bradenton, FL 34205'] } });
-    await expect(s1.place(args(), nested.deps)).rejects.toMatchObject(NOT_SHIPPED);
-    expect(nested.st.trialDone).toBe(true);
+    // 3b stopped at the dry-run boundary (checkout_not_shipped); here the submit stage is live, so the nested reading places the order
+    await expect(s1.place(args(), nested.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(nested.st.placeClicked).toBe(1);
     expect(S.billToAccount).toMatch(/\[value\*="account" i\]/);
     expect(S.billToAccount).not.toMatch(/ACCOUNT/);
   });
