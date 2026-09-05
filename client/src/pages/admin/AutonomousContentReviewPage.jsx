@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { CardBody, Textarea, cn } from "../../components/ui";
 
+const ACTIVITY_STATUSES = { pending: "Queued", claimed: "Running", pending_review: "Processing / held", done: "Completed", skipped: "Skipped", expired: "Expired" };
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function adminFetch(path, options = {}) {
@@ -93,7 +95,10 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [linkLoading, setLinkLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [linkDetailLoading, setLinkDetailLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [contentError, setContentError] = useState("");
+  const [linkError, setLinkError] = useState("");
+  const [impactError, setImpactError] = useState("");
+  const error = { links: linkError, impact: impactError, content: contentError, review: contentError }[view];
   const [reviewNote, setReviewNote] = useState("");
   const [linkReviewNote, setLinkReviewNote] = useState("");
   const [actionPending, setActionPending] = useState("");
@@ -115,7 +120,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     const request = ++listRequest.current;
     listInFlight.current = request;
     setLoading(true);
-    setError("");
+    setContentError("");
     try {
       const next = await adminFetch(`/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=${actionType}`);
       if (request !== listRequest.current) return;
@@ -123,7 +128,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       setDetailVersion((version) => version + 1);
       setSelectedId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
     } catch (err) {
-      if (request === listRequest.current) setError(err.message);
+      if (request === listRequest.current) setContentError(err.message);
     } finally {
       if (listInFlight.current === request) listInFlight.current = null;
       if (request === listRequest.current) setLoading(false);
@@ -132,13 +137,13 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   const loadLinks = async () => {
     setLinkLoading(true);
-    setError("");
+    setLinkError("");
     try {
       const next = await adminFetch("/admin/content/internal-links?status=all&limit=100");
       setLinkData(next);
       setSelectedLinkId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
     } catch (err) {
-      setError(err.message);
+      setLinkError(err.message);
     } finally {
       setLinkLoading(false);
     }
@@ -146,12 +151,12 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   const loadImpact = async () => {
     setImpactLoading(true);
-    setError("");
+    setImpactError("");
     try {
       const next = await adminFetch("/admin/content/autonomous/impact?limit=100");
       setImpactData(next);
     } catch (err) {
-      setError(err.message);
+      setImpactError(err.message);
     } finally {
       setImpactLoading(false);
     }
@@ -189,7 +194,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         if (stale) return;
         setDetail(next.item);
       })
-      .catch((err) => { if (!stale) setError(err.message); })
+      .catch((err) => { if (!stale) setContentError(err.message); })
       .finally(() => { if (!stale) setDetailLoading(false); });
     return () => { stale = true; };
   }, [selectedId, detailVersion]);
@@ -207,7 +212,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         if (stale) return;
         setLinkDetail(next.item);
       })
-      .catch((err) => { if (!stale) setError(err.message); })
+      .catch((err) => { if (!stale) setLinkError(err.message); })
       .finally(() => { if (!stale) setLinkDetailLoading(false); });
     return () => { stale = true; };
   }, [selectedLinkId]);
@@ -215,7 +220,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const submitDecision = async (decision) => {
     if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending) return;
     setActionPending(decision);
-    setError("");
+    setContentError("");
     try {
       const next = await adminFetch(`/admin/content/autonomous/review/${selectedId}/decision`, {
         method: "POST",
@@ -227,7 +232,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       setReviewNote("");
       await load();
     } catch (err) {
-      setError(err.message);
+      setContentError(err.message);
     } finally {
       setActionPending("");
     }
@@ -236,7 +241,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const submitLinkDecision = async (decision) => {
     if (!selectedLinkId || linkActionPending) return;
     setLinkActionPending(decision);
-    setError("");
+    setLinkError("");
     try {
       const next = await adminFetch(`/admin/content/internal-links/${selectedLinkId}/decision`, {
         method: "POST",
@@ -246,7 +251,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       setLinkReviewNote("");
       await loadLinks();
     } catch (err) {
-      setError(err.message);
+      setLinkError(err.message);
     } finally {
       setLinkActionPending("");
     }
@@ -379,6 +384,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                           {named && <Tag tone="forest" className="shrink-0">Named competitor</Tag>}
                         </div>
                         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                          <Tag>{ACTIVITY_STATUSES[item.status] || item.status}</Tag>
                           <Tag>{item.action_type}</Tag>
                           <Tag tone={gt.tone}>{gt.label}</Tag>
                           <span className="text-12 tabular-nums text-zinc-500">Score {item.final_score ?? item.score ?? "—"}</span>

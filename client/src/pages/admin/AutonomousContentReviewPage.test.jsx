@@ -135,3 +135,32 @@ describe('review regressions', () => {
     expect(fetch.mock.calls.filter(([url]) => url.includes('/review?'))).toHaveLength(2);
   });
 });
+
+describe('activity observability', () => {
+  it.each([['Links', '/internal-links'], ['Impact', '/autonomous/impact']])('preserves %s errors during background blog polling', async (tab, endpoint) => {
+    vi.useFakeTimers();
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, opts) => url.includes(endpoint)
+      ? Promise.reject(new Error(`${tab} unavailable`)) : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: tab, exact: true }));
+    expect(screen.getByText(`${tab} unavailable`)).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+    expect(fetch.mock.calls.filter(([url]) => url.includes('/review?')).length).toBeGreaterThan(1);
+    expect(screen.getByText(`${tab} unavailable`)).toBeTruthy();
+  });
+
+  it('shows lifecycle status on every activity card independently of gate state', async () => {
+    const statuses = ['pending', 'claimed', 'pending_review', 'done', 'skipped'];
+    const records = statuses.map(status => ({ ...item(status), status, run: null }));
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, opts) => url.includes('/review?')
+      ? Promise.resolve({ ok: true, json: async () => ({ items: records, total: 5 }) }) : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByRole('button', { name: /Seasonal ants pending Queued/ });
+    for (const [index, label] of ['Queued', 'Running', 'Processing / held', 'Completed', 'Skipped'].entries()) {
+      expect(screen.getByRole('button', { name: new RegExp(`Seasonal ants ${statuses[index]} `) }).textContent).toContain(label);
+    }
+  });
+});
