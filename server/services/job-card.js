@@ -303,6 +303,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
 function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   const s1 = [];
   if (facts.pets) s1.push(`Pets: ${facts.pets}${facts.petsSecured ? ` (${facts.petsSecured})` : ''}`);
+  else if (facts.petsSecured) s1.push(`Pets secured: ${facts.petsSecured}`);
   if (facts.gates.length) s1.push(`${facts.gates.join(' and ').toLowerCase()} code on file, tap to show`);
   if (facts.entry) s1.push(facts.entry);
   if (facts.parking) s1.push(facts.parking);

@@ -40,6 +40,11 @@ describe('buildTemplateParagraph', () => {
     expect(text).toBe('Pets: dog, property gate code on file, tap to show. Last visit 2026-08-12: Chinch bugs east side, open: URGENT Ants in kitchen.');
   });
 
+  test('a pet-securing plan with no pet description still renders (pre-push P1)', () => {
+    const text = jobCard.buildTemplateParagraph({ ...baseFacts(), petsSecured: 'dog crated in garage' });
+    expect(text).toContain('Pets secured: dog crated in garage');
+  });
+
   test('lawn: irrigation + rain, or the explicit ask when empty', () => {
     const withIrrigation = { ...baseFacts(), irrigation: 'Mon/Thu, 20 min', rain7d: 1.2 };
     expect(jobCard.buildTemplateParagraph(withIrrigation, { isLawn: true }))
