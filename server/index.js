@@ -1012,6 +1012,14 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
   logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET'}`);
 
   (async () => {
+    // This read-only configuration refresh is needed in managed dev too.
+    try {
+      const { syncConstantsFromDB } = require('./services/pricing-engine');
+      await syncConstantsFromDB();
+    } catch (err) {
+      logger.warn(`[pricing-engine] Initial DB sync skipped: ${err.message}`);
+    }
+
     // The managed launcher uses isolated fixtures; recovery workers must not
     // mutate those fixtures between assertions. Production recovery is unchanged.
     if (process.env.WAVES_LOCAL_DEV === '1') return;
@@ -1038,14 +1046,6 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
           : '[stripe-terminal] TERMINAL_HANDOFF_SECRET is NOT SET — handoff minting DISABLED. Generate with: openssl rand -hex 32 and set in Railway env.';
         if (config.nodeEnv === 'production') logger.error(msg); else logger.warn(msg);
       }
-    }
-
-    // Sync pricing engine constants from admin-edited DB values
-    try {
-      const { syncConstantsFromDB } = require('./services/pricing-engine');
-      await syncConstantsFromDB();
-    } catch (err) {
-      logger.warn(`[pricing-engine] Initial DB sync skipped: ${err.message}`);
     }
 
     // Stripe payout sync runs twice daily at 8 AM and 8 PM ET via
