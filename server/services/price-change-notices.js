@@ -455,9 +455,16 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
       // holds the same `price-notice:<customer>` lock through its provider
       // handoff and re-reads the newest notice inside it, so a correction
       // finishing here cannot race a stale re-share out (GH Codex #3893 r13
-      // P1). Request-scoped (fails fast): a held lock counts the row as
-      // failed — nothing was claimed, so rerunning the change resumes it.
-      const outcome = await runExclusive(`price-notice:${row.customerId}`, () => sendOne(row), { recordHealth: false, waitForSlot: false });
+      // P1). The chunk fires SEND_CONCURRENCY locks at once but cron-lock
+      // caps concurrent holders at half the pool, so these WAIT for a slot
+      // (a waiter pins no connection; bounded by cron-lock's slot deadline)
+      // instead of failing fast — fail-fast would drop every notice past
+      // the cap in each chunk, and a rerun would starve the same rows
+      // behind the already-notified ones ahead of them (GH Codex #3893 r14
+      // P1). A lock held by a composer re-share, or no slot before the
+      // deadline, counts the row as failed — nothing was claimed, so
+      // rerunning the change resumes it.
+      const outcome = await runExclusive(`price-notice:${row.customerId}`, () => sendOne(row), { recordHealth: false, waitForSlot: true });
       if (wasLockSkipped(outcome)) {
         summary.failed += 1;
         logger.warn(`[price-change] notice for customer ${row.customerId} not attempted — the customer's notice lock is held (${outcome.reason}); rerun the change to resume`);

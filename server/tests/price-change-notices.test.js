@@ -259,9 +259,11 @@ describe('createAndSendBatch delivery', () => {
 
     // The whole per-customer send runs under the customer's notice lock —
     // the one the composer's re-share of this customer's notice also takes
-    // (GH Codex #3893 r13 P1).
+    // (GH Codex #3893 r13 P1) — and WAITS for a holder slot: a chunk of
+    // SEND_CONCURRENCY fail-fast locks would exceed cron-lock's holder cap
+    // and drop notices (r14 P1).
     const { runExclusive } = require('../utils/cron-lock');
-    expect(runExclusive).toHaveBeenCalledWith('price-notice:c-1', expect.any(Function), { recordHealth: false, waitForSlot: false });
+    expect(runExclusive).toHaveBeenCalledWith('price-notice:c-1', expect.any(Function), { recordHealth: false, waitForSlot: true });
     expect(runExclusive.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
 
     // claim (draft→sending) then final state
@@ -279,6 +281,16 @@ describe('createAndSendBatch delivery', () => {
     expect(out).toMatchObject({ ok: false, created: 0, emailed: 0, texted: 0, failed: 1 });
     expect(noticeInserts).toHaveLength(0);
     expect(noticeUpdates).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('no holder slot before the lock deadline counts the row as failed the same way — the rerun resumes it (r14 P1)', async () => {
+    customerRows = [CUSTOMER];
+    const { runExclusive } = require('../utils/cron-lock');
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'no_connection' });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: false, failed: 1 });
+    expect(noticeInserts).toHaveLength(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
