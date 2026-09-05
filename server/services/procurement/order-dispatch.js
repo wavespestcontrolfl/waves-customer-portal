@@ -1141,7 +1141,7 @@ async function bellUndispatchable(conn, requestId, notify) {
   // The request-id dedupe returns the EXISTING row unchanged when the text
   // is the same — and the dispatcher's claim marked that row read on the
   // hand-off. A handback must be visible again: reopen it (Codex r20 P2).
-  await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null, updated_at: new Date() });
+  await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-reorder:${requestId}`]).whereNotNull('read_at').update({ read_at: null }); // notifications has no updated_at (hook r27 P1)
   // Closed while the bell was being written (received / cancelled): retire
   // what was just rung — staff must not be told to buy it (Codex r27 P2).
   const after = await conn('product_restock_requests').where({ id: requestId }).first('status', 'source');
