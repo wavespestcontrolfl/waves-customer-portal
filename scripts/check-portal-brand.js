@@ -8,7 +8,8 @@
  *   1. Raw emoji characters          (use <Icon name="..." /> instead)
  *   2. Hardcoded brand font strings  (import FONTS from theme-brand)
  *   3. Local palette declarations    (import COLORS from theme-brand)
- *   4. Font sizes under 14 (literal or FS token) and weights above 700 per the customer glass sheet
+ *   4. Font sizes under 14 (literal or FS token) and weights above 700 per the customer glass sheet —
+ *      JSX camel-case properties AND kebab-case declarations inside embedded <style> templates
  *
  * Run: `node scripts/check-portal-brand.js` or `npm run check:portal-brand`.
  * Exit code 0 = clean, 1 = violations found.
@@ -81,6 +82,11 @@ const BANNED_FONT_TOKEN_RX = /fontSize:\s*FS\.(micro|caption)\b/;
 // one-offs that snap unpredictably. Matched anywhere in the value expression
 // (ternaries included) and by name: FW.heavy (800) was deleted with #3895.
 const HEAVY_WEIGHT_RX = /fontWeight:\s*[^,}\n]*?\b(6[5-9]\d|7[1-9]\d|[89]\d\d|FW\.heavy)\b/;
+// The same two rules for CSS authored inside a <style> template literal
+// (kebab-case declarations): `font-size: 10px` / `font-weight: 800` used to
+// pass the gate while the JSX spelling failed it.
+const BANNED_CSS_FONT_SIZE_RX = /font-size:\s*((?:\d|1[0-3])(?:\.\d+)?)px\b/;
+const HEAVY_CSS_WEIGHT_RX = /font-weight:\s*[^;}\n]*?\b(6[5-9]\d|7[1-9]\d|[89]\d\d)\b/;
 
 // =========================================================================
 // Walk
@@ -165,6 +171,24 @@ function checkFile(filePath) {
         rule: 'heavy-weight',
         line: n,
         msg: `fontWeight: ${m[1]} — customer weights are 400 / 500 / 600 / 700 only (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_CSS_FONT_SIZE_RX.test(line)) {
+      const m = line.match(BANNED_CSS_FONT_SIZE_RX);
+      violations.push({
+        rule: 'banned-font-size',
+        line: n,
+        msg: `font-size: ${m[1]}px — nothing under 14px on a customer surface, embedded CSS included (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (HEAVY_CSS_WEIGHT_RX.test(line)) {
+      const m = line.match(HEAVY_CSS_WEIGHT_RX);
+      violations.push({
+        rule: 'heavy-weight',
+        line: n,
+        msg: `font-weight: ${m[1]} — customer weights are 400 / 500 / 600 / 700 only, embedded CSS included (owner sheet 2026-09-03)`,
         snippet: line.trim().slice(0, 140),
       });
     }

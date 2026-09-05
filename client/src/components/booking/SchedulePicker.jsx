@@ -343,7 +343,7 @@ export function SchedulePickerStyles() {
       .wpk-day:disabled { opacity: .35; cursor: default; }
       .wpk-day-selected { background: ${COLORS.glassNavy}; color: ${COLORS.white}; border-color: ${COLORS.glassNavy}; }
       .wpk-day-num { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
-      .wpk-day-rain { position: absolute; top: 2px; right: 4px; font-size: 10px; line-height: 1; opacity: .85; }
+      .wpk-day-rain { position: absolute; top: 2px; right: 4px; line-height: 1; opacity: .85; }
       .wpk-day-dots { position: absolute; left: 0; right: 0; bottom: 5px; display: flex; justify-content: center; gap: 3px; }
       .wpk-day-dots i { width: 5px; height: 5px; border-radius: 999px; background: ${COLORS.yellow}; border: .5px solid rgba(4,57,94,.3); }
       .wpk-day-dots i.wpk-dot-nearby { background: ${COLORS.green}; border-color: transparent; }

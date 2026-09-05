@@ -1912,7 +1912,7 @@ function ReentryTargetTile({ target, nowMs, mode, timezone }) {
 function PressureTrendChart({ points = [], neighborhood, summary }) {
   const width = 320;
   const height = 120;
-  const padding = { top: 12, right: 16, bottom: 24, left: 28 };
+  const padding = { top: 12, right: 16, bottom: 24, left: 36 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const xFor = (index, count = points.length) => {
@@ -2013,7 +2013,7 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
 function LawnTrendChart({ trend = [], summary }) {
   const width = 320;
   const height = 120;
-  const padding = { top: 12, right: 16, bottom: 24, left: 30 };
+  const padding = { top: 12, right: 16, bottom: 24, left: 36 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const points = trend.filter((point) => point.overallScore != null);
@@ -7139,13 +7139,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-width: 1.2;
           vector-effect: non-scaling-stroke;
         }
-        .satellite-application-badge text {
-          fill: #fff;
-          font-family: ${FONT_BODY};
-          font-size: 10px;
-          font-weight: 700;
-          letter-spacing: 0;
-        }
         .sat-pattern-line,
         .sat-pattern-path {
           stroke: #111;
@@ -7162,11 +7155,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke: rgba(255,255,255,.92);
           stroke-width: 1.2;
           vector-effect: non-scaling-stroke;
-        }
-        .satellite-bait-label {
-          fill: #fff;
-          font-size: 10px;
-          font-weight: 700;
         }
         .satellite-flag-circle {
           fill: var(--red);
@@ -7994,11 +7982,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .chart-label {
           fill: var(--report-muted);
-          font-size: 10px;
+          font-size: 14px;
         }
         .pressure-value-label {
           fill: ${B.glassNavy};
-          font-size: 10px;
+          font-size: 14px;
           font-weight: 700;
           pointer-events: none;
         }
