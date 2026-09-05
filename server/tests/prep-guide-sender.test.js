@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
-jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn(), loadTemplateByKey: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/sms-auto-send', () => ({ isRealProviderSend: jest.requireActual('../services/sms-auto-send').isRealProviderSend }));
@@ -173,6 +173,7 @@ beforeEach(() => {
   servicePrepRow = { prep_token: null, prep_template_key: null };
   serviceUpdates = [];
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
+  EmailTemplateLibrary.loadTemplateByKey.mockResolvedValue({ activeVersion: { id: 'v1' } });
   renderSmsTemplate.mockResolvedValue('Prep text...');
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM123' });
 });
@@ -721,6 +722,33 @@ describe('sendPrepToCustomer', () => {
     expect(sent).toMatchObject({ ok: true, smsSent: true });
     expect(renderSmsTemplate.mock.calls[0][1].prep_url).toMatch(new RegExp(`/prep/${'b'.repeat(32)}$`));
     expect(serviceUpdates).toContainEqual({ prep_sent_at: 'NOW()' }); // key is the WHERE fence (prep.lawn)
+  });
+
+  test('the page is texted only when it will render: no active template version or an expired token refuses the link before any claim (pre-push Codex P1 on 7f82e7564)', async () => {
+    upcomingVisitRow = { ...VISIT };
+    EmailTemplateLibrary.loadTemplateByKey.mockResolvedValue({ activeVersion: null });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_guide_inactive' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(serviceUpdates).toEqual([]);
+    expect(EmailTemplateLibrary.loadTemplateByKey).toHaveBeenCalledWith('prep.lawn');
+
+    EmailTemplateLibrary.loadTemplateByKey.mockResolvedValue({ activeVersion: { id: 'v1' } });
+    upcomingVisitRow = { ...VISIT, prep_expires_at: new Date(Date.now() - 60_000) };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_page_expired' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(serviceUpdates).toEqual([]);
+    // Both: the email still goes (portal link), the text names the reason.
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'both' }))
+      .toMatchObject({ ok: true, emailSent: true, smsSent: false, reason: 'partial', smsLinkReason: 'prep_page_expired' });
+    expect(serviceUpdates).toEqual([]);
+
+    // A template lookup failure is a retryable link failure.
+    EmailTemplateLibrary.loadTemplateByKey.mockRejectedValueOnce(new Error('db down'));
+    upcomingVisitRow = { ...VISIT };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'prep_link_failed' });
   });
 
   test('a failed visit lookup or token mint is reported as a link failure, not a missing visit', async () => {

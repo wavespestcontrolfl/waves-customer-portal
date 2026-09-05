@@ -350,9 +350,17 @@ async function releasePrepPage(serviceId, templateKey) {
 // (GH Codex #3856 r2 P1). The read below is the cheap early-out; the
 // conditional claim after the mint is the gate. Such a row still dates the
 // email but is not linked or stamped. linkReason says why prepUrl is null:
-//   no_upcoming_visit — nothing for a page to describe
-//   prep_page_taken   — the row's page belongs to another guide (takenBy)
-//   prep_link_failed  — visit lookup or token mint threw (retryable)
+//   no_upcoming_visit   — nothing for a page to describe
+//   prep_page_taken     — the row's page belongs to another guide (takenBy)
+//   prep_guide_inactive — the guide has no active version (the page 404s)
+//   prep_page_expired   — the visit's page token is past prep_expires_at
+//   prep_link_failed    — visit lookup or token mint threw (retryable)
+// The page is texted only when it will RENDER: /prep/:token 404s past
+// prep_expires_at and without an active template version
+// (resolvePrepSource / renderGuideForSource) — the same two predicates the
+// composer's buildPrepGuideLink applies before inserting a link, re-run here
+// so a text-only send can never report success (and stamp prep_sent_at) on
+// a URL the customer opens to a 404 (pre-push Codex P1 on 7f82e7564).
 async function resolvePrepVisit(customer, config) {
   let visits;
   try {
@@ -362,6 +370,14 @@ async function resolvePrepVisit(customer, config) {
     return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
   if (!visits.length) return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'no_upcoming_visit' };
+  let loaded;
+  try {
+    loaded = await EmailTemplateLibrary.loadTemplateByKey(config.emailTemplateKey);
+  } catch (err) {
+    logger.warn(`[prep-guide-sender] template lookup failed for ${config.emailTemplateKey}: ${err.message}`);
+    return { visit: visits[0], prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
+  }
+  if (!loaded?.activeVersion) return { visit: visits[0], prepUrl: null, ownsPage: false, linkReason: 'prep_guide_inactive' };
   // Soonest first: a free (or same-guide) page wins; a page another guide
   // owns — delivered or merely reserved — is skipped for the next visit.
   // Nothing usable = the soonest visit's refusal.
@@ -394,6 +410,9 @@ async function resolvePrepVisit(customer, config) {
     };
   }
   if (!visit) return taken;
+  if (visit.prep_expires_at && new Date(visit.prep_expires_at).getTime() <= Date.now()) {
+    return { visit, prepUrl: null, ownsPage: false, linkReason: 'prep_page_expired' };
+  }
   // Claim BEFORE the mint: ensureServicePrepToken initializes an unset key
   // itself, so a claim after it could never be fresh and a failed first
   // send would reserve the page forever (pre-push Codex P1 on cd6de743e).

@@ -716,9 +716,11 @@ describe('admin communications SMS route', () => {
       const { runExclusive } = require('../utils/cron-lock');
       let bearerSpy;
       let markSpy;
+      let recheckSpy;
       beforeEach(() => {
         bearerSpy = jest.spyOn(ccl(), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, preps: PREPS });
         markSpy = jest.spyOn(ccl(), 'markPrepGuidesSent').mockResolvedValue(undefined);
+        recheckSpy = jest.spyOn(ccl(), 'recheckPrepLinks').mockResolvedValue({ ok: true });
         db.mockImplementation((table) => {
           const first = jest.fn();
           if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
@@ -728,6 +730,7 @@ describe('admin communications SMS route', () => {
       afterEach(() => {
         bearerSpy.mockRestore();
         markSpy.mockRestore();
+        recheckSpy.mockRestore();
         runExclusive.mockImplementation(async (_key, fn) => fn());
       });
 
@@ -747,6 +750,21 @@ describe('admin communications SMS route', () => {
           expect(lockTaken).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
           expect(markSpy).toHaveBeenCalledWith(PREPS, expect.anything());
           expect(markSpy.mock.invocationCallOrder[0]).toBeLessThan(lockReleased.mock.invocationCallOrder[0]);
+          // The prep links are re-validated INSIDE the lock, before the provider.
+          expect(recheckSpy).toHaveBeenCalledWith(PREP_BODY, '5551234567', { trustedCustomerId: 'cust-A', usDestination: true });
+          expect(recheckSpy.mock.invocationCallOrder[0]).toBeGreaterThan(lockTaken);
+          expect(recheckSpy.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+        });
+      });
+
+      test('a prep link that stopped resolving between the pre-lock check and the lock (a released provisional page) refuses as not-sent — nothing dispatched, no marker (pre-push Codex P1 on 7f82e7564)', async () => {
+        recheckSpy.mockResolvedValue({ ok: false, error: 'This prep guide link has expired — remove it and insert a fresh one.' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(422);
+          expect((await res.json()).error).toMatch(/prep guide link has expired/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(markSpy).not.toHaveBeenCalled();
         });
       });
 

@@ -203,12 +203,15 @@ async function resolveSmsLogCustomerFallbacks(rows) {
 // per-customer `prep-send:<customer>` lock, so a manual send for the same
 // customer never interleaves with this dispatch's claim → send → stamp
 // (GH Codex #3856 r22 P0; the sender no longer re-keys reservations at all,
-// r23 P0). A held lease is an operator-facing "try again",
+// r23 P0). The links are re-validated INSIDE the lock right before dispatch
+// (`recheck`): the pre-lock bearer check can have verified a manual send's
+// provisional page that failed and was released before the lock was ours
+// (pre-push Codex P1 on 7f82e7564); a refusal is a not-sent result. A held lease is an operator-facing "try again",
 // never a wait — reported as a not-sent result so the route's own no-send
 // exit releases every claim taken before dispatch. A throw the provider
 // accepted (err.providerOutcome.sent === true) still writes the marker
 // before propagating; a lost marker never fails a text that already left.
-async function dispatchPrepLinkSend(preps, dispatch, actorId) {
+async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
   const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
   const mark = async (label) => {
     try {
@@ -222,6 +225,8 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId) {
     if (i < customerIds.length) {
       return runExclusive(`prep-send:${customerIds[i]}`, () => locked(i + 1), { recordHealth: false, waitForSlot: false });
     }
+    const fresh = await recheck();
+    if (!fresh.ok) return { sent: false, blocked: false, reason: fresh.error };
     let result;
     try {
       result = await dispatch();
@@ -750,7 +755,11 @@ router.post('/sms', async (req, res, next) => {
       },
     });
     const result = prepLinkSends
-      ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null)
+      ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
+        .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), {
+          trustedCustomerId: trustedCustomerId || null,
+          usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
+        }))
       : await dispatch();
     // The reservation has done its job — the real provider row now exists (on
     // success) or no send happened (on failure). Clear it so it can't linger as
@@ -1088,6 +1097,8 @@ const PREP_REFUSAL_COPY = {
   // and re-keying it would flip every link already delivered.
   prep_page_taken: (r) => `This guide can only be texted as a link, and the customer's next visit already carries the ${r.takenBy || 'other'} prep page — email this guide instead.`,
   prep_link_failed: () => "Couldn't build the guide page link for this visit — try again.",
+  prep_guide_inactive: (r) => `The ${r.label || 'prep'} guide has no active version in Email Templates — activate it before texting a prep link.`,
+  prep_page_expired: () => 'The prep page link for this visit has expired — email this guide instead.',
   prep_send_pending: (r) => `The ${r.label || 'prep'} guide for this visit is already queued to send automatically — it will go out on its own.`,
   prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
   unsupported_pest_type: () => 'That prep type is not available yet.',
@@ -1099,6 +1110,8 @@ const PREP_TEXT_DOWN_COPY = {
   no_upcoming_visit: () => 'The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.',
   prep_page_taken: (r) => `The text was not sent — the customer's next visit already carries the ${r.takenBy || 'other'} prep page.`,
   prep_link_failed: () => 'The text was not sent — the guide page link could not be built; try Text again later.',
+  prep_guide_inactive: (r) => `The text was not sent — the ${r.label || 'prep'} guide has no active version in Email Templates.`,
+  prep_page_expired: () => 'The text was not sent — the prep page link for this visit has expired.',
 };
 // SendGrid MAY have accepted the email (post-dispatch throw): the page claim
 // is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).

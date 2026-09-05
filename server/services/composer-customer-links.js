@@ -1186,6 +1186,29 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
 }
 
 /**
+ * Prep links only, re-run INSIDE the manual sender's per-customer
+ * `prep-send:<customer>` lock immediately before dispatch: bearerLinkSendCheck
+ * ran before the lock, so a manual send's provisional page it verified can
+ * have failed and been released (prep_template_key cleared → 404) between
+ * that read and the lock — serialization alone does not protect the earlier
+ * read (pre-push Codex P1 on 7f82e7564). Same predicates as the pre-lock
+ * check (checkPrepLinks); the caller reports a refusal as a not-sent result.
+ */
+async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
+  const ctx = {
+    runs: decodedRuns(body),
+    hosts: ownedPortalHosts(),
+    toLast10: String(toLast10 || ''),
+    trustedCustomerId,
+    usDestination,
+    bearers: 0,
+    contractId: null,
+  };
+  const refusal = await checkPrepLinks(ctx, []);
+  return refusal || { ok: true };
+}
+
+/**
  * A REAL provider send of a composer prep link is a delivered prep text:
  * write the SAME customer_interactions marker the appointment tagger's
  * replay guard (hasSentPrepSms — sms_outbound + "<pestType> prep info
@@ -1744,6 +1767,7 @@ module.exports = {
   bearerLinkSendCheck,
   markStatementsSent,
   markPrepGuidesSent,
+  recheckPrepLinks,
   claimCardRequestSends,
   releaseCardRequestSends,
   markCardRequestSends,
