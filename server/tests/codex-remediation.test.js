@@ -555,6 +555,13 @@ describe('lane entry points', () => {
   const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
   afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
 
+  test('unset remediation does not enable the scheduler or refresh lanes', async () => {
+    delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    const gh = makeGh();
+    expect(await maybeRemediateBlogPost({ id: 1 }, { gh })).toMatchObject({ reason: 'disabled' });
+    expect(await maybeRemediateAutonomousPr({ number: 5 }, { action_type: 'refresh_existing_page' }, { gh })).toMatchObject({ reason: 'disabled' });
+  });
+
   test('disabled → skip without touching GitHub', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'false';
     const gh = makeGh();

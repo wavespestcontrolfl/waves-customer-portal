@@ -71,8 +71,8 @@ const CLOSED_SKIP_REASONS = {
 const SUPERSEDED_SKIP_REASON = 'superseded_by_review_queue_action';
 const PR_URL_NUMBER = /\/pull\/(\d+)(?:[/?#]|$)/;
 
-function autoMergeEnabled() {
-  return /^(1|true|yes|on)$/i.test(String(process.env.AUTONOMOUS_BLOG_AUTO_MERGE ?? 'true').trim());
+function autoMergeEnabled(actionType) {
+  return /^(1|true|yes|on)$/i.test(String(process.env.AUTONOMOUS_BLOG_AUTO_MERGE ?? (actionType === 'new_supporting_blog' ? 'true' : 'false')).trim());
 }
 
 // Kill switch for the deterministic post-merge social share. Defaults ON:
@@ -1706,7 +1706,7 @@ async function pollRun(run, { allowMerge = true } = {}) {
     }
     if (pr.state !== 'open') return await finalizeClosed(run, prNumber);
 
-    if (!autoMergeEnabled()) return { pending: true, reason: 'auto_merge_disabled' };
+    if (!autoMergeEnabled(run.action_type)) return { pending: true, reason: 'auto_merge_disabled' };
     if (isMetadataLane(run)) {
       // Conservative reading of AUTONOMOUS_BLOG_AUTO_MERGE: the flag is
       // named for — and was trust-ramped on — the blog publish lane.

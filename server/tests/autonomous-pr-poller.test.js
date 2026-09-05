@@ -404,12 +404,13 @@ describe('helpers', () => {
     expect(target.planLinks).toBe(false);
   });
 
-  test('auto-merge is OFF by default and honors conventional truthy values', () => {
-    expect(poller._internals.autoMergeEnabled()).toBe(true);
+  test('auto-merge defaults on only for supporting blogs and honors explicit configuration', () => {
+    expect(poller._internals.autoMergeEnabled('new_supporting_blog')).toBe(true);
+    expect(poller._internals.autoMergeEnabled('refresh_existing_page')).toBe(false);
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    expect(poller._internals.autoMergeEnabled()).toBe(true);
+    expect(poller._internals.autoMergeEnabled('refresh_existing_page')).toBe(true);
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = '0';
-    expect(poller._internals.autoMergeEnabled()).toBe(false);
+    expect(poller._internals.autoMergeEnabled('new_supporting_blog')).toBe(false);
   });
 });
 
