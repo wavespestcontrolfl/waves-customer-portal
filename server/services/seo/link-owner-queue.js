@@ -86,6 +86,9 @@ function actionFor(row) {
 function whyNotHere(placement, row) {
   if (placement.status === PARKED) return placement.parked_from_status === PARKABLE ? null : `parked from ${placement.parked_from_status} — not the queue's to decide`;
   if (placement.status === CHECKOUT) return row.dimension === 'payment' ? null : 'the placement is at the publisher\'s checkout — only its payment is decided here';
+  // A sent initial pitch unlocks its deferred acquisition decision without parking the conversation.
+  if (['contacted', 'negotiating'].includes(placement.status) && placement.outreach_status === 'sent'
+    && row.dimension === 'execution' && row.instance_kind === '-') return null;
   if (placement.status === CONTACTED) return isFollowUp(row) ? null : 'the placement is contacted — only its follow-up is decided here';
   if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' || row.dimension === 'communication' ? null : `the placement is ${placement.status} — only its payment or follow-up is decided here`;
   return `the placement is ${placement.status} — not awaiting your decision`;

@@ -837,3 +837,32 @@ describe('acquireAnyway', () => {
     expect(placements(s.db)).toHaveLength(N);
   });
 });
+
+
+test.each(['contacted', 'negotiating'])('send-first %s placement exposes and accepts its deferred owner execution approval', async (status) => {
+  const { db, p } = scenario({ make: outreachPath, path: { acquisition_type: 'content_submission', link_type: 'editorial', submission_url: 'https://example.org/submit', execution_after_send: true }, policy: { auto_free_acquisition: false, preferred_provider: 'deterministic_runner' } });
+  await nightly(db);
+  const execution = openRows(db, 'execution').find(r => r.instance_kind === '-');
+  expect(execution.level).toBe('OWNER_FREE');
+  const placement = placementOf(db, execution);
+  placement.status = status;
+  placement.outreach_status = 'sent';
+  placement.outreach_sent_at = NOW;
+  Object.assign(openRows(db, 'communication').find(r => r.instance_kind === '-'), { satisfied_at: NOW, satisfied_reason: 'sent' });
+  await nightly(db);
+  const card = (await Q.listOwnerQueue(db)).cards.find(c => c.placement.id === placement.id);
+  expect(card).toBeDefined();
+  expect(card.rows.find(r => r.id === execution.id)).toMatchObject({ approvable: true });
+  const result = await Q.approveRow(db, { authorityId: execution.id, actor: ACTOR, now: NOW, bridge: inline });
+  expect(result.attached).toContain(execution.id);
+  expect(placement.status).toBe(status);
+  expect(await require('../services/seo/link-execution-authority').authorize(db, placement, p, 'deterministic_runner')).toMatchObject({ approval: { dimension: 'execution', action: 'acquire' } });
+});
+
+test('an unsent contacted placement cannot approve a deferred execution', async () => {
+  const { db } = await parked();
+  const execution = openRows(db, 'execution')[0];
+  const placement = placementOf(db, execution);
+  placement.status = 'contacted'; placement.outreach_status = 'none';
+  await expect(Q.approveRow(db, { authorityId: execution.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409 });
+});
