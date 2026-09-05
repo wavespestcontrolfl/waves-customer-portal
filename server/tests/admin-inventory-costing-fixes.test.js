@@ -92,7 +92,9 @@ describe('POST /restock-requests/:id/action', () => {
     const stockUpdates = [];
     const statusUpdates = [];
     const orderUpdates = [];
+    const bellRetires = [];
     const route = (q) => {
+      if (q._table === 'notifications') { bellRetires.push(q.args('update')[0]); return 1; } // settleRequestLedgerBells
       if (q._table === 'product_restock_requests') {
         if (q.called('update')) {
           statusUpdates.push(q.args('update')[0]);
@@ -122,7 +124,7 @@ describe('POST /restock-requests/:id/action', () => {
     trx.raw = jest.fn((sql) => sql); // settleLandedAfterReceive's evidence patch
     db.transaction.mockImplementation(async (fn) => fn(trx));
     db.mockImplementation((table) => makeChain(table, route));
-    return { movements, stockUpdates, statusUpdates, orderUpdates };
+    return { movements, stockUpdates, statusUpdates, orderUpdates, bellRetires };
   }
 
   test('receives an open request once: stock updated, movement written, status received', async () => {
@@ -174,7 +176,7 @@ describe('POST /restock-requests/:id/action', () => {
       expect(movements).toHaveLength(1);
       expect(movements[0].metadata.secondReceive).toBe(true);
       expect(statusUpdates.some((u) => u.status === 'received')).toBe(true);
-      expect(orderUpdates).toHaveLength(1); // evidence.landedAfterReceive comes off in the same transaction
+      expect(orderUpdates.some((u) => String(u.evidence).includes("- 'landedAfterReceive'"))).toBe(true); // the marker comes off in the same transaction
     });
   });
 
@@ -242,14 +244,16 @@ describe('POST /restock-requests/:id/action', () => {
   test.each([
     ['cancel', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: { revokedAt: '2026-09-03T10:00:00Z' } }, 'cancelled'],
     ['mark_ordered', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: {} }, 'ordered'],
-  ])('%s proceeds once the order is revoked / when it only confirms the order', async (action, ledger, expected) => {
-    const { statusUpdates } = wireRestock({ id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger });
+  ])('%s proceeds once the order is revoked / when it only confirms the order — and retires the ledger bell it resolves (Codex r28 P2)', async (action, ledger, expected) => {
+    const { statusUpdates, bellRetires } = wireRestock({ id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
       });
       expect(res.status).toBe(200);
       expect(statusUpdates.some((u) => u.status === expected)).toBe(true);
+      expect(bellRetires).toHaveLength(1); // the parked row's "order manually" bell must not outlive the action
+      expect(bellRetires[0].read_at).toBeInstanceOf(Date);
     });
   });
 

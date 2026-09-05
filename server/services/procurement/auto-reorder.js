@@ -273,6 +273,12 @@ async function createRequestLocked(conn, p) {
     // read two live requests would survive.
     const live = await findLiveRestockRequest(trx, p.id);
     if (live) return { deduped: live.source === SOURCE ? 'concurrent_auto_request' : 'concurrent_staff_request' };
+    // The same belt every staff creation path wears (assertNoLiveAutoOrder):
+    // an automatic order still out — including one that landed after its
+    // request was received by hand (evidence.landedAfterReceive), which the
+    // live-request read above cannot see — must not get a fresh request and
+    // an "order manually" bell beside it (hook r27 P1).
+    if (await require('./order-dispatch').findLiveAutoOrder(trx, p.id)) return { deduped: 'auto_order_live' };
     const qty = num(fresh.reorder_quantity);
     const unit = fresh.inventory_unit || p.inventory_unit;
     if (!unit) return { unconfigured: 'no_unit' };
