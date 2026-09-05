@@ -1834,18 +1834,10 @@ describe('rain-out service', () => {
       expect(sanitize()('avoid watering for 24 hours')).toEqual({ note: 'avoid watering for 24 hours' });
     });
 
-    test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {
-      // sendCustomerMessage's EMOJI_FOR_CUSTOMER validator would otherwise
-      // fire after the reschedule committed — move done, customer silent.
-      expect(sanitize()('See you Friday 👍')).toEqual({ error: 'note_emoji_blocked' });
-      expect(sanitize()('Rain check ☔ sorry!')).toEqual({ error: 'note_emoji_blocked' });
-      // Flags (regional indicators) and keycaps are emoji too — neither is
-      // Extended_Pictographic, both now covered by the shared validator
-      // (codex r3 P1).
-      expect(sanitize()('See you 🇺🇸')).toEqual({ error: 'note_emoji_blocked' });
-      expect(sanitize()('Press 1️⃣ to confirm')).toEqual({ error: 'note_emoji_blocked' });
-      // Smart punctuation is NOT emoji — same line the voice validator draws.
-      expect(sanitize()('Friday — we’ll be there')).toEqual({ note: 'Friday — we’ll be there' });
+    test('sanitizer: preserves SMS emoji and smart punctuation', () => {
+      for (const note of ['See you Friday 👍', 'Rain check ☔ sorry!', 'See you 🇺🇸', 'Press 1️⃣ to confirm', 'Thanks 👍🏽 👨‍👩‍👧‍👦', 'Friday — we’ll be there']) {
+        expect(sanitize()(note)).toEqual({ note });
+      }
       expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
       // "habit.ly" is a REAL registrable .ly host, so the no-URL rule now
       // correctly blocks it; dot-joined words off the TLD set still pass.
@@ -2943,11 +2935,22 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    test('gate on: emoji notes and template text reach the SMS send intact', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      renderSmsTemplate.mockImplementationOnce(async (key, vars) => `${vars.custom_message} ☔`);
+      wireSingle();
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow 👍🏽' });
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        channel: 'sms', body: 'Back tomorrow 👍🏽 ☔',
+      }));
+    });
+
     test('gate on: the standard note guards still screen the custom message pre-move', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       wireSingle();
-      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow 👍' });
-      expect(result).toMatchObject({ ok: false, reason: 'note_emoji_blocked' });
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow {missing}' });
+      expect(result).toMatchObject({ ok: false, reason: 'note_guard_blocked' });
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
@@ -3157,12 +3160,12 @@ describe('rain-out service', () => {
       expect(result).toMatchObject({ ok: false, reason: 'custom_message_unavailable' });
     });
 
-    test('commit: template-static send blockers (emoji, guard markers) reject the move BEFORE it commits', async () => {
-      // codex r9 P2: an admin-saved emoji or a marker like '1970' in the
+    test('commit: template-static send blockers (guard markers) reject the move BEFORE it commits', async () => {
+      // A broken-render marker like '1970' in the
       // TEMPLATE's static text passes every note guard, renders truthy,
       // and would strand a committed move when the send layer blocks it.
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
-      for (const staticTail of [' See you! \u2614', ' Since 1970.']) {
+      for (const staticTail of [' Since 1970.']) {
         renderSmsTemplate.mockImplementationOnce(async (key, vars) => (
           `Hi Pat - ${vars.custom_message}\n\nWe've moved your ${vars.service_type} to ${vars.new_option}.${vars.link_clause}${staticTail}`
         ));
