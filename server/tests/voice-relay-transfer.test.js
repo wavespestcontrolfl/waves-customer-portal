@@ -409,7 +409,8 @@ describe('pre-push hook round 9', () => {
     // from the row's metadata and reads the written value back (a stash landing between the read and the write is still composed).
     expect(src).toContain('relayPending = transferred && !segment;');
     expect(src.match(/await writeTranscript\(/g)).toHaveLength(4); // primary, both fallbacks, and the relay-only rejection write
-    expect(src).toMatch(/CASE WHEN \$\{STASH_SQL\} THEN '\[AI segment\]' \|\| .*\(metadata->'relay_transcript'->>'text'\).*\|\| \?::text ELSE \?::text END/);
+    expect(src).toMatch(/CASE WHEN \? IS NOT NULL THEN '\[AI segment\]' \|\| E'\\\\n' \|\| \? \|\| .*\|\| \?::text ELSE \?::text END/); // the relay text = the stash, else the segments (PR 2B), composed inside the UPDATE
+    expect(src).toContain("COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?)");
     expect(src).toContain("}, ['transcription']);");
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
     expect(src).toContain("} else if (recordedFallbackOf(call)) {");

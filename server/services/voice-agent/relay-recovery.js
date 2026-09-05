@@ -196,11 +196,14 @@ function segmentsText(segments = []) {
 
 /**
  * The resumed session's PROOF (bounded, fail-soft null): the row's reconnect
- * stamp, the earlier segments' played text (for the one-time history seed)
- * and the linked lead. A `resumed` <Parameter> without this proof is ignored.
+ * stamp AND the requesting session's OWNERSHIP of the claim — the earlier
+ * caller's dialogue, lead and promises are privileged context, handed only
+ * to the socket whose nonce is the row's current claim owner (a verified
+ * session that won the takeover). A `resumed` <Parameter> on any other
+ * socket — unverified, superseded, forged — proves nothing (hook P0).
  */
-async function loadResumeState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_MS } = {}) {
-  if (!callSid) return null;
+async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RESUME_STATE_TIMEOUT_MS } = {}) {
+  if (!callSid || !sessionKey) return null;
   let timer;
   const read = db('call_log').where('twilio_call_sid', callSid).first('metadata')
     .then((row) => {
@@ -208,6 +211,7 @@ async function loadResumeState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_M
       let meta = row.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
       if (!meta || typeof meta !== 'object') return null;
+      if (String(meta.relay_session_claim_owner || '') !== String(sessionKey)) return null; // not this socket's call
       const reconnects = Number(meta.relay_reconnects) || 0;
       if (reconnects <= 0) return null;
       const full = segmentsText(meta.relay_segments);

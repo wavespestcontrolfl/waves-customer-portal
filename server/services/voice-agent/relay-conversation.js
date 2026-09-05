@@ -699,13 +699,18 @@ class RelayConversation {
     // PR 2B: a reconnected leg proves the hint from the row (bounded,
     // fail-soft) before it seeds the earlier turns or skips its capture
     // floor. Gate read at call time — off ⇒ nothing is loaded.
-    if (this._resumedHint && this.callSid && require('./relay-recovery').isRecoveryGateOn()) {
+    if (this._resumedHint && this.callSid && this.sessionKey && require('./relay-recovery').isRecoveryGateOn()) {
       const { loadResumeState } = require('./relay-recovery');
-      this._resumeReady = loadResumeState(db, this.callSid)
+      // AFTER the claim settles (resolveCallerContext wins it), and ONLY for
+      // a verified session: the earlier caller's dialogue is privileged
+      // context, released to the socket that owns the row's claim (hook P0).
+      this._resumeReady = (this._contextReady || Promise.resolve())
+        .catch(() => {})
+        .then(() => (this._callerVerified === true ? loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null))
         .then((state) => {
           this._applyResumeState(state);
           if (state) logger.info(`[voice-relay] resumed session proven callSid=${maskSid(this.callSid)} reconnects=${state.reconnects} priorChars=${state.segmentsText.length} lead=${state.relayLeadId ? 'linked' : 'none'}`);
-          else logger.warn(`[voice-relay] resumed hint NOT proven by the row callSid=${maskSid(this.callSid)} — treated as a fresh session`);
+          else logger.warn(`[voice-relay] resumed hint NOT proven (row / ownership / verification) callSid=${maskSid(this.callSid)} — treated as a fresh session`);
         })
         .catch(() => { this._resume = null; });
     }
@@ -1701,7 +1706,7 @@ class RelayConversation {
       // segment is there — the seed then lands on that turn (hook P1).
       this._resumeReloads = (this._resumeReloads || 0) + 1;
       try {
-        const fresh = await require('./relay-recovery').loadResumeState(db, this.callSid);
+        const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
         if (fresh && fresh.segmentsText) this._applyResumeState(fresh); // the same restoration as the constructor's load (hook P1)
       } catch { /* fail-soft: the next turn retries */ }
     }
@@ -1999,7 +2004,7 @@ class RelayConversation {
       // leg, so the turn-time reload never ran (hook P1).
       if (this._resume && !this._resume.segmentsText) {
         try {
-          const fresh = await require('./relay-recovery').loadResumeState(db, this.callSid);
+          const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
           if (fresh && fresh.segmentsText) this._applyResumeState(fresh);
         } catch { /* fail-soft */ }
       }

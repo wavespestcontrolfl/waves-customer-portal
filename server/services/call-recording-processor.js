@@ -6758,10 +6758,17 @@ const CallRecordingProcessor = {
     // still composed (hook P1) — and the written value is read back so
     // extraction sees what the row holds.
     let relayPending = false;
-    const STASH_SQL = "COALESCE(metadata->'relay_transcript'->>'text', '') <> ''";
+    // The relay text the row holds RIGHT NOW: the stash, else the segments
+    // (PR 2B — a silent resumed leg wrote no stash, but every earlier socket
+    // appended its segment). Composed inside the UPDATE, never from a read.
+    const relayTextSql = () => db.raw(
+      "COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?)",
+      [require('./voice-agent/relay-recovery').composeSegmentsSql(db)],
+    );
+    const STASH_SQL = '? IS NOT NULL';
     const composeInSql = (text) => db.raw(
-      `CASE WHEN ${STASH_SQL} THEN '[AI segment]' || E'\\n' || (metadata->'relay_transcript'->>'text') || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || ?::text ELSE ?::text END`,
-      [text, text],
+      `CASE WHEN ? IS NOT NULL THEN '[AI segment]' || E'\\n' || ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || ?::text ELSE ?::text END`,
+      [relayTextSql(), relayTextSql(), text, text],
     );
     const writeTranscript = async (query, patch) => {
       if (!relayPending) return Number(await query.update(patch)) || 0;
@@ -6770,8 +6777,8 @@ const CallRecordingProcessor = {
         ...patch,
         transcription: composeInSql(patch.transcription),
         transcript_structured: hasStructured
-          ? db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE ?::jsonb END`, [patch.transcript_structured == null ? null : patch.transcript_structured])
-          : db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE transcript_structured END`),
+          ? db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE ?::jsonb END`, [relayTextSql(), patch.transcript_structured == null ? null : patch.transcript_structured])
+          : db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE transcript_structured END`, [relayTextSql()]),
       }, ['transcription']);
       const n = Array.isArray(rows) ? rows.length : Number(rows) || 0;
       const written = Array.isArray(rows) && rows[0] ? rows[0].transcription : null;
