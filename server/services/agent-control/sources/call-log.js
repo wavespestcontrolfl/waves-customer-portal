@@ -25,7 +25,11 @@ const STATUS_MAP = Object.freeze({
   pending: { lifecycle: 'queued' },
   processing: { lifecycle: 'running' },
   processed: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' },
-  extraction_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' },
+  // the class comes from the v2 extraction status when one was recorded
+  // (extractFailureClass); a bare extraction_failed is any exception the
+  // extractor threw — key, network, provider — so infrastructure, not a
+  // model-quality failure (Codex r7)
+  extraction_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure' },
   voicemail: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   spam: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   // transcription never landed: the processor returns success:false, its
@@ -55,6 +59,21 @@ const TRANSCRIBE_FAILED = 'no_transcription';
 const EXTRACT_FAILED = /_failed$|^api_unavailable$/;
 // extraction landed; the customer / lead write after it did not (its own step)
 const LINK_FAILED = new Set(['customer_creation_failed', 'lead_creation_failed']);
+// v2 extraction failure status → failure class: the model's output was the
+// problem (incomplete) vs the provider was (provider)
+const EXTRACT_FAILURE_CLASS = Object.freeze({ parse_failed: 'incomplete', schema_failed: 'incomplete', normalization_failed: 'incomplete', api_unavailable: 'provider' });
+
+function failureClassFor(c, status, map) {
+  if (status !== 'extraction_failed') return map.failureClass;
+  return EXTRACT_FAILURE_CLASS[c.v2_extraction_status] || map.failureClass;
+}
+
+// extraction_attempts counts FAILED extractions (the processor increments it
+// on failure only): the attempts that ran = failures + the current pass
+// unless the current pass is itself the recorded failure (Codex r7)
+function attemptsFor(c, status) {
+  return Math.max(1, Number(c.extraction_attempts || 0) + (status === 'extraction_failed' ? 0 : 1));
+}
 // A never-claimed row (processing_status NULL / pending) is queued work only
 // when the processor's restart-safe sweep would claim it: a non-empty
 // recording over 10 s (processAllPending's duration gate), or a PAN-
@@ -106,13 +125,14 @@ function fromRow(c) {
     title: title(c),
     subtitle: [humanize(c.classification), humanize(c.call_outcome || c.disposition)].filter(Boolean).join(' · ') || humanize(status),
     ...map,
+    failureClass: failureClassFor(c, status, map),
     errorCode: map.result === 'errored' ? status : null,
     createdAt: c.created_at,
     startedAt: c.processing_started_at || c.created_at,
     finishedAt: map.lifecycle === 'terminal' ? c.updated_at : null,
     lastHeartbeatAt: beat,
     lastProgressAt: beat,
-    attempts: Math.max(1, Number(c.extraction_attempts || 0)),
+    attempts: attemptsFor(c, status),
     steps: stepsFor(c, status, map),
     link: `/admin/communications?tab=calls&call=${c.id}`,
     entity: { type: 'call_log', id: c.id },

@@ -345,14 +345,21 @@ describe('a spent handle', () => {
     expect(runRow()).toMatchObject({ lifecycle: 'running', result: null, finished_at: null });
     expect(store.agent_attempts[0].finished_at).toBeUndefined();
     expect(store.run_artifacts || []).toHaveLength(0); // (the warn is rate-limited to one a minute across this file)
+    // nothing persisted → the handle is NOT spent: closing again works
+    expect(await a.finish({ result: 'succeeded' })).toBe(true);
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded' });
+    expect(events(a.id)).toEqual(['started', 'finished']);
     // fail: the same — no half-persisted retry state
     const b = await runs.startRun({ ...base, sourceRunId: 'r2', maxAttempts: 3 });
     state.failNext = 'run_events';
     const r = await b.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: true });
-    expect(r).toEqual({ retry: false, failureClass: 'provider', result: null, stale: true });
+    expect(r).toEqual({ retry: false, failureClass: 'provider', result: null, stale: false, persisted: false });
     const row = store.agent_runs.find((x) => x.source_run_id === 'r2');
     expect(row).toMatchObject({ lifecycle: 'running', error_code: null });
     expect(store.agent_attempts.find((x) => x.run_id === row.id).finished_at).toBeUndefined();
+    // … and the retry can be recorded on the next call
+    expect((await b.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: true })).retry).toBe(true);
+    expect(row.lifecycle).toBe('queued');
   });
 
   test('a stale handle stepping past the budget stamps nothing and writes no budget event on the newer attempt', async () => {

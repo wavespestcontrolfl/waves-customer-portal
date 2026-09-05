@@ -195,7 +195,11 @@ describe('adapters project onto the canonical shape', () => {
   test('call_log: processing_status → lifecycle with the processor heartbeat as the run heartbeat', () => {
     const base = { id: 'c', direction: 'inbound', duration_seconds: 125, created_at: ago(9e5), processing_started_at: ago(8e5), processing_heartbeat_at: ago(10e3), extraction_attempts: 2 };
     const live = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed' });
-    expect(live).toMatchObject({ lifecycle: 'running', lastHeartbeatAt: ago(10e3).toISOString(), attempts: 2, laneId: 'call_extraction', title: 'inbound · 2 min' });
+    // extraction_attempts counts failures: two failed + the pass in flight = 3 attempts; a row whose current state IS the failure counts just the failures; a success after one failure ran twice
+    expect(live).toMatchObject({ lifecycle: 'running', lastHeartbeatAt: ago(10e3).toISOString(), attempts: 3, laneId: 'call_extraction', title: 'inbound · 2 min' });
+    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' }).attempts).toBe(2);
+    expect(callLog.fromRow({ ...base, processing_status: 'processed', extraction_attempts: 1 }).attempts).toBe(2);
+    expect(callLog.fromRow({ ...base, processing_status: 'processed', extraction_attempts: 0 }).attempts).toBe(1);
     expect(live.steps.map((s) => s.status)).toEqual(['done', 'running', 'skipped', 'skipped']);
     // the processor's stage vocabulary: 'valid' is the one extraction success; its *_failed values fail the step; enrichment = the enriched payload
     // every server-side writer of the call_log stage columns
@@ -211,9 +215,12 @@ describe('adapters project onto the canonical shape', () => {
     expect(done.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'done']);
     const parseFailed = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed', v2_extraction_status: 'schema_failed' });
     expect(parseFailed.steps[1]).toMatchObject({ status: 'failed', detail: 'schema_failed' });
-    const extractionFailed = callLog.fromRow({ ...base, processing_status: 'extraction_failed' });
+    // extraction_failed: the class follows the recorded v2 status — model output (incomplete) vs provider — and a bare one (any thrown exception: key, network) is infrastructure
+    const extractionFailed = callLog.fromRow({ ...base, processing_status: 'extraction_failed', v2_extraction_status: 'schema_failed' });
     expect(extractionFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
     expect(extractionFailed.steps[1].status).toBe('failed');
+    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed', v2_extraction_status: 'api_unavailable' }).failureClass).toBe('provider');
+    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' }).failureClass).toBe('infrastructure');
     // extraction landed, the lead write did not: the extract step stays done, the link step fails
     const linkFailed = callLog.fromRow({ ...base, processing_status: 'lead_creation_failed', v2_extraction_status: 'valid', transcription_status: 'completed', enriched: true });
     expect(linkFailed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'failed']);

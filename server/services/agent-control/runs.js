@@ -325,8 +325,11 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   // this handle's attempt is the run's current one (see openAttempt) and
   // the run is still open: a terminal run is changed only by openAttempt
   const fenced = (conn = db) => conn('agent_runs').where({ id: runId, attempts: attemptNo }).whereNot('lifecycle', 'terminal');
-  // one-shot: after finish / fail this handle is spent — every later call is
-  // a no-op (a retry goes through startRun → openAttempt)
+  // one-shot: after finish / fail PERSISTED (or proved stale — a newer
+  // attempt owns the run) this handle is spent and every later call is a
+  // no-op (a retry goes through startRun → openAttempt). A terminal
+  // transaction that failed to commit leaves the handle open so the caller
+  // can close the run again (Codex r7).
   let closed = false;
   const spent = () => closed;
 
@@ -493,12 +496,12 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   // pre-push audit).
   async function finish({ result = 'succeeded', disposition = null, summary = null, artifacts = null } = {}) {
     if (spent()) return false;
-    closed = true;
     const now = new Date();
     const res = RESULT.includes(result) ? result : 'succeeded';
     const dispo = DISPOSITION.includes(disposition) ? disposition : null;
     const rows = artifactRows(artifacts);
-    const moved = await guarded('finish', () => db.transaction(async (trx) => {
+    // 'moved' | 'stale' | null (the transaction failed and rolled back)
+    const outcome = await guarded('finish', () => db.transaction(async (trx) => {
       await closeAttempt(trx, res);
       const n = await fenced(trx).update({
         lifecycle: 'terminal',
@@ -515,19 +518,19 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         ...(summary ? { summary: db.raw('summary || ?::jsonb', [jsonb(summary)]) } : {}),
         updated_at: now,
       });
-      if (!Number(n)) return false;
+      if (!Number(n)) return 'stale';
       if (workItemId && res === 'succeeded') await trx('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now });
       if (rows.length) await trx('run_artifacts').insert(rows);
       await trx('run_events').insert(eventRow(runId, 'finished', null, { result: res, disposition: dispo }));
       if (dispo) await trx('run_events').insert(eventRow(runId, 'disposition', null, { disposition: dispo }));
-      return true;
-    }), false);
-    return moved;
+      return 'moved';
+    }), null);
+    closed = outcome !== null;
+    return outcome === 'moved';
   }
 
   async function fail({ error = null, errorCode = null, failureClass = null, retryable = false } = {}) {
     if (spent()) return { retry: false, failureClass: null, result: null, stale: true };
-    closed = true;
     const now = new Date();
     const err = error && typeof error === 'object' ? error : { message: error, code: null };
     const code = clip(errorCode ?? err.code, 80);
@@ -537,31 +540,34 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     const klass = FAILURE_CLASS.includes(failureClass) ? failureClass : classifyFailure(code ?? message);
     const canRetry = [retryable, attemptNo < Number(run.max_attempts), run.idempotency_key, !NO_RETRY_CLASSES.has(policy.side_effect_class)].every(Boolean);
     const result = CODE_RESULT[code] ?? CLASS_RESULT[klass] ?? 'errored';
-    const outcome = canRetry
+    const transition = canRetry
       ? { lifecycle: 'queued', result: null, finished_at: null, event: 'retry_scheduled' }
       : { lifecycle: 'terminal', result, finished_at: now, event: 'failed' };
     // the attempt close, the transition and its events in one transaction (see finish)
-    const moved = await guarded('fail', () => db.transaction(async (trx) => {
+    const outcome = await guarded('fail', () => db.transaction(async (trx) => {
       await closeAttempt(trx, result, { failureClass: klass, errorCode: code, errorMessage: message });
       const n = await fenced(trx).update({
-        lifecycle: outcome.lifecycle,
-        result: outcome.result,
+        lifecycle: transition.lifecycle,
+        result: transition.result,
         failure_class: klass,
         error_code: code,
         error_message: message,
-        finished_at: outcome.finished_at,
+        finished_at: transition.finished_at,
         last_heartbeat_at: now,
         lease_expires_at: null,
         updated_at: now,
       });
-      if (!Number(n)) return false;
-      await trx('run_events').insert(eventRow(runId, outcome.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: outcome.result }));
+      if (!Number(n)) return 'stale';
+      await trx('run_events').insert(eventRow(runId, transition.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: transition.result }));
       if (isQualityFailure(klass)) await trx('run_events').insert(eventRow(runId, 'eval_candidate', null, { failure_class: klass }));
-      return true;
-    }), false);
+      return 'moved';
+    }), null);
+    closed = outcome !== null;
+    // nothing persisted: the handle stays open for another fail / finish
+    if (outcome === null) return { retry: false, failureClass: klass, result: null, stale: false, persisted: false };
     // stale handle: its attempt row carries the failure; the run belongs to a newer attempt
-    if (!moved) return { retry: false, failureClass: klass, result: null, stale: true };
-    return { retry: canRetry, failureClass: klass, result: outcome.result };
+    if (outcome === 'stale') return { retry: false, failureClass: klass, result: null, stale: true };
+    return { retry: canRetry, failureClass: klass, result: transition.result };
   }
 
   return Object.freeze({
