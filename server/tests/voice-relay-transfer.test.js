@@ -397,6 +397,7 @@ describe('pre-push hook round 9', () => {
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
     expect(src).toContain("} else if (recordedFallbackOf(call)) {");
     expect(src).toContain("if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;");
+    expect(src).toContain('return isUsableFallback(recorded) ? recorded : null;'); // a rejected recorded leg (the sentinel) is no fallback either
     // A hallucinated RECORDED leg on a transferred call rejects that segment only: the AI segment stays, and the
     // whole-call rejection (voicemail sentinel, triage dismissal, CallSid-keyed lead retirement) never runs (hook P1).
     const relayOnlyAt = src.indexOf('const relayOnly = recordedRejected ? composeRelaySegment(call) : null;');

@@ -6733,7 +6733,10 @@ const CallRecordingProcessor = {
     const recordedFallbackOf = (row) => {
       if (!row || !isUsableFallback(row.transcription)) return null;
       if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;
-      return recordedPartOfComposite(row.transcription);
+      // The sentinel check runs on the RECORDED part: a composite whose
+      // recorded leg was already rejected carries the sentinel there.
+      const recorded = recordedPartOfComposite(row.transcription);
+      return isUsableFallback(recorded) ? recorded : null;
     };
     const composeRelay = (text, provenance) => {
       const relaySegment = composeRelaySegment(call);
