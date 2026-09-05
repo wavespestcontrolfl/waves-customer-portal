@@ -32,7 +32,9 @@ const prospect = (o = {}) => ({
   contact_email: 'michael@directinspections.com', lease_token: '2026-06-22T00:00:00.000Z', ...o,
 });
 
-beforeEach(() => { worker.claim.mockReset(); worker.report.mockReset(); worker.report.mockResolvedValue({ ok: true }); });
+// the claim mock answers per lane: the follow-up pass (followUp: true) runs first and finds nothing unless a test says so
+const claims = (pitches = [], followUps = []) => worker.claim.mockImplementation(async (o) => (o && o.followUp ? followUps : pitches));
+beforeEach(() => { worker.claim.mockReset(); worker.report.mockReset(); worker.report.mockResolvedValue({ ok: true }); claims(); });
 
 describe('parseDraft', () => {
   test('extracts subject/body from fenced + plain JSON, null on garbage', () => {
@@ -60,9 +62,25 @@ describe('SYSTEM_PROMPT playbook', () => {
   });
 });
 
+describe('the follow-up prompt timing (Codex r13 P2)', () => {
+  const { buildFollowUpPrompt, sentLine, FOLLOW_UP_SYSTEM_PROMPT } = drafter._internals;
+  const profile = { brand: 'Waves Pest Control', locations: [{ id: 'brad', name: 'Bradenton, FL', phone: '941' }], default_location_id: 'brad' };
+  test('the prompt carries the pitch\'s real send date and elapsed days — never a fixed "ten days ago"; the system prompt forbids stating a duration', () => {
+    const now = new Date('2026-10-05T14:00:00Z');
+    const p = { target_domain: 'example.org', outreach_subject: 'A resource', outreach_body: 'hi', outreach_sent_at: '2026-09-10T13:00:00Z' };
+    expect(sentLine(p, now)).toBe('- sent: 2026-09-10 (25 days ago, as of 2026-10-05)');
+    expect(buildFollowUpPrompt(p, profile, profile.locations[0], now)).toContain('- sent: 2026-09-10 (25 days ago, as of 2026-10-05)');
+    expect(sentLine({ ...p, outreach_sent_at: null }, now)).toMatch(/date unknown/);
+    // ET calendar days, not elapsed hours: 02:30 EST → 02:30 EDT ten calendar days later is 239 hours (Codex r14 P2)
+    expect(sentLine({ ...p, outreach_sent_at: '2026-03-05T07:30:00Z' }, new Date('2026-03-15T06:30:00Z'))).toBe('- sent: 2026-03-05 (10 days ago, as of 2026-03-15)');
+    expect(FOLLOW_UP_SYSTEM_PROMPT).not.toMatch(/Ten days ago/);
+    expect(FOLLOW_UP_SYSTEM_PROMPT).toMatch(/never state a number of days or weeks/);
+  });
+});
+
 describe('run', () => {
   test('drafts a claimed prospect and parks it with the STORED contact_email (never the model’s)', async () => {
-    worker.claim.mockResolvedValue([prospect()]);
+    claims([prospect()]);
     // Even if the model emits a different email, we must not use it.
     const a = fakeAnthropic('{"subject":"Add Waves to your vendor resources?","body":"Hi Michael,\\n...\\n— The Waves Pest Control Team","recipient":"evil@attacker.com"}');
     const r = await drafter.run({ anthropic: a, fetchPageFn: noFetch });
@@ -75,14 +93,51 @@ describe('run', () => {
     expect(call.lease_token).toBe('2026-06-22T00:00:00.000Z');
   });
 
-  test('claims outreach prospects requiring a contact email', async () => {
-    worker.claim.mockResolvedValue([]);
+  test('claims outreach prospects requiring a contact email — after the follow-up lease', async () => {
     await drafter.run({ anthropic: fakeAnthropic('{}'), fetchPageFn: noFetch });
     expect(worker.claim).toHaveBeenCalledWith({ n: 10, type: 'outreach', requireContactEmail: true });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 10, type: 'outreach', followUp: true });
+  });
+
+  test('ONE batch budget for both lanes: follow-ups first, pitches on what remains — a batch spent on follow-ups claims no pitch (Codex r4)', async () => {
+    const sent = prospect({ id: 'p2', outreach_to_email: 'michael@directinspections.com', outreach_subject: 'Add Waves to your vendor resources?', outreach_body: 'Hi Michael, …', outreach_status: 'sent', follow_up_status: 'due', lease_token: '2026-07-02T00:00:00.000Z' });
+    claims([prospect()], [sent]);
+    const a = fakeAnthropic('{"subject":"Re: Add Waves to your vendor resources?","body":"Hi Michael, a quick nudge.\\n— The Waves Pest Control Team"}');
+    const r = await drafter.run({ batchSize: 1, anthropic: a, fetchPageFn: noFetch });
+    expect(r).toMatchObject({ claimed: 1, drafted: 1, skipped: 0, failed: 0, followUps: { claimed: 1, drafted: 1, failed: 0 } }); // the totals the cron log and the CLI print carry both lanes
+    expect(worker.claim).toHaveBeenCalledTimes(1); // the follow-up lease only — no pitch claim on a spent budget
+    expect(worker.claim).toHaveBeenCalledWith({ n: 1, type: 'outreach', followUp: true });
+    worker.claim.mockClear();
+    await drafter.run({ batchSize: 3, anthropic: a, fetchPageFn: noFetch });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 2, type: 'outreach', requireContactEmail: true }); // three minus the one follow-up
+  });
+
+  test('a due follow-up is drafted in the pitch\'s thread and reported on the follow-up lane (subject Re:, no recipient, the lease token)', async () => {
+    const sent = prospect({ id: 'p2', outreach_to_email: 'michael@directinspections.com', outreach_subject: 'Add Waves to your vendor resources?', outreach_body: 'Hi Michael, …', outreach_status: 'sent', follow_up_status: 'due', lease_token: '2026-07-02T00:00:00.000Z' });
+    claims([], [sent]);
+    // through the shared caller (llm/call.js): the system prompt travels as a cached text block, the prompt as content blocks
+    const a = { messages: { create: jest.fn(async ({ system, messages }) => {
+      expect(JSON.stringify(system)).toMatch(/follow-up/i);
+      expect(JSON.stringify(messages[0].content)).toMatch(/Add Waves to your vendor resources\?/);
+      return { content: [{ type: 'text', text: '{"subject":"Re: Add Waves to your vendor resources?","body":"Hi Michael, a quick nudge.\\n— The Waves Pest Control Team","recipient":"evil@attacker.com"}' }] };
+    }) } };
+    const r = await drafter.run({ anthropic: a, fetchPageFn: noFetch });
+    expect(r.followUps).toEqual({ claimed: 1, drafted: 1, failed: 0 });
+    expect(worker.report).toHaveBeenCalledTimes(1);
+    const call = worker.report.mock.calls[0][0];
+    expect(call).toMatchObject({ prospect_id: 'p2', outcome: 'drafted', lease_token: '2026-07-02T00:00:00.000Z', outreach_subject: 'Re: Add Waves to your vendor resources?' });
+    expect(call.outreach_to_email).toBeUndefined(); // the recipient is the thread's — never the model's
+  });
+
+  test('an unusable follow-up draft reports failed on the lease (the row returns to due)', async () => {
+    claims([], [prospect({ id: 'p2', outreach_status: 'sent', follow_up_status: 'due' })]);
+    const r = await drafter.run({ anthropic: fakeAnthropic('no json'), fetchPageFn: noFetch });
+    expect(r.followUps).toEqual({ claimed: 1, drafted: 0, failed: 1 });
+    expect(worker.report.mock.calls[0][0]).toMatchObject({ prospect_id: 'p2', outcome: 'failed' });
   });
 
   test('dry-run writes nothing', async () => {
-    worker.claim.mockResolvedValue([prospect()]);
+    claims([prospect()]);
     const r = await drafter.run({ anthropic: fakeAnthropic('{"subject":"S","body":"B\\n— The Waves Pest Control Team"}'), fetchPageFn: noFetch, dryRun: true });
     expect(r.drafted).toBe(1);
     expect(worker.report).not.toHaveBeenCalled();
@@ -95,7 +150,7 @@ describe('run', () => {
   });
 
   test('unparseable model output → reports failed (not drafted)', async () => {
-    worker.claim.mockResolvedValue([prospect()]);
+    claims([prospect()]);
     const r = await drafter.run({ anthropic: fakeAnthropic('sorry, I cannot'), fetchPageFn: noFetch });
     expect(r).toMatchObject({ drafted: 0, failed: 1 });
     expect(worker.report.mock.calls[0][0].outcome).toBe('failed');
