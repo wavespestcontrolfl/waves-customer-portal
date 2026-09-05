@@ -404,7 +404,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // orderNumberAppendedMidScan: after the click a SECOND confirmation node (a different number) is appended between a scan's enumeration and its
       // re-enumeration — resolutions 1–3 see one node, every later one sees two; a scan that never re-enumerates settles the first on its second poll (r10 P2 on #3900)
       if (sel === S.orderNumber && st.orderNumberAppendedMidScan && st.placeClicked) { st.confResolves = (st.confResolves || 0) + 1; return st.confResolves <= 3 ? el({ count: 1, visible: true, text: 'Order # SO-778899' }) : el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? 'Order # SO-778899' : 'Order # SO-999999' }) }); }
-      // orderNumberSequence: the confirmation node's text per post-click poll (last value repeats) (r1 P2 on #3900)
+      // orderNumberTextChangesMidScan: after the click the ONE confirmation node is rewritten to another identifier between a scan's two snapshots —
+      // resolutions 1–3 read SO-778899, every later one SO-999999; count and visibility never change (r11 P2 on #3900)
+      if (sel === S.orderNumber && st.orderNumberTextChangesMidScan && st.placeClicked) { st.confResolves = (st.confResolves || 0) + 1; return el({ count: 1, visible: true, text: st.confResolves <= 3 ? 'Order # SO-778899' : 'Order # SO-999999' }); }
+      // orderNumberSequence: the confirmation node's text per post-click RESOLUTION — two per poll since the r11 P2 double snapshot (last value repeats) (r1 P2 on #3900)
       if (sel === S.orderNumber && st.orderNumberSequence) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.orderNumberSequence[Math.min(st.confReads - 1, st.orderNumberSequence.length - 1)] }); }
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
       if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? (st.orderNumberLateText || 'Processing order…') : 'Order # SO-778899' }); }
@@ -752,7 +755,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('two different NEW identifiers on one poll are ambiguous at once — one of them vanishing later never lets the other settle as the order number (r2 P2 on #3900)', async () => {
-    const { deps } = fakeSiteOne({ orderNumberSequence: ['Order # SO-778899 · Order # SO-999999', 'Order # SO-778899', 'Order # SO-778899'], checkoutTotalText: 'Order total $105.93' });
+    const { deps } = fakeSiteOne({ orderNumberSequence: ['Order # SO-778899 · Order # SO-999999', 'Order # SO-778899 · Order # SO-999999', 'Order # SO-778899', 'Order # SO-778899'], checkoutTotalText: 'Order total $105.93' }); // both snapshots of poll 1 carry both ids
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
   });
 
@@ -783,6 +786,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ orderNumberAppendedMidScan: true, checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.confResolves).toBeGreaterThanOrEqual(4);
+  });
+
+  test('a confirmation node rewritten to ANOTHER identifier between a scan\'s two snapshots (same count, same visibility) leaves that scan unresolved — the stale number never settles; the number the page then shows does (r11 P2 on #3900)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberTextChangesMidScan: true });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-999999' });
+    expect(st.confResolves).toBeGreaterThanOrEqual(6);
   });
 
   test('the confirmation identifier must settle: a reference value rendered a tick before the order number is never recorded — the settled number is (r1 P2 on #3900)', async () => {

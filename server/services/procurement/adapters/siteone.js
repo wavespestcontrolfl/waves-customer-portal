@@ -923,26 +923,29 @@ async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) 
 // The whitespace-normalized text of every shown confirmation-number node.
 // Unreadable = unresolved (null): a node whose visibility or text cannot be
 // read mid-rerender may carry a different order number, so the poll must
-// not settle the readable one (Codex #3900 r5 P2). The nodes read must
-// still be the nodes shown (Codex #3900 r10 P2, the cart-line pattern): a
-// second confirmation node appended after the enumeration but before the
-// reads finish would otherwise be missed by the scan that settles the
-// first — the count AND the visibility mask are re-read after the texts;
-// churn = unresolved, and the next poll judges both nodes.
+// not settle the readable one (Codex #3900 r5 P2). TWO identical snapshots
+// (the cart-line pattern, Codex #3900 r10 + r11 P2): the count, the
+// visibility mask AND every text are read again after the first pass — a
+// node appended, hidden, or rewritten to another identifier between the
+// two is churn the scan must not settle on; null, and the next poll judges
+// what the page shows then.
 async function shownOrderTexts(page) {
-  let found;
-  try { found = await matches(page, SELECTORS.orderNumber, { strict: true }); } catch { return null; }
-  const texts = [];
-  for (const n of found.shown) {
-    const t = await n.textContent().catch(() => null);
-    if (t == null) return null;
-    texts.push(String(t).replace(/\s+/g, ' '));
-  }
-  const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
-  let again;
-  try { again = await matches(page, SELECTORS.orderNumber, { strict: true }); } catch { return null; }
-  if (again.all.length !== found.all.length || mask(again) !== mask(found)) return null;
-  return texts;
+  const snapshot = async () => {
+    let found;
+    try { found = await matches(page, SELECTORS.orderNumber, { strict: true }); } catch { return null; }
+    const texts = [];
+    for (const n of found.shown) {
+      const t = await n.textContent().catch(() => null);
+      if (t == null) return null;
+      texts.push(String(t).replace(/\s+/g, ' '));
+    }
+    return { mask: found.all.map((el) => found.shown.includes(el)).join(''), count: found.all.length, texts };
+  };
+  const first = await snapshot();
+  const second = first && await snapshot();
+  if (!first || !second) return null;
+  if (second.count !== first.count || second.mask !== first.mask || JSON.stringify(second.texts) !== JSON.stringify(first.texts)) return null;
+  return first.texts;
 }
 
 // EVERY shown confirmation-selector node before the click — each text and
