@@ -1645,6 +1645,18 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, expect.objectContaining({ onlyIfLead: expect.objectContaining({ estimate_id: 'e-A' }) }));
     });
 
+    test('a replayed conversion with no estimate of its own keeps the scope the winning conversion persisted (extracted_data.won_estimate_id): root A stays refused, the repeat keeps its row (codex r37 P1)', async () => {
+      const rows = { rep: repeat('rep', { extracted_data: { duplicate_of_lead_id: 'root', won_estimate_id: 'e-B' } }), root: { id: 'root', status: 'estimate_sent', customer_id: 'c1', phone: '9415550142', estimate_id: 'e-A' } };
+      const database = dbOf(rows, { root: 'estimate_sent' });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
+      expect(database._deleted).toEqual([]);
+      // The event's own estimate still comes first.
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-A' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, expect.objectContaining({ onlyIfLead: expect.objectContaining({ estimate_id: 'e-A' }) }));
+    });
+
     test('a root linked to the SAME estimate as the repeat is the same deal', async () => {
       const rows = { rep: repeat('rep', { estimate_id: 'e-1' }), root: { id: 'root', status: 'estimate_viewed', customer_id: 'c1', estimate_id: 'e-1' } };
       const database = dbOf(rows, { root: 'estimate_viewed' });

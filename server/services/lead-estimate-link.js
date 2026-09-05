@@ -45,10 +45,23 @@ function normalizeEmail(value) {
 // the named one or any hop — is out of every live mutation path (admin
 // delete contract), so it is never followed to a live original (codex
 // #3834 r11 P1).
-function duplicateMarkerOf(lead) {
+function extractedDataOf(lead) {
   let data = lead && lead.extracted_data;
   if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  return data || null;
+}
+
+function duplicateMarkerOf(lead) {
+  const data = extractedDataOf(lead);
   return (data && data.duplicate_of_lead_id) || null;
+}
+
+// The estimate a conversion closed, as markConverted persisted it on the
+// won row — the settlement scope a replayed conversion without an estimate
+// of its own must keep (codex #3834 r37 P1).
+function wonEstimateOf(lead) {
+  const data = extractedDataOf(lead);
+  return (data && data.won_estimate_id) || null;
 }
 
 async function followDuplicateLink(database, lead) {
@@ -114,7 +127,9 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
   // the new customer's row (pre-push P1 on d511af9).
   const customerId = repeat.customer_id || suppliedCustomerId || null;
   const { root } = await resolveAncestry(database, repeat);
-  const scope = estimateId || repeat.estimate_id;
+  // The event's scope first; then the scope the winning conversion
+  // persisted (a replay carries none of its own); the repeat's link last.
+  const scope = estimateId || wonEstimateOf(repeat) || repeat.estimate_id;
   const sameOpportunity = !!root && !root.deleted_at
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && scope && String(root.estimate_id) !== String(scope));

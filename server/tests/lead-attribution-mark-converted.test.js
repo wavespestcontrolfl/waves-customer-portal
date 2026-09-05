@@ -61,6 +61,16 @@ describe('markConverted claims', () => {
     expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-rep', { customerId: 'c1', estimateId: 'e-B' });
   });
 
+  test('an estimate-scoped conversion persists that scope on the won row (extracted_data.won_estimate_id, never the estimate_id FK) so a replay without an estimate settles the same way; an unscoped conversion writes no extracted_data (codex r37 P1)', async () => {
+    await markConverted('lead-rep', { customerId: 'c1', estimateId: 'e-B' });
+    const patch = mockCalls.find((c) => c[1] === 'update')[2];
+    expect(patch.extracted_data).toEqual({ __raw: expect.stringContaining("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb") });
+    expect(patch).not.toHaveProperty('estimate_id');
+    mockCalls.length = 0;
+    await markConverted('lead-rep', { customerId: 'c1' });
+    expect(mockCalls.find((c) => c[1] === 'update')[2]).not.toHaveProperty('extracted_data');
+  });
+
   test('a settled win (the root took it) or a non-repeat with no funnel row stamps nothing — an inbound call on the Ads bridge number keeps its slot for the delayed paid-call bridge (codex r24 P1, r27 P2)', async () => {
     mockRepeatRow = null; // settleRepeatFunnelRow: root bridged, or not a quote_wizard row with a marker
     await markConverted('lead-call', { customerId: 'c1' });
