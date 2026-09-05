@@ -173,13 +173,16 @@ function propertyCoords(latRaw, lngRaw) {
   return { lat, lng };
 }
 
-async function loadRain7d(dbh, customer) {
+// The 7 days ending on the viewed visit's date (today at the latest): a
+// historical card's grounding is that week's rain, not this week's.
+async function loadRain7d(dbh, customer, serviceDate = null, deps = {}) {
   if (!customer?.lawn_water_area_id) return null;
+  const today = etDateString(new Date());
+  const until = serviceDate && serviceDate < today ? serviceDate : today;
+  const since = etDateString(addETDays(parseETDateTime(`${until}T12:00`), -6));
   // The canonical reader: null unless every day of the window is on file,
   // so a missed sync day never reads as a dry week.
-  const today = etDateString(new Date());
-  const since = etDateString(addETDays(new Date(), -6));
-  return getAreaRainfall(customer.lawn_water_area_id, since, today, dbh);
+  return (deps.getAreaRainfall || getAreaRainfall)(customer.lawn_water_area_id, since, until, dbh);
 }
 
 async function loadLastVisit(dbh, customerId, serviceLine, beforeDate = null) {
@@ -322,7 +325,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
   ]);
   const [calls, rain7d] = await Promise.all([
     loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null),
-    serviceLine === 'lawn' ? loadRain7d(dbh, svc) : Promise.resolve(null),
+    serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
   ]);
 
   const alternateAddress = Boolean(svc.address_diverges);
@@ -476,8 +479,8 @@ const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|free of)\b|n't\b/;
 
 /**
  * Model output is accepted only when it is 1–3 sentences, ≤ 60 words, carries
- * no emoji, no bullet/heading markup, no code-looking token, no number the
- * grounding does not contain, and no content word the grounding lacks.
+ * no emoji, no bullet/heading markup, no code-looking token, every critical
+ * fact, and every clause inside one grounding clause with its polarity.
  */
 function validateParagraph(text, grounding, codes = [], critical = []) {
   // Raw text on purpose: the code check below must see a code as written.
@@ -494,23 +497,10 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   const lower = body.toLowerCase();
   const codeRe = knownCodePattern(codes);
   if (codeRe && codeRe.test(body)) return 'code_leak';
-  // Every numeric token must come from the grounding AND keep its clause:
-  // a content word within three words of it in the output must sit within
-  // three words of the same token in the grounding (a "20" moved from
-  // "runs 20 min" to "20 dogs" is an invented fact, not a rephrase).
-  if (numbersOutOfContext(body, grounding)) return 'ungrounded_number';
   // A rewrite that drops a safety-critical fact is not a rewrite.
   if (critical.some((fact) => fact && !lower.includes(String(fact).toLowerCase()))) return 'critical_fact_dropped';
-  // A clause keeps the polarity of the grounding clause it restates: "No
-  // side gate." over "Side gate.", or "Irrigation on file." over "No
-  // irrigation on file", reverses the instruction.
-  if (polarityFlip(body, grounding)) return 'polarity_flip';
-  // Every sentence must be made of the grounding's own words: a sentence
-  // the notes never mention ("No pets are present." over "First visit on
-  // record."), an instruction lifted from a visit note, or one invented
-  // safety word ("Dog secured.") is not a rephrase.
-  if (ungroundedSentence(body, grounding)) return 'ungrounded_sentence';
-  return null;
+  // Clause by clause against the grounding (see clauseMismatch).
+  return clauseMismatch(body, grounding);
 }
 
 /**
@@ -540,63 +530,32 @@ function contextWords(text) {
   // "Mon/Thu" is two words.
   return String(text || '').toLowerCase().split(/[\s/]+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
 }
-function neighbours(words, i) {
-  return words.slice(Math.max(0, i - 3), i).concat(words.slice(i + 1, i + 4)).filter((w) => !/\d/.test(w) && !CONTEXT_STOPWORDS.has(w));
-}
-// Neighbours never cross a sentence: "20 dogs. Irrigation …" must not
-// borrow "irrigation" from the next sentence.
-function sentenceWords(text) {
-  return String(text || '').split(/(?<=[.!?])\s+/).map(contextWords).filter((w) => w.length);
-}
-// Every content word of every sentence must come from the grounding: one
-// invented word is one invented fact ("Dog secured." over "Pets: dog."
-// invents a securing plan), so the rewrite may reorder and connect the
-// notes' own words, never add to them. Function words are free.
 // Clauses: the template's facts are comma / colon / dash separated inside
-// one sentence, so polarity is compared at that grain.
+// one sentence, and "and" joins whole clauses — so that is the grain a
+// rewrite is checked at. A parenthetical stays with its fact ("dog (crated
+// in garage)" is one clause).
 function clauses(text) {
-  return String(text || '').split(/[,;:.!?()]|\s[—–-]\s/).map((c) => c.trim().toLowerCase()).filter(Boolean);
+  return String(text || '').split(/[,;:.!?]|\s[—–-]\s|\band\b/).map((c) => c.replace(/[()]/g, ' ').trim().toLowerCase()).filter(Boolean);
 }
 function contentStems(text) {
   return contextWords(text).filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem);
 }
-function polarityFlip(body, grounding) {
+// Every rewritten clause must sit inside ONE grounding clause — all of its
+// content words (numbers included), with the same polarity. Words from two
+// facts recombined into one clause ("Dog at side gate" over "Pets: dog,
+// side gate"), an invented word ("Dog secured."), a moved number ("20
+// dogs") or a reversed instruction ("No side gate.") are not rephrases.
+function clauseMismatch(body, grounding) {
   const src = clauses(grounding).map((c) => ({ negated: NEGATION_RE.test(c), stems: new Set(contentStems(c)) }));
-  return clauses(body).some((c) => {
+  for (const c of clauses(body)) {
     const stems = contentStems(c);
-    if (!stems.length) return false;
-    const matched = src.filter((g) => stems.some((w) => g.stems.has(w)));
+    if (!stems.length) continue;
+    const within = src.filter((g) => stems.every((w) => g.stems.has(w)));
+    if (!within.length) return 'ungrounded_clause';
     const negated = NEGATION_RE.test(c);
-    return matched.length > 0 && !matched.some((g) => g.negated === negated);
-  });
-}
-function ungroundedSentence(body, grounding) {
-  const src = new Set(sentenceWords(grounding).flat().filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem));
-  return sentenceWords(body).some((words) => {
-    const content = words.filter((w) => !CONTEXT_STOPWORDS.has(w));
-    return !content.length || content.some((w) => !src.has(stem(w)));
-  });
-}
-function numbersOutOfContext(body, grounding) {
-  const src = sentenceWords(grounding);
-  for (const out of sentenceWords(body)) {
-    for (let i = 0; i < out.length; i += 1) {
-      if (!/\d/.test(out[i])) continue;
-      const mine = neighbours(out, i);
-      let seen = false;
-      let bound = false;
-      for (const s of src) {
-        for (let j = 0; j < s.length; j += 1) {
-          if (s[j] !== out[i]) continue;
-          seen = true;
-          const theirs = neighbours(s, j);
-          if (!mine.length || !theirs.length || mine.some((w) => theirs.includes(w))) bound = true;
-        }
-      }
-      if (!seen || !bound) return true;
-    }
+    if (!within.some((g) => g.negated === negated)) return 'polarity_flip';
   }
-  return false;
+  return null;
 }
 
 function groundingHash(template) {
@@ -1053,12 +1012,41 @@ function linesFromLineMeta(visit, catalog) {
   return lines;
 }
 
+// A line may name more than one product ("Distance or Talus", "Iron Plus
+// + Mn Combo"): the whole line first (its best match), then each
+// alternative segment, one card per product. Only " or " and " + " split —
+// "/" would hand tiny fragments ("Mg") to the reverse alias match.
+const LINE_ALTERNATIVES = /\s+or\s+|\s\+\s/i;
+// A segment's trailing words ("Mn Combo foliar") defeat the alias match, so
+// each segment is probed by its leading words down to two — never one, a
+// lone word would reverse-match inside many aliases.
+function leadingProbes(text) {
+  const words = text.split(/\s+/);
+  const out = [];
+  for (let n = words.length; n >= 2; n -= 1) out.push(words.slice(0, n).join(' '));
+  return out;
+}
+function productsOnLine(line, catalog) {
+  const segments = String(line.raw || '').split(LINE_ALTERNATIVES).map((t) => t.trim()).filter(Boolean);
+  const found = [];
+  const add = (raw) => {
+    const product = matchCatalogProduct({ ...line, raw }, catalog);
+    if (product && !found.some((f) => f.id === product.id)) found.push(product);
+    return Boolean(product);
+  };
+  add(line.raw);
+  if (segments.length > 1) {
+    for (const segment of segments) leadingProbes(segment).some(add);
+  }
+  return found;
+}
 function linesFromProtocolText(visit, catalog) {
   const parsed = [...parseProtocolLines(visit?.primary, 'base'), ...parseProtocolLines(visit?.secondary, 'conditional')];
   const out = [];
   for (const line of parsed) {
-    const product = matchCatalogProduct(line, catalog);
-    if (product && !out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: line.role, selected: line.role === 'base' });
+    for (const product of productsOnLine(line, catalog)) {
+      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: line.role, selected: line.role === 'base' });
+    }
   }
   return out;
 }
@@ -1351,5 +1339,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, ungroundedSentence, polarityFlip, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
+  _test: { accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
 };

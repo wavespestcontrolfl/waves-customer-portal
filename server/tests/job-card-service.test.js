@@ -62,25 +62,28 @@ describe('validateParagraph', () => {
 
   test('a grounded number moved to another fact is rejected; rephrased in place it passes (PR r3 P2)', () => {
     const lawn = 'Pets: dog. First visit on record. Irrigation Mon/Thu, 20 min, 1.2" rain in the last 7 days.';
-    expect(jobCard.validateParagraph('There are 20 dogs. Irrigation runs Mon and Thu.', lawn, [])).toBe('ungrounded_number');
-    expect(jobCard.validateParagraph('One dog. Irrigation on Mon and Thu for 20 min, with 1.2" of rain in the last 7 days.', lawn, [])).toBeNull();
+    expect(jobCard.validateParagraph('There are 20 dogs. Irrigation runs Mon and Thu.', lawn, [])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('One dog. Irrigation Mon and Thu, 20 min, 1.2" of rain in the last 7 days.', lawn, [])).toBeNull();
   });
 
   test('a sentence the grounding never mentions is rejected, even without numbers (Codex r10 P1)', () => {
-    expect(jobCard.validateParagraph('No pets are present.', 'First visit on record.', [])).toBe('ungrounded_sentence');
-    expect(jobCard.validateParagraph('First visit here. The side gate is unlocked.', 'First visit on record.', [])).toBe('ungrounded_sentence');
+    expect(jobCard.validateParagraph('No pets are present.', 'First visit on record.', [])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('First visit here. The side gate is unlocked.', 'First visit on record.', [])).toBe('ungrounded_clause');
     // An instruction lifted from a visit note is not in the grounding either.
-    expect(jobCard.validateParagraph('Skip the back yard today.', 'Pets: dog. First visit on record.', [])).toBe('ungrounded_sentence');
+    expect(jobCard.validateParagraph('Skip the back yard today.', 'Pets: dog. First visit on record.', [])).toBe('ungrounded_clause');
     expect(jobCard.validateParagraph('This is the first visit on record.', 'First visit on record.', [])).toBeNull();
     expect(jobCard.validateParagraph('There are 2 dogs.', 'Pets: 2 dogs.', [])).toBeNull();
     // A shared word never carries an invented one (hook P1 ×2): "dog" is grounded, a securing plan or an entry instruction is not — even as a single word.
-    expect(jobCard.validateParagraph('The dog is secured, so enter the yard. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_sentence');
-    expect(jobCard.validateParagraph('Dog secured. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_sentence');
+    expect(jobCard.validateParagraph('The dog is secured, so enter the yard. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('Dog secured. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_clause');
     expect(jobCard.validateParagraph('A dog is here. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBeNull();
   });
 
   test('accepts a faithful 1–3 sentence rewrite', () => {
-    expect(jobCard.validateParagraph('There is a dog and a gate code on file you can show. Last visit on 2026-08-12: chinch bugs on the east side.', grounding, codes)).toBeNull();
+    expect(jobCard.validateParagraph('There is a dog and a gate code on file, tap to show. Last visit 2026-08-12: chinch bugs on the east side.', grounding, codes)).toBeNull();
+    // Grounded words recombined into a new association are not a rephrase (Codex r14 P1): the dog is not at the gate.
+    expect(jobCard.validateParagraph('Dog at side gate, crated in garage.', 'Pets: dog (crated in garage), side gate.', [], ['dog', 'crated in garage'])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('Dog, crated in garage. Side gate.', 'Pets: dog (crated in garage), side gate.', [], ['dog', 'crated in garage'])).toBeNull();
   });
 
   test.each([
@@ -88,7 +91,7 @@ describe('validateParagraph', () => {
     ['emoji', 'Dog on site 🐶. Gate code on file.', 'emoji'],
     ['bullet markup', '- dog\n- gate', 'markup'],
     ['leaked code', 'Gate code is 4545#. Dog on site.', 'code_leak'],
-    ['invented number', 'Two dogs and 3 cats are on site.', 'ungrounded_number'],
+    ['invented number', 'Two dogs and 3 cats are on site.', 'ungrounded_clause'],
     ['empty', '   ', 'empty'],
   ])('rejects %s', (_label, text, reason) => {
     expect(jobCard.validateParagraph(text, grounding, codes)).toBe(reason);
@@ -348,7 +351,7 @@ describe('safety-critical facts survive the rewrite (PR r1 P1)', () => {
     expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
     expect(jobCard.validateParagraph('Customer has a chemical sensitivity; dog crated in garage.', grounding, [], critical)).toBe('critical_fact_dropped');
     // A critical fact restated under a negation is reversed, not kept (hook P1).
-    expect(jobCard.validateParagraph('No chemical sensitivity is reported. First visit on record.', 'Chemical sensitivity. First visit on record.', [], ['sensitiv'])).toBe('polarity_flip');
+    expect(jobCard.validateParagraph('No chemical sensitivity. First visit on record.', 'Chemical sensitivity. First visit on record.', [], ['sensitiv'])).toBe('polarity_flip');
     expect(jobCard.validateParagraph('The dog isn\'t crated in garage today.', 'Pets: dog (crated in garage).', [], ['crated in garage'])).toBe('polarity_flip');
     // Polarity holds for EVERY clause, not only critical facts (Codex r12 P1).
     expect(jobCard.validateParagraph('No side gate. First visit on record.', 'Side gate. First visit on record.', [])).toBe('polarity_flip');
@@ -383,6 +386,17 @@ describe('lineMeta hints keep the secondary line\'s role (pre-push P1)', () => {
       expect.objectContaining({ product: catalog[1], role: 'base', selected: true }),
       expect.objectContaining({ product: catalog[0], role: 'conditional', selected: false }),
     ]);
+  });
+
+  test('a line naming two products resolves both ("Distance or Talus", "Iron Plus + Mn Combo") (Codex r14 P1)', () => {
+    const catalog = [{ id: 'd', name: 'Distance IGR', cost_per_unit: 1 }, { id: 't', name: 'Talus 70 DF IGR', cost_per_unit: 1 }, { id: 'fe', name: 'Chelated Iron Plus', cost_per_unit: 1 }, { id: 'mn', name: 'High Mn Combo', cost_per_unit: 1 }];
+    const lines = jobCard._test.linesFromProtocolText({ primary: 'Distance IGR or Talus 70 DF IGR for crawlers\nIron Plus + Mn Combo foliar', secondary: '' }, catalog);
+    const byLine = (raw) => lines.filter((l) => l.raw === raw).map((l) => l.product.id).sort();
+    expect(byLine('Distance IGR or Talus 70 DF IGR for crawlers')).toEqual(['d', 't']);
+    expect(byLine('Iron Plus + Mn Combo foliar')).toEqual(['fe', 'mn']);
+    expect(lines).toHaveLength(4);
+    // A single-product line is unchanged.
+    expect(jobCard._test.linesFromProtocolText({ primary: 'Conserve SC 0.1-0.2 fl oz/gal for caterpillars', secondary: '' }, [{ id: 'c', name: 'Conserve SC', cost_per_unit: 1 }]).map((l) => l.product.id)).toEqual(['c']);
   });
 
   test('a product on two treatment lines keeps both lines (Codex r10 P2)', () => {
@@ -986,6 +1000,18 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(card.notes.chemicalSensitivity).toBe(sensitivity);
     expect(card.notes.petsSecured).toBe('crated in garage');
     expect(card.notes.instructions).toContain('do not treat the vegetable garden');
+  });
+
+  test('the rain window ends on the viewed visit date, today at the latest (Codex r14 P2)', async () => {
+    const getAreaRainfall = jest.fn(async () => 0.4);
+    const today = new Date();
+    const past = await jobCard._test.loadRain7d(null, { lawn_water_area_id: 'a1' }, '2026-06-20', { getAreaRainfall });
+    expect(past).toBe(0.4);
+    expect(getAreaRainfall).toHaveBeenLastCalledWith('a1', '2026-06-14', '2026-06-20', null);
+    // A future-dated visit is bounded at today.
+    await jobCard._test.loadRain7d(null, { lawn_water_area_id: 'a1' }, '2099-01-01', { getAreaRainfall });
+    expect(getAreaRainfall.mock.calls[1][2] <= today.toISOString().slice(0, 10)).toBe(true);
+    expect(await jobCard._test.loadRain7d(null, {}, '2026-06-20', { getAreaRainfall })).toBeNull();
   });
 
   test('pet presence is a critical fact even without a securing plan (P1)', () => {
