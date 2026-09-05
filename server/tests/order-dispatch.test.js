@@ -46,6 +46,7 @@ jest.mock('../models/db', () => {
     q.first = async (...cols) => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrderAfterBell && mockState.bellRung ? mockState.liveAutoOrderAfterBell : mockState.liveAutoOrder; // findLiveAutoOrder's aliased join (a claim landing after the hand-off bell: liveAutoOrderAfterBell)
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
+      if (table === 'vendor_orders' && cols.length === 1 && cols[0] === 'id') return mockState.requestLedger || null; // settleRequestLedgerBells' row (null = the request has no ledger row); the lock-only reads ignore the value
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
@@ -240,7 +241,8 @@ test('a claim another pod inserts while the hand-off bell is being written retir
 });
 
 test('stale recovery of a claim whose request an older pod received meanwhile parks WITH landedAfterReceive (Codex r29 P1)', async () => {
-  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', request_status: 'received', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  mockState.stale = [{ id: 'ledger-old', adapter: 'stickermule', amount_cents: 31400, created_at: new Date(Date.now() - 3600e3), request_id: 'req-old', product_name: 'Sticker', vendor_id: 'vend-sm', vendor_name: 'Sticker Mule' }];
+  mockState.freshRequestStatus = 'received'; // read under the park's locks, not from the scan (Codex r30 P1)
   const r = await dispatch.recoverStalePlacing({ notify });
   expect(r.recovered).toEqual(['ledger-old']);
   const patch = mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status).row;
@@ -565,6 +567,17 @@ test.each([
   expect(JSON.parse(cancel.metadata)).toMatchObject({ vendorId: 'vend-sm', autoOrderCancelled: reason });
   // The sweep's manual bell for the withdrawn need is retired with the cancel (Codex r24 P1).
   expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(1);
+});
+
+test('a claim-time cancel of a request with a re-claimable dry-run row retires that row\'s own bell too (Codex r30 P1)', async () => {
+  mockState.product = { ...sticker, auto_reorder_enabled: false };
+  mockState.requestLedger = { id: 'ledger-dry' };
+  try {
+    const r = await run(mockAdapter());
+    expect(r).toMatchObject({ skipped: 'auto_reorder_disabled', cancelled: true });
+    expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(2); // the sweep's request bell + the dry-run ledger bell
+    expect(mockState.updates.some((u) => u.table === 'vendor_orders' && u.row.evidence && !u.row.status)).toBe(true); // evidence.bell stripped
+  } finally { mockState.requestLedger = null; }
 });
 
 test('master gate off: the run still re-rings pending bells and recovers stale placing rows, places nothing (pre-push P0)', async () => {

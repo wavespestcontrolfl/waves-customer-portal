@@ -595,15 +595,26 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
   const bell = parkBell({ reason, status, product, vendor, request, amountCents, message, placed });
   const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
   const transitioned = await conn.transaction(async (trx) => {
+    let rowPatch = patch;
+    if (staleBefore) {
+      // Stale recovery: the request's status is read HERE, under the ledger →
+      // request locks (the scan's snapshot is unlocked): received by an older
+      // pod meanwhile ⇒ the park carries landedAfterReceive so every
+      // live-order guard keeps the possibly-placed order live (Codex r30 P1).
+      await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
+      const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
+      if (fresh?.status === 'received') rowPatch = { ...patch, evidence: JSON.stringify({ ...JSON.parse(patch.evidence), landedAfterReceive: new Date().toISOString() }) };
+    }
     const transition = trx('vendor_orders').where({ id: ledger.id, status: 'placing' });
     // Stale recovery: the heartbeat observed at scan time must STILL be old —
     // a run that resumed beating between the scan and this write keeps its
     // claim (Codex r5 P1).
     if (staleBefore) transition.where('updated_at', '<', staleBefore);
-    const n = await transition.update(patch);
+    const n = await transition.update(rowPatch);
     if (!n) return false;
     if (markRequestOrdered) await requestToOrdered(trx, request.id);
-    await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, reason: `${reason}: ${message}`.slice(0, 400), trx });
+    // The vendor order number rides into the audit row when the park knows it (Codex r30 P2).
+    await auditVendorOrder({ vendor_order_id: ledger.id, restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, outcome: status, amount_cents: amountCents, external_order_number: placed?.externalOrderNumber || null, reason: `${reason}: ${message}`.slice(0, 400), trx });
     return true;
   });
   if (!transitioned) {
@@ -665,6 +676,9 @@ function retireRequestBell(trx, requestId) {
 
 async function cancelAtClaim(trx, { request, product, m, ineligible }) {
   await retireRequestBell(trx, request.id);
+  // A re-claimable dry-run row's own versioned bell ("turn dry run off to
+  // order for real") is withdrawn with the need (Codex r30 P1).
+  await settleRequestLedgerBells(trx, request.id);
   await trx('product_restock_requests').where({ id: request.id, status: 'open' }).update({
     status: 'cancelled',
     closed_at: new Date(),
@@ -952,7 +966,7 @@ async function recordPlaced(conn, { ctx, placed, finalCents, quoteCents }) {
   // The office closed the request while the vendor call was in flight: an
   // order exists that the tab no longer expects — say so once. A cancelled
   // request is put back to ordered (requestToOrdered).
-  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(placed.amountCents ?? quoteCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke.' : 'Reconcile by hand.'}` });
+  const closedMidFlightBell = (freshStatus) => versioned({ title: `Auto-order placed on a ${freshStatus || 'missing'} request: ${product.name}`, body: `${vendor.name} order ${placed.externalOrderNumber || ''} (${dollars(finalCents)}) landed after the restock request was marked ${freshStatus || 'missing'}. ${freshStatus === 'cancelled' ? 'The request is back to ordered — receive the stock when it arrives, or cancel with the vendor and record the revoke.' : 'Reconcile by hand.'}` });
   const outcome = await conn.transaction(async (trx) => {
     // The cap lock FIRST — the reservation's own order (cap lock → ledger
     // row): the amount this commit records lands while no concurrent
@@ -1241,7 +1255,7 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('vo.status', 'placing')
     .where('vo.updated_at', '<', cutoff) // last heartbeat, not creation time
-    .select('vo.id', 'vo.adapter', 'vo.amount_cents', 'vo.created_at', 'vo.updated_at', 'prr.id as request_id', 'prr.status as request_status', 'pc.name as product_name', 'v.id as vendor_id', 'v.name as vendor_name');
+    .select('vo.id', 'vo.adapter', 'vo.amount_cents', 'vo.created_at', 'vo.updated_at', 'prr.id as request_id', 'pc.name as product_name', 'v.id as vendor_id', 'v.name as vendor_name');
   const recovered = [];
   const bellPending = [];
   const unrecovered = [];
@@ -1250,9 +1264,6 @@ async function recoverStalePlacing({ conn = db, notify = null, now = new Date() 
       const parked = await park(conn, {
         ledger: { id: row.id }, request: { id: row.request_id }, product: { name: row.product_name || '?' }, vendor: { id: row.vendor_id, name: row.vendor_name || '?' }, adapterKey: row.adapter, notify,
         staleBefore: cutoff,
-        // Received by hand while the claim was out: the park keeps the
-        // marker that holds the live-order guards closed (Codex r29 P1).
-        evidence: row.request_status === 'received' ? { landedAfterReceive: new Date().toISOString() } : null,
         reason: 'stale_placing', message: `the dispatcher died mid-order (claimed ${new Date(row.created_at).toISOString()}, last heartbeat ${new Date(row.updated_at || row.created_at).toISOString()}); the ${row.vendor_name || 'vendor'} call may or may not have gone out.`, amountCents: row.amount_cents,
       });
       if (parked.skipped) continue; // settled by its own dispatcher between the scan and the park

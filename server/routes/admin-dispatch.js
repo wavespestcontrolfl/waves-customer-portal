@@ -14135,7 +14135,8 @@ async function settleRecapSupplies(serviceId, result) {
   if (!(await recapSuppliesOwed(result))) return;
   try {
     const consumption = await consumeRecapSupplies(serviceId, result);
-    const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent');
+    // A hand-off bell that did not land, or an obsolete one that could not be retired (Codex r30 P1): the marker stays for the next retry.
+    const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed');
     if (result.recordId && !handoffLost) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
   } catch (err) { logger.error(`[dispatch] recap supplies consumption failed: ${err.message}`); }
 }
