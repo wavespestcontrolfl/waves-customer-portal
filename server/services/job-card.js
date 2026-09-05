@@ -1288,11 +1288,14 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   else if (perGallon) mix = buildPerGallonAmount(perGallon, gallons);
   else mix = buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
   const packSizes = await loadPackSizes(dbh, [product.id]);
+  // The label rate is itself a dosing instruction: it rides only with a
+  // permitted amount, never alongside a withheld one.
+  const permitted = mix.amount != null;
   return {
     productId: product.id,
     name: product.name,
-    ratePer1000: ratePer1000 != null ? Number(ratePer1000) : null,
-    ratePerGallon: perGallon,
+    ratePer1000: permitted && ratePer1000 != null ? Number(ratePer1000) : null,
+    ratePerGallon: permitted ? perGallon : null,
     rateSource: planned ? 'plan' : 'catalog',
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,

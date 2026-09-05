@@ -1017,6 +1017,9 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(hold.sprayCheck).toEqual({ verdict: 'hold', reason: 'wind over 10 mph' });
     expect(hold.amount).toBeNull();
     expect(hold.reason).toBe('Spray check: wind over 10 mph');
+    // A withheld mix carries no label rate either (hook P1).
+    expect(hold.ratePer1000).toBeNull();
+    expect(hold.ratePerGallon).toBeNull();
     const calm = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly: async () => windy.map((h) => ({ ...h, windMph: 5 })) }, now });
     expect(calm.sprayCheck.verdict).toBe('ok');
     expect(calm.amount).toBe(6.215);
