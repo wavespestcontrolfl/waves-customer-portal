@@ -9748,8 +9748,7 @@ export function CompletionPanel({
   // including the mobile payment handoff — through this callback.
   onCompletionResult,
 }) {
-  // Local preview rollout; absent query keeps existing closeout defaults.
-  const completionImprovements = new URLSearchParams(window.location.search).get("completionImprovements") === "1";
+  const { enabled: completionImprovements } = useFeatureFlagReady("lawn-completion-improvements");
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
@@ -10009,6 +10008,12 @@ export function CompletionPanel({
   const lawnDefaultAreas = completionImprovements && serviceLineFromType(service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
     ? LAWN_DEFAULT_AREAS : [];
   const [areasServiced, setAreasServiced] = useState(() => [...lawnDefaultAreas]);
+  const lawnAreasInitializedRef = useRef(completionImprovements);
+  useEffect(() => {
+    if (!completionImprovements || lawnAreasInitializedRef.current) return;
+    lawnAreasInitializedRef.current = true;
+    setAreasServiced((current) => current.length ? current : [...lawnDefaultAreas]);
+  }, [completionImprovements, lawnDefaultAreas]);
   // Property satellite basemap (bait-station marking). The manual per-area
   // zone-mark widget this also fed was retired 2026-07-23 — the traced
   // Treatment Zone Mapper is the report's coverage-map source now.
@@ -11064,7 +11069,7 @@ export function CompletionPanel({
     // Refresh only an untouched seed when today’s assessment changes the plan.
     if (lawnDefaultMixSeededRef.current && currentSnapshot !== lawnDefaultMixSnapshotRef.current) return;
     if (!lawnDefaultMixSeededRef.current && selectedProducts.length) { lawnDefaultMixSeededRef.current = true; return; }
-    const rows = lawnPlanSelections(treatmentPlanMixItems, buildSelectedProduct);
+    const rows = lawnPlanSelections(treatmentPlanMixItems, buildSelectedProduct, products);
     const nextSnapshot = JSON.stringify(rows);
     if (nextSnapshot === currentSnapshot) return;
     lawnDefaultMixSeededRef.current = true;
@@ -12027,6 +12032,7 @@ export function CompletionPanel({
 
   function restoreDraft() {
     if (!savedDraft) return;
+    lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setNotes(savedDraft.notes || "");
@@ -13300,6 +13306,7 @@ export function CompletionPanel({
   }
   function toggleArea(area) {
     if (generating) return;
+    lawnAreasInitializedRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],

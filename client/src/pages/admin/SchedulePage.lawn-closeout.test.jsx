@@ -3,6 +3,7 @@ import React from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { CompletionPanel } from './SchedulePage';
+import { refetchFlags } from '../../hooks/useFeatureFlag';
 
 const products = [{ id: 'test-k', name: 'Test liquid fertilizer', category: 'fertilizer', rate_unit: 'fl_oz', default_rate_per_1000: 99 }];
 const service = { id: 'test-visit', customerId: 'test-property', serviceType: 'Every 6 Weeks Lawn Care Service', completionProfile: { serviceKey: 'lawn', requiresProducts: true }, scheduledDate: '2026-09-05', waveguardTier: 'Silver', status: 'on_site', price: 0 };
@@ -10,7 +11,9 @@ let submit;
 let planResolvers;
 let delayPlan;
 let mixAmount;
-beforeEach(() => {
+let improvementsEnabled;
+beforeEach(async () => {
+  improvementsEnabled = true;
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -22,7 +25,7 @@ beforeEach(() => {
   submit = vi.fn().mockRejectedValue(new Error('Synthetic submit'));
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     let data = {};
-    if (url.includes('feature-flags')) data = { flags: {} };
+    if (url.includes('feature-flags')) data = { flags: { 'lawn-completion-improvements': improvementsEnabled } };
     if (url.includes('turf-profile')) data = { profile: { lawn_sqft: 5000 } };
     if (url.includes('lawn-assessment/service')) data = { assessment: { id: 'assessment-current', confirmed_by_tech: true, turf_density: 82, weed_suppression: 85, color_health: 85, stress_damage: 80 } };
     if (url.includes('lawn-assessment/history')) data = { history: [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }] };
@@ -34,6 +37,7 @@ beforeEach(() => {
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
     return { ok: true, json: async () => data };
   }));
+  await refetchFlags();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const mount = () => render(<CompletionPanel service={service} products={products} onClose={() => {}} onSubmit={submit} />);
@@ -61,8 +65,10 @@ it('prefills the engine mix and submits findings and inspection actions once, wi
   expect(body).not.toHaveProperty('gaugePhoto');
 });
 
-it('keeps the existing defaults when the preview switch is absent', async () => {
-  window.history.replaceState({}, '', '/');
+it('keeps the existing defaults when the server flag is disabled, even with a query override', async () => {
+  improvementsEnabled = false;
+  await refetchFlags();
+  window.history.replaceState({}, '', '/?completionImprovements=1');
   mount();
   await screen.findByText('Assessment confirmed');
   expect(screen.queryByLabelText('Previous lawn visit')).toBeNull();

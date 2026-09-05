@@ -173,13 +173,15 @@ describe("ProtocolPanel independent request failures", () => {
     expect(screen.getByText("Current sprayer")).toBeVisible();
   });
 
-  it("reports a failed turf profile while preserving the existing appointment-data fallback", async () => {
+  it("reports a failed turf profile without guessing a species-specific mix", async () => {
     fetch.mockImplementation((url) => url.includes("/turf-profile")
       ? reply({}, 503) : reply(fixture(url)));
     render(<ProtocolPanel service={service} onClose={() => {}} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load: Turf profile.");
-    expect(screen.getByText("Current mix product")).toBeVisible();
-    expect(fetch.mock.calls.some(([url]) => url.includes("/lawn-mix?") && url.includes("lawnSqft=10000"))).toBe(true);
+    expect(screen.queryByText("Current mix product")).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => url.includes("/lawn-mix?"))).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /^Equipment/ }));
+    expect(screen.getByText("Current sprayer")).toBeVisible();
   });
 
   it("clears a previous service's guidance when the next service cannot load it", async () => {

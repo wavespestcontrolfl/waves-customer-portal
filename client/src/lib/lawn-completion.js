@@ -15,15 +15,16 @@ export function previousLawnAssessment(history, service) {
     .sort((a, b) => visitDay(b).localeCompare(visitDay(a)))[0] || null;
 }
 
-export function lawnPlanSelections(items, buildProduct) {
+export function lawnPlanSelections(items, buildProduct, catalog) {
   const seen = new Set();
   return (items || []).filter((item) => {
     const id = item?.product?.id;
-    if (!id || item.selected === false || seen.has(String(id))) return false;
+    if (!id || item.selected === false || seen.has(String(id))
+      || !catalog.some((product) => String(product.id) === String(id))) return false;
     seen.add(String(id));
     return true;
   }).map((item) => {
-    const row = buildProduct(item.product);
+    const row = buildProduct(catalog.find((product) => String(product.id) === String(item.product.id)));
     const mix = item.mix || {};
     // Only the generated per-visit mix supplies defaults; static optional
     // protocol rows and inferred label rates never become actual quantities.

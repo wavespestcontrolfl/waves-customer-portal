@@ -7,13 +7,13 @@ it('uses the engine mix instead of catalog defaults and skips unselected optiona
     { product: { id: 'potassium' }, mix: { ratePer1000: 3, rateUnit: 'fl_oz', amount: 15, amountUnit: 'fl_oz', treatedSqft: 5000 } },
     { product: { id: 'potassium' }, mix: {} },
     { product: { id: 'optional' }, selected: false },
-  ], build);
+  ], build, [{ id: 'potassium' }, { id: 'optional' }]);
   expect(rows).toHaveLength(1);
   expect(rows[0]).toMatchObject({ productId: 'potassium', rate: 3, totalAmount: 15, areaValue: 5000, areaUnit: 'sqft', applicationArea: 'Front yard, Back yard, Side yards' });
 });
 
 it('does not manufacture a quantity when the plan cannot derive one', () => {
-  expect(lawnPlanSelections([{ product: { id: 'unknown' }, mix: {} }], () => ({ rate: 99, totalAmount: 999 }))[0]).toMatchObject({ rate: '', totalAmount: '' });
+  expect(lawnPlanSelections([{ product: { id: 'unknown' }, mix: {} }], () => ({ rate: 99, totalAmount: 999 }), [{ id: 'unknown' }])[0]).toMatchObject({ rate: '', totalAmount: '' });
 });
 
 it('field inspection actions cannot imply a pesticide application', () => {
@@ -49,4 +49,11 @@ it('orders linked visits by appointment date and excludes the current service', 
   ];
   expect(previousLawnAssessment(rows, { id: 'current', scheduledDate: '2026-09-05' }).id).toBe('backfilled');
   expect(previousLawnAssessment([rows[0]], { id: 'current', scheduledDate: '2026-09-05' })).toBeNull();
+});
+
+it('uses catalog application metadata and ignores unavailable catalog products', () => {
+  const build = (product) => ({ method: product.application_method, ceiling: product.max_rate });
+  const items = [{ product: { id: 'known' }, mix: { ratePer1000: 3 } }, { product: { id: 'missing' } }];
+  expect(lawnPlanSelections(items, build, [{ id: 'known', application_method: 'granular_broadcast', max_rate: 4 }]))
+    .toEqual([expect.objectContaining({ method: 'granular_broadcast', ceiling: 4, rate: 3 })]);
 });
