@@ -64,6 +64,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Keep Vite's default secret exclusions and also block managed dev state.
+    // /@fs/ otherwise exposes workspace files outside the client directory.
+    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/.tmp/**'] },
     proxy: {
       '/api': {
         target: apiProxyTarget,

@@ -63,6 +63,9 @@ test('runner identifies its checkout, rejects foreign stop requests, and release
   const { spawn } = require('node:child_process');
   const root = path.resolve(__dirname, '../../..');
   const context = await setup(root);
+  const databaseFile = path.join(root, '.tmp/dev/database.env');
+  const createdDatabaseFixture = !fs.existsSync(databaseFile);
+  if (createdDatabaseFixture) fs.writeFileSync(databaseFile, 'DATABASE_URL=fixture-must-not-egress', { flag: 'wx', mode: 0o600 });
   const child = spawn(process.execPath, ['scripts/dev/run.js', 'client'], { cwd: root, stdio: 'pipe' });
   let output = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
@@ -88,11 +91,18 @@ test('runner identifies its checkout, rejects foreign stop requests, and release
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.equal(page?.status, 200, output);
+    for (const file of ['context.json', 'database.env']) {
+      const response = await fetch(`http://127.0.0.1:${context.ports.client}/@fs/${root}/.tmp/dev/${file}`);
+      assert.equal(response.status, 403, `${file} must never be served by Vite`);
+    }
     const stop = await fetch(`${base}/stop`, { method: 'POST', headers: { Authorization: `Bearer ${context.id}` } });
     assert.equal(stop.status, 200);
     assert.equal(await exited, 0, output);
     const { availablePort } = require('../context');
     assert.equal(await availablePort(context.ports.client), true);
     assert.equal(await availablePort(context.ports.control), true);
-  } finally { if (child.exitCode === null) child.kill('SIGTERM'); }
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    if (createdDatabaseFixture) fs.unlinkSync(databaseFile);
+  }
 });
