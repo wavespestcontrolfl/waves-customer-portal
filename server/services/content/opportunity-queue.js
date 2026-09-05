@@ -400,16 +400,22 @@ class OpportunityQueue {
   }
 
   /**
-   * Finish exhausted blog retries automatically. Other content lanes retain
+   * Finish exhausted retries and legacy unpublished blog holds automatically. Other content lanes retain
    * their existing review/requeue workflow. Paired with expireStale().
    */
   async sweepExhaustedAttempts() {
     const result = await db('opportunity_queue')
-      .where('status', 'pending')
-      .where('attempt_count', '>=', maxClaimAttempts())
+      .whereRaw(`(status = 'pending' AND attempt_count >= ?) OR (
+        action_type = 'new_supporting_blog' AND status = 'pending_review'
+        AND COALESCE(skip_reason, '') NOT IN ('named_competitor_review', 'affiliate_review')
+        AND COALESCE(skip_reason, '') !~ '^trust_build_[0-9]+_of_[0-9]+$'
+        AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
+          WHERE r.opportunity_id = opportunity_queue.id
+            AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
+      )`, [maxClaimAttempts()])
       .update({
         status: db.raw("CASE WHEN action_type = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END"),
-        skip_reason: 'attempts_exhausted',
+        skip_reason: db.raw("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END"),
         completed_at: new Date(),
         updated_at: new Date(),
       });

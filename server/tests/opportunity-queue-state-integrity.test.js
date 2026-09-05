@@ -131,14 +131,11 @@ describe('claimNext lifetime attempt budget', () => {
     const swept = await queue.sweepExhaustedAttempts();
 
     expect(swept).toBe(2);
-    expect(q._filters).toEqual(expect.arrayContaining([
-      ['status', 'pending'],
-      ['attempt_count', '>=', 5],
-    ]));
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("status = 'pending' AND attempt_count >= ?"), [5]);
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT EXISTS'), [5]);
     expect(db.raw).toHaveBeenCalledWith("CASE WHEN action_type = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END");
-    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({
-      skip_reason: 'attempts_exhausted',
-    }));
+    expect(db.raw).toHaveBeenCalledWith("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END");
+
   });
 });
 

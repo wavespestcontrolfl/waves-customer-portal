@@ -749,7 +749,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   }
 
   test('a blog blocked for 48 hours is retired automatically without merging', async () => {
-    const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     setupDb({ pending: [run] });
     gh.getPr.mockResolvedValue(openPr());
     const result = await poller.pollPending();
@@ -759,12 +759,22 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('retirement never closes a PR that merged while its queue lock was acquired', async () => {
-    const run = makeRun({ poll_pending_reason: 'publisher_head_pin_failed', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     setupDb({ pending: [run] });
     gh.getPr.mockResolvedValueOnce(openPr()).mockResolvedValue({ ...openPr(), state: 'closed', merged: true });
     const result = await poller.pollPending();
     expect(gh.closePr).not.toHaveBeenCalled();
     expect(result.results[0]).toMatchObject({ transient: true, reason: 'retirement_state_changed' });
+  });
+
+  test('a changed current blocker resets the wait instead of retiring from stale evidence', async () => {
+    const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    setupDb({ pending: [run] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue(null);
+    const result = await poller.pollPending();
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(result.results[0].reason).toBe('preview_build_pending');
   });
 
   test('explicit kill switch leaves the open PR alone', async () => {

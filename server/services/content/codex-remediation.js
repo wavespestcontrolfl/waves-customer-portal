@@ -18,7 +18,7 @@
  * store serves both lanes.
  *
  * Safety:
- *   - Gated behind AUTONOMOUS_CODEX_REMEDIATION (default OFF).
+ *   - Gated behind AUTONOMOUS_CODEX_REMEDIATION (default ON; explicit false disables).
  *   - It only ever pushes to an existing draft PR branch and re-requests review;
  *     it NEVER merges (merge still requires a genuine Codex-clean signal).
  *   - Bounded by CODEX_REMEDIATION_MAX_ROUNDS (default 3). After that — or if a

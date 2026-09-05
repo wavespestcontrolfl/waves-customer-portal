@@ -1707,25 +1707,6 @@ async function pollRun(run, { allowMerge = true } = {}) {
     if (pr.state !== 'open') return await finalizeClosed(run, prNumber);
 
     if (!autoMergeEnabled()) return { pending: true, reason: 'auto_merge_disabled' };
-    // Bounded unattended recovery: a blog PR stuck on the same blocker for
-    // two days is closed, then the existing closed-PR reconciler records the
-    // failure. Never discard a merged PR or a deliberate budget/gate hold.
-    const blockedSince = Date.parse(run.poll_pending_since || '');
-    if (run.action_type === 'new_supporting_blog' && Number.isFinite(blockedSince)
-      && Date.now() - blockedSince >= 48 * 60 * 60 * 1000
-      && run.poll_pending_reason && !['daily_publish_cap_reached', 'auto_merge_disabled', 'awaiting_human_merge'].includes(run.poll_pending_reason)) {
-      const retired = await db.transaction(async (trx) => {
-        if (!(await queueRowStillParkedLocked(run, trx))) return false;
-        const current = await gh.getPr(prNumber);
-        if (current?.state !== 'open' || current.merged || current.merged_at || current.head?.sha !== pr.head?.sha) return false;
-        await gh.closePr(prNumber);
-        return true;
-      });
-      // Re-read on the next tick: a concurrent external merge wins over
-      // retirement and must still complete deployment/impact bookkeeping.
-      return retired ? { pending: true, reason: 'automatic_retirement_pending' }
-        : { pending: true, transient: true, reason: 'retirement_state_changed' };
-    }
     if (isMetadataLane(run)) {
       // Conservative reading of AUTONOMOUS_BLOG_AUTO_MERGE: the flag is
       // named for — and was trust-ramped on — the blog publish lane.
@@ -1741,7 +1722,28 @@ async function pollRun(run, { allowMerge = true } = {}) {
       logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id} (per-poll cap reached); retries next tick`);
       return { pending: true, mergeDeferred: true };
     }
-    return await maybeAutoMerge(run, pr);
+    const verdict = await maybeAutoMerge(run, pr);
+    // Bounded unattended recovery: a blog PR stuck on the same blocker for
+    // two days is closed, then the existing closed-PR reconciler records the
+    // failure. Never discard a merged PR or a deliberate budget/gate hold.
+    const blockedSince = Date.parse(run.poll_pending_since || '');
+    if (verdict.pending && !verdict.transient && verdict.reason === run.poll_pending_reason
+      && run.action_type === 'new_supporting_blog' && Number.isFinite(blockedSince)
+      && Date.now() - blockedSince >= 48 * 60 * 60 * 1000
+      && run.poll_pending_reason && !['daily_publish_cap_reached', 'auto_merge_disabled', 'awaiting_human_merge'].includes(run.poll_pending_reason)) {
+      const retired = await db.transaction(async (trx) => {
+        if (!(await queueRowStillParkedLocked(run, trx))) return false;
+        const current = await gh.getPr(prNumber);
+        if (current?.state !== 'open' || current.merged || current.merged_at || current.head?.sha !== pr.head?.sha) return false;
+        await gh.closePr(prNumber);
+        return true;
+      });
+      // Re-read on the next tick: a concurrent external merge wins over
+      // retirement and must still complete deployment/impact bookkeeping.
+      return retired ? { pending: true, reason: 'automatic_retirement_pending' }
+        : { pending: true, transient: true, reason: 'retirement_state_changed' };
+    }
+    return verdict;
   } catch (err) {
     // Transient (network / GitHub 5xx / Cloudflare blip): leave the row for
     // the next tick. NEVER mark a run failed on an infrastructure error.
