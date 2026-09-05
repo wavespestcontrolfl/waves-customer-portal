@@ -44,7 +44,7 @@ afterEach(() => { delete process.env.GATE_VOICE_RELAY_RECOVERY; delete process.e
 
 function primeDb({ firstRow = null, updateImpl, db = require('../models/db') } = {}) {
   const updates = [];
-  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
+  const guardQ = { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
   const builder = {
     update: updateImpl || jest.fn(async (patch) => { updates.push(patch); return 1; }),
     where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
@@ -151,7 +151,7 @@ describe('relay-recovery module', () => {
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'other-nonce' })).toBeNull(); // not this socket's claim ⇒ nothing (hook P0)
     expect(await recovery.loadResumeState(db, 'CA-1')).toBeNull(); // no key ⇒ nothing
-    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
+    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
     primeDb({ firstRow: { metadata: JSON.stringify({ ...OWNED, relay_segments: [{ generation: 1, text: 'x' }] }) } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toBeNull(); // no reconnect stamp ⇒ a forged <Parameter resumed> proves nothing
     primeDb({ firstRow: null });
@@ -298,12 +298,14 @@ describe('the conversation side', () => {
 
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { db, builder, updates } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
+    const { db, builder, updates, guardQ } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
     const convo = convoWithTurns();
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');
     expect(db).toHaveBeenCalledWith('leads');
-    expect(builder.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-rec' });
+    // this call's lead: inserted by this call OR the persisted linkage (a reused lead keeps another call's twilio_call_sid — codex r3 P2)
+    expect(guardQ.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-rec' });
+    expect(guardQ.orWhere).toHaveBeenCalledWith({ id: 'L-linked' });
     expect(builder.where).toHaveBeenCalledWith('transcript_summary', 'like', '%No transcript captured.');
     const refresh = updates.find((u) => typeof u.transcript_summary === 'string');
     expect(refresh.transcript_summary).toBe('Inbound voice call (auto-captured on hangup). Caller said: my ants are back');
@@ -497,6 +499,70 @@ describe('the conversation side', () => {
     expect(endSession).toHaveBeenCalledTimes(1);
   });
 
+  test('a lead captured on an earlier leg whose relay_lead_id stamp did not land is still restored as captured (segment lead_captured) (codex r3 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', lead_captured: true }] } } });
+    const convo = resumedConvo({ callSid: 'CA-seglead' });
+    await convo._resumeReady;
+    expect(convo._resume.leadCaptured).toBe(true);
+    expect(convo.leadCaptured).toBe(true);
+  });
+
+  test('a late reload never resurrects a failure streak this leg already cleared; the earlier legs\' caller turns count toward the call turn cap (codex r3 P2 ×2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
+    const convo = resumedConvo({ callSid: 'CA-streak' });
+    await convo._resumeReady;
+    const late = { ...convo._resume, modelFailures: 1, toolFailures: 1, callerTurns: Array.from({ length: 39 }, (_, i) => `turn ${i}`) };
+    convo._applyResumeState(late); // before any round on this leg ⇒ the streak carries over
+    expect(convo._modelFailures).toBe(1);
+    convo._providerRoundSeen = true; // a round ran here and cleared it
+    convo._modelFailures = 0; convo._toolFailures = 0;
+    convo._applyResumeState(late);
+    expect(convo._modelFailures).toBe(0);
+    expect(convo._toolFailures).toBe(0);
+    // 39 earlier caller turns + this one ⇒ the cap (40) ends the call
+    expect(convo._priorCallerTurns).toBe(39);
+    const endSession = jest.fn();
+    convo._endSession = endSession;
+    convo._userTurns.push('x');
+    await convo.handlePrompt("one more");
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'turn_cap' }));
+  });
+
+  test('a reconnected call\'s summary covers the WHOLE call: this leg with turns composes the earlier caller lines ahead of its own; a silent resumed socket writes the row-only summary (codex r3 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    let { updates } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
+    let convo = resumedConvo({ callSid: 'CA-sum' });
+    convo._sessionSuperseded = jest.fn(async () => false);
+    await convo._resumeReady;
+    convo._recordTurn('caller', 'thanks');
+    convo._recordTurn('agent', 'Bye.');
+    await convo.end('ws_close');
+    let reconcile = updates.find((u) => u.call_outcome === 'ai_handled');
+    expect(reconcile.call_summary).toContain('Caller said: my ants are back | thanks');
+    // silent resumed socket ⇒ the row-only composition carries the summary too
+    ({ updates } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back' }] } } }));
+    convo = resumedConvo({ callSid: 'CA-sum2' });
+    convo._sessionSuperseded = jest.fn(async () => false);
+    await convo.end('ws_close');
+    reconcile = updates.find((u) => u.call_outcome === 'ai_handled');
+    expect(reconcile.call_summary).toContain('Caller said: my ants are back');
+    expect(reconcile.transcription.sql).toBe('COALESCE(?, transcription)');
+  });
+
+  test('the capture floor stamps the exact call→lead linkage (relay_lead_id) on the call row (codex r3 P2)', async () => {
+    const { updates } = primeDb();
+    const convo = new RelayConversation({ callSid: 'CA-floor', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    convo._callerVerified = true;
+    convo._recordTurn('caller', 'hello');
+    await convo._runCaptureFloor('ws_close');
+    expect(createLeadFromExtraction).toHaveBeenCalled();
+    const stamp = updates.find((u) => u.metadata && String(u.metadata.bindings?.[0] || '').includes('relay_lead_id'));
+    expect(stamp).toBeTruthy();
+    expect(JSON.parse(stamp.metadata.bindings[0])).toEqual({ relay_lead_id: 'L-floor' });
+  });
+
   test('context gate OFF + recovery gate ON: the session still runs the CallSid/ANI claim on its own and publishes the verdict (codex r2 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
@@ -542,7 +608,7 @@ describe('the conversation side', () => {
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
     const convo = resumedConvo({ callSid: 'CA-res', sessionGeneration: 2 });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
     await convo._runLoop('where were we').catch(() => {}); // no Anthropic client in tests: the seeding half runs
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call, before the line dropped'));
     expect(seeded).toHaveLength(1);
@@ -559,7 +625,7 @@ describe('the conversation side', () => {
     const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } }); // proven, but no segment yet
     const convo = resumedConvo({ callSid: 'CA-race' });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
     builder.first = jest.fn(async () => ({ metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L9', relay_segments: [{ generation: 1, text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } })); // the old socket's append landed
@@ -663,6 +729,33 @@ describe('the conversation side', () => {
       expect(spoken).toMatch(/connect you with the office/);
       expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'transfer' }));
       expect(convo._handoffForFailure).toBe(true);
+    });
+
+    test('the threshold is judged after EACH failed tool: two failed blocks in one response hand off before a third runs; the skipped block still gets a tool_result (codex r3 P2)', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+      const blocks = [{ type: 'tool_use', id: 't1', name: 'a', input: {} }, { type: 'tool_use', id: 't2', name: 'b', input: {} }, { type: 'tool_use', id: 't3', name: 'c', input: {} }];
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'tool_use', content: blocks }) }));
+      const executeTool = jest.fn(async (name, input, ctx) => {
+        if (name === 'transfer_to_office') { ctx.endForTransfer(); return 'Transferring.'; }
+        if (name === 'c') return 'ok';
+        ctx.toolFailed = true; return 'Sorry, that failed.';
+      });
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf-tools', from: '+19415551234', send, endSession });
+      convo._officeHours = { open: true };
+      convo._buildToolCtx = ((orig) => function () { const c = orig.call(this); c.officeOpenNow = () => true; return c; })(convo._buildToolCtx);
+      await convo._runLoop('first').catch(() => {});
+      const names = executeTool.mock.calls.map(([n]) => n);
+      expect(names).toEqual(['a', 'b', 'transfer_to_office']); // 'c' never ran
+      expect(convo._toolFailures).toBe(2);
+      const results = convo.messages.find((m) => Array.isArray(m.content) && m.content.some((c) => c.type === 'tool_result'));
+      expect(results.content.map((c) => c.tool_use_id)).toEqual(['t1', 't2', 't3']);
+      expect(results.content[2].content).toMatch(/Not run/);
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'transfer' }));
     });
 
     test('…office closed ⇒ the callback close: capture floor + a clean end (reason provider_failure); once per call', async () => {

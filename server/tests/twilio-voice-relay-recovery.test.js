@@ -298,6 +298,14 @@ describe('/relay-complete — the second failure', () => {
     await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
     expect(res.body).toMatch(/^<\?xml[^>]*\?><Response\/>$/);
     expect(updates.some((u) => u.call_outcome === 'voicemail')).toBe(false);
+    // a CONCURRENT retry won the re-issue (the stamp moved) ⇒ this one is a duplicate, never the fallback (codex r3 P1)
+    ({ builder, updates } = primeDb({ claimRows: 0, firstRow: firstLegStillOwns }));
+    builder.update.mockImplementation(async (patch) => { updates.push(patch); return isReissue(patch) || String(patch.metadata?.sql || '').includes('relay_reconnects') ? 0 : 1; });
+    builder.first.mockResolvedValueOnce(firstLegStillOwns).mockResolvedValueOnce({ metadata: { relay_session_claim_owner: 'nonce-1', relay_reconnects: 1, relay_reconnect_ms: 999, relay_session_claim_gen: 500 } });
+    res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    expect(res.body).toMatch(/^<\?xml[^>]*\?><Response\/>$/);
+    expect(updates.some((u) => u.call_outcome === 'voicemail')).toBe(false);
     // unconfirmed re-stamp ⇒ voicemail now; when it lands later it is put back, fenced on its own stamp AND on no claim at/after it
     ({ builder, updates } = primeDb({ claimRows: 0, firstRow: firstLegStillOwns }));
     let landReissue;

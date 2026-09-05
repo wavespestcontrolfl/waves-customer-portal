@@ -1093,7 +1093,7 @@ class RelayConversation {
     // WITHIN a turn; this bounds the NUMBER of turns so a never-ending or abusive
     // call (or a leaked ws key) can't drive the model — and spend Anthropic
     // tokens — without limit. End gracefully rather than going silent.
-    if (this._userTurns.length >= MAX_CALL_TURNS) {
+    if (this._userTurns.length + (this._priorCallerTurns || 0) >= MAX_CALL_TURNS) {
       if (!this._ending) {
         logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
         // Neutral copy ON PURPOSE — this line is spoken directly (no model in
@@ -1656,7 +1656,10 @@ class RelayConversation {
   _applyResumeState(state) {
     this._resume = state || null;
     if (!state) return;
-    if (state.relayLeadId) this.leadCaptured = true;
+    if (state.relayLeadId || state.leadCaptured) this.leadCaptured = true;
+    // The earlier legs' caller turns count toward this CALL's turn cap
+    // (codex r3 P2): a reconnect is not a fresh budget.
+    this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
     // A re-service already FILED on an earlier leg is this call's artifact:
     // no lead is owed (the floor stays down) and the close reports it filed.
     // A capture that deliberately created NO lead (an existing lifecycle
@@ -1676,8 +1679,12 @@ class RelayConversation {
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
-    this._modelFailures = Math.max(this._modelFailures, Number(state.modelFailures) || 0);
-    this._toolFailures = Math.max(this._toolFailures, Number(state.toolFailures) || 0);
+    // …but never over a streak THIS leg already owns (codex r3 P2): a late
+    // reload after a round ran here must not resurrect a cleared counter.
+    if (!this._providerRoundSeen) {
+      this._modelFailures = Math.max(this._modelFailures, Number(state.modelFailures) || 0);
+      this._toolFailures = Math.max(this._toolFailures, Number(state.toolFailures) || 0);
+    }
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
@@ -1890,6 +1897,7 @@ class RelayConversation {
       const modelStartAt = now();
       stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
       try {
+        this._providerRoundSeen = true; // from here on the failure streak is this leg's own
         const stream = anthropic.messages.stream(
           {
             model: MODEL,
@@ -1985,6 +1993,7 @@ class RelayConversation {
 
       if (msg.stop_reason === 'tool_use') {
         const results = [];
+        let roundCut = false; // the results were already pushed by the mid-round handoff check
         for (const block of msg.content) {
           if (block.type !== 'tool_use') continue;
           // Part of the record: reviewing a call must show that Sandy looked
@@ -2004,6 +2013,20 @@ class RelayConversation {
           this._toolOutcomes.push({ name: block.name, ok: toolOk });
           this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
+          // The threshold is judged after EACH failed tool (codex r3 P2): a
+          // later block in the same response must not run — and reset the
+          // streak — past the documented limit. The skipped blocks still get
+          // a tool_result so the history stays well-formed. Gate off ⇒ the
+          // policy never answers 'handoff' here and nothing changes.
+          if (!toolOk && require('./relay-recovery').isRecoveryGateOn()
+            && require('./relay-recovery').providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) === 'handoff') {
+            const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
+            results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — Sandy had repeated system trouble.' })));
+            this.messages.push({ role: 'user', content: results });
+            if (await this._maybeHandoffForFailure(toolCtx)) return;
+            roundCut = true;
+            break;
+          }
           // A transfer (or any end) inside this round ends the SESSION: no
           // further tool in the same response may run — a booking or capture
           // after the handoff would be a write absent from the packet — and
@@ -2017,7 +2040,7 @@ class RelayConversation {
             return;
           }
         }
-        this.messages.push({ role: 'user', content: results });
+        if (!roundCut) this.messages.push({ role: 'user', content: results });
         // PR 2B: a second failed tool in one call hands the caller off
         // instead of another round of "let me try that again".
         if (await this._maybeHandoffForFailure(toolCtx)) return;
@@ -2237,7 +2260,7 @@ class RelayConversation {
         // there was nothing said worth recording.
         // Turns still waiting on a speaker event log now (firstAudio=n/a).
         for (const s of this._turnStats) this._finishTurn(s);
-        const { buildTranscriptUpdate, summarizeTurnStats } = require('./relay-transcript');
+        const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats } = require('./relay-transcript');
         const transcriptUpdate = buildTranscriptUpdate({
           turns: this._transcript,
           modelSummary: this._modelSummary,
@@ -2250,6 +2273,13 @@ class RelayConversation {
           latency: summarizeTurnStats(this._turnStats),
           versions: this._versionStamps(),
         });
+        // PR 2B (codex r3 P2): on a reconnected call the summary covers the
+        // WHOLE call — the earlier legs' caller lines ahead of this leg's —
+        // unless the model wrote one (capture_lead's, which already did).
+        const priorCallerTurns = (recoveryOn && this._resume && Array.isArray(this._resume.callerTurns) ? this._resume.callerTurns : []).map((text) => ({ role: 'caller', text }));
+        if (transcriptUpdate && priorCallerTurns.length && !this._modelSummary) {
+          transcriptUpdate.call_summary = buildCallSummary({ turns: [...priorCallerTurns, ...this._transcript], reason: reason || null, leadCaptured: this.leadCaptured && !this._noLeadCreated });
+        }
         const reconcileQuery = db('call_log')
           .where('twilio_call_sid', this.callSid)
           // NULL OR not terminal: a relay-failure row that /relay-complete
@@ -2291,6 +2321,8 @@ class RelayConversation {
           // columns (hook P1). Composed from the row; NULL leaves the row as is.
           const { TRANSCRIPTION_PROVIDER: RELAY_PROVIDER } = require('./relay-transcript');
           composedFromRowOnly = {
+            // …and its summary (the superseded first socket never wrote one).
+            ...(priorCallerTurns.length ? { call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason: reason || null, leadCaptured: this.leadCaptured && !this._noLeadCreated }) } : {}),
             transcription: db.raw('COALESCE(?, transcription)', [recovery.composeSegmentsSql(db)]),
             transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [recovery.composeSegmentsSql(db), RELAY_PROVIDER]),
             transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [recovery.composeSegmentsSql(db)]),
@@ -2445,9 +2477,12 @@ class RelayConversation {
     if (!callerTurns.length) return false;
     try {
       const { scrubForStorage } = require('./relay-transcript');
+      // This call's lead: the persisted linkage (a reused lead keeps another
+      // call's twilio_call_sid — codex r3 P2) or the lead inserted by this call.
+      const linkedId = meta && meta.relay_lead_id ? String(meta.relay_lead_id) : null;
       const rows = await withTimeout(
         db('leads')
-          .where({ twilio_call_sid: this.callSid })
+          .where((q) => (linkedId ? q.where({ twilio_call_sid: this.callSid }).orWhere({ id: linkedId }) : q.where({ twilio_call_sid: this.callSid })))
           .where('transcript_summary', 'like', `%${FLOOR_NO_TRANSCRIPT}`)
           .update({ transcript_summary: floorSummary(callerTurns, scrubForStorage), updated_at: new Date() }),
         WRITE_DRAIN_TIMEOUT_MS,
@@ -2567,6 +2602,11 @@ class RelayConversation {
         // back-fill capture_lead does, idempotent on a card that already has one.
         if (floorLeadId) {
           this._leadId = this._leadId || floorLeadId;
+          // The exact call→lead linkage (a reused lead keeps its original
+          // twilio_call_sid): the late-segment summary refresh and the
+          // office-confirm recovery resolve through it (codex r3 P2).
+          const { stampCallLeadLinkage } = require('./relay-context');
+          await withTimeout(stampCallLeadLinkage(this.callSid, floorLeadId), 2000, false);
           if (this._bookingRequested) {
             const { attachLeadToVoiceBookingCard } = require('./relay-booking');
             await attachLeadToVoiceBookingCard(this.callSid, floorLeadId).catch(() => {});

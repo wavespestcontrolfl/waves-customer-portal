@@ -279,6 +279,9 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
         reserviceFiled: legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
+        // A lead captured on an earlier leg even when its relay_lead_id
+        // stamp (best-effort) did not land (codex r3 P2).
+        leadCaptured: legs.some((seg) => seg.lead_captured === true),
         // The LATEST leg's hold (a later complete capture clears it) and the
         // estimate fields accumulated across every leg, later legs winning.
         holdOpen: latest ? latest.hold_open === true : false,

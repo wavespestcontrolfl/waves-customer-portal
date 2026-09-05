@@ -213,6 +213,32 @@ async function claimOwnedElsewhere(q, callSid, sessionKey) {
   }
 }
 
+/**
+ * The call→lead provenance stamp (call_log.metadata.relay_lead_id) — written by
+ * capture_lead and by the close-time capture floor (codex #3884 r3 P2: a reused
+ * lead keeps its original twilio_call_sid, so this is the only exact linkage;
+ * office-confirm recovery and the late-segment summary refresh resolve through
+ * it). Fail-soft: the lead is the durable artifact and must never be lost to it.
+ */
+async function stampCallLeadLinkage(callSid, leadId) {
+  if (!callSid || !leadId) return false;
+  try {
+    const db = require('../../models/db');
+    await db('call_log')
+      .where({ twilio_call_sid: callSid })
+      .update({
+        metadata: db.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ relay_lead_id: String(leadId) })],
+        ),
+      });
+    return true;
+  } catch (linkErr) {
+    logger.warn(`[voice-relay] call→lead linkage stamp failed callSid=${callSid}: ${linkErr.message}`);
+    return false;
+  }
+}
+
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -1748,6 +1774,7 @@ module.exports = {
   beginRelaySessionClaim,
   relaySessionClaimOwner,
   claimOwnedElsewhere,
+  stampCallLeadLinkage,
   servicesCatalogText,
   loadOfficeHours,
   renderClockBlock,

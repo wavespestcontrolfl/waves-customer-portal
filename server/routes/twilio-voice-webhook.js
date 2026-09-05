@@ -1834,8 +1834,11 @@ async function attemptRelayReconnect(req, callSid, failure) {
             return renderRelayReconnect(req, callSid, failure, reissued.ms);
           }
           if (reissued.rows === 0) {
+            // The stamp MOVED ⇒ a concurrent retry won the re-issue and is
+            // rendering the reconnect (codex r3 P1) — a duplicate, never the
+            // fallback; a claim at/after the stamp ⇒ the resumed leg is live.
             const now = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
-            duplicate = Boolean(now && now.reconnectMs && now.claimGen >= now.reconnectMs);
+            duplicate = Boolean(now && now.reconnectMs && (now.reconnectMs !== state.reconnectMs || now.claimGen >= now.reconnectMs));
           }
         } else {
           duplicate = !secondFailure;
