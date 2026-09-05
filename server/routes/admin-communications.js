@@ -265,6 +265,11 @@ router.post('/sms', async (req, res, next) => {
   // before dispatch (claimCardRequestSends) — released on every no-send
   // exit, marked after a real provider send.
   let cardClaim = null;
+  // Composer-carried project report links: the project send flow's own
+  // delivery claim, taken before dispatch (claimProjectReportSends) and
+  // handed back on every exit once the provider has answered — the text is
+  // a re-share, never a delivery.
+  let projectClaim = null;
   // Verified composer statement links — a real send is their first delivery.
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
@@ -291,6 +296,16 @@ router.post('/sms', async (req, res, next) => {
       await require('../services/composer-customer-links').releaseCardRequestSends(claim);
     } catch (releaseErr) {
       logger.warn(`[communications] card request claim release failed (the service's stale-claim lease recovers it): ${releaseErr.message}`);
+    }
+  };
+  const releaseProjectClaim = async () => {
+    if (!projectClaim) return;
+    const claim = projectClaim;
+    projectClaim = null;
+    try {
+      await require('../services/composer-customer-links').releaseProjectReportSends(claim);
+    } catch (releaseErr) {
+      logger.warn(`[communications] project report claim release failed (the send flow's stale-claim takeover recovers it): ${releaseErr.message}`);
     }
   };
   // AMBIGUOUS provider outcome (GH Codex #3851 r4 P1 — the card funnel's own
@@ -534,6 +549,7 @@ router.post('/sms', async (req, res, next) => {
     const abortUnsent = async (status, error) => {
       await clearManualReservation();
       await releaseCardClaim();
+      await releaseProjectClaim();
       await restoreContractLinks();
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
@@ -569,7 +585,7 @@ router.post('/sms', async (req, res, next) => {
     // mid-send, or a text already out) refuses here; every later exit
     // restores/releases or records/marks them.
     try {
-      const { bearerLinkSendCheck, claimCardRequestSends } = require('../services/composer-customer-links');
+      const { bearerLinkSendCheck, claimCardRequestSends, claimProjectReportSends } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), {
         trustedCustomerId: trustedCustomerId || null,
         // The seam binds by the last ten digits; a non-US E.164 destination
@@ -595,6 +611,14 @@ router.post('/sms', async (req, res, next) => {
         const claim = await claimCardRequestSends(bearerCheck.cards);
         if (!claim.ok) return abortUnsent(409, claim.error);
         cardClaim = claim.claim;
+      }
+      // The project send flow's delivery claim, held through the provider
+      // handoff (GH Codex #3893 r11 P1): a resend that starts now 409s on
+      // its own claim instead of texting the same report twice.
+      if (bearerCheck.projectReports) {
+        const claim = await claimProjectReportSends(bearerCheck.projectReports);
+        if (!claim.ok) return abortUnsent(409, claim.error);
+        projectClaim = claim.claim;
       }
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
@@ -770,6 +794,9 @@ router.post('/sms', async (req, res, next) => {
     // success) or no send happened (on failure). Clear it so it can't linger as
     // a stuck 'sending' row blocking auto-sends to the thread.
     await clearManualReservation();
+    // The provider has answered either way — the project delivery claim has
+    // covered its window; the row's delivery state is restored.
+    await releaseProjectClaim();
     if (result.blocked || result.sent === false) {
       if (!result.blocked && (result.retryable || result.deferred)) {
         await holdBearerStateAmbiguous(result);
@@ -1027,6 +1054,9 @@ router.post('/sms', async (req, res, next) => {
       && (err.providerOutcome.retryable || err.providerOutcome.deferred)) {
       await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
     }
+    // The project delivery claim is handed back on a throw too — accepted
+    // or not, the provider window it fenced is over.
+    await releaseProjectClaim();
     // Same convention for the card request claim: accepted → mark, else release.
     if (cardClaim) {
       if (err?.providerOutcome?.sent === true) {

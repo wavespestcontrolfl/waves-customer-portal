@@ -737,9 +737,13 @@ function shortRowDestination(row, hosts) {
   // hands over its /pay target's token too; an untyped /pay code is a pay
   // link, not a receipt, and stays out of the receipt seam (GH Codex #3893
   // r10 P2).
-  const receipt = canonicalPortalToken(target, hosts, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME)
-    || (row.kind === 'receipt' && canonicalPortalToken(target, hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME));
+  const receipt = canonicalPortalToken(target, hosts, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME);
   if (receipt) return { kind: 'receipt', token: receipt };
+  // payTarget: the pay page only redirects a paid / processing invoice to
+  // its receipt — a refunded one stays on the payment page (PayPageV2), so
+  // the seam refuses that form for a refunded row (r11 P2).
+  const payTarget = row.kind === 'receipt' && canonicalPortalToken(target, hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME);
+  if (payTarget) return { kind: 'receipt', token: payTarget, payTarget: true };
   if (['appointment', 'service_report', 'receipt'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
 }
@@ -1110,7 +1114,7 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
 // prefix must resolve to exactly one project, as /data does), never a
 // payment-held report (the page answers 402 with a pay card, not the
 // report), then the account binding — a household shares its projects.
-async function checkProjectReportLinks(ctx, onRecipientAccount) {
+async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) {
   for (const run of linkRuns(ctx.runs, PROJECT_REPORT_RUN_RE)) {
     const segment = canonicalPortalToken(run, ctx.hosts, PROJECT_REPORT_PATH_RE);
     const lookup = segment && require('./project-report-links').extractProjectReportTokenLookup(segment);
@@ -1127,12 +1131,12 @@ async function checkProjectReportLinks(ctx, onRecipientAccount) {
     if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
       return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
     }
-    if (projectResendInFlight(project)) {
-      return refuseSend('This project report is being re-sent right now — give it a moment, then send again.');
-    }
     const bad = await onRecipientAccount(project.customer_id, 'project report link');
     if (bad) return bad;
     ctx.bearers += 1;
+    // The send flow's delivery claim is taken by the caller BEFORE dispatch
+    // (claimProjectReportSends), keyed to the delivery state seen here.
+    projectReports.push({ id: project.id, deliveryStatus: project.delivery_status || null });
   }
   return null;
 }
@@ -1158,7 +1162,7 @@ async function checkPriceChangeLinks(ctx) {
     // Codex #3893 r7 P1) — judged newest BEFORE upcoming, so a correction
     // whose date has passed still retires the older notice it corrected
     // (r10 P1).
-    const newest = await newestTextedPriceChangeNotice(notice.customer_id);
+    const newest = await newestDeliveredPriceChangeNotice(notice.customer_id);
     if (!newest || newest.id !== notice.id) {
       return refuseSend('A newer price change notice has been sent to this customer — remove the link and insert a fresh one.');
     }
@@ -1175,7 +1179,7 @@ async function checkPriceChangeLinks(ctx) {
 // The account-scoped kinds together: the appointment gate is re-read at the
 // send (every /appointment route 404s the moment it is off — r2 P1), then
 // each kind binds to the recipient's account.
-async function checkAccountBoundLinks(ctx) {
+async function checkAccountBoundLinks(ctx, projectReports) {
   // ANY_SCHEME here too: an http://<owned>/l/<code> run must not vanish from
   // the seam (nothing later sees the /l/ occurrence) — it is judged, and its
   // plaintext scheme refused like the long forms' (GH Codex #3844 r12 P1).
@@ -1189,7 +1193,7 @@ async function checkAccountBoundLinks(ctx) {
   const onRecipientAccount = recipientAccountBinder(ctx);
   return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
     || (await checkReportLinks(ctx, shortRows, onRecipientAccount))
-    || (await checkProjectReportLinks(ctx, onRecipientAccount))
+    || (await checkProjectReportLinks(ctx, onRecipientAccount, projectReports))
     || checkReceiptLinks(ctx, shortRows, onRecipientAccount);
 }
 
@@ -1202,13 +1206,20 @@ async function checkAccountBoundLinks(ctx) {
 // pre-push Codex P1 on r9. The recipient is the trusted customer, else the
 // one live row on the number; an ambiguous number refuses, like the insert.
 async function checkReceiptLinks(ctx, shortRows, onRecipientAccount) {
-  const vet = async (token) => {
-    const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id');
+  const vet = async (token, { payTarget = false } = {}) => {
+    const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id', 'service_record_id');
     if (!invoice || !RECEIPT_INVOICE_STATUSES.includes(String(invoice.status || '')) || invoice.payer_id) {
       return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
     }
+    // The receipt SMS's own /pay short link opens the payment page, which
+    // redirects only a paid / processing invoice to its receipt — once the
+    // invoice is refunded that page is no receipt (r11 P2); the permanent
+    // /receipt form still is.
+    if (payTarget && invoice.status === 'refunded') {
+      return refuseSend('This receipt short link no longer opens the receipt (the invoice was refunded) — remove it and insert a fresh one.');
+    }
     // Texted by the receipt lifecycle already (the builder's own evidence).
-    if (!(await textedReceiptAudit().where({ invoice_id: String(invoice.id) }).first('id'))) {
+    if (!(await textedReceiptAudit('?', '?', [invoice.id, invoice.service_record_id ?? null]).first('id'))) {
       return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
     }
     const bad = await onRecipientAccount(invoice.customer_id, 'receipt link');
@@ -1231,7 +1242,7 @@ async function checkReceiptLinks(ctx, shortRows, onRecipientAccount) {
   for (const row of shortRows.filter((r) => r.kind === 'receipt')) {
     if (expiredShortRow(row)) return refuseSend('This receipt link has expired — remove it and insert a fresh one.');
     if (!row.token) return refuseSend('This receipt short link does not open a receipt — remove it and insert a fresh one.');
-    const bad = await vet(row.token);
+    const bad = await vet(row.token, { payTarget: Boolean(row.payTarget) });
     if (bad) return bad;
   }
   return null;
@@ -1362,12 +1373,13 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
   const contracts = [];
   const statements = [];
   const preps = [];
+  const projectReports = [];
   const checks = [
     () => checkContractLinks(ctx, contracts),
     () => checkPrepLinks(ctx, preps),
     () => checkStatementLinks(ctx, statements),
     () => checkPriceChangeLinks(ctx),
-    () => checkAccountBoundLinks(ctx),
+    () => checkAccountBoundLinks(ctx, projectReports),
     () => checkCardLinks(ctx, cards),
   ];
   for (const check of checks) {
@@ -1381,6 +1393,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     ...(contracts.length ? { contracts } : {}),
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
+    ...(projectReports.length ? { projectReports } : {}),
   };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that
@@ -2039,20 +2052,35 @@ async function receiptTextBlockedReason(customerId) {
 }
 
 // A receipt the receipt lifecycle already TEXTED: the messaging pipeline's
-// audit row for the payment_receipt purpose over SMS, with a real Twilio
-// accept (SM/MM sid — a suppressed leg records a sentinel id with sent_at
-// too). receipt_sent_at is not that evidence: the receipt queue stamps it
-// after an email-only delivery (channel_email_only / receipt_texts_opted_out
-// / sms_suppressed), so a customer who later allows receipt texts would make
-// the composer the never-texted receipt's FIRST text — without the
-// invoice_receipt template and the receipt lifecycle (GH Codex #3893 r8 +
-// r10 P1; same ruling as price notices, r2). Builder and send seam share it.
-function textedReceiptAudit() {
+// audit row for an SMS with a real Twilio accept (SM/MM sid — a suppressed
+// leg records a sentinel id with sent_at too), on either receipt path:
+// the classic receipt (purpose payment_receipt, invoice_id — sendReceipt),
+// or the combined completion text that carries the receipt facts and link
+// (admin-dispatch service_complete_paid_receipt: purpose 'appointment',
+// the invoice in metadata.invoice_id or through the completion's
+// service record — r11 P2). receipt_sent_at is not that evidence: the
+// receipt queue stamps it after an email-only delivery (channel_email_only
+// / receipt_texts_opted_out / sms_suppressed), so a customer who later
+// allows receipt texts would make the composer the never-texted receipt's
+// FIRST text — without the invoice_receipt template and the receipt
+// lifecycle (GH Codex #3893 r8 + r10 P1; same ruling as price notices,
+// r2). Builder (correlated to the invoices row) and send seam (bound to
+// one invoice) share it: the two SQL fragments name the invoice id and
+// its service_record_id.
+function textedReceiptAudit(invoiceIdSql, serviceRecordIdSql, bindings = []) {
   return db('messaging_audit_log')
-    .where({ purpose: 'payment_receipt', channel: 'sms' })
+    .where({ channel: 'sms' })
     .whereNull('blocked_code')
     .whereNotNull('sent_at')
-    .whereRaw("provider_message_id ~ '^(SM|MM)'");
+    .whereRaw("provider_message_id ~ '^(SM|MM)'")
+    .where((q) => q
+      .where((classic) => classic.where({ purpose: 'payment_receipt' }).whereRaw(`invoice_id = ${invoiceIdSql}::text`, bindings.slice(0, 1)))
+      .orWhere((combined) => combined
+        .where({ purpose: 'appointment' })
+        .whereRaw("metadata->>'original_message_type' = 'service_complete_paid_receipt'")
+        .where((link) => link
+          .whereRaw(`metadata->>'invoice_id' = ${invoiceIdSql}::text`, bindings.slice(0, 1))
+          .orWhereRaw(`metadata->>'service_record_id' = ${serviceRecordIdSql}::text`, bindings.slice(1, 2)))));
 }
 
 async function buildReceiptLink(customerIds, recipientId = null) {
@@ -2062,7 +2090,7 @@ async function buildReceiptLink(customerIds, recipientId = null) {
     .whereNull('payer_id')
     .whereNotNull('token')
     // A re-share only — first receipt delivery is InvoiceService.sendReceipt's.
-    .whereExists(textedReceiptAudit().whereRaw('messaging_audit_log.invoice_id = invoices.id::text'))
+    .whereExists(textedReceiptAudit('invoices.id', 'invoices.service_record_id'))
     // Every texted receipt on the account, not a window: a fully refunded
     // invoice's paid_at is cleared, so the row alone under-orders it and a
     // cap here could drop the true newest settlement before the pick below
@@ -2139,30 +2167,36 @@ function deliveredPriceChangeNotice(notice) {
  * (STRICT_OWNER_KINDS) and /sms re-binds it. Permanent token, raw URL — the
  * same link the notices lane texted (price-change-notices.js).
  */
-// The customer's newest TEXTED notice — the one row the composer may link,
-// for the builder and the send seam alike. Newest regardless of effective
-// date: a later correction is the customer's terms even once its date has
-// passed, so filtering to upcoming first would let the older notice it
-// corrected resurface as "newest" (GH Codex #3893 r10 P1). Whether that
-// newest notice is still ahead is judged afterwards (upcomingPriceChange).
-function newestTextedPriceChangeNotice(customerId) {
+// The customer's newest DELIVERED notice (the lane's success stamp, either
+// channel) — the one row that can be the composer's link, for the builder
+// and the send seam alike. Newest is judged before every other predicate:
+// a later correction is the customer's terms even once its date has passed
+// (GH Codex #3893 r10 P1) and even when it went by email only (r11 P1), so
+// filtering to upcoming or texted first would let the older notice it
+// corrected resurface as "newest". Whether that newest notice was texted
+// (deliveredPriceChangeNotice — the composer re-shares texts only) and is
+// still ahead (upcomingPriceChange) is judged afterwards.
+function newestDeliveredPriceChangeNotice(customerId) {
   return db('price_change_notices')
     .where({ customer_id: customerId })
     .whereIn('status', PRICE_CHANGE_LINKABLE_STATUSES)
     .whereNotNull('sent_at')
-    .where({ sms_sent: true })
     // Newest ISSUED, not farthest-out: a later correction effective sooner
     // must not be shadowed by an older notice with a farther effective date
     // (GH Codex #3893 r5 P1).
     .orderBy([{ column: 'sent_at', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .first('id', 'notice_token', 'effective_date', 'current_amount_cents', 'new_amount_cents', 'cadence_label', 'status');
+    .first('id', 'notice_token', 'effective_date', 'current_amount_cents', 'new_amount_cents', 'cadence_label', 'status', 'sent_at', 'sms_sent');
 }
 // Still ahead: effective today (ET) or later.
 const upcomingPriceChange = (notice) => dateOnly(notice.effective_date) >= etDateString();
 
 async function buildPriceChangeNoticeLink(customerId) {
-  const notice = await newestTextedPriceChangeNotice(customerId);
+  const notice = await newestDeliveredPriceChangeNotice(customerId);
   if (!notice || !upcomingPriceChange(notice)) return { url: null, line: '', reason: 'No upcoming price change notice for this customer' };
+  // The newest notice went by email only: its first text is the lane's
+  // (template + opt-out footer), never the composer's, and the older
+  // texted notice it corrected is not the customer's terms (r11 P1).
+  if (!deliveredPriceChangeNotice(notice)) return { url: null, line: '', reason: 'The latest price change notice was emailed, not texted — re-send it from Pricing → Notices before texting a link' };
   const { formatMoney } = require('./price-change-notices');
   const url = `${publicPortalUrl()}/price-change/${notice.notice_token}`;
   const effectiveDate = dateOnly(notice.effective_date);
@@ -2202,24 +2236,66 @@ const issuedProjectReport = (project) => Boolean(project)
   && PROJECT_REPORT_STATUSES.includes(String(project.status || ''))
   && Boolean(project.sent_at || project.delivery_status === PROJECT_REPORT_LEGACY_DELIVERY);
 
-// The project send flow's duplicate-delivery claim (admin-projects /send):
-// a resend of an issued report holds delivery_status 'sending' — status and
-// sent_at unchanged — for its provider window, and treats a claim older
-// than ten minutes as a crashed send it may take over. The composer respects
-// the live claim the same way: texting the report link inside that window
-// would be the duplicate the claim exists to stop (GH Codex #3893 r10 P1).
-const PROJECT_SEND_CLAIM_STALE_MS = 10 * 60 * 1000;
-function projectResendInFlight(project) {
-  if (project.delivery_status !== 'sending') return false;
-  const claimedAt = new Date(project.updated_at || 0).getTime();
-  return Number.isFinite(claimedAt) && claimedAt >= Date.now() - PROJECT_SEND_CLAIM_STALE_MS;
+/**
+ * The project send flow's duplicate-delivery claim (admin-projects /send):
+ * a resend of an issued report holds delivery_status 'sending' — status and
+ * sent_at unchanged — for its provider window, and treats a claim older
+ * than ten minutes as a crashed send it may take over. A composer text of
+ * the report link is the duplicate that claim exists to stop, and a
+ * read-only look at 'sending' cannot close the check-to-dispatch race (GH
+ * Codex #3893 r10 + r11 P1) — so the composer send takes the SAME claim,
+ * exactly as it takes the card request claim:
+ *   claimProjectReportSends — BEFORE dispatch: the flow's own conditional
+ *     UPDATE (not 'sending', or a stale claim), keyed to the delivery state
+ *     the seam saw so the hand-back is exact; a lost claim means the flow
+ *     is sending right now (or the state moved) — every claim this call won
+ *     is handed back and the send refuses.
+ *   releaseProjectReportSends — after the provider answered, sent or not:
+ *     the composer's text is a re-share, not a delivery, so the row's
+ *     delivery state is restored, token-guarded (only THIS claim is
+ *     cleared). A stale claim taken over restores to 'failed', as the flow
+ *     itself normalizes a crashed send.
+ */
+async function claimProjectReportSends(projectReports) {
+  const crypto = require('crypto');
+  const won = [];
+  const CLAIMED = 'This project report is being re-sent right now — give it a moment, then send again.';
+  for (const { id, deliveryStatus } of projectReports) {
+    const token = crypto.randomBytes(12).toString('hex');
+    const seenSending = deliveryStatus === 'sending';
+    const q = db('projects').where({ id });
+    if (seenSending) q.whereRaw("delivery_status = 'sending' AND updated_at < now() - interval '10 minutes'");
+    else if (deliveryStatus == null) q.whereNull('delivery_status');
+    else q.where({ delivery_status: deliveryStatus });
+    let claimed;
+    try {
+      claimed = await q.update({ delivery_status: 'sending', delivery_claim_token: token, updated_at: db.fn.now() });
+    } catch (err) {
+      await releaseProjectReportSends({ projects: won });
+      throw err;
+    }
+    if (!claimed) {
+      await releaseProjectReportSends({ projects: won });
+      return { ok: false, error: CLAIMED };
+    }
+    won.push({ id, token, previousStatus: seenSending ? 'failed' : deliveryStatus });
+  }
+  return { ok: true, claim: { projects: won } };
+}
+
+async function releaseProjectReportSends(claim) {
+  for (const { id, token, previousStatus } of claim.projects) {
+    await db('projects')
+      .where({ id, delivery_status: 'sending', delivery_claim_token: token })
+      .update({ delivery_status: previousStatus, delivery_claim_token: null, updated_at: db.fn.now() });
+  }
 }
 
 // The project a public report segment opens, exactly as the viewer resolves
 // it (reports-public loadProjectForReport): a full token matches its row; a
 // vanity prefix must match exactly one.
 async function linkableProjectReport(lookup) {
-  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status', 'updated_at'];
+  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
   if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...COLUMNS);
   const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`).limit(2);
   return rows.length === 1 ? rows[0] : null;
@@ -2340,6 +2416,8 @@ module.exports = {
   claimCardRequestSends,
   releaseCardRequestSends,
   markCardRequestSends,
+  claimProjectReportSends,
+  releaseProjectReportSends,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,

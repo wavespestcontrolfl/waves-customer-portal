@@ -158,6 +158,8 @@ const {
   claimCardRequestSends,
   releaseCardRequestSends,
   markCardRequestSends,
+  claimProjectReportSends,
+  releaseProjectReportSends,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -176,6 +178,15 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.select = jest.fn(async () => rows);
   b.first = jest.fn(async () => firstRow);
   b.update = jest.fn(async () => 1);
+  return b;
+}
+
+// Records the predicates a nested where(cb) tree adds, invoking callbacks.
+function nestedRecorder(calls = []) {
+  const b = { calls };
+  for (const m of ['where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNull', 'whereNotNull']) {
+    b[m] = jest.fn((...args) => { if (typeof args[0] === 'function') args[0](b); else calls.push([m, ...args]); return b; });
+  }
   return b;
 }
 
@@ -1086,11 +1097,24 @@ describe('buildReceiptLink', () => {
     expect(mockBuilders.invoices.whereNotNull).not.toHaveBeenCalledWith('receipt_sent_at');
     expect(mockBuilders.invoices.whereExists).toHaveBeenCalledWith(mockBuilders.messaging_audit_log);
     const audit = mockBuilders.messaging_audit_log;
-    expect(audit.where).toHaveBeenCalledWith({ purpose: 'payment_receipt', channel: 'sms' });
+    expect(audit.where).toHaveBeenCalledWith({ channel: 'sms' });
     expect(audit.whereNull).toHaveBeenCalledWith('blocked_code');
     expect(audit.whereNotNull).toHaveBeenCalledWith('sent_at');
     expect(audit.whereRaw).toHaveBeenCalledWith("provider_message_id ~ '^(SM|MM)'");
-    expect(audit.whereRaw).toHaveBeenCalledWith('messaging_audit_log.invoice_id = invoices.id::text');
+    // Either receipt path: the classic receipt SMS (payment_receipt, keyed by
+    // invoice_id) or the combined completion text that carried the receipt
+    // (service_complete_paid_receipt under purpose 'appointment', linked by
+    // metadata invoice_id or the completion's service record — r11 P2).
+    const rec = nestedRecorder();
+    audit.where.mock.calls.find(([arg]) => typeof arg === 'function')[0](rec);
+    expect(rec.calls).toEqual(expect.arrayContaining([
+      ['where', { purpose: 'payment_receipt' }],
+      ['whereRaw', 'invoice_id = invoices.id::text', []],
+      ['where', { purpose: 'appointment' }],
+      ['whereRaw', "metadata->>'original_message_type' = 'service_complete_paid_receipt'"],
+      ['whereRaw', "metadata->>'invoice_id' = invoices.id::text", []],
+      ['orWhereRaw', "metadata->>'service_record_id' = invoices.service_record_id::text", []],
+    ]));
     // Every texted receipt on the account is considered — no candidate cap
     // ahead of the payment-aware pick (r10 P2).
     expect(mockBuilders.invoices.limit).not.toHaveBeenCalled();
@@ -1180,9 +1204,11 @@ describe('buildPriceChangeNoticeLink', () => {
     // Status is not delivery evidence (the public page marks any row
     // 'viewed'); the lane's success stamp is required (r5 P1).
     expect(mockBuilders.price_change_notices.whereNotNull).toHaveBeenCalledWith('sent_at');
-    // A re-share of a TEXT the lane sent — an email-only delivery leaves
-    // sms_sent false and its first text stays the lane's (r6 P1).
-    expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ sms_sent: true });
+    // Texted is NOT a query filter either: the newest delivered notice is
+    // picked across channels, then must have been texted — an email-only
+    // correction retires the older texted notice instead of being filtered
+    // out ahead of it (r11 P1; the r6 P1 rule now lives in the predicate).
+    expect(mockBuilders.price_change_notices.where).not.toHaveBeenCalledWith({ sms_sent: true });
     // The date is NOT a query filter: the newest texted notice is picked
     // first and only then judged upcoming, so a correction whose date has
     // passed still retires the older notice it corrected (r10 P1).
@@ -1211,6 +1237,14 @@ describe('buildPriceChangeNoticeLink', () => {
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/No upcoming price change/);
     // One pick — nothing re-queries for an older upcoming row.
+    expect(mockBuilders.price_change_notices.first).toHaveBeenCalledTimes(1);
+  });
+
+  test('the newest delivered notice went by email only → no link (its first text is the lane\'s), and the older texted notice does not resurface (r11 P1)', async () => {
+    mockBuilders = { price_change_notices: chainBuilder({ firstRow: { ...NOTICE, id: 'n2', sms_sent: false } }) };
+    const r = await buildPriceChangeNoticeLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/emailed, not texted — re-send it from Pricing/);
     expect(mockBuilders.price_change_notices.first).toHaveBeenCalledTimes(1);
   });
 });
@@ -2106,7 +2140,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
     describe('receipt links re-run the builder\'s predicate, bind to the account, and re-check the RECIPIENT\'s receipt-text consent at the send (pre-push Codex P1 on r9)', () => {
       const TOKEN = 'r'.repeat(64);
-      const inv = (over = {}) => ({ id: 'inv-1', customer_id: 'c2', status: 'paid', payer_id: null, ...over });
+      const inv = (over = {}) => ({ id: 'inv-1', customer_id: 'c2', status: 'paid', payer_id: null, service_record_id: 'sr-1', ...over });
       // texted: the messaging audit row proving the receipt lifecycle
       // already SENT this receipt by SMS (the builder's own evidence).
       function wireReceipt({ row = inv(), texted = true, ...account } = {}) {
@@ -2122,8 +2156,15 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect(mockBuilders.invoices.where).toHaveBeenCalledWith({ token: TOKEN });
         // The texted-receipt evidence, re-read for THIS invoice (r10 P1).
         const audit = mockBuilders.messaging_audit_log;
-        expect(audit.where).toHaveBeenCalledWith({ purpose: 'payment_receipt', channel: 'sms' });
-        expect(audit.where).toHaveBeenCalledWith({ invoice_id: 'inv-1' });
+        expect(audit.where).toHaveBeenCalledWith({ channel: 'sms' });
+        const rec = nestedRecorder();
+        audit.where.mock.calls.find(([arg]) => typeof arg === 'function')[0](rec);
+        expect(rec.calls).toEqual(expect.arrayContaining([
+          ['where', { purpose: 'payment_receipt' }],
+          ['whereRaw', 'invoice_id = ?::text', ['inv-1']],
+          ['whereRaw', "metadata->>'invoice_id' = ?::text", ['inv-1']],
+          ['orWhereRaw', "metadata->>'service_record_id' = ?::text", ['sr-1']],
+        ]));
         expect(audit.whereNull).toHaveBeenCalledWith('blocked_code');
         expect(audit.whereNotNull).toHaveBeenCalledWith('sent_at');
         expect(audit.whereRaw).toHaveBeenCalledWith("provider_message_id ~ '^(SM|MM)'");
@@ -2168,6 +2209,13 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/receipt link has expired/);
         wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } });
         expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/does not open a receipt/);
+        // The receipt SMS's /pay short link: the pay page redirects only a
+        // paid / processing invoice to its receipt — refunded, it is the
+        // payment page (r11 P2). The permanent /receipt form still opens it.
+        wireReceipt({ row: inv({ status: 'refunded' }), shortRow: { code: 'rc2', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/pay/${TOKEN}` } });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc2', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer opens the receipt/);
+        wireReceipt({ row: inv({ status: 'refunded' }) });
+        expect(await send()).toEqual({ ok: true });
         wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}` } });
         checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'PURPOSE_OPTED_OUT' });
         expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/opted out of receipt texts — remove the receipt link/);
@@ -2183,21 +2231,25 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         mockBuilders.projects = chainBuilder({ firstRow: full, rows: byPrefix });
       }
 
+      // The verified report rides back for the send flow's delivery claim
+      // (claimProjectReportSends), keyed to the delivery state seen (r11 P1).
+      const OK = (deliveryStatus = null) => ({ ok: true, projectReports: [{ id: 'p1', deliveryStatus }] });
+
       test('the full-token form resolves by report_token; the vanity form by its 12-hex prefix, exactly one match', async () => {
         wireProject();
-        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
         expect(mockBuilders.projects.where).toHaveBeenCalledWith({ report_token: FULL });
         // The service-report seam never sees the project run.
         expect(mockBuilders.service_records.where).not.toHaveBeenCalled();
         wireProject();
-        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana-lee-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
-        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana_lee.jr-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana-lee-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana_lee.jr-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
         expect(mockBuilders.projects.where).toHaveBeenCalledWith('report_token', 'like', `${FULL.slice(0, 12)}%`);
         expect(mockBuilders.projects.limit).toHaveBeenCalledWith(2);
         // A migrated historical delivery ('legacy_sent', no sent_at) is an
         // issued report whose token still opens (r7 P2).
         wireProject({ full: project({ sent_at: null, delivery_status: 'legacy_sent' }) });
-        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK('legacy_sent'));
       });
 
       test('an ambiguous prefix, a vanished project, a payment-held report, or another account\'s report refuses', async () => {
@@ -2215,14 +2267,6 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: project({ report_hold_status: 'held' }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);
-        // The project send flow's live resend claim (delivery_status
-        // 'sending', status + sent_at kept) is respected for its window; a
-        // claim past the flow's own ten-minute staleness bound is a crashed
-        // send, not a delivery in flight (r10 P1).
-        wireProject({ full: project({ delivery_status: 'sending', updated_at: new Date().toISOString() }) });
-        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/being re-sent right now/);
-        wireProject({ full: project({ delivery_status: 'sending', updated_at: '2020-01-01T00:00:00Z' }) });
-        expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
         wireProject({ full: project({ customer_id: 'c9' }), linkCustomer: acct('c9', 'other') });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
         // A look-alike host or a non-report segment is not ours.
@@ -2280,6 +2324,11 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       wireNotice();
       mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2', effective_date: '2020-01-01' }));
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
+      // … and so does a correction delivered by EMAIL only (r11 P1).
+      wireNotice();
+      mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2', sms_sent: false }));
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
+      expect(mockBuilders.price_change_notices.where).not.toHaveBeenCalledWith({ sms_sent: true });
       wireNotice({ row: notice({ effective_date: '2020-01-01' }) });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
       wireNotice({ row: null });
@@ -2351,6 +2400,59 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     await markStatementsSent([31, 52]);
     expect(markStatementSent).toHaveBeenCalledWith(31);
     expect(markStatementSent).toHaveBeenCalledWith(52);
+  });
+
+  describe('project report send claim (the project send flow\'s own delivery claim, taken by the composer send — GH Codex #3893 r10 + r11 P1)', () => {
+    beforeEach(() => { mockDb.fn = { now: () => 'NOW()' }; });
+    const claimUpdate = (projects) => projects.update.mock.calls;
+
+    test('claim: the flow\'s conditional UPDATE keyed to the delivery state the seam saw — a stamped state, none, or a STALE claim it may take over', async () => {
+      const projects = chainBuilder();
+      mockBuilders = { projects };
+      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: null }, { id: 'p3', deliveryStatus: 'sending' }]);
+      expect(r.ok).toBe(true);
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p1' });
+      expect(projects.where).toHaveBeenCalledWith({ delivery_status: 'sent' });
+      expect(projects.whereNull).toHaveBeenCalledWith('delivery_status');
+      expect(projects.whereRaw).toHaveBeenCalledWith("delivery_status = 'sending' AND updated_at < now() - interval '10 minutes'");
+      expect(claimUpdate(projects)).toHaveLength(3);
+      expect(claimUpdate(projects)[0][0]).toEqual({ delivery_status: 'sending', delivery_claim_token: expect.stringMatching(/^[a-f0-9]{24}$/), updated_at: 'NOW()' });
+      // The hand-back target: the state seen, or 'failed' for a stale claim
+      // taken over — the flow's own normalization of a crashed send.
+      expect(r.claim.projects.map((p) => p.previousStatus)).toEqual(['sent', null, 'failed']);
+      expect(new Set(r.claim.projects.map((p) => p.token)).size).toBe(3);
+    });
+
+    test('claim lost (the flow is sending right now, or the state moved): every claim this call won is handed back, token-guarded, and the send refuses', async () => {
+      const projects = chainBuilder();
+      projects.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      mockBuilders = { projects };
+      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: 'closed' }]);
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/being re-sent right now/);
+      const token = claimUpdate(projects)[0][0].delivery_claim_token;
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p1', delivery_status: 'sending', delivery_claim_token: token });
+      expect(claimUpdate(projects)[2][0]).toEqual({ delivery_status: 'sent', delivery_claim_token: null, updated_at: 'NOW()' });
+    });
+
+    test('claim: an UPDATE that throws hands back the claims already won before the error surfaces', async () => {
+      const projects = chainBuilder();
+      projects.update.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('connection reset'));
+      mockBuilders = { projects };
+      await expect(claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: 'sent' }])).rejects.toThrow('connection reset');
+      expect(claimUpdate(projects)).toHaveLength(3);
+      expect(claimUpdate(projects)[2][0]).toMatchObject({ delivery_status: 'sent', delivery_claim_token: null });
+    });
+
+    test('release: restores the delivery state this claim replaced, only where the row still carries this claim', async () => {
+      const projects = chainBuilder();
+      mockBuilders = { projects };
+      await releaseProjectReportSends({ projects: [{ id: 'p1', token: 't1', previousStatus: 'legacy_sent' }, { id: 'p3', token: 't3', previousStatus: 'failed' }] });
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p1', delivery_status: 'sending', delivery_claim_token: 't1' });
+      expect(projects.update).toHaveBeenCalledWith({ delivery_status: 'legacy_sent', delivery_claim_token: null, updated_at: 'NOW()' });
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p3', delivery_status: 'sending', delivery_claim_token: 't3' });
+      expect(projects.update).toHaveBeenCalledWith({ delivery_status: 'failed', delivery_claim_token: null, updated_at: 'NOW()' });
+    });
   });
 
   describe('card request send claim (the service\'s own one-text mechanics, run by the composer send)', () => {
