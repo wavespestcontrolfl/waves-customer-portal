@@ -11,6 +11,11 @@ let mockRestrictionPolicy = null;
 // The seasonal-guide SMS consent basis (document-contract-delivery's own
 // derivation): opted in only when notification_prefs.seasonal_tips === true.
 let mockNotificationPrefsRow = null;
+// The guide's audience: the Monday sweep's own recurring-lawn predicate.
+let mockRecurringLawn = true;
+jest.mock('../services/irrigation-weekly-email', () => ({
+  hasRecurringLawnEvidence: jest.fn(async () => mockRecurringLawn),
+}));
 jest.mock('../services/document-contract-delivery', () => ({
   marketingSmsConsentBasisForContract: jest.fn(async () => (mockNotificationPrefsRow?.seasonal_tips === true
     ? { status: 'opted_in', source: 'notification_prefs.seasonal_tips', capturedAt: '2026-08-01T00:00:00Z' }
@@ -149,7 +154,10 @@ function scheduledQuery() {
   };
   return q;
 }
-const interactionsInsert = jest.fn(async () => [1]);
+const interactionsInsert = jest.fn(async () => [{ id: 'claim-1' }]);
+let interactionUpdates = [];
+let interactionDeletes = 0;
+let interactionClaimWheres = [];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -162,7 +170,17 @@ beforeEach(() => {
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
     if (table === 'scheduled_services') { const q = scheduledQuery(); scheduledQueries.push(q); return q; }
-    if (table === 'customer_interactions') { const q = { insert: interactionsInsert, ...traceQuery(interactionMarkerRow) }; interactionQueries.push(q); return q; }
+    if (table === 'customer_interactions') {
+      // One object: traceQuery's where() returns ITS OWN q, so the claim's
+      // update / del must live on that same object, not on a spread copy.
+      const q = traceQuery(interactionMarkerRow);
+      q.insert = interactionsInsert;
+      q.update = jest.fn(async (patch) => { interactionUpdates.push(patch); return 1; });
+      q.del = jest.fn(async () => { interactionDeletes += 1; return 1; });
+      const where = q.where;
+      q.where = jest.fn((...args) => { if (args[0] && typeof args[0] === 'object' && 'id' in args[0]) interactionClaimWheres.push(args[0]); return where(...args); });
+      interactionQueries.push(q); return q;
+    }
     if (table === 'email_messages') { const q = traceQuery(manualEmailRow); manualEmailQueries.push(q); return q; }
     if (table === 'sms_log') return traceQuery(manualSmsRow);
     if (table === 'email_template_automation_runs') { lastRunsQuery = livenessQuery(runRows); return lastRunsQuery; }
@@ -178,6 +196,10 @@ beforeEach(() => {
   turfRow = null;
   turfQueries = [];
   mockNotificationPrefsRow = null;
+  mockRecurringLawn = true;
+  interactionUpdates = [];
+  interactionDeletes = 0;
+  interactionClaimWheres = [];
   mockRestrictionPolicy = null;
   db.fn = { now: jest.fn(() => 'NOW()') };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -1037,10 +1059,8 @@ describe('sprinkler timer guide', () => {
     expect(q.whereIn.mock.calls[0]).toEqual(['subject', ['sprinkler_timer prep info sent', 'Sprinkler Timer Guide prep sent (manual)']]);
   });
 
-  test('sent once, durably: the email ledger and the SMS log count as delivery even when the interaction marker was never written', async () => {
+  test('sent once, durably: the email ledger and the SMS log count as delivery too (belt and braces around the claim)', async () => {
     mockNotificationPrefsRow = { seasonal_tips: true };
-    // Delivery, then the marker insert fails (logPrepInteraction is fail-soft).
-    interactionsInsert.mockRejectedValueOnce(new Error('marker insert failed'));
     const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
     expect(first.ok).toBe(true);
     expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].idempotencyKey).toBe('prep_guide_once:cust-1:prep.sprinkler_timer');
@@ -1067,16 +1087,54 @@ describe('sprinkler timer guide', () => {
     EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ onQueued }) => { onQueued?.(); throw new Error('response lost'); });
     const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
     expect(first).toMatchObject({ ok: false, emailSent: false, emailUncertain: true });
-    expect(interactionsInsert).toHaveBeenCalledWith(expect.objectContaining({
-      customer_id: 'cust-1', interaction_type: 'email_outbound', subject: 'Sprinkler Timer Guide prep sent (manual)',
-    }));
-    expect(interactionsInsert.mock.calls[0][0].body).toMatch(/delivery uncertain/);
-    // A definite pre-dispatch failure writes no marker (a retry is fine).
-    jest.clearAllMocks();
+    // The pre-send claim is kept and marked uncertain — never released.
+    expect(interactionDeletes).toBe(0);
+    expect(interactionUpdates).toEqual([{ body: expect.stringMatching(/delivery uncertain/) }]);
+    // A definite pre-dispatch failure releases the claim (a retry is fine).
+    jest.clearAllMocks(); interactionUpdates = []; interactionDeletes = 0;
     EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('template missing'));
     const second = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
     expect(second).toMatchObject({ ok: false, emailSent: false });
-    expect(interactionsInsert).not.toHaveBeenCalled();
+    expect(interactionDeletes).toBe(1);
+    expect(interactionUpdates).toEqual([]);
+  });
+
+  test('the send is claimed BEFORE dispatch, settled into the tagger-compatible marker on delivery, and refused when the claim cannot be written', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    const order = [];
+    interactionsInsert.mockImplementation(async () => { order.push('claim'); return [{ id: 'claim-9' }]; });
+    sendCustomerMessage.mockImplementation(async () => { order.push('sms'); return { sent: true, providerMessageId: 'SM1' }; });
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(result.ok).toBe(true);
+    expect(order).toEqual(['claim', 'sms']);
+    expect(interactionsInsert.mock.calls[0][0]).toMatchObject({ customer_id: 'cust-1', subject: 'Sprinkler Timer Guide prep sent (manual)' });
+    expect(interactionClaimWheres).toContainEqual({ id: 'claim-9', customer_id: 'cust-1' });
+    expect(interactionUpdates).toEqual([expect.objectContaining({ interaction_type: 'sms_outbound', subject: 'sprinkler_timer prep info sent' })]);
+    expect(interactionUpdates[0].body).toMatch(/text to \+19415550101/);
+    expect(interactionDeletes).toBe(0);
+    // A definite text miss releases the claim.
+    jest.clearAllMocks(); interactionUpdates = []; interactionDeletes = 0;
+    interactionsInsert.mockResolvedValue([{ id: 'claim-10' }]);
+    sendCustomerMessage.mockResolvedValue({ sent: false, code: 'NO_MARKETING_CONSENT' });
+    const miss = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(miss.ok).toBe(false);
+    expect(interactionDeletes).toBe(1);
+    // No claim = no send.
+    jest.clearAllMocks();
+    interactionsInsert.mockRejectedValueOnce(new Error('db unavailable'));
+    const refused = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(refused).toMatchObject({ ok: false, reason: 'guide_check_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('only a recurring lawn customer (the Monday plan\'s audience) gets the guide', async () => {
+    mockRecurringLawn = false;
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(result).toMatchObject({ ok: false, reason: 'not_recurring_lawn' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    // Visit prep is unaffected by the lawn audience.
+    const flea = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' });
+    expect(flea.ok).toBe(true);
   });
 
   test('watering block uses the re-read address and fails closed when the move stamp changes mid-build', async () => {

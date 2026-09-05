@@ -1150,7 +1150,8 @@ const PREP_REFUSAL_COPY = {
   prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
   unsupported_pest_type: () => 'That prep type is not available yet.',
   unsupported_channel: () => 'Choose Email, Text, or Both.',
-  // The sprinkler timer guide is a seasonal tip, sent once.
+  // The sprinkler timer guide is a seasonal tip for recurring lawn customers, sent once.
+  not_recurring_lawn: () => 'The sprinkler timer guide is for recurring lawn customers who get the Monday watering plan — this customer is not one, so it was not sent.',
   seasonal_tips_off: () => 'This customer turned off Seasonal Lawn Tips, and the sprinkler timer guide is one — it was not sent.',
   email_opted_out: () => 'This customer turned off email — choose Text to send the sprinkler timer guide link instead.',
   seasonal_tips_not_opted_in: () => 'A sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in (a text is a marketing message) — this customer has not opted in, so choose Email.',

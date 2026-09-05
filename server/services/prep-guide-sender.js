@@ -828,6 +828,11 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
 // send (a guide is a courtesy; a second copy or an unwanted one is not).
 async function guideGate(customer, config, pestType, { wantEmail = true, wantSms = true } = {}) {
   try {
+    // The guide says "every Monday we email you your watering plan" — true
+    // only for the Monday sweep's audience, a recurring lawn customer
+    // (its own predicate; GH Codex #3953 r3 P2).
+    const { hasRecurringLawnEvidence } = require('./irrigation-weekly-email');
+    if (!(await hasRecurringLawnEvidence(customer.id))) return { refusal: { reason: 'not_recurring_lawn' } };
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
     if (prefs && prefs.seasonal_tips === false) return { refusal: { reason: 'seasonal_tips_off' } };
     // History BEFORE the email opt-out: on Both, that opt-out only drops the
@@ -875,6 +880,32 @@ async function guideGate(customer, config, pestType, { wantEmail = true, wantSms
   } catch (err) {
     logger.warn(`[prep-guide-sender] guide preference / history read failed for customer ${customer.id}: ${err.message}`);
     return { refusal: { reason: 'guide_check_failed' } };
+  }
+}
+
+async function settleGuideClaim({ claimId, customer, config, contacts, result, pestType }) {
+  if (claimId == null) return;
+  const row = db('customer_interactions').where({ id: claimId, customer_id: customer.id });
+  try {
+    if (result.ok) {
+      await row.update({
+        interaction_type: result.smsSent ? 'sms_outbound' : 'email_outbound',
+        subject: result.smsSent ? `${pestType} prep info sent` : `${config.label} prep sent (manual)`,
+        body: `Prep sent manually via Communications — ${[
+          result.emailSent ? `email to ${contacts.recipient.email}` : null,
+          result.smsSent ? `text to ${contacts.phone}` : null,
+        ].filter(Boolean).join(' + ')}.`,
+      });
+    } else if (result.emailUncertain) {
+      await row.update({ body: 'Prep email dispatched via Communications — delivery uncertain (provider response lost); not resent.' });
+    } else {
+      await row.del();
+    }
+  } catch (err) {
+    // A delivered send whose settle failed still holds its claim (the fence
+    // reads the subject, which the claim already carries); only a release
+    // that failed costs an operator a "already sent" on the next click.
+    logger.warn(`[prep-guide-sender] guide claim settle failed for customer ${customer.id} (ok=${result.ok}): ${err.message}`);
   }
 }
 
@@ -940,6 +971,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     // again — the interaction row logPrepInteraction writes is the durable
     // proof (GH Codex #3953 r1 P1 + P2).
     let guideConsentBasis = null;
+    let guideClaimId = null;
     if (config.guide) {
       const gate = await guideGate(customer, config, pestType, { wantEmail: contacts.wantEmail, wantSms: contacts.wantSms });
       const refusal = gate.refusal;
@@ -958,6 +990,25 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
         if (!contacts.wantEmail) return { ...result, reason: 'seasonal_tips_not_opted_in' };
         contacts.wantSms = false;
         result.smsLinkReason = 'seasonal_tips_not_opted_in';
+      }
+      // Sent once, claimed BEFORE dispatch: the marker row the fence reads is
+      // written first, so a swallowed post-provider write (twilio.js's
+      // sms_log insert, the marker itself) can never leave an accepted send
+      // invisible. Released only on a definite miss; a delivered or
+      // uncertain attempt keeps it (GH Codex #3953 r2 P2 + r3 P2). No claim
+      // = no send.
+      try {
+        const [claimed] = await db('customer_interactions').insert({
+          customer_id: customer.id,
+          interaction_type: 'email_outbound',
+          admin_user_id: actorId || null,
+          subject: `${config.label} prep sent (manual)`,
+          body: 'Prep send claimed via Communications — dispatching.',
+        }, ['id']);
+        guideClaimId = claimed?.id ?? claimed ?? null;
+      } catch (err) {
+        logger.warn(`[prep-guide-sender] guide send claim failed for customer ${customer.id}: ${err.message}`);
+        return { ...result, reason: 'guide_check_failed' };
       }
     }
     const page = config.guide
@@ -989,24 +1040,12 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
       result.reason = 'partial';
       result.failedChannel = 'sms';
     }
-    // An uncertain email (SendGrid may have accepted; the ledger row reads
-    // "failed", which the send-once fence must not treat as a clean miss)
-    // leaves a durable marker so a later click is refused rather than
-    // sending a second copy (GH Codex #3953 r2 P2). Fail-soft.
-    if (config.guide && result.emailUncertain && !result.emailSent) {
-      try {
-        await db('customer_interactions').insert({
-          customer_id: customer.id,
-          interaction_type: 'email_outbound',
-          admin_user_id: actorId || null,
-          subject: `${config.label} prep sent (manual)`,
-          body: `Prep email dispatched via Communications — delivery uncertain (provider response lost); not resent.`,
-        });
-      } catch (err) {
-        logger.warn(`[prep-guide-sender] uncertain-delivery marker failed for customer ${customer.id}: ${err.message}`);
-      }
-    }
-    if (result.ok) {
+    if (config.guide) {
+      // Settle the claim: delivered → the tagger-compatible marker
+      // (logPrepInteraction's own shape, on the claimed row); uncertain
+      // email → kept, marked; definite miss → released so a retry is allowed.
+      await settleGuideClaim({ claimId: guideClaimId, customer, config, contacts, result, pestType });
+    } else if (result.ok) {
       await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });
       await settleHeldEnrollment(customer.id, config.emailTemplateKey);
     }
