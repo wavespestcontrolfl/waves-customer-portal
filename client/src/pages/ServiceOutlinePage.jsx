@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { CalendarDays, ClipboardCheck, FileText, MapPin, ShieldCheck, Sprout } from "lucide-react";
-import BrandFooter from "../components/BrandFooter";
 import DocumentActionBar from "../components/DocumentActionBar";
 import { useGlassSurface } from "../glass/glass-engine";
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from "../constants/business";
@@ -75,7 +74,7 @@ function Section({ section }) {
 
 export default function ServiceOutlinePage() {
   const { token } = useParams();
-  useGlassSurface(true, "full");
+  useGlassSurface(true);
   const [packet, setPacket] = useState(null);
   const [loading, setLoading] = useState(true);
   // { kind: 'gone' | 'transient', message } — never a raw HTTP status.
@@ -156,7 +155,7 @@ export default function ServiceOutlinePage() {
   };
 
   return (
-    <div data-glass-clear="" className="min-h-screen bg-waves-page text-waves-blue-deeper">
+    <div data-glass-clear="" className="flex-1 bg-waves-page text-waves-blue-deeper">
       {/* Wordmark row removed — the WavesShell top bar (App.jsx route wrap,
           owner 2026-07-06) provides the brand chrome; this strip keeps only
           the View Estimate CTA. */}
@@ -273,11 +272,6 @@ export default function ServiceOutlinePage() {
           </div>
         </section>
 
-        <div className="mx-auto max-w-[760px] px-4 pb-10">
-          {/* Newsletter signup lives only on the newsletter pages (owner
-              2026-07-09, supersedes same-day card ruling). */}
-          <BrandFooter />
-        </div>
       </div>
     </div>
   );

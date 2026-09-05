@@ -50,6 +50,20 @@ const { executeTool } = require('../services/intelligence-bar/tools');
 // Real ET "today" — the date a same-day move targets.
 const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed rows (the reschedule writer reads
+// the committed technician_id off the CAS row).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(
+      rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : []),
+    ),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -68,7 +82,7 @@ function chain(overrides = {}) {
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockResolvedValue([]),
     first: jest.fn().mockResolvedValue(undefined),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockReturnThis(),
     returning: jest.fn().mockResolvedValue([{ id: 'appt-1' }]),
     ...overrides,
@@ -687,7 +701,7 @@ describe('reschedule_appointment', () => {
     // date-only move, via the preserved-duration derivation on a timed one —
     // so a concurrent END-only resize must also make it miss): the stale
     // writer matches zero rows and must not write, log, or fire side effects.
-    const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+    const updateChain = chain({ update: jest.fn().mockImplementation(() => updateResult(0)) });
     wireDb({
       scheduled_services: [
         chain({ first: jest.fn().mockResolvedValue(baseAppt) }),
@@ -921,7 +935,7 @@ describe('reschedule_appointment — end-less rows: probe the DERIVED block, CAS
   test('the duration the derivation used is in the CAS: a concurrent duration edit makes the write miss', async () => {
     // Zero rows matched = the row changed under us (here: its duration, so
     // the block this move computed is stale) → the tool's retry error.
-    const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+    const updateChain = chain({ update: jest.fn().mockImplementation(() => updateResult(0)) });
     wireDb({
       scheduled_services: [chain({ first: jest.fn().mockResolvedValue(nullEndAppt) }), chain(), updateChain],
       customers: customersQ(),

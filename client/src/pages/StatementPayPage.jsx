@@ -27,7 +27,6 @@ import { COLORS } from "../theme-brand";
 import { DOC, DOC_FONT, FS, FW, LH, SP, RADIUS, SHADOW } from "../theme-doc";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
 import PublicLoadError from '../components/PublicLoadError';
-import BrandFooter from "../components/BrandFooter";
 import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
 import { microdepositDetailFromNextAction, microdepositGuidance } from "../lib/microdeposit";
@@ -338,7 +337,7 @@ export default function StatementPayPage() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
   // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -491,9 +490,6 @@ export default function StatementPayPage() {
           the outlier 792px/48px shell so /pay/statement matches its siblings. */}
       <div className="waves-receipt-page">
         {children}
-        {/* Newsletter signup lives only on the newsletter pages (owner
-            2026-07-09, supersedes the 2026-07-08 glass-footer ruling). */}
-        <BrandFooter />
       </div>
     </WavesShell>
   );
@@ -591,7 +587,7 @@ export default function StatementPayPage() {
     <>
       {/* No server-side statement PDF render — Share + Print only. */}
       <DocumentActionBar shareTitle={`Waves statement ${statement.number || ''}`.trim()} />
-      <BrandCard padding={28}>
+      <BrandCard padding={24}>
       <SerifHeading style={{ marginBottom: 6 }}>Pay statement {statement.number}</SerifHeading>
       <p style={{ margin: "0 0 20px", fontSize: FS.body, color: DOC.muted }}>
         {billTo?.company ? `Billed to ${billTo.company}. ` : ""}

@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   ClipboardCheck,
   ExternalLink,
-  Gauge,
   Package,
   RefreshCw,
   ShieldCheck,
@@ -17,6 +16,7 @@ import {
   Wrench,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import ProtocolReferenceTabV2 from "./ProtocolReferenceTabV2";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -97,77 +97,11 @@ function fmtDate(value) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" });
 }
 
-function fmtDateTime(value) {
-  if (!value) return "—";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-}
-
 function statusTone(status) {
   if (status === "ok") return "text-green-700 bg-green-50 border-green-200";
   if (status === "low") return "text-amber-800 bg-amber-50 border-amber-200";
   if (status === "unmapped") return "text-red-700 bg-red-50 border-red-200";
   return "text-zinc-700 bg-zinc-50 border-zinc-200";
-}
-
-function readinessTone(status) {
-  if (status === "ready") return "good";
-  if (status === "warning") return "warn";
-  if (status === "blocked") return "bad";
-  return "neutral";
-}
-
-function readinessIssueAction(issue, appointment) {
-  const code = String(issue?.code || "");
-  if (code === "missing_protocol_assignment") {
-    return { type: "assign", label: "Assign" };
-  }
-  if (code.includes("calibration") || code.includes("equipment")) {
-    return { type: "link", label: "Calibration", to: "/admin/equipment?tab=calibrations" };
-  }
-  if (code.includes("inventory") || code.includes("product")) {
-    return { type: "link", label: "Inventory", to: "/admin/inventory?tab=protocols" };
-  }
-  if (code.includes("turf_profile") || code.includes("profile")) {
-    return { type: "link", label: "Customer", to: `/admin/customers?customerId=${encodeURIComponent(appointment.customerId || "")}` };
-  }
-  if (code.includes("assessment")) {
-    return { type: "link", label: "Assessment", to: "/admin/lawn-assessments?tab=field" };
-  }
-  if (code.includes("sop") || code.includes("wiki")) {
-    return { type: "tab", label: "SOP Refs", tab: "bridges" };
-  }
-  if (code.includes("blackout") || code.includes("ordinance") || code.includes("phosphorus") || code.includes("nitrogen")) {
-    return { type: "link", label: "Compliance", to: "/admin/compliance" };
-  }
-  return { type: "link", label: "Dispatch", to: `/admin/dispatch?tab=schedule&serviceId=${encodeURIComponent(appointment.id || "")}` };
-}
-
-function readinessResolutionCopy(issue) {
-  const code = String(issue?.code || "");
-  if (code === "missing_protocol_assignment") {
-    return "Assign the active protocol window and a field-verified calibration. Re-scan readiness after assignment.";
-  }
-  if (code.includes("calibration") || code.includes("equipment")) {
-    return "Verify the equipment calibration, mark expired records inactive, or assign a valid field-verified calibration.";
-  }
-  if (code.includes("inventory") || code.includes("product")) {
-    return "Restock the mapped product, correct the stock count, or update the protocol product mapping before route day.";
-  }
-  if (code.includes("turf_profile") || code.includes("profile")) {
-    return "Complete the customer turf profile fields needed for cultivar, ordinance zone, turf square footage, and legal gates.";
-  }
-  if (code.includes("assessment")) {
-    return "Complete or update the lawn assessment so irrigation, thatch, pest, disease, and chronic decline flags are current.";
-  }
-  if (code.includes("sop") || code.includes("wiki")) {
-    return "Attach or sync the seasonal SOP reference for the active protocol window.";
-  }
-  if (code.includes("blackout") || code.includes("ordinance") || code.includes("phosphorus") || code.includes("nitrogen")) {
-    return "Review the compliance gate and adjust the plan to the allowed blackout-safe or ordinance-safe alternative.";
-  }
-  return "Open the appointment in dispatch and resolve the field or office exception before the route is released.";
 }
 
 function Pill({ children, tone = "neutral" }) {
@@ -215,51 +149,6 @@ function Section({ title, icon: Icon, children, action }) {
   );
 }
 
-function ReadinessActionButton({ action, appointment, issue, assigningServiceId, onAssign, onTab }) {
-  if (!action) return null;
-  if (action.type === "link") {
-    return (
-      <Link
-        to={action.to}
-        className="inline-flex items-center justify-center rounded-sm border border-zinc-300 bg-white px-3 py-2 text-11 font-medium uppercase tracking-label text-zinc-800 hover:bg-zinc-50"
-      >
-        {action.label}
-      </Link>
-    );
-  }
-  if (action.type === "tab") {
-    return (
-      <button
-        type="button"
-        className="inline-flex items-center justify-center rounded-sm border border-zinc-300 bg-white px-3 py-2 text-11 font-medium uppercase tracking-label text-zinc-800 hover:bg-zinc-50"
-        onClick={() => onTab(action.tab)}
-      >
-        {action.label}
-      </button>
-    );
-  }
-  if (action.type === "assign") {
-    return (
-      <button
-        type="button"
-        className="inline-flex items-center justify-center rounded-sm bg-zinc-900 px-3 py-2 text-11 font-medium uppercase tracking-label text-white disabled:opacity-50"
-        disabled={assigningServiceId === appointment.id}
-        onClick={() => onAssign(appointment.id)}
-      >
-        {assigningServiceId === appointment.id ? "Assigning" : action.label}
-      </button>
-    );
-  }
-  return (
-    <Link
-      to={`/admin/dispatch?tab=schedule&serviceId=${encodeURIComponent(appointment?.id || "")}`}
-      className="inline-flex items-center justify-center rounded-sm border border-zinc-300 bg-white px-3 py-2 text-11 font-medium uppercase tracking-label text-zinc-800 hover:bg-zinc-50"
-    >
-      {issue?.severity === "block" ? "Resolve" : "Review"}
-    </Link>
-  );
-}
-
 function BridgeList({ title, items }) {
   return (
     <Section title={title} icon={ExternalLink}>
@@ -282,30 +171,18 @@ function BridgeList({ title, items }) {
   );
 }
 
-function buildGateDraft(gate) {
-  return {
-    title: gate?.title || "",
-    gateType: gate?.type || "",
-    severity: gate?.severity || "",
-    ruleText: gate?.ruleText || "",
-    logicText: JSON.stringify(gate?.logic || {}, null, 2),
-    wikiRefsText: (gate?.wikiRefs || []).join("\n"),
-  };
-}
-
 const PROTOCOL_SECTIONS = [
+  { key: "mixing", label: "Mixing & labels", Icon: Beaker },
   { key: "overview", label: "Overview", Icon: Sprout },
-  { key: "readiness", label: "Readiness", Icon: AlertTriangle },
   { key: "products", label: "Products", Icon: Package },
-  { key: "gates", label: "Gates", Icon: ShieldCheck },
-  { key: "calibration", label: "Calibration", Icon: Gauge },
-  { key: "bridges", label: "Bridges", Icon: BookOpen },
-  { key: "audit", label: "Audit", Icon: Clock },
+  { key: "bridges", label: "Instructions", Icon: BookOpen },
+  { key: "audit", label: "History", Icon: Clock },
 ];
 const PROTOCOL_TAB_KEYS = new Set(PROTOCOL_SECTIONS.map(({ key }) => key));
 
 function normalizeProtocolTab(value) {
-  return PROTOCOL_TAB_KEYS.has(value) ? value : "overview";
+  if (["readiness", "gates", "calibration"].includes(value)) return "overview";
+  return PROTOCOL_TAB_KEYS.has(value) ? value : "mixing";
 }
 
 // `onSecondaryNav` (from ServiceLibraryPage): the Services header owns the
@@ -317,7 +194,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
   const activeTab = normalizeProtocolTab(searchParams.get(queryKey));
 
   // Usage beacon for the leaf that actually RENDERS — invalid or missing
-  // ?protocolTab= resolves to Overview without rewriting the URL. The
+  // ?protocolTab= resolves to Mixing & labels without rewriting the URL. The
   // Service Library host defers to this page for its deepest leaf,
   // matching the nested-*Tab convention (Codex #2961 r17). Embedded-only:
   // the standalone route was retired.
@@ -338,26 +215,13 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
   const [syncingWiki, setSyncingWiki] = useState(false);
   const [tasksDraft, setTasksDraft] = useState("");
   const [savingTasks, setSavingTasks] = useState(false);
-  const [gateDrafts, setGateDrafts] = useState({});
-  const [savingGateId, setSavingGateId] = useState("");
   const [selectedProtocolId, setSelectedProtocolId] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [creatingDraft, setCreatingDraft] = useState(false);
-  const [bulkAssigning, setBulkAssigning] = useState(false);
-  const [assigningServiceId, setAssigningServiceId] = useState("");
-  const [savingSnapshot, setSavingSnapshot] = useState(false);
-  const [selectedExceptionServiceId, setSelectedExceptionServiceId] = useState("");
-  const [substitutionSearch, setSubstitutionSearch] = useState({});
-  const [substitutionResults, setSubstitutionResults] = useState({});
-  const [substitutionDrafts, setSubstitutionDrafts] = useState({});
-  const [savingSubstitutionKey, setSavingSubstitutionKey] = useState("");
-  const [restockDrafts, setRestockDrafts] = useState({});
-  const [savingRestockKey, setSavingRestockKey] = useState("");
-
   const setActiveTab = (nextTab) => {
     const next = new URLSearchParams(searchParams);
     const normalized = normalizeProtocolTab(nextTab);
-    if (normalized === "overview") next.delete(queryKey);
+    if (normalized === "mixing") next.delete(queryKey);
     else next.set(queryKey, normalized);
     setSearchParams(next, { replace: true });
   };
@@ -371,19 +235,14 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
         setData(result);
         setWikiDraft((result?.protocol?.window?.wikiRefs || []).join("\n"));
         setTasksDraft((result?.protocol?.window?.requiredTasks || []).join("\n"));
-        const nextGateDrafts = {};
-        (result?.protocol?.gates || []).forEach((gate) => {
-          if (gate.id) nextGateDrafts[gate.id] = buildGateDraft(gate);
-        });
-        setGateDrafts(nextGateDrafts);
       })
       .catch((err) => setError(err.message || "Could not load protocol command center"))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => {
-    load();
-  }, []); // run once on mount
+    if (activeTab !== "mixing" && !data) load();
+  }, [activeTab]);
 
   const protocol = data?.protocol || {};
   const window = protocol.window || {};
@@ -392,27 +251,6 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
   const publishValidation = data?.publishValidation || { canPublish: false, issues: [], counts: {} };
   const defaultProducts = useMemo(() => products.filter((p) => p.defaultInPlan), [products]);
   const conditionalProducts = useMemo(() => products.filter((p) => !p.defaultInPlan), [products]);
-  const exceptionAppointments = useMemo(
-    () => (data?.readinessQueue?.appointments || []).filter((appt) => appt.status === "blocked" || appt.status === "warning"),
-    [data?.readinessQueue?.appointments],
-  );
-  const selectedExceptionAppointment = useMemo(() => {
-    if (!exceptionAppointments.length) return null;
-    return exceptionAppointments.find((appt) => appt.id === selectedExceptionServiceId) || exceptionAppointments[0];
-  }, [exceptionAppointments, selectedExceptionServiceId]);
-  const exceptionIssueCounts = useMemo(() => {
-    const counts = {};
-    exceptionAppointments.forEach((appt) => {
-      (appt.issues || []).forEach((issue) => {
-        const key = issue.code || issue.severity || "unknown";
-        counts[key] = (counts[key] || 0) + 1;
-      });
-    });
-    return Object.entries(counts)
-      .map(([code, count]) => ({ code, count }))
-      .sort((a, b) => b.count - a.count);
-  }, [exceptionAppointments]);
-
   async function searchCatalogProducts(protocolProductId) {
     const query = productSearch[protocolProductId] || "";
     if (!query.trim()) return;
@@ -521,198 +359,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
     }
   }
 
-  async function bulkAssignReadyAppointments() {
-    setBulkAssigning(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await adminPost("/admin/protocols/lawn/readiness/bulk-assign", {
-        days: data?.readinessQueue?.days || 14,
-        limit: 75,
-      });
-      setNotice(`Bulk assigned ${result.assigned || 0} appointment${result.assigned === 1 ? "" : "s"}; skipped ${result.skipped || 0}.`);
-      setData((prev) => ({
-        ...(prev || {}),
-        readinessQueue: result.readinessQueue || prev?.readinessQueue,
-        readinessSnapshots: result.readinessSnapshots || prev?.readinessSnapshots,
-      }));
-    } catch (err) {
-      setError(err.message || "Could not bulk assign appointments");
-    } finally {
-      setBulkAssigning(false);
-    }
-  }
-
-  async function assignReadinessAppointment(serviceId) {
-    if (!serviceId) return;
-    setAssigningServiceId(serviceId);
-    setError("");
-    setNotice("");
-    try {
-      const result = await adminPost(`/admin/protocols/lawn/readiness/${serviceId}/assign`, {
-        days: data?.readinessQueue?.days || 14,
-      });
-      setNotice("Appointment assigned from readiness queue.");
-      setData((prev) => ({
-        ...(prev || {}),
-        readinessQueue: result.readinessQueue || prev?.readinessQueue,
-        readinessSnapshots: result.readinessSnapshots || prev?.readinessSnapshots,
-      }));
-    } catch (err) {
-      setError(err.message || "Could not assign appointment");
-    } finally {
-      setAssigningServiceId("");
-    }
-  }
-
-  function substitutionKey(appointmentId, issue) {
-    return `${appointmentId}:${issue?.metadata?.productId || issue?.code || "product"}`;
-  }
-
-  async function searchSubstitutionProducts(key) {
-    const query = substitutionSearch[key] || "";
-    const result = await adminFetch(`/admin/protocols/lawn/substitution-products?q=${encodeURIComponent(query)}`);
-    setSubstitutionResults((prev) => ({ ...prev, [key]: result.products || [] }));
-  }
-
-  async function approveProductSubstitution(appointment, issue) {
-    const key = substitutionKey(appointment.id, issue);
-    const originalProductId = issue?.metadata?.productId;
-    const draft = substitutionDrafts[key] || {};
-    if (!originalProductId || !draft.substituteProductId) {
-      setError("Select a substitute product before approving the substitution.");
-      return;
-    }
-    setSavingSubstitutionKey(key);
-    setError("");
-    setNotice("");
-    try {
-      const result = await adminPost(`/admin/protocols/lawn/readiness/${appointment.id}/substitutions`, {
-        originalProductId,
-        substituteProductId: draft.substituteProductId,
-        ratePer1000: draft.ratePer1000 || null,
-        rateUnit: draft.rateUnit || null,
-        reason: draft.reason || "Inventory readiness substitution",
-        days: data?.readinessQueue?.days || 14,
-      });
-      setNotice("Product substitution approved and readiness was rechecked.");
-      setData((prev) => ({
-        ...(prev || {}),
-        readinessQueue: result.readinessQueue || prev?.readinessQueue,
-        readinessSnapshots: result.readinessSnapshots || prev?.readinessSnapshots,
-      }));
-    } catch (err) {
-      setError(err.message || "Could not approve product substitution");
-    } finally {
-      setSavingSubstitutionKey("");
-    }
-  }
-
-  async function createRestockRequest(appointment, issue) {
-    const key = substitutionKey(appointment.id, issue);
-    const productId = issue?.metadata?.productId;
-    const draft = restockDrafts[key] || {};
-    if (!productId) {
-      setError("This inventory issue is missing a product id.");
-      return;
-    }
-    setSavingRestockKey(key);
-    setError("");
-    setNotice("");
-    try {
-      const result = await adminPost(`/admin/protocols/lawn/readiness/${appointment.id}/restock-requests`, {
-        productId,
-        requestedQuantity: draft.requestedQuantity || null,
-        unit: draft.unit || issue?.metadata?.inventory?.unit || null,
-        targetStock: draft.targetStock || null,
-        vendor: draft.vendor || null,
-        neededBy: draft.neededBy || appointment.scheduledDate || null,
-        priority: draft.priority || "high",
-        reason: draft.reason || issue.message || "WaveGuard readiness inventory exception",
-        issueCode: issue.code || null,
-        days: data?.readinessQueue?.days || 14,
-      });
-      setNotice(result.restockRequest?.existing
-        ? `A restock request for ${result.restockRequest?.productName || "this product"} is already ${result.restockRequest?.status || "open"} — nothing new was created.`
-        : `Restock request created for ${result.restockRequest?.productName || "product"}.`);
-      setData((prev) => ({
-        ...(prev || {}),
-        readinessQueue: result.readinessQueue || prev?.readinessQueue,
-        readinessSnapshots: result.readinessSnapshots || prev?.readinessSnapshots,
-      }));
-    } catch (err) {
-      setError(err.message || "Could not create restock request");
-    } finally {
-      setSavingRestockKey("");
-    }
-  }
-
-  async function saveReadinessSnapshot() {
-    setSavingSnapshot(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await adminPost("/admin/protocols/lawn/readiness/snapshot", {
-        days: data?.readinessQueue?.days || 14,
-        limit: 75,
-      });
-      const blocked = result.snapshot?.blocked_count || 0;
-      setNotice(blocked
-        ? `Readiness snapshot saved. Admin alert opened for ${blocked} blocked appointment${blocked === 1 ? "" : "s"}.`
-        : "Readiness snapshot saved. No blocked appointments found.");
-      setData((prev) => ({
-        ...(prev || {}),
-        readinessQueue: result.readinessQueue || prev?.readinessQueue,
-        readinessSnapshots: result.readinessSnapshots || prev?.readinessSnapshots,
-      }));
-    } catch (err) {
-      setError(err.message || "Could not save readiness snapshot");
-    } finally {
-      setSavingSnapshot(false);
-    }
-  }
-
-  function updateGateDraft(gateId, field, value) {
-    setGateDrafts((prev) => ({
-      ...prev,
-      [gateId]: {
-        ...(prev[gateId] || {}),
-        [field]: value,
-      },
-    }));
-  }
-
-  async function saveGate(gate) {
-    const draft = gateDrafts[gate.id] || buildGateDraft(gate);
-    let logic = {};
-    try {
-      logic = draft.logicText?.trim() ? JSON.parse(draft.logicText) : {};
-    } catch {
-      setError(`Gate logic for "${gate.title}" is not valid JSON.`);
-      return;
-    }
-    setSavingGateId(gate.id);
-    setError("");
-    setNotice("");
-    try {
-      await adminPut(`/admin/protocols/lawn/gates/${gate.id}`, {
-        title: draft.title,
-        gateType: draft.gateType,
-        severity: draft.severity,
-        ruleText: draft.ruleText,
-        logic,
-        wikiRefs: draft.wikiRefsText,
-      });
-      setNotice("Protocol gate updated.");
-      await load();
-    } catch (err) {
-      setError(err.message || "Could not update protocol gate");
-    } finally {
-      setSavingGateId("");
-    }
-  }
-
-  const headerActions = [
+  const headerActions = activeTab === "mixing" ? [] : [
     {
       key: "create-draft",
       label: "Create Draft",
@@ -751,7 +398,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
       activeKey: activeTab,
       onChange: (key) => hubNavRef.current.setActiveTab(key),
       ariaLabel: "Protocol section",
-      navGridClassName: "grid-cols-2 lg:grid-cols-7",
+      navGridClassName: "grid-cols-2 lg:grid-cols-5",
       actions: hubNavRef.current.headerActions.map((a) => ({
         ...a,
         onClick: (...args) => {
@@ -770,18 +417,19 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
     >
       {!hubOwnsHeader && (
       <AdminCommandHeader
-        title={embedded ? "Protocol & Readiness" : "Lawn Protocol"}
+        title="Treatment Plans"
         icon={Sprout}
         sections={PROTOCOL_SECTIONS}
         activeKey={activeTab}
         onSectionChange={setActiveTab}
         headingLevel={embedded ? 2 : 1}
         sticky={!embedded}
-        navGridClassName="grid-cols-2 lg:grid-cols-7"
+        navGridClassName="grid-cols-2 lg:grid-cols-5"
         actions={headerActions}
       />
       )}
 
+      {activeTab === "mixing" ? <ProtocolReferenceTabV2 /> : <>
       {error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-13 text-red-700">
           {error}
@@ -803,7 +451,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                 <span className="text-12 text-zinc-500">{protocol.version}</span>
               </div>
               <div className="mt-1 text-12 text-zinc-500">
-                Active view is read-only. Create or select a draft before changing products, gates, or SOP refs.
+                Active view is read-only. Create or select a draft before changing products or instructions.
               </div>
             </div>
             <select
@@ -943,7 +591,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                   )}
                 </Section>
 
-                <Section title="Compliance gates" icon={ShieldCheck}>
+                <Section title="Product restrictions" icon={ShieldCheck}>
                   <div className="grid gap-2">
                     {(protocol.gates || []).slice(0, 6).map((gate) => (
                       <div key={gate.key} className="rounded-sm border border-zinc-200 p-3">
@@ -957,413 +605,6 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                   </div>
                 </Section>
               </div>
-            </div>
-          )}
-
-          {activeTab === "readiness" && (
-            <div className="grid gap-4">
-              <div className="grid gap-3 md:grid-cols-4">
-                <Stat label="Ready" value={data?.readinessQueue?.statusCounts?.ready || 0} tone="text-green-700" />
-                <Stat label="Warnings" value={data?.readinessQueue?.statusCounts?.warning || 0} tone="text-amber-700" />
-                <Stat label="Blocked" value={data?.readinessQueue?.statusCounts?.blocked || 0} tone="text-red-700" />
-                <Stat label="Window" value={`${data?.readinessQueue?.days || 14} days`} />
-              </div>
-
-              <Section title="Readiness snapshot" icon={ClipboardCheck}>
-                <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
-                  <div className="rounded-sm border border-zinc-200 bg-zinc-50 p-3">
-                    <div className="text-11 uppercase tracking-label text-zinc-500">Last snapshot</div>
-                    <div className="mt-2 text-16 font-medium text-zinc-900">
-                      {data?.readinessSnapshots?.last ? fmtDateTime(data.readinessSnapshots.last.created_at) : "No snapshot saved"}
-                    </div>
-                    {data?.readinessSnapshots?.last && (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <Pill tone="good">{data.readinessSnapshots.last.ready_count || 0} Ready</Pill>
-                        <Pill tone="warn">{data.readinessSnapshots.last.warning_count || 0} Warn</Pill>
-                        <Pill tone="bad">{data.readinessSnapshots.last.blocked_count || 0} Blocked</Pill>
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      className="mt-4 rounded-sm bg-zinc-900 px-3 py-2 text-12 font-medium uppercase tracking-label text-white disabled:opacity-50"
-                      disabled={savingSnapshot}
-                      onClick={saveReadinessSnapshot}
-                    >
-                      {savingSnapshot ? "Saving..." : "Save Snapshot"}
-                    </button>
-                  </div>
-                  <div>
-                    <div className="mb-2 text-11 uppercase tracking-label text-zinc-500">Recent blocked trend</div>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                      {(data?.readinessSnapshots?.recent || []).slice(0, 8).map((snap) => (
-                        <div key={snap.id} className="rounded-sm border border-zinc-200 p-3">
-                          <div className="text-12 font-medium text-zinc-900">{fmtDate(snap.snapshot_date || snap.created_at)}</div>
-                          <div className="mt-2 text-22 font-medium text-red-700">{snap.blocked_count || 0}</div>
-                          <div className="text-11 uppercase tracking-label text-zinc-500">blocked</div>
-                        </div>
-                      ))}
-                      {!data?.readinessSnapshots?.recent?.length && (
-                        <div className="rounded-sm border border-zinc-200 p-3 text-13 text-zinc-500">
-                          Save a snapshot to begin tracking readiness history.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </Section>
-
-              <Section title="Exception resolution" icon={Wrench}>
-                {exceptionAppointments.length ? (
-                  <div className="grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
-                    <div className="grid gap-3">
-                      <div>
-                        <div className="text-11 uppercase tracking-label text-zinc-500">Open exceptions</div>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          <Pill tone="bad">{exceptionAppointments.filter((appt) => appt.status === "blocked").length} Blocked</Pill>
-                          <Pill tone="warn">{exceptionAppointments.filter((appt) => appt.status === "warning").length} Warning</Pill>
-                        </div>
-                      </div>
-                      <div className="grid gap-2">
-                        {exceptionAppointments.map((appt) => {
-                          const selected = selectedExceptionAppointment?.id === appt.id;
-                          return (
-                            <button
-                              key={appt.id}
-                              type="button"
-                              className={`rounded-sm border p-3 text-left transition-colors ${selected ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white hover:bg-zinc-50"}`}
-                              onClick={() => setSelectedExceptionServiceId(appt.id)}
-                            >
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="font-medium text-zinc-900">{appt.customerName}</div>
-                                <Pill tone={readinessTone(appt.status)}>{appt.status}</Pill>
-                              </div>
-                              <div className="mt-1 text-12 text-zinc-500">
-                                {fmtDate(appt.scheduledDate)} · {appt.city || "No city"} · {appt.counts?.block || 0} block / {appt.counts?.warn || 0} warn
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {!!exceptionIssueCounts.length && (
-                        <div className="rounded-sm border border-zinc-200 bg-zinc-50 p-3">
-                          <div className="text-11 uppercase tracking-label text-zinc-500">Top issue types</div>
-                          <div className="mt-2 grid gap-1">
-                            {exceptionIssueCounts.slice(0, 5).map((item) => (
-                              <div key={item.code} className="flex items-center justify-between gap-3 text-12">
-                                <span className="text-zinc-700">{item.code.replace(/_/g, " ")}</span>
-                                <span className="font-medium text-zinc-900">{item.count}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="rounded-sm border border-zinc-200 bg-white p-4">
-                      {selectedExceptionAppointment && (
-                        <>
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <div className="text-11 uppercase tracking-label text-zinc-500">Selected appointment</div>
-                              <div className="mt-1 text-18 font-medium text-zinc-900">{selectedExceptionAppointment.customerName}</div>
-                              <div className="mt-1 text-13 text-zinc-500">
-                                {fmtDate(selectedExceptionAppointment.scheduledDate)} · {selectedExceptionAppointment.address || "No address"}{selectedExceptionAppointment.city ? `, ${selectedExceptionAppointment.city}` : ""}
-                              </div>
-                            </div>
-                            <Pill tone={readinessTone(selectedExceptionAppointment.status)}>{selectedExceptionAppointment.status}</Pill>
-                          </div>
-                          <div className="mt-4 grid gap-3">
-                            {(selectedExceptionAppointment.issues || []).map((issue, index) => {
-                              const action = readinessIssueAction(issue, selectedExceptionAppointment);
-                              return (
-                                <div key={`${selectedExceptionAppointment.id}-resolution-${issue.code}-${index}`} className="rounded-sm border border-zinc-200 p-3">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <Pill tone={issueTone(issue.severity)}>{issue.severity}</Pill>
-                                    <span className="text-12 font-medium uppercase tracking-label text-zinc-500">{issue.code?.replace(/_/g, " ") || "issue"}</span>
-                                  </div>
-                                  <div className="mt-2 text-13 leading-5 text-zinc-800">{issue.message}</div>
-                                  <div className="mt-2 text-12 leading-5 text-zinc-500">{readinessResolutionCopy(issue)}</div>
-                                  {String(issue.code || "").includes("inventory") && issue?.metadata?.productId && (
-                                    <div className="mt-3 rounded-sm border border-amber-200 bg-amber-50 p-3">
-                                      <div className="text-11 font-medium uppercase tracking-label text-amber-900">Approve substitute for this appointment</div>
-                                      {(() => {
-                                        const key = substitutionKey(selectedExceptionAppointment.id, issue);
-                                        const draft = substitutionDrafts[key] || {};
-                                        const results = substitutionResults[key] || [];
-                                        return (
-                                          <div className="mt-2 grid gap-2">
-                                            <div className="flex flex-wrap gap-2">
-                                              <input
-                                                value={substitutionSearch[key] || ""}
-                                                onChange={(event) => setSubstitutionSearch((prev) => ({ ...prev, [key]: event.target.value }))}
-                                                placeholder="Search replacement product"
-                                                className="min-w-[220px] flex-1 rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              />
-                                              <button
-                                                type="button"
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-11 font-medium uppercase tracking-label text-zinc-800"
-                                                onClick={() => searchSubstitutionProducts(key)}
-                                              >
-                                                Search
-                                              </button>
-                                            </div>
-                                            {!!results.length && (
-                                              <select
-                                                value={draft.substituteProductId || ""}
-                                                onChange={(event) => {
-                                                  const product = results.find((row) => row.id === event.target.value);
-                                                  setSubstitutionDrafts((prev) => ({
-                                                    ...prev,
-                                                    [key]: {
-                                                      ...(prev[key] || {}),
-                                                      substituteProductId: event.target.value,
-                                                      ratePer1000: product?.defaultRatePer1000 ?? prev[key]?.ratePer1000 ?? "",
-                                                      rateUnit: product?.rateUnit || prev[key]?.rateUnit || "",
-                                                    },
-                                                  }));
-                                                }}
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              >
-                                                <option value="">Select substitute</option>
-                                                {results.map((product) => (
-                                                  <option key={product.id} value={product.id}>
-                                                    {product.name} {product.inventoryOnHand != null ? `(${product.inventoryOnHand} ${product.inventoryUnit || ""} on hand)` : ""}
-                                                  </option>
-                                                ))}
-                                              </select>
-                                            )}
-                                            <div className="grid gap-2 sm:grid-cols-3">
-                                              <input
-                                                value={draft.ratePer1000 || ""}
-                                                onChange={(event) => setSubstitutionDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), ratePer1000: event.target.value } }))}
-                                                placeholder="Rate / 1K"
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              />
-                                              <input
-                                                value={draft.rateUnit || ""}
-                                                onChange={(event) => setSubstitutionDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), rateUnit: event.target.value } }))}
-                                                placeholder="Unit"
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              />
-                                              <input
-                                                value={draft.reason || ""}
-                                                onChange={(event) => setSubstitutionDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), reason: event.target.value } }))}
-                                                placeholder="Reason"
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              />
-                                            </div>
-                                            <button
-                                              type="button"
-                                              className="justify-self-start rounded-sm bg-zinc-900 px-3 py-2 text-11 font-medium uppercase tracking-label text-white disabled:opacity-50"
-                                              disabled={savingSubstitutionKey === key}
-                                              onClick={() => approveProductSubstitution(selectedExceptionAppointment, issue)}
-                                            >
-                                              {savingSubstitutionKey === key ? "Approving..." : "Approve Substitute"}
-                                            </button>
-                                          </div>
-                                        );
-                                      })()}
-                                    </div>
-                                  )}
-                                  {String(issue.code || "").includes("inventory") && issue?.metadata?.productId && (
-                                    <div className="mt-3 rounded-sm border border-zinc-200 bg-zinc-50 p-3">
-                                      <div className="text-11 font-medium uppercase tracking-label text-zinc-600">Create restock request</div>
-                                      {(() => {
-                                        const key = substitutionKey(selectedExceptionAppointment.id, issue);
-                                        const draft = restockDrafts[key] || {};
-                                        return (
-                                          <div className="mt-2 grid gap-2">
-                                            <div className="grid gap-2 sm:grid-cols-4">
-                                              <input
-                                                value={draft.requestedQuantity || ""}
-                                                onChange={(event) => setRestockDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), requestedQuantity: event.target.value } }))}
-                                                placeholder="Qty"
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              />
-                                              <input
-                                                value={draft.unit || issue?.metadata?.inventory?.unit || ""}
-                                                onChange={(event) => setRestockDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), unit: event.target.value } }))}
-                                                placeholder="Unit"
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              />
-                                              <input
-                                                type="date"
-                                                value={draft.neededBy || String(selectedExceptionAppointment.scheduledDate || "").slice(0, 10)}
-                                                onChange={(event) => setRestockDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), neededBy: event.target.value } }))}
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              />
-                                              <select
-                                                value={draft.priority || "high"}
-                                                onChange={(event) => setRestockDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), priority: event.target.value } }))}
-                                                className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                              >
-                                                <option value="normal">Normal</option>
-                                                <option value="high">High</option>
-                                                <option value="urgent">Urgent</option>
-                                              </select>
-                                            </div>
-                                            <input
-                                              value={draft.reason || ""}
-                                              onChange={(event) => setRestockDrafts((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), reason: event.target.value } }))}
-                                              placeholder="Reason"
-                                              className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-13 text-zinc-900"
-                                            />
-                                            <button
-                                              type="button"
-                                              className="justify-self-start rounded-sm border border-zinc-300 bg-white px-3 py-2 text-11 font-medium uppercase tracking-label text-zinc-800 disabled:opacity-50"
-                                              disabled={savingRestockKey === key}
-                                              onClick={() => createRestockRequest(selectedExceptionAppointment, issue)}
-                                            >
-                                              {savingRestockKey === key ? "Creating..." : "Create Restock Request"}
-                                            </button>
-                                          </div>
-                                        );
-                                      })()}
-                                    </div>
-                                  )}
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    <ReadinessActionButton
-                                      action={action}
-                                      appointment={selectedExceptionAppointment}
-                                      issue={issue}
-                                      assigningServiceId={assigningServiceId}
-                                      onAssign={assignReadinessAppointment}
-                                      onTab={setActiveTab}
-                                    />
-                                    <Link
-                                      to={`/admin/dispatch?tab=schedule&serviceId=${encodeURIComponent(selectedExceptionAppointment.id || "")}`}
-                                      className="inline-flex items-center justify-center rounded-sm border border-zinc-300 bg-white px-3 py-2 text-11 font-medium uppercase tracking-label text-zinc-800 hover:bg-zinc-50"
-                                    >
-                                      Appointment
-                                    </Link>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="rounded-sm border border-green-200 bg-green-50 p-4 text-13 text-green-800">
-                    No blocked or warning appointments in the current readiness window.
-                  </div>
-                )}
-              </Section>
-
-              <Section title="Upcoming WaveGuard lawn readiness" icon={AlertTriangle}>
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  <div className="text-13 leading-6 text-zinc-600">
-                    Office preflight for upcoming lawn appointments. Resolve blocked rows before route day.
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className="rounded-sm border border-zinc-300 bg-white px-3 py-2 text-12 font-medium uppercase tracking-label text-zinc-800 disabled:opacity-50"
-                      disabled={savingSnapshot}
-                      onClick={saveReadinessSnapshot}
-                    >
-                      {savingSnapshot ? "Saving..." : "Save Snapshot"}
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-sm bg-zinc-900 px-3 py-2 text-12 font-medium uppercase tracking-label text-white disabled:opacity-50"
-                      disabled={bulkAssigning}
-                      onClick={bulkAssignReadyAppointments}
-                    >
-                      {bulkAssigning ? "Assigning..." : "Bulk Assign Ready"}
-                    </button>
-                  </div>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="min-w-full text-left text-13">
-                    <thead className="text-11 uppercase tracking-label text-zinc-500">
-                      <tr className="border-b border-zinc-200">
-                        <th className="py-2 pr-4 font-medium">Appointment</th>
-                        <th className="py-2 pr-4 font-medium">Customer</th>
-                        <th className="py-2 pr-4 font-medium">Protocol</th>
-                        <th className="py-2 pr-4 font-medium">Status</th>
-                        <th className="py-2 pr-4 font-medium">Top Issues</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(data?.readinessQueue?.appointments || []).map((appt) => (
-                        <tr key={appt.id} className="border-b border-zinc-100 align-top">
-                          <td className="py-3 pr-4">
-                            <div className="font-medium text-zinc-900">{fmtDate(appt.scheduledDate)}</div>
-                            <div className="text-12 text-zinc-500">{appt.windowStart || "Any time"} · {appt.technicianName || "Unassigned"}</div>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <div className="font-medium text-zinc-900">{appt.customerName}</div>
-                            <div className="text-12 text-zinc-500">{appt.address || "No address"}{appt.city ? `, ${appt.city}` : ""}</div>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <div className="text-zinc-900">{appt.protocolWindowTitle || "No window"}</div>
-                            <div className="text-12 text-zinc-500">
-                              {appt.assignment?.assignedAt ? "Assigned" : "Not assigned"}
-                            </div>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <Pill tone={readinessTone(appt.status)}>{appt.status}</Pill>
-                            <div className="mt-1 text-12 text-zinc-500">
-                              {appt.counts?.block || 0} block · {appt.counts?.warn || 0} warn
-                            </div>
-                          </td>
-                          <td className="py-3 pr-4">
-                            <div className="grid gap-1">
-                              {(appt.issues || []).slice(0, 4).map((issue, index) => {
-                                const action = readinessIssueAction(issue, appt);
-                                return (
-                                  <div key={`${appt.id}-${issue.code}-${index}`} className="flex flex-wrap items-center gap-2 text-12 leading-5 text-zinc-700">
-                                    <span>
-                                      <span className={issue.severity === "block" ? "font-medium text-red-700" : "font-medium text-amber-700"}>
-                                        {issue.code?.replace(/_/g, " ") || issue.severity}:
-                                      </span>{" "}
-                                      {issue.message}
-                                    </span>
-                                    {action.type === "link" && (
-                                      <Link
-                                        to={action.to}
-                                        className="rounded-sm border border-zinc-200 px-2 py-0.5 text-10 font-medium uppercase tracking-label text-zinc-700 hover:bg-zinc-50"
-                                      >
-                                        {action.label}
-                                      </Link>
-                                    )}
-                                    {action.type === "tab" && (
-                                      <button
-                                        type="button"
-                                        className="rounded-sm border border-zinc-200 px-2 py-0.5 text-10 font-medium uppercase tracking-label text-zinc-700 hover:bg-zinc-50"
-                                        onClick={() => setActiveTab(action.tab)}
-                                      >
-                                        {action.label}
-                                      </button>
-                                    )}
-                                    {action.type === "assign" && (
-                                      <button
-                                        type="button"
-                                        className="rounded-sm border border-zinc-200 px-2 py-0.5 text-10 font-medium uppercase tracking-label text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
-                                        disabled={assigningServiceId === appt.id}
-                                        onClick={() => assignReadinessAppointment(appt.id)}
-                                      >
-                                        {assigningServiceId === appt.id ? "Assigning" : action.label}
-                                      </button>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                              {!appt.issues?.length && <div className="text-12 text-green-700">Ready for route.</div>}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {!data?.readinessQueue?.appointments?.length && (
-                    <div className="p-4 text-13 text-zinc-500">No upcoming WaveGuard lawn appointments found.</div>
-                  )}
-                </div>
-              </Section>
             </div>
           )}
 
@@ -1482,151 +723,6 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
                     </div>
                   ))}
                   {!conditionalProducts.length && <div className="text-13 text-zinc-500">No conditional products in this window.</div>}
-                </div>
-              </Section>
-            </div>
-          )}
-
-          {activeTab === "gates" && (
-            <div className="grid gap-4">
-              <Section title="Protocol gate editor" icon={ShieldCheck}>
-                <div className="mb-4 rounded-sm border border-amber-200 bg-amber-50 p-3 text-13 leading-6 text-amber-900">
-                  Gate changes affect treatment planning, service report context, and crew enforcement. Keep legal lockouts and label restrictions conservative.
-                </div>
-                <div className="grid gap-4">
-                  {(protocol.gates || []).map((gate) => {
-                    const draft = gateDrafts[gate.id] || buildGateDraft(gate);
-                    return (
-                      <div key={gate.id || gate.key} className="rounded-md border border-zinc-200 p-4">
-                        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                          <div>
-                            <div className="text-14 font-medium text-zinc-900">{gate.key}</div>
-                            <div className="mt-1 text-12 text-zinc-500">{gate.type} · {gate.severity}</div>
-                          </div>
-                          <button
-                            type="button"
-                            className="rounded-sm bg-zinc-900 px-3 py-2 text-12 font-medium uppercase tracking-label text-white disabled:opacity-50"
-                            disabled={savingGateId === gate.id || !gate.id || !canEditProtocol}
-                            onClick={() => saveGate(gate)}
-                          >
-                            {savingGateId === gate.id ? "Saving..." : "Save Gate"}
-                          </button>
-                        </div>
-
-                        <div className="grid gap-3 lg:grid-cols-[1fr_180px_180px]">
-                          <label className="grid gap-1 text-12 font-medium uppercase tracking-label text-zinc-500">
-                            Title
-                            <input
-                              value={draft.title}
-                              onChange={(e) => updateGateDraft(gate.id, "title", e.target.value)}
-                              disabled={!canEditProtocol}
-                              className="rounded-sm border border-zinc-300 px-3 py-2 text-13 font-normal normal-case tracking-normal text-zinc-900"
-                            />
-                          </label>
-                          <label className="grid gap-1 text-12 font-medium uppercase tracking-label text-zinc-500">
-                            Type
-                            <input
-                              value={draft.gateType}
-                              onChange={(e) => updateGateDraft(gate.id, "gateType", e.target.value)}
-                              disabled={!canEditProtocol}
-                              className="rounded-sm border border-zinc-300 px-3 py-2 text-13 font-normal normal-case tracking-normal text-zinc-900"
-                            />
-                          </label>
-                          <label className="grid gap-1 text-12 font-medium uppercase tracking-label text-zinc-500">
-                            Severity
-                            <select
-                              value={draft.severity}
-                              onChange={(e) => updateGateDraft(gate.id, "severity", e.target.value)}
-                              disabled={!canEditProtocol}
-                              className="rounded-sm border border-zinc-300 px-3 py-2 text-13 font-normal normal-case tracking-normal text-zinc-900"
-                            >
-                              <option value="block">block</option>
-                              <option value="lockout">lockout</option>
-                              <option value="warn">warn</option>
-                              <option value="info">info</option>
-                            </select>
-                          </label>
-                        </div>
-
-                        <label className="mt-3 grid gap-1 text-12 font-medium uppercase tracking-label text-zinc-500">
-                          Rule Text
-                          <textarea
-                            value={draft.ruleText}
-                            onChange={(e) => updateGateDraft(gate.id, "ruleText", e.target.value)}
-                            rows={3}
-                            disabled={!canEditProtocol}
-                            className="rounded-sm border border-zinc-300 px-3 py-2 text-13 font-normal normal-case leading-6 tracking-normal text-zinc-900"
-                          />
-                        </label>
-
-                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                          <label className="grid gap-1 text-12 font-medium uppercase tracking-label text-zinc-500">
-                            Logic JSON
-                            <textarea
-                              value={draft.logicText}
-                              onChange={(e) => updateGateDraft(gate.id, "logicText", e.target.value)}
-                              rows={8}
-                              spellCheck={false}
-                              disabled={!canEditProtocol}
-                              className="font-mono rounded-sm border border-zinc-300 px-3 py-2 text-12 font-normal normal-case leading-5 tracking-normal text-zinc-900"
-                            />
-                          </label>
-                          <label className="grid gap-1 text-12 font-medium uppercase tracking-label text-zinc-500">
-                            Wiki/SOP Refs
-                            <textarea
-                              value={draft.wikiRefsText}
-                              onChange={(e) => updateGateDraft(gate.id, "wikiRefsText", e.target.value)}
-                              rows={8}
-                              disabled={!canEditProtocol}
-                              className="rounded-sm border border-zinc-300 px-3 py-2 text-13 font-normal normal-case leading-6 tracking-normal text-zinc-900"
-                              placeholder="One reference per line"
-                            />
-                          </label>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {!protocol.gates?.length && <div className="text-13 text-zinc-500">No gates are configured for this protocol.</div>}
-                </div>
-              </Section>
-            </div>
-          )}
-
-          {activeTab === "calibration" && (
-            <div className="grid gap-4">
-              <Section
-                title="Active spray calibrations"
-                icon={Gauge}
-                action={<Link to="/admin/equipment?tab=calibrations" className="text-12 font-medium uppercase tracking-label text-zinc-700 hover:text-zinc-900">Open Calibration</Link>}
-              >
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {(data?.calibrations || []).map((row) => {
-                    const expired = row.expires_at && new Date(row.expires_at) < new Date();
-                    return (
-                      <div key={row.id} className="rounded-sm border border-zinc-200 p-4">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-14 font-medium text-zinc-900">{row.system_name}</div>
-                          <Pill tone={expired ? "bad" : "good"}>{expired ? "Expired" : "Active"}</Pill>
-                        </div>
-                        <div className="mt-3 grid gap-2 text-13 text-zinc-600">
-                          <div className="flex justify-between"><span>Carrier</span><span className="font-medium text-zinc-900">{fmtNumber(row.carrier_gal_per_1000, " gal/1K")}</span></div>
-                          <div className="flex justify-between"><span>Tank</span><span className="font-medium text-zinc-900">{fmtNumber(row.tank_capacity_gal, " gal")}</span></div>
-                          <div className="flex justify-between"><span>Pressure</span><span className="font-medium text-zinc-900">{fmtNumber(row.pressure_psi, " psi")}</span></div>
-                          <div className="flex justify-between"><span>Expires</span><span className="font-medium text-zinc-900">{fmtDate(row.expires_at)}</span></div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </Section>
-
-              <Section title="Assessment fields feeding this protocol" icon={Beaker}>
-                <div className="grid gap-2 md:grid-cols-3">
-                  {(data?.health?.requiredProfileFields || []).map((field) => (
-                    <div key={field} className="rounded-sm border border-zinc-200 bg-zinc-50 px-3 py-2 text-13 text-zinc-700">
-                      {String(field).replace(/_/g, " ")}
-                    </div>
-                  ))}
                 </div>
               </Section>
             </div>
@@ -1762,6 +858,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
           )}
         </>
       )}
+      </>}
     </div>
   );
 }

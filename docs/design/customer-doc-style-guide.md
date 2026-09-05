@@ -25,23 +25,44 @@ coherent). Serif accents: `DOC_FONT_SERIF`.
 
 | Token | px | Use |
 |---|---|---|
-| `FS.micro` | 11 | uppercase micro-labels/footnote stamps ONLY (never body) |
-| `FS.caption` | 12 | captions, legal, meta rows, eyebrows |
 | `FS.body` | 14 | default body, buttons, table cells |
-| `FS.bodyLg` | 15 | primary prose paragraphs |
+| `FS.bodyLg` | 16 | primary prose paragraphs (owner D1 2026-09-05) |
 | `FS.lead` | 16 | lead-ins and ALL text inputs (16 = no iOS focus zoom) |
 | `FS.sub` | 18 | sub-headings, intro lines |
-| `FS.h4/h3/h2/h1` | 16/20/24/34 | headings (see `docHeading(level)`) |
+| `FS.h4/h3/h2/h1` | 16/20/26/40 | headings (see `docHeading(level)`); the glass sheet renders h1 as `clamp(32px, 4vw, 40px)` |
 
-**13px is banned** on customer surfaces (glass ruling; `check-portal-brand.js`
-enforces literal 11/13). Weights snap to `FW` {400, 500, 600, 700, 800} — no
-variable-font one-offs (650/750/850). Line heights snap to `LH`
-{1, 1.1, 1.2, 1.35, 1.5}: solid for buttons/badges, display for h1, heading
-for h2–h4, snug for dense meta, body for prose.
+**Nothing under 14px on a glass surface** — the runtime sheet in
+`glass/glass-theme.css` forces eyebrows and fine print to 14 (owner ruling
+2026-09-03); the scale starts at `FS.body` (14) — `FS.micro` / `FS.caption` are gone
+(the PDF twin keeps its own 8/9 print sizes).
+`check-portal-brand.js` refuses every literal under 14 and the retired tokens.
+Weights snap to `FW` {400, 500, 600, 700}; `FW.heavy` (800) is gone and 850
+never appears (the gate refuses weights over 700, ternaries included).
+Line heights snap to `LH` {1, 1.1, 1.2, 1.35, 1.5}: solid for
+buttons/badges, display for h1, heading for h2–h4, snug for dense meta, body
+for prose.
 
-Uppercase section labels use `DOC_EYEBROW` (12px/700/0.11em/1.2/uppercase/
+Uppercase section labels use `DOC_EYEBROW` (14px/600/0.06em/1.2/uppercase/
 `var(--text-muted)`) — author as `<div data-gt="eyebrow" style={DOC_EYEBROW}>`
 so glass and non-glass renders agree.
+
+## Controls
+
+Primary action = `BrandButton` (48px, r10, weight 600, sentence case — owner
+2026-09-04; the marketing site's UPPERCASE rule does not apply on glass).
+Gold accent actions (`data-glass-accent`) are 44px minimum; choice chips
+(`data-glass="chip"`) 40px minimum with a 999 radius when they are pills.
+Inputs are 48px, r10, 16px text (no iOS zoom), placeholder 14px `#64748B`.
+Every control shows the shared `:focus-visible` ring (2px accent, 2px
+offset). Under `prefers-reduced-transparency` and `forced-colors` cards
+render solid with a real border — the same fallback as no `backdrop-filter`.
+
+## Glass tiers
+
+Three and only three: `data-glass="card"` (outer card, blur 32, the
+estimate's warm tint), `data-glass="soft"` (inner box, blur 18),
+`data-glass="chip"` (pill / chip, blur 18). One scene for every customer
+page — the quieter `pro` scene was retired 2026-09-03.
 
 ## Spacing scale
 
@@ -57,7 +78,7 @@ padding, hairline 1–3px offsets) are allowed but must be deliberate.
   `className="waves-receipt-page"` which also carries the standard
   `28px auto 56px` page margins.
 - Radii from `RADIUS`: tag 6, input 8, button 10, card 12, modal 16,
-  pill 999. The pay family's shipped 8px card idiom is expressed as
+  pill 999. The glass sheet renders cards 12, controls 10, pills 999. The pay family's shipped 8px card idiom is expressed as
   `RADIUS.input` — do not re-round it.
 - Shadows from `SHADOW` (card / modal / focusRing). Transitions via
   `docTransition('background', 'color', …)` — 160ms ease, explicit

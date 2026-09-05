@@ -38,6 +38,8 @@ describe('LawnReportViewPage', () => {
     renderAt();
     expect(await screen.findByText(/Here's what we saw at your Venice lawn/i)).toBeInTheDocument();
     expect(screen.getByText(REPORT.summary)).toBeInTheDocument();
+    // The server's overall assessment survives the chip removal as text.
+    expect(screen.getByText('Overall: Keep an eye on it')).toBeInTheDocument();
     expect(screen.getByText('Chinch bug pressure')).toBeInTheDocument();
     expect(screen.getByText('Water Wednesday and Saturday only.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /get my free lawn plan/i })).toBeInTheDocument();

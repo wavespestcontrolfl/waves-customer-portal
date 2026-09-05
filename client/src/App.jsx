@@ -11,7 +11,7 @@ import Icon from './components/Icon';
 import CustomerDialogHost from './components/brand/CustomerDialogHost';
 
 function CustomerFailureScreen({ title, message, onRetry }) {
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   return (
     <main style={{
       minHeight: '100vh',
@@ -397,8 +397,10 @@ const StatementPayPage = lazyWithRetry(() => import('./pages/StatementPayPage'))
 const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
-const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
-const ReservicePage = lazyWithRetry(() => import('./pages/ReservicePage'));
+// One page for both self-serve scheduling flows (owner 2026-09-04). Keyed
+// per flow: the re-service covered card links to /reschedule, and an SPA hop
+// must mount a fresh instance (result / slot / AI-filter state is per flow).
+const ScheduleFlowPage = lazyWithRetry(() => import('./pages/ScheduleFlowPage'));
 const AppointmentPage = lazyWithRetry(() => import('./pages/AppointmentPage'));
 const SecureAppointmentPage = lazyWithRetry(() => import('./pages/SecureAppointmentPage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
@@ -433,7 +435,7 @@ function ProtectedRoute({ children }) {
   const location = useLocation();
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
-  useGlassSurface(loading, 'full');
+  useGlassSurface(loading);
 
   if (loading) {
     return (
@@ -515,8 +517,8 @@ export default function App() {
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
-          <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
-          <Route path="/reservice/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReservicePage /></Suspense>} />
+          <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="reschedule" flow="reschedule" /></Suspense>} />
+          <Route path="/reservice/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage key="reservice" flow="reservice" /></Suspense>} />
           <Route path="/appointment/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><AppointmentPage /></Suspense>} />
           <Route path="/secure/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><SecureAppointmentPage /></Suspense>} />
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
@@ -609,7 +611,7 @@ export default function App() {
                   remapQuery={{
                     from: "tab",
                     to: "protocolTab",
-                    preserveValues: ["overview", "readiness", "products", "gates", "calibration", "bridges", "audit"],
+                    preserveValues: ["mixing", "overview", "readiness", "products", "gates", "calibration", "bridges", "audit"],
                   }}
                 />
               )}
