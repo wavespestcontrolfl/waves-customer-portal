@@ -64,6 +64,11 @@ describe('/relay-complete', () => {
     await handlerFor('/relay-complete')({ body: { CallSid: 'CA-t1', HandoffData: TRANSFER }, query: {} }, res);
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA-t1');
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_transfer_ring_at'));
+    // Owner-bound: the frame's claim owner rides the claim (null for an unclaimed session).
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), [null]);
+    const res2 = mockRes();
+    await handlerFor('/relay-complete')({ body: { CallSid: 'CA-t1b', HandoffData: JSON.stringify({ reason: 'transfer', owner: 'nonce-MINE' }) }, query: {} }, res2);
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-MINE']);
     const patch = update.mock.calls[0][0];
     expect(patch.call_outcome.sql).toMatch(/NOT IN \(\?, \?, \?\) THEN \?/);
     expect(patch.call_outcome.bindings).toEqual(['voicemail', 'relay_failed', 'ai_transferred', 'ai_transferred']);

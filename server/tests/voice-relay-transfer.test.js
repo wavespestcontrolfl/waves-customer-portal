@@ -11,10 +11,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
-jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true })) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/twilio-failure-alerts', () => ({ maskSid: (s) => String(s || '').slice(-4) }));
 
-const { triggerNotification } = require('../services/notification-triggers');
+const { notifyAdmin: triggerNotification } = require('../services/notification-service');
 const transfer = require('../services/voice-agent/relay-transfer');
 const { activeTools, executeTool } = require('../services/voice-agent/relay-tools');
 const { RelayConversation, buildBasePrompt } = require('../services/voice-agent/relay-conversation');
@@ -115,8 +115,9 @@ describe('executeTool transfer_to_office', () => {
     await executeTool('transfer_to_office', { intent: 'cancel', summary: 'wants out' }, ctx);
     expect(writeHandoff).toHaveBeenCalledTimes(2);
     expect(writeHandoff.mock.calls[1][0]).toMatchObject({ context_available: false, summary: null, tools: [] });
+    await new Promise((r) => setImmediate(r)); // the bell is detached
     expect(triggerNotification).toHaveBeenCalledTimes(1);
-    expect(triggerNotification).toHaveBeenCalledWith('sandy_transfer_no_context', expect.objectContaining({ callSid: 'CA-tx-1' }));
+    expect(triggerNotification).toHaveBeenCalledWith('alert', 'Sandy transfer without context', expect.stringContaining('ask the caller to recap'), expect.objectContaining({ dedupeKey: 'sandy_transfer_no_context:CA-tx-1', bell: true, link: '/admin/communications#tab=calls' }));
     expect(ctx.say).toHaveBeenCalled();
     expect(ctx.endForTransfer).toHaveBeenCalledTimes(1);
   });
@@ -219,9 +220,9 @@ describe('codex r1 follow-ups', () => {
     expect(ctx.toolFailed).toBe(true);
   });
 
-  test('the no-context bell is on the bell-policy allowlist (P2)', () => {
-    const { _private } = require('../services/notification-bell-policy');
-    expect(_private.TRIGGER_BELL_ALLOWLIST.has('sandy_transfer_no_context')).toBe(true);
+  test('the no-context bell is registered as a trigger key (tech-visible rows) and written deduped per CallSid', () => {
+    const { listTriggers } = require('../services/notification-triggers');
+    expect(listTriggers().some((t) => t.key === 'sandy_transfer_no_context' || t === 'sandy_transfer_no_context')).toBe(true);
   });
 });
 

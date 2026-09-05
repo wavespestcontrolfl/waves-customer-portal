@@ -37,7 +37,6 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'customer_voicemail_callback',    // a customer left a voicemail
   'customer_missed_call',           // a customer called, nobody answered, no voicemail
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
-  'sandy_transfer_no_context',      // a caller was handed to the office without their summary (Sandy PR 2A)
 ]);
 
 

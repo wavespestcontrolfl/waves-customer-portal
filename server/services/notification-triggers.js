@@ -222,7 +222,10 @@ const TRIGGER_REGISTRY = {
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
   // (the handoff packet write failed or timed out). The staff member who
   // pressed 1 heard the generic whisper; this is the only record that a
-  // summary existed. Fired at most once per call by relay-transfer.js.
+  // summary existed. Written directly by relay-transfer.js (notifyAdmin with
+  // a per-CallSid dedupeKey and bell: true, the watchdog pattern);
+  // registered here so the persisted rows carry a known trigger key and
+  // `build` mirrors the shape it writes.
   sandy_transfer_no_context: {
     label: 'Sandy transfer arrived without its summary',
     category: 'alert',

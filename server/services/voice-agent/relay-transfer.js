@@ -233,9 +233,22 @@ async function recordNoContext(ctx, packet, facts) {
     await withTimeout(Promise.resolve(ctx.writeHandoff({ ...packet, summary: null, unresolved_question: null, facts_collected: {}, tools: [], commitments: [], context_available: false })), NO_CONTEXT_WRITE_TIMEOUT_MS, 'timeout');
   } catch { /* the bell below is the record */ }
   if (ctx.sandbox === true) return;
-  // Detached: the bell is never on the caller's path or the tool budget.
-  Promise.resolve()
-    .then(() => require('../notification-triggers').triggerNotification(NO_CONTEXT_BELL, { callSid: ctx.callSid || null, from: facts.from || null }))
+  // Detached (never on the caller's path or the tool budget) and DEDUPED per
+  // CallSid: a reconnect or a repeated attempt on the same call re-uses the
+  // one bell (the call-commitments watchdog pattern — notifyAdmin with a
+  // dedupeKey and bell: true; the registry entry keeps the row tech-visible).
+  void Promise.resolve()
+    .then(() => require('../notification-service').notifyAdmin(
+      'alert',
+      'Sandy transfer without context',
+      `A caller${facts.from ? ` from ${require('./relay-protocol').maskPhone(facts.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
+      {
+        link: '/admin/communications#tab=calls',
+        dedupeKey: `${NO_CONTEXT_BELL}:${ctx.callSid || 'unknown'}`,
+        bell: true,
+        metadata: { triggerKey: NO_CONTEXT_BELL, callSid: ctx.callSid || null },
+      },
+    ))
     .catch((err) => logger.warn(`[voice-relay] ${NO_CONTEXT_BELL} bell failed: ${err.message}`));
 }
 

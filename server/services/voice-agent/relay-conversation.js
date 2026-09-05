@@ -1432,10 +1432,14 @@ class RelayConversation {
       markTransferRequested: () => { this._transferRequested = true; },
       say: (text) => { this.say(text); },
       // The relay leg ends with reason 'transfer'; /relay-complete rings the office.
+      // The end frame carries this socket's claim owner: /relay-complete
+      // rings staff only when the row's owner is still this nonce (or the
+      // row is unclaimed), so a superseded socket's transfer frame matches
+      // 0 rows — the one-session boundary holds at the callback (hook P1).
       endForTransfer: () => {
         if (this._ending) return;
         this._ending = true;
-        try { if (this._endSession) this._endSession({ reason: 'transfer', captured: this.leadCaptured }); } catch (e) {
+        try { if (this._endSession) this._endSession({ reason: 'transfer', captured: this.leadCaptured, owner: this.sessionKey || null }); } catch (e) {
           logger.error(`[voice-relay] endSession (transfer) failed callSid=${this.callSid}: ${e.message}`);
         }
       },

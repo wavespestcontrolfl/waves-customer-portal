@@ -765,7 +765,7 @@ const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
  * row already, the leg simply ends. No staff numbers ⇒ voicemail, never a
  * stranded caller.
  */
-async function appendRelayTransfer(req, twiml, callSid) {
+async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
   if ((req.query || {}).sandbox === '1') {
     logger.info(`[relay-complete] sandbox transfer for ${maskSid(callSid)} — hanging up (no staff ring on the sandbox)`);
     twiml.hangup();
@@ -785,9 +785,14 @@ async function appendRelayTransfer(req, twiml, callSid) {
     // durable claim, and voicemail is the non-duplicating fallback every
     // other relay failure already takes.
     const { RELAY_TERMINAL_OUTCOMES } = require('../services/voice-agent/relay-protocol');
+    // OWNER-BOUND (hook P1): the frame names the socket's claim owner; a
+    // row now owned by a reconnect (or claimed while this frame says
+    // unclaimed) matches 0 rows, so a superseded socket cannot ring staff.
+    const owner = typeof handoff.owner === 'string' && handoff.owner ? handoff.owner.slice(0, 128) : null;
     const claimed = await withDeadline(
       db('call_log').where('twilio_call_sid', callSid)
         .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''")
+        .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
         .update({
           call_outcome: db.raw('CASE WHEN call_outcome IS NULL OR call_outcome NOT IN (?, ?, ?) THEN ? ELSE call_outcome END', [...RELAY_TERMINAL_OUTCOMES, 'ai_transferred']),
           metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text)", [new Date().toISOString()]),
@@ -1602,8 +1607,9 @@ router.post('/relay-complete', async (req, res) => {
   // The relay's own end frame (`HandoffData`, a JSON string Twilio passes
   // through verbatim; absent on a caller hang-up or a failure). Tolerated,
   // never trusted beyond `reason`.
-  if (!failed && parseHandoffData(body.HandoffData).reason === 'transfer') {
-    await appendRelayTransfer(req, twiml, callSid);
+  const handoff = parseHandoffData(body.HandoffData);
+  if (!failed && handoff.reason === 'transfer') {
+    await appendRelayTransfer(req, twiml, callSid, handoff);
     return res.type('text/xml').send(twiml.toString());
   }
   // A sandbox call (the signed ?sandbox=1 the sandbox route itself rendered)
