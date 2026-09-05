@@ -95,7 +95,7 @@ test('SSH exit zero requires this invocation’s worker acknowledgment', () => {
       const fs=require('node:fs');const read=fs.readFileSync;
       fs.readFileSync=(file,...args)=>String(file).endsWith('/remote.json')?JSON.stringify(${JSON.stringify(config)}):read(file,...args);
       const cp=require('node:child_process');
-      cp.execFileSync=(_command,args)=>JSON.stringify(args[0]==='status'?${JSON.stringify(status())}:{
+      cp.execFileSync=(_command,args)=>args[0]==='--version'?'railway 5.49.0':JSON.stringify(args[0]==='status'?${JSON.stringify(status())}:{
         RAILWAY_PROJECT_ID:${JSON.stringify(PROJECT_ID)},RAILWAY_ENVIRONMENT_ID:${JSON.stringify(config.environmentId)},
         RAILWAY_SERVICE_ID:${JSON.stringify(config.databaseServiceId)},RAILWAY_TCP_PROXY_DOMAIN:'test.proxy.rlwy.net',
         RAILWAY_TCP_PROXY_PORT:'1234',RAILWAY_TCP_APPLICATION_PORT:'5432',RAILWAY_PRIVATE_DOMAIN:'postgres.railway.internal'});

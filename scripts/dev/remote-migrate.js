@@ -53,17 +53,36 @@ function railwayJson(args, root) {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000, maxBuffer: 8 * 1024 * 1024 }));
   } catch {
     // CLI errors can contain variable values. Keep secrets out of diagnostics.
-    throw new Error('Railway lookup failed. Check CLI login, version, and access to the selected dev environment.');
+    throw new Error('Railway lookup failed. Run railway --version (requires 5.49+), then railway whoami; use railway login if signed out. Verify access to the selected dev environment.');
   }
 }
 
-async function remoteMigration(context, env) {
-  const config = JSON.parse(fs.readFileSync(path.join(context.root, '.tmp/dev/remote.json'), 'utf8'));
+function prepareRemoteMigration(context, env) {
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(path.join(context.root, '.tmp/dev/remote.json'), 'utf8'));
+  } catch {
+    throw new Error('Create valid JSON in .tmp/dev/remote.json with environmentId, serviceId and databaseServiceId from the verified Railway dev/preview environment. See docs/development.md#run-migrations-near-the-dev-database.');
+  }
   for (const key of ['environmentId', 'serviceId', 'databaseServiceId']) {
-    if (!UUID.test(config[key] || '')) throw new Error(`remote.json requires a UUID ${key}.`);
+    if (!UUID.test(config?.[key])) throw new Error(`remote.json requires a UUID ${key}.`);
   }
   if (config.environmentId === PRODUCTION_ID) throw new Error('Production is forbidden.');
+  const nodePath = config.nodePath || 'node';
+  if (typeof nodePath !== 'string' || !/^(node|\/[a-zA-Z0-9_./-]+)$/.test(nodePath)) throw new Error('nodePath must be an absolute executable path.');
+  if (config.identityFile && (typeof config.identityFile !== 'string' ||
+      !fs.existsSync(path.resolve(context.root, config.identityFile)))) {
+    throw new Error('identityFile must name an existing SSH private key. Omit it to use Railway key discovery; verify keys with railway ssh keys list.');
+  }
   if (git(context.root, 'status', '--porcelain')) throw new Error('Commit all checkout changes before remote migration.');
+  let version;
+  try {
+    version = execFileSync('railway', ['--version'], { cwd: context.root, encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 }).trim().match(/^railway (\d+)\.(\d+)\.\d+/);
+  } catch { /* Report only fixed guidance; CLI errors may contain credentials. */ }
+  if (!version || Number(version[1]) < 5 || (Number(version[1]) === 5 && Number(version[2]) < 49)) {
+    throw new Error('Railway CLI 5.49+ is required. Install or upgrade Railway, then run railway login and retry.');
+  }
   const { sha } = identity(context);
   const scope = ['--project', PROJECT_ID, '--environment', config.environmentId];
   const status = railwayJson(['status', ...scope, '--json'], context.root);
@@ -73,8 +92,11 @@ async function remoteMigration(context, env) {
   const args = ['ssh', ...scope, '--service', config.serviceId, '--deployment-instance', target.instanceId];
   if (config.identityFile) args.push('--identity-file', path.resolve(context.root, config.identityFile));
   // SSH argv contains no credentials. NODE_OPTIONS must be removed before Node starts.
-  const nodePath = config.nodePath || 'node';
-  if (nodePath !== 'node' && !/^\/[a-zA-Z0-9_./-]+$/.test(nodePath)) throw new Error('nodePath must be an absolute executable path.');
+  return { args, nodePath, databaseUrl, config, target, sha };
+}
+
+async function remoteMigration(context, env) {
+  const { args, nodePath, databaseUrl, config, target, sha } = prepareRemoteMigration(context, env);
   args.push('--', 'env', '-u', 'NODE_OPTIONS', nodePath, 'scripts/dev/remote-migrate-worker.js');
   const nonce = randomUUID();
   const child = spawn('railway', args, { cwd: context.root, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -101,4 +123,4 @@ async function remoteMigration(context, env) {
   return code;
 }
 
-module.exports = { remoteMigration, selectDeployment, privateDatabaseUrl, assertNonproduction, PROJECT_ID };
+module.exports = { prepareRemoteMigration, remoteMigration, selectDeployment, privateDatabaseUrl, assertNonproduction, PROJECT_ID };

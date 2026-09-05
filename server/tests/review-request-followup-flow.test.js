@@ -776,7 +776,7 @@ describe('review request follow-up flow', () => {
     const EmailLib = require('../services/email-template-library');
     let rrUpdate;
     const CLAIM_STAMP = expect.objectContaining({ email_leg_owed_at: null, channel: 'both', sent_at: expect.anything() });
-    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com', customerRow = {}, requestRow = {} } = {}) => {
+    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com', customerRow = {}, requestRow = {}, technicianName = null } = {}) => {
       rrUpdate = jest.fn().mockResolvedValue(1);
       // The claim's sent_at is COALESCE(sent_at, now) — a raw binding.
       db.raw = (sql, bindings) => ({ sql, bindings });
@@ -795,6 +795,10 @@ describe('review request follow-up flow', () => {
         if (table === 'customers') {
           return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Megan', city: 'Bradenton', ...customerRow }) });
         }
+        if (table === 'technicians') {
+          // the by-id name lookup for a row that carries technician_id but no tech_name
+          return { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(technicianName ? { name: technicianName } : undefined) };
+        }
         if (table === 'notification_prefs') {
           if (prefsThrow) return chain({ first: jest.fn().mockRejectedValue(new Error('db down')) });
           return chain({ first: jest.fn().mockResolvedValue(prefs) });
@@ -803,17 +807,27 @@ describe('review request follow-up flow', () => {
       });
     };
 
-    test('the email names the technician createInline persisted on the row; Adam only as the fallback (r30 P2)', async () => {
+    test('the email names the technician createInline persisted on the row; else the row\'s technician_id; else a neutral label — never a hardcoded person (r30 P2, Field Team Phase 0)', async () => {
       wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: 'Alex' } });
       EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); return { sent: true }; });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
       expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Alex' }) }));
 
+      // tech_name missing but the row points at a technician → their first name
       EmailLib.sendTemplate.mockClear();
-      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: null } });
+      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: null, technician_id: 'tech-9' }, technicianName: 'Jordan Reyes' });
       EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-2' }); return { sent: true }; });
       expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
-      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Adam' }) }));
+      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Jordan' }) }));
+
+      // nothing on the row → neutral copy, and no technician lookup is attempted
+      EmailLib.sendTemplate.mockClear();
+      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: null, technician_id: null } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-3' }); return { sent: true }; });
+      const callsBefore = db.mock.calls.length;
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Your technician' }) }));
+      expect(db.mock.calls.slice(callsBefore).map((c) => c[0])).not.toContain('technicians');
     });
 
     test('emails the SAME ask (same token) and stamps sent_at once — status untouched', async () => {

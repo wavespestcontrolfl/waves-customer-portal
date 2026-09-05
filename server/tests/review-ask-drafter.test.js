@@ -173,6 +173,22 @@ describe('draftAskBody — gating + fallback contract', () => {
     expect(mockDispatch.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.customerCopy);
   });
 
+  test('no technician on the visit → the facts block carries no Technician line and never invents a name', async () => {
+    mockGetRecentCalls.mockResolvedValue([]);
+    mockDb([]);
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_BODY });
+    await Drafter.draftAskBody({
+      customer: CUSTOMER,
+      recipientFirstName: 'Aaron',
+      serviceType: 'Quarterly Pest Control',
+      techName: null,
+      sequenceStep: 1,
+    });
+    const payload = mockDispatch.mock.calls[0][1];
+    expect(payload.text).not.toMatch(/Technician:/);
+    expect(payload.text).not.toMatch(/\bAdam\b/);
+  });
+
   test('smart punctuation is normalized to GSM before verification', async () => {
     mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron — hope the ants are gone… If so: {review_url}. Anything off, just reply here.' });
     const body = await Drafter.draftAskBody({ customer: CUSTOMER, recipientFirstName: 'Aaron' });

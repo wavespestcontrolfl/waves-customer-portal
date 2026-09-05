@@ -160,9 +160,15 @@ describe('lawn-mix response for optional products', () => {
     expect(body.materialCostSummary).toMatchObject({ total: 0, pricedLineCount: 0 });
   });
 
+  test('calibration expiry does not withhold mix amounts when inputs exist', async () => {
+    calibration.expires_at = '2000-01-01T00:00:00Z';
+    const body = await lawnMix();
+    expect(body.items.find(item => item.product?.id === 'kflow').jobMix.amount).toBeGreaterThan(0);
+    expect(body.warnings).toEqual([]);
+  });
+
   test.each([
     ['missing', null, 'missing_calibration'],
-    ['expired', { expires_at: '2030-07-14T16:00:00Z' }, 'expired_calibration'],
     ['zero carrier', { carrier_gal_per_1000: 0 }, null],
     ['nonnumeric carrier', { carrier_gal_per_1000: 'unavailable' }, null],
   ])('%s calibration withholds all actual and preview amounts', async (_label, overrides, warning) => {

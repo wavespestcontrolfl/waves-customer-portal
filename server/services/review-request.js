@@ -17,6 +17,27 @@ const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
+
+// Neutral technician labels for customer copy when no name resolves — never a
+// person's name (Field Team Program: the visiting tech is whoever the row says).
+// The SMS form is 9 characters so every {tech}-bearing template stays inside
+// one GSM-7 segment at its documented worst case (12-char first name + the
+// 43-char shortened link); email has no segment budget.
+const TECH_FALLBACK = "Your technician";
+const TECH_FALLBACK_SMS = "Your tech";
+
+// First name from the technician row when an ask carries technician_id but no
+// tech_name (override callers, legacy rows). Null when unknown.
+async function technicianFirstName(technicianId) {
+  if (!technicianId) return null;
+  try {
+    const row = await db("technicians").where({ id: technicianId }).first("name");
+    return firstNameFrom(row?.name) || null;
+  } catch (err) {
+    logger.warn(`[review-request] technician name lookup failed: ${err.message}`);
+    return null;
+  }
+}
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
@@ -2079,9 +2100,9 @@ const ReviewService = {
         payload: {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
-          // The technician createInline persisted on the row; Adam only as
-          // the fallback, as the normal email path (GH Codex #3856 r30 P2).
-          tech_name: request.tech_name || "Adam",
+          // The technician createInline persisted on the row; resolved from
+          // technician_id when the name is missing, neutral otherwise.
+          tech_name: request.tech_name || (await technicianFirstName(request.technician_id)) || TECH_FALLBACK,
           intro_paragraph: GENERIC_EMAIL_INTRO,
         },
         recipientType: "customer",
@@ -3282,7 +3303,7 @@ const ReviewService = {
       // First name only (codex #3235 r2 P2): a full technician name blows the
       // one-segment budget on the {tech}-bearing templates, and the customer
       // knows the tech by first name anyway.
-      tech: firstNameFrom(techName) || "Adam",
+      tech: firstNameFrom(techName) || (await technicianFirstName(technicianId)) || TECH_FALLBACK_SMS,
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };
@@ -3492,7 +3513,7 @@ const ReviewService = {
         payload: {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
-          tech_name: techName || "Adam",
+          tech_name: techName || (await technicianFirstName(request?.technician_id)) || TECH_FALLBACK,
           // The template's opening paragraph is {{intro_paragraph}} — the
           // personalized draft when one verified, else the canonical generic
           // copy. Always supplied: a missing variable renders an empty
@@ -4031,13 +4052,24 @@ const ReviewService = {
     let svcType = serviceType;
     let tName = techName;
     if (!svcType || !tName) {
+      // scheduled_services has no tech_name column — the name comes from the
+      // technician row the visit points at (the old read always fell through
+      // to a hardcoded owner name). When the caller names the visit
+      // (scheduledServiceId — the record-less completion path), THAT row is
+      // the source; the customer-wide latest completed visit is only for an
+      // unscoped manual enrollment, so a same-day sibling or a later visit can
+      // never lend its technician to this ask.
       const lastSvc = await db("scheduled_services")
-        .where({ customer_id: customerId, status: "completed" })
-        .orderBy("scheduled_date", "desc")
+        .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+        .where(scheduledServiceId
+          ? { "scheduled_services.id": scheduledServiceId }
+          : { "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
+        .orderBy("scheduled_services.scheduled_date", "desc")
+        .select("scheduled_services.service_type", "technicians.name as tech_name")
         .first()
         .catch(() => null);
       svcType = svcType || lastSvc?.service_type || null;
-      tName = tName || lastSvc?.tech_name || "Adam";
+      tName = tName || lastSvc?.tech_name || null;
     }
     // resolveLocation() routes city → zip → geo first — nearest_location_id
     // (pure straight-line geography, the signal that mis-routed downtown

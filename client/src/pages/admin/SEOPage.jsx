@@ -3709,6 +3709,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
       {data && cards.length === 0 && <div style={{ fontSize: 13, color: D.muted }}>Nothing awaits your decision.</div>}
       {cards.map((c) => {
         const domainBusy = busy === c.domain.id;
+        const assignmentHold = c.placement.claimed_at ? "Assignment waits for the active placement work to finish."
+          : ["sending", "send_error"].includes(c.placement.follow_up_status) ? "Resolve the pending follow-up send before assigning this backlink." : null;
         const p = c.path;
         return (
           <div key={c.placement.id} style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
@@ -3730,7 +3732,8 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
             {c.backlink_match && <div style={{ fontSize: 14, marginBottom: 12 }}>
               <p>A backlink was found, but more than one placement could match it. Review the source page before assigning it to this placement.</p>
               <a href={c.backlink_match.source_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>Review source page</a>
-              <button disabled={domainBusy} onClick={() => matchBacklink(c)} style={{ ...btn(domainBusy), fontSize: 14, marginLeft: 12 }}>Assign to this placement</button>
+              <button disabled={domainBusy || Boolean(assignmentHold)} onClick={() => matchBacklink(c)} style={{ ...btn(domainBusy || Boolean(assignmentHold)), fontSize: 14, marginLeft: 12 }}>Assign to this placement</button>
+              {assignmentHold && <p>{assignmentHold}</p>}
             </div>}
 
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
