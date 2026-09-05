@@ -4837,7 +4837,9 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     if (!enrollment.enrolled && enrollment.transient) {
       throw annotateSetupIntentWebhookError(
         new Error(`recurring-cof webhook enrollment transient failure (${enrollment.reason}) — retry`),
-        { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: safeErrorToken(enrollment.reason) || 'enrollment_transient' },
+        // enrollment.reason may contain a raw exception message, even one
+        // word that passes safeErrorToken. Never promote it to Sentry.
+        { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'enrollment_transient' },
       );
     }
     return;

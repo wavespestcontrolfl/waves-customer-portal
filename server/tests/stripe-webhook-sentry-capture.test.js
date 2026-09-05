@@ -72,6 +72,16 @@ jest.mock('../services/appointment-card-request', () => ({
 }));
 
 const express = require('express');
+jest.mock('../services/recurring-card-on-file', () => ({
+  isRecurringCardOnFileEnabled: jest.fn(() => true),
+  completeRecurringCardEnrollment: jest.fn(),
+}));
+jest.mock('../routes/estimate-public', () => ({
+  isCommercialAutoAcceptEstimate: jest.fn(() => false),
+  findLinkedUpcomingAppointment: jest.fn(async () => ({ id: 'appt_test' })),
+}));
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
+const RecurringCards = require('../services/recurring-card-on-file');
 const AppointmentCardRequests = require('../services/appointment-card-request');
 const Sentry = require('@sentry/node');
 const db = require('../models/db');
@@ -274,6 +284,45 @@ test('setup_intent.succeeded expected-retry capture adds safe purpose/branch/rea
   });
 
   expect(update).toHaveBeenCalledWith({ error: 'appointment card capture seti_retry_1 completion_in_progress — retry' });
+});
+
+test('raw one-word enrollment exception stays out of every Sentry field while Stripe still retries', async () => {
+  const privateReason = 'PrivateCustomerWord';
+  const update = jest.fn().mockResolvedValue(1);
+  const ledger = ledgerBuilder({ update });
+  db.schema = { hasTable: jest.fn(async () => false) };
+  db.mockImplementation((table) => {
+    if (table === 'stripe_webhook_events') return ledger;
+    const row = table === 'estimates'
+      ? { id: 'estimate_test', customer_id: 'customer_test', status: 'accepted' }
+      : { billing_mode: 'per_application' };
+    return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => row) };
+  });
+  RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({
+    enrolled: false, transient: true, reason: privateReason,
+  });
+  mockConstructEvent.mockReturnValue({
+    id: 'evt_enrollment_transient', type: 'setup_intent.succeeded',
+    data: { object: {
+      id: 'seti_enrollment', payment_method: 'pm_test',
+      metadata: { purpose: 'estimate_recurring_card', estimate_id: 'estimate_test' },
+    } },
+  });
+
+  expect((await postWebhook()).status).toBe(500);
+  expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(1);
+  expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+  const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+  expect(context.extra.reasonCode).toBe('enrollment_transient');
+  expect(context.extra.errorCode).toBe('enrollment_transient');
+  expect(context.fingerprint).toEqual([
+    'stripe-webhook-handler', 'setup_intent.succeeded', 'Error',
+    'estimate_recurring_card', 'expected_retry', 'enrollment_transient',
+  ]);
+  expect(JSON.stringify([capturedErr.message, capturedErr.stack, context])).not.toContain(privateReason);
+  expect(update).toHaveBeenCalledWith({
+    error: `recurring-cof webhook enrollment transient failure (${privateReason}) — retry`,
+  });
 });
 
 test('unexpected setup capture failures stay distinct from expected retries', async () => {
