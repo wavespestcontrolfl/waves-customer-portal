@@ -1076,7 +1076,23 @@ async function resolveFulfillment(conn, commitment, call) {
       // promise.
       const estQ = handedOffWithin(conn("estimates"), after, until);
       if (customerId) {
-        estQ.where("customer_id", customerId);
+        // A lead can acquire its customer before its estimate does. Reuse the
+        // precise FK / lead-id mirror, never contact matching. This remains
+        // an association; conflicting or unknown live-lead ownership blocks
+        // the unowned-estimate fallback in either linkage direction.
+        estQ.whereRaw(`(estimates.customer_id = ? OR (
+          estimates.customer_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id = ?
+              AND (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data ->> 'lead_id')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ?
+              AND (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data ->> 'lead_id')
+          )
+        ))`, [customerId, customerId, customerId]);
       } else if (phone) {
         estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
       } else {
