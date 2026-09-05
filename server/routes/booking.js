@@ -514,6 +514,8 @@ router.get('/config', async (req, res, next) => {
       // Multi-service selector on /book — fail-closed dark-ship flag; the
       // server independently refuses composite service keys while off.
       multi_service: isEnabled('multiServiceBooking'),
+      // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
+      van_scene: isEnabled('vanScene'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,

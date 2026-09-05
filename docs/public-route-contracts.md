@@ -808,7 +808,11 @@ confirmation texts link to. Gated by `scheduled_services.reschedule_token`
 minting a second one — plus a 60 req/min router limit and 10 req/min on
 the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
 GET returns the visit summary (service type, date + window_start, the
-server-derived arrival range, plan/one-time flag, confirmed flag) plus
+server-derived arrival range, plan/one-time flag, confirmed flag, and
+`vanScene` — a boolean that is exactly `GATE_VAN_SCENE` (feature-gates
+`vanScene`: dev-open, prod dark; unset = false) telling the page to render
+the "look for this van" scene under the header card; it carries no visit
+data and no other field changes with it) plus
 decorations that are each individually fail-open: assigned tech first name
 + TTL-presigned photo, a same-tech-as-last-visit flag, and the day's NWS
 rain chance. **NO customer name, and the page greets nobody** —
@@ -829,6 +833,10 @@ bless a replacement slot the customer never saw. It never touches
 date/window/tech and sends NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
 the same visit, UID-stable per visit so re-downloading updates rather
 than duplicates).
+`GET /api/booking/config` (the /book page's public config payload, no token)
+gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
+to show the van scene above the secure-card block. Unset gate = `false`;
+no other field changes.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

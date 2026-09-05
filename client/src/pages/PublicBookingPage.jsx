@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
+import VanScene from '../components/VanScene';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
 import { fireGlassConfetti, useGlassSurface } from '../glass/glass-engine';
@@ -160,6 +161,7 @@ export default function PublicBookingPage() {
   const { customer: authCustomer, isAuthenticated, sendCode, verifyCode, clearError: clearAuthError, error: authError } = useAuth();
   const [customersOnly, setCustomersOnly] = useState(null);
   // GATE_VAN_SCENE via /booking/config — the confirmation step's van scene.
+  const [vanScene, setVanScene] = useState(false);
   // Multi-service selector (GATE_MULTI_SERVICE_BOOKING) — fail-closed:
   // renders only when /booking/config affirms; the server also refuses
   // composite service keys while the gate is off.
@@ -182,6 +184,7 @@ export default function PublicBookingPage() {
       .then((cfg) => {
         if (cancelled) return;
         setCustomersOnly(cfg?.customers_only === true);
+        setVanScene(cfg?.van_scene === true);
         const multiOn = cfg?.multi_service === true;
         setMultiServiceEnabled(multiOn);
         // Kill-switch fail-closed for deep/recovery links: a composite
@@ -1533,6 +1536,13 @@ export default function PublicBookingPage() {
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
+            {vanScene ? (
+              <VanScene
+                title="Here's the van to look for in your driveway"
+                stamp={[selectedSlot?.fullDate || selectedDayLabel, selectedSlot?.start_label].filter(Boolean).join(' · ') || null}
+                style={{ marginBottom: 20, borderRadius: 12, border: `1px solid ${COLORS.slate200}` }}
+              />
+            ) : null}
             {secureCardUrl ? (
               <div data-glass="card" style={{
                 position: 'relative',
