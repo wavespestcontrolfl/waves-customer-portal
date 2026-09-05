@@ -8952,7 +8952,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // reminder row in the same transaction — otherwise the 72h/24h cron
         // texts the customer the old date/time. (Recurring children get the
         // same treatment via resetAppointmentReminderForScheduleRewrite below.)
-        const reminderFieldsTouched = updates.scheduled_date !== undefined || updates.window_start !== undefined;
+        const reminderFieldsTouched = updates.scheduled_date !== undefined || updates.window_start !== undefined || updates.window_end !== undefined;
         const reminderBefore = reminderFieldsTouched
           ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start', 'window_end', 'technician_id')
           : null;
@@ -9126,6 +9126,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
             scheduleMoveForNotice = { date: nextDate, start: nextStart || null };
+          }
+          // The tech's card covers any slot change — date, start, OR end
+          // (the customer reminder above keys on date/start only).
+          const prevEnd = normalizeHHMM(reminderBefore.window_end);
+          const nextEnd = updates.window_end !== undefined ? normalizeHHMM(updates.window_end) : prevEnd;
+          if (nextDate && (nextDate !== prevDate || nextStart !== prevStart || nextEnd !== prevEnd)) {
             techMoveForNotice = {
               technicianId: requestedTechnicianId !== undefined ? requestedTechnicianId : (reminderBefore.technician_id || null),
               previous: { date: prevDate, windowStart: reminderBefore.window_start, windowEnd: reminderBefore.window_end },

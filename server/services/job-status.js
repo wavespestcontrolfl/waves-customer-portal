@@ -871,9 +871,14 @@ async function transitionJobStatus({
   function notifyTechOfCancel(adminPayload) {
     if (suppressTechNotice) return;
     if (String(toStatus) !== 'cancelled' || String(fromStatus) === 'cancelled' || !adminPayload?.tech_id) return;
+    // `trx` rides along: a savepoint's executionPromise resolves at savepoint
+    // release, and the notice must wait for the OUTERMOST commit
+    // (commitPromiseOf inside the service) — same rule as the dispatch
+    // broadcast. With no trx it runs now (the write is already committed).
     require('./tech-visit-notifications').notifyVisitCancelled({
       visitId: jobId, technicianId: adminPayload.tech_id, actorId: transitionedBy || null,
       snapshot: { date: adminPayload.scheduled_date, windowStart: adminPayload.window_start, windowEnd: adminPayload.window_end },
+      trx: trx || null,
     });
   }
 
