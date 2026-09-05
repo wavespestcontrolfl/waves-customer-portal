@@ -979,13 +979,16 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // it at the later of noon and now (tankFromCalibrations). A rig that
     // lapsed since noon withholds every planned amount here too, with the
     // Tank section's own reason.
-    const plannedMix = !blocked && !tankReason && line.selected !== false && line.planMix?.amount > 0 && !unverified ? line.planMix : null;
+    const demandMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
+    const plannedMix = !blocked && !tankReason && !unverified ? demandMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
     const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
     // stock in the inventory unit (gal) — the plan engine's snapshot owns
     // that conversion. Unconvertible pairs are not "short", they are flagged.
-    const inventory = buildProductInventorySnapshot(p, plannedMix);
+    // Demand is the plan's selected mix even while the display amount is
+    // withheld: a stock block must not erase the shortage it is about.
+    const inventory = buildProductInventorySnapshot(p, demandMix);
     const onHand = inventory?.onHand ?? null;
     const short = Boolean(inventory && inventory.plannedAmountInventoryUnit != null && onHand != null && inventory.plannedAmountInventoryUnit > onHand);
     // Untracked stock is the catalog's normal state, not a warning worth a line.
@@ -1000,7 +1003,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
-      amountNote: unverified ? 'Label rate not yet verified — amount withheld' : (tankReason && line.planMix?.amount > 0 ? `${tankReason} — amount withheld` : null),
+      amountNote: unverified ? 'Label rate not yet verified — amount withheld' : (tankReason && demandMix ? `${tankReason} — amount withheld` : null),
       short,
       stockNote,
       onHand,

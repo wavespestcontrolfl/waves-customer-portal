@@ -792,6 +792,15 @@ describe('PR review r5', () => {
 });
 
 describe('PR review r6', () => {
+  test('a blocked plan still computes the shortage and the order quantity (hook P1)', async () => {
+    const product = { id: 'p', name: 'P', rate_unit: 'fl oz', inventory_on_hand: 1, inventory_unit: 'fl oz', label_verified_at: '2026-08-01' };
+    const line = { raw: 'x', role: 'base', selected: true, product, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
+    const [card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: [line], verdicts: [], packSizes: {}, blocked: true });
+    expect(card.planned).toBeNull();
+    expect(card.short).toBe(true);
+    expect(card.order.quantity).toBeCloseTo(11.4, 2);
+  });
+
   test('a rig that lapsed after noon withholds the card amounts with the tank reason (hook P1)', async () => {
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
