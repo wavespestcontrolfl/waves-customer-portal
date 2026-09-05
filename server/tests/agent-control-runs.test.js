@@ -205,10 +205,14 @@ describe('start / step / finish', () => {
 
   test('finish: terminal + result + disposition, artifacts, attempt closed, work item done, unknown values fall back', async () => {
     const h = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
-    await h.finish({ result: 'bogus', disposition: 'drafted', summary: { detail: 'd' }, artifacts: [{ kind: 'draft', label: 'Draft', content: 'x' }, { kind: 'nope' }, null] });
+    await h.finish({ result: 'bogus', disposition: 'drafted', summary: { detail: 'd' }, artifacts: [{ kind: 'draft', label: 'Draft', content: 'x' }, { kind: 'url', ref: 'https://x' }, { kind: 'nope' }, null] });
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'drafted', summary: { detail: 'd' } });
     expect(runRow().lease_expires_at).toBeNull();
-    expect(store.run_artifacts).toHaveLength(2);
+    // only CHECK-valid kinds reach the batch insert (one bad kind would reject the whole batch)
+    expect(store.run_artifacts.map((a) => a.kind)).toEqual(['draft', 'url']);
+    const migration = require('fs').readFileSync(require('path').join(__dirname, '..', 'models', 'migrations', '20260905000010_agent_runs.js'), 'utf8');
+    const check = migration.match(/run_artifacts_kind_chk CHECK \(kind IN \(([^)]*)\)\)/)[1].match(/'([a-z_]+)'/g).map((k) => k.replace(/'/g, ''));
+    expect([...runs.ARTIFACT_KINDS].sort()).toEqual(check.sort());
     expect(store.agent_attempts[0]).toMatchObject({ result: 'succeeded' });
     expect(store.work_items[0].status).toBe('done');
     expect(events(h.id)).toEqual(['started', 'finished', 'disposition']);

@@ -52,6 +52,9 @@ const context = require('./context');
 const NO_RETRY_CLASSES = new Set(['money', 'irreversible_external']);
 // Which taxonomy RESULT a failure lands on: by error code first, then class.
 const CODE_RESULT = Object.freeze({ budget_exhausted: 'budget_exhausted' });
+// run_artifacts.kind CHECK (migration 20260905000010): anything else would
+// reject the whole batch insert and lose the valid artifacts beside it.
+const ARTIFACT_KINDS = new Set(['draft', 'report', 'json', 'url', 'record_ref']);
 const CLASS_RESULT = Object.freeze({ timeout: 'timed_out' });
 const WARN_INTERVAL_MS = 60_000;
 const WORKER_ID = `${os.hostname()}:${process.pid}`.slice(0, 120);
@@ -382,7 +385,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   async function writeArtifacts(artifacts) {
     if (!Array.isArray(artifacts) || !artifacts.length) return;
     const rows = artifacts
-      .filter((a) => a && a.kind)
+      .filter((a) => a && ARTIFACT_KINDS.has(a.kind))
       .map((a) => ({
         run_id: runId,
         kind: clip(a.kind, 12),
@@ -518,4 +521,4 @@ async function runManaged(startArgs, fn) {
   }
 }
 
-module.exports = { startRun, runManaged, runGateOn, WORKER_ID, NO_RETRY_CLASSES };
+module.exports = { startRun, runManaged, runGateOn, WORKER_ID, NO_RETRY_CLASSES, ARTIFACT_KINDS };
