@@ -1,5 +1,6 @@
 import React from "react";
 import { createPortal } from "react-dom";
+import { productLabelLink } from "../../lib/product-label";
 import { Button, Card } from "../../components/ui";
 
 const TANK_MIX_CATEGORIES = new Set([
@@ -44,6 +45,7 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
       {products.map((item, index) => {
         const product = item.product;
         const mix = item.fullTankMix;
+        const labelLink = productLabelLink(product);
         const tankProduct = TANK_MIX_CATEGORIES.has(product.mixingOrderCategory);
         const exclusions = product.excludedTurfSpecies || [];
         const excludesDefaultTurf = exclusions.some((species) => String(species).toLowerCase().replace(/[^a-z]/g, "") === "staugustine");
@@ -75,7 +77,7 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
             {product.reiHours != null && <p className="mt-2">Recorded restricted-entry interval: {product.reiHours} hours. Check label applicability.</p>}
             <dl className="mt-3 grid gap-3 md:grid-cols-2">{safety.map(([label, value]) => <div key={label}><dt className="font-medium">{label}</dt><dd>{String(value)}</dd></div>)}</dl>
             <div className="mt-3 flex flex-wrap gap-4">
-              {product.labelUrl ? <a className="underline" href={product.labelUrl} target="_blank" rel="noopener noreferrer">Product label</a> : <span>Product label document not on file</span>}
+              {labelLink ? <a className="underline" href={labelLink.href} target="_blank" rel="noopener noreferrer">Product label</a> : <span>Product label document not on file</span>}
               {product.sdsUrl ? <a className="underline" href={product.sdsUrl} target="_blank" rel="noopener noreferrer">Safety data sheet</a> : <span>SDS not on file</span>}
             </div>
           </section>

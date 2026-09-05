@@ -21,6 +21,16 @@ function fixture() {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("110-gallon tank reference", () => {
+  it("retains the EPA label fallback on screen and in print when only registration is stored", () => {
+    const plan = fixture();
+    Object.assign(plan.items[0].product, { labelUrl: null, epaRegNumber: "123-456-789" });
+    const { container } = render(<ProtocolTankSheet plan={plan} calibration={calibration} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Product label")).toHaveAttribute("href", "https://ordspub.epa.gov/ords/pesticides/f?p=PPLS:102::::::P102_REG_NUM:123-456-789");
+      expect(within(surface).queryByText("Product label document not on file")).not.toBeInTheDocument();
+    }
+  });
+
   it("preserves product-specific triggers and application scope on screen and in print", () => {
     const plan = fixture();
     Object.assign(plan.items[0], { conditional: true, raw: "Spot treat only if the synthetic threshold is met", scope: "spot" });
