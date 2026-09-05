@@ -1318,12 +1318,12 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // not the primary lawn plan (an off-protocol / blackout block of the lawn
   // plan says nothing about a pest or tree & shrub mix), and a line the
   // protocol lists as "if needed" is withheld exactly as the card does.
-  const protocolLine = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
+  const { line: protocolLine, treatment, primaryIsLawn } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
-  const plan = !protocolLine && detectServiceLine(svc.service_type) === 'lawn' ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
+  const plan = !protocolLine && primaryIsLawn ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
   const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
@@ -1364,6 +1364,10 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // Withhold reasons in guard order — the first that applies wins; the
   // catalog contract (label_verified_at) and a spray Hold sit among them.
   const withheld = [
+    // The visit's catalog identity is not a treatment (inspection,
+    // assessment, the specialty grab-bag) and no booked add-on's protocol
+    // names the product: the search is not a way to dose on an inspection.
+    [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category})`],
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
     // The protocol lists this product as "if needed": no dose until the
@@ -1404,19 +1408,24 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
  * it (name + aliases against that program's visit); `addon` is the add-on's
  * name (null for the primary line) and `selected` says whether the line is
  * booked work or the visit's "if needed" (a selected line anywhere wins
- * over a conditional one). Null when no non-lawn protocol names the product.
+ * over a conditional one); `line` is null when no non-lawn protocol names
+ * the product. `treatment` is the primary line's own eligibility (false
+ * for an inspection / assessment / specialty grab-bag identity) and
+ * `primaryIsLawn` whether the lawn plan governs it.
  */
 async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
   const primaryKey = svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols) : undefined;
-  const primaryIsLawn = primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn';
+  const treatment = primaryKey !== null;
+  const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
+  const found = (line) => ({ line, treatment, primaryIsLawn });
   const candidates = [
     ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null }] : []),
     ...(await loadAddons(dbh, serviceId))
       .map((a) => ({ addon: a.name, name: a.name, programKey: addonProgramKey(a.category, a.name, protocols) }))
       .filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
-  if (!candidates.length) return null;
+  if (!candidates.length) return found(null);
   const aliases = await dbh('product_aliases').where({ product_id: product.id }).select('alias_name')
     .catch((err) => { throw unavailable('Product catalog unavailable', err); });
   const catalog = [{ ...product, aliases: aliases.map((r) => r.alias_name) }];
@@ -1425,10 +1434,10 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const { lines } = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, c.programKey ? { programKey: c.programKey } : {});
     const hit = lines.find((l) => l.product.id === product.id);
     if (!hit) continue;
-    if (hit.selected !== false) return { addon: c.addon, selected: true };
+    if (hit.selected !== false) return found({ addon: c.addon, selected: true });
     conditional = conditional || { addon: c.addon, selected: false };
   }
-  return conditional;
+  return found(conditional);
 }
 
 function perGallonRate(product) {

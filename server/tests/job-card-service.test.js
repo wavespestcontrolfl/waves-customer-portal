@@ -1150,10 +1150,19 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const talus = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(talus.context).toEqual({ line: null, conditional: false });
     expect(talus.amount).toBe(0.5);
-    // An inspection by identity has no protocol line: nothing to withhold on, nothing to dose under.
-    rows.scheduled_services = [{ ...visit, service_type: 'Tree & Shrub Assessment', service_category: 'inspection' }];
-    expect((await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') })).context).toEqual({ line: null });
+    // An inspection by identity never doses (hook P1) — not even a
+    // lawn-named one through the lawn plan — unless a booked add-on's
+    // protocol names the product.
+    rows.scheduled_services = [{ ...visit, service_type: 'Lawn Assessment Service', service_category: 'inspection' }];
+    const inspection = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(inspection.context).toEqual({ line: null });
+    expect(inspection.amount).toBeNull();
+    expect(inspection.reason).toBe('No treatment protocol for this visit (inspection)');
     expect(buildPlan).not.toHaveBeenCalled();
+    rows.scheduled_service_addons = [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }];
+    const viaAddon = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(viaAddon.context).toEqual({ line: 'Tree & Shrub Care', conditional: false });
+    expect(viaAddon.amount).toBe(0.5);
   });
 
   test('the tank search runs the spray check at the property: a Hold withholds the dose', async () => {
