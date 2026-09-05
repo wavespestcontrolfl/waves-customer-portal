@@ -1651,6 +1651,7 @@ async function buildPlanForService(serviceId, options = {}) {
 }
 
 module.exports = {
+  buildProductInventorySnapshot,
   buildPlanForService,
   calculateProductAmount,
   parseVisitNutrientTargets,

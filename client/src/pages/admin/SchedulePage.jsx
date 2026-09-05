@@ -4895,6 +4895,7 @@ function JobCardProduct({ p, D }) {
         {!p.short && p.onHand != null && (
           <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
         )}
+        {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
         {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
         {(p.labelUrl || p.sdsUrl) && (
           <div style={{ display: "flex", gap: 12 }}>
@@ -5154,8 +5155,8 @@ export function ProtocolPanel({ service, onClose }) {
       })
       .catch(() => {
         if (cancelled) return;
-        // A failed read must not hide the tab behind a silent "gate off".
-        setJobCard({ enabled: true, failed: true });
+        // Fail closed: only an affirmative { enabled: true } shows the tab.
+        setJobCard({ enabled: false });
         setJobCardError(true);
       })
       .finally(() => {
@@ -5430,7 +5431,7 @@ export function ProtocolPanel({ service, onClose }) {
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
         {activeSection === "job_card" && jobCardEnabled ? (
-          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError || jobCard?.failed} D={D} />
+          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
         ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...

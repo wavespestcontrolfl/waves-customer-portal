@@ -35,6 +35,7 @@ const {
   resolveProtocolItems,
   matchCatalogProduct,
   parseVisitNutrientTargets,
+  buildProductInventorySnapshot,
 } = require('./waveguard-plan-engine');
 const { latestComparableGroupApplication } = require('./waveguard-approval-engine');
 
@@ -121,6 +122,18 @@ function wateringLine(prefs) {
   if (minutes > 0) parts.push(`${minutes} min`);
   if (inches > 0) parts.push(`${inches}"/wk`);
   return parts.join(', ');
+}
+
+// Present AND in range, checked before any numeric coercion (Number(null)
+// and Number('') are 0, which would send the NWS lookup to the Gulf of
+// Guinea instead of the office fallback).
+function propertyCoords(latRaw, lngRaw) {
+  if (latRaw == null || latRaw === '' || lngRaw == null || lngRaw === '') return null;
+  const lat = Number(latRaw);
+  const lng = Number(lngRaw);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || (lat === 0 && lng === 0)) return null;
+  return { lat, lng };
 }
 
 async function loadRain7d(dbh, customer) {
@@ -230,9 +243,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
 
   const name = clean(`${svc.first_name || ''} ${svc.last_name || ''}`, 80);
   const program = clean(svc.waveguard_tier ? `${svc.service_type} · WaveGuard ${svc.waveguard_tier}` : svc.service_type, 80);
-  const lat = Number(svc.latitude);
-  const lng = Number(svc.longitude);
-  const hasCoords = Number.isFinite(lat) && Number.isFinite(lng);
+  const coords = propertyCoords(svc.latitude, svc.longitude);
 
   return {
     serviceId: svc.id,
@@ -245,7 +256,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     lawnSqft: turf?.lawn_sqft != null ? Number(turf.lawn_sqft) : null,
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     access: { codes: accessCodes(prefs) },
-    coords: hasCoords ? { lat, lng, source: 'property' } : { ...OFFICE_COORDS, source: 'office' },
+    coords: coords ? { ...coords, source: 'property' } : { ...OFFICE_COORDS, source: 'office' },
     // Model-safe facts. Nothing below carries a code or a phone number.
     facts: {
       pets: petLine(prefs),
@@ -444,27 +455,42 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
     }
     : null;
 
+  // Hours covering [now, now + hours) from the FULL hourly input — a
+  // product's rain-free interval can run past the 4 h spray window.
+  const hoursAhead = (hours) => (Array.isArray(hourly) ? hourly : []).filter((h) => {
+    const t = Date.parse(h.startTime);
+    return Number.isFinite(t) && t + 3600000 > start && t < start + hours * 3600000;
+  });
+  const covers = (rows, hours) => rows.length >= Math.ceil(hours);
+
   const verdicts = products.map((product) => {
     const limits = productLimits(product);
     const hasLimits = [limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
     if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: 'No limit on file' };
     if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
     const reasons = [];
-    if (limits.maxTempF != null && window.some((h) => h.temperatureF != null && h.temperatureF > limits.maxTempF)) {
-      reasons.push(`over ${limits.maxTempF}°F`);
+    const missing = [];
+    // A limit can only pass when EVERY hour it is judged over carries the
+    // measurement; a null reading is "unknown", never a pass.
+    const judge = ({ rows, key, label, limit, reason }) => {
+      if (rows.some((h) => h[key] == null)) { missing.push(label); return; }
+      if (rows.some((h) => h[key] > limit)) reasons.push(reason);
+    };
+    if (limits.maxTempF != null) {
+      judge({ rows: window, key: 'temperatureF', label: 'temperature', limit: limits.maxTempF, reason: `over ${limits.maxTempF}°F` });
     }
-    if (limits.maxWindMph != null && window.some((h) => h.windMph != null && h.windMph > limits.maxWindMph)) {
-      reasons.push(`wind over ${limits.maxWindMph} mph`);
+    if (limits.maxWindMph != null) {
+      judge({ rows: window, key: 'windMph', label: 'wind', limit: limits.maxWindMph, reason: `wind over ${limits.maxWindMph} mph` });
     }
     if (limits.rainFreeHours != null) {
-      const rainWindow = window.filter((h) => Date.parse(h.startTime) < start + limits.rainFreeHours * 3600000);
-      if (rainWindow.some((h) => (h.rainChance ?? 0) >= RAIN_HOLD_PCT)) {
-        reasons.push(`rain likely inside ${limits.rainFreeHours} h`);
-      }
+      const label = `rain ${limits.rainFreeHours} h`;
+      const rainRows = hoursAhead(limits.rainFreeHours);
+      if (!covers(rainRows, limits.rainFreeHours)) missing.push(label);
+      else judge({ rows: rainRows, key: 'rainChance', label, limit: RAIN_HOLD_PCT - 1, reason: `rain likely inside ${limits.rainFreeHours} h` });
     }
-    return reasons.length
-      ? { productId: product.id, verdict: 'hold', reason: reasons.join(', ') }
-      : { productId: product.id, verdict: 'ok', reason: null };
+    if (reasons.length) return { productId: product.id, verdict: 'hold', reason: reasons.join(', ') };
+    if (missing.length) return { productId: product.id, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast` };
+    return { productId: product.id, verdict: 'ok', reason: null };
   });
 
   return {
@@ -619,13 +645,23 @@ async function buildProductCards({ facts, lines, tank, verdicts, packSizes, dbh 
     const p = line.product;
     const verdict = verdicts.find((v) => v.productId === p.id) || { verdict: 'unknown', reason: 'No limit on file' };
     let planned = null;
+    let plannedMix = null;
     if (facts.isLawn && facts.lawnSqft && tank.calibrated && line.selected !== false) {
       const areaFactor = effectiveAreaFactor(line, { plan: facts.strip.program });
       const mix = calculateProductAmount({ product: p, lawnSqft: facts.lawnSqft, carrierGalPer1000: tank.carrierGalPer1000, areaFactor, ...nutrientTargets });
-      if (mix?.amount > 0) planned = { amount: Math.round(mix.amount * 100) / 100, unit: mix.amountUnit || p.rate_unit || null };
+      if (mix?.amount > 0) {
+        plannedMix = mix;
+        planned = { amount: Math.round(mix.amount * 100) / 100, unit: mix.amountUnit || p.rate_unit || null };
+      }
     }
-    const onHand = p.inventory_on_hand != null ? Number(p.inventory_on_hand) : null;
-    const short = planned && onHand != null && onHand < planned.amount;
+    // Unit-aware: the planned amount is in the application unit (fl oz),
+    // stock in the inventory unit (gal) — the plan engine's snapshot owns
+    // that conversion. Unconvertible pairs are not "short", they are flagged.
+    const inventory = buildProductInventorySnapshot(p, plannedMix);
+    const onHand = inventory?.onHand ?? null;
+    const short = Boolean(inventory && inventory.plannedAmountInventoryUnit != null && onHand != null && inventory.plannedAmountInventoryUnit > onHand);
+    // Untracked stock is the catalog's normal state, not a warning worth a line.
+    const stockNote = inventory?.warning && !short && inventory.status !== 'not_tracked' ? inventory.warning : null;
     const rotation = await rotationNote(dbh, facts, p);
     cards.push({
       id: p.id,
@@ -636,10 +672,11 @@ async function buildProductCards({ facts, lines, tank, verdicts, packSizes, dbh 
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
-      short: Boolean(short),
+      short,
+      stockNote,
       onHand,
-      onHandUnit: p.inventory_unit || null,
-      lowStock: onHand != null && p.low_stock_threshold != null && onHand <= Number(p.low_stock_threshold),
+      onHandUnit: inventory?.unit || null,
+      lowStock: inventory?.status === 'low' || inventory?.status === 'depleted',
       signalWord: p.signal_word || null,
       precautions: precautionText(p),
       labelUrl: p.label_url || null,
@@ -713,7 +750,9 @@ async function mixForProduct(productId, gallons, { dbh = db, now = new Date() } 
   ]);
   if (!product) return null;
   const tank = tankFromCalibration(calibration, now);
-  const mix = buildMixAmount({ ratePer1000: product.default_rate_per_1000, rateUnit: product.rate_unit, carrierGalPer1000: tank.carrierGalPer1000, gallons });
+  // An expired calibration keeps its carrier number for display, but no
+  // mix is computed from it — the same withholding the lawn-mix route does.
+  const mix = buildMixAmount({ ratePer1000: product.default_rate_per_1000, rateUnit: product.rate_unit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
   const packSizes = await loadPackSizes(dbh, [product.id]);
   return {
     productId: product.id,
@@ -745,5 +784,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords },
 };

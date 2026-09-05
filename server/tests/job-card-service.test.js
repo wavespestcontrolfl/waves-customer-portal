@@ -173,6 +173,26 @@ describe('buildSprayCheck', () => {
     expect(long.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'rain likely inside 4 h' });
   });
 
+  test('rain-free interval longer than the forecast coverage → unknown, never ok', () => {
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly, now });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 6 h forecast' });
+  });
+
+  test('rain past the 4 h spray window still holds a long rain-free interval', () => {
+    const six = [...hourly, hour(5, { rainChance: 5 })];
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly: six, now });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'rain likely inside 6 h' });
+  });
+
+  test('a null measurement inside the window is unknown, not a pass', () => {
+    const gappy = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : h));
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: gappy, now });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
+    // A breach on the other limit still wins over the gap.
+    const windy = gappy.map((h, i) => (i === 2 ? { ...h, windMph: 25 } : h));
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: windy, now }).verdicts[0].verdict).toBe('hold');
+  });
+
   test('no forecast → unknown with reason', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: null, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast' });
@@ -195,6 +215,17 @@ describe('buildMixAmount', () => {
     ['odd volume', { ratePer1000: 1.5, carrierGalPer1000: 2, gallons: 5 }, 'Pick 110 or 1 gallons'],
   ])('%s → null amount with reason', (_l, input, reason) => {
     expect(jobCard.buildMixAmount(input)).toMatchObject({ amount: null, reason });
+  });
+});
+
+describe('property coordinates', () => {
+  test.each([
+    [null, null], ['', ''], [0, 0], ['91', '-82.4'], ['abc', '-82.4'],
+  ])('%s / %s falls back to the office pin', (lat, lng) => {
+    expect(jobCard._test.propertyCoords(lat, lng)).toBeNull();
+  });
+  test('a real pin is kept', () => {
+    expect(jobCard._test.propertyCoords('27.4989', '-82.5748')).toEqual({ lat: 27.4989, lng: -82.5748 });
   });
 });
 
@@ -222,5 +253,38 @@ describe('access codes never enter the model-safe facts', () => {
     expect(jobCard._test.petLine({ pet_details: 'Dog; gate code 4545#' })).not.toContain('4545');
     // And the validator refuses model text that prints a known code.
     expect(jobCard.validateParagraph('Gate code 4545# on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
+  });
+});
+
+describe('mixForProduct', () => {
+  // Generic knex-chain stub: every builder method returns the chain, the
+  // terminal (.first / await) resolves the table's fixture.
+  const makeDb = (fixtures) => (table) => {
+    const rows = fixtures[String(table).split(" as ")[0]] ?? [];
+    const chain = {};
+    for (const m of ['join', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+    chain.first = async () => rows[0] ?? null;
+    chain.catch = (fn) => Promise.resolve(rows).catch(fn);
+    chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+    return chain;
+  };
+  const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: null };
+
+  test('expired calibration → amount withheld with the tank reason', async () => {
+    const dbh = makeDb({
+      products_catalog: [product],
+      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
+    });
+    const out = await jobCard.mixForProduct('p1', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') });
+    expect(out).toMatchObject({ amount: null, reason: 'Rig not calibrated', tank: { calibrated: false, reason: 'Rig calibration expired' } });
+  });
+
+  test('live calibration → amount for 110 gal', async () => {
+    const dbh = makeDb({
+      products_catalog: [product],
+      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
+    });
+    const out = await jobCard.mixForProduct('p1', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') });
+    expect(out).toMatchObject({ amount: 6.22, unit: 'oz', gallons: 110, rateVerified: false });
   });
 });
