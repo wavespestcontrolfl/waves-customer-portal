@@ -104,7 +104,6 @@ After verifying and selecting a Railway dev/preview cluster as above:
 npm run qa:database
 npm run dev:migrate
 npm run dev:doctor
-npm run build
 npm run qa:e2e
 npm run qa:cleanup
 ```
@@ -117,7 +116,12 @@ database so its background jobs cannot process QA accounts. If doctor reports
 a pending legacy placeholder after the first migration batch, run `dev:migrate`
 again. Never use production credentials with these commands.
 
-`qa:e2e` creates fictional admin, technician and customer accounts with random
+`qa:e2e` first runs `npm run build` in the managed frontend environment, so
+assets left by an earlier checkout cannot satisfy a run. Build failures stop
+before new fixtures are seeded. Each full run pays the build cost; `qa:seed`
+and `qa:cleanup` do not build. Keep source files unchanged during a run.
+
+It then creates fictional admin, technician and customer accounts with random
 credentials and future appointments. It starts its own loopback API serving the
 production frontend build. Browser logins exercise password auth and captured
 OTP verification; API journeys check estimate acceptance retries, rescheduling

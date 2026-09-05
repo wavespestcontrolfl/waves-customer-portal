@@ -38,7 +38,18 @@ async function main() {
     }
     if (process.argv.includes('--cleanup')) return;
     await doctor(context);
-    if (!process.argv.includes('--seed') && !fs.existsSync(path.join(context.root, 'client/dist/index.html'))) throw new Error('Run npm run build before end-to-end QA.');
+    if (!process.argv.includes('--seed')) {
+      // Always rebuild: ignored dist assets can belong to a previous checkout.
+      // Use the managed frontend environment, without database/provider secrets.
+      await new Promise((resolve, reject) => {
+        const build = spawn('npm', ['run', 'build'], { cwd: context.root,
+          env: { ...childEnvironment(context), NODE_ENV: 'production' }, stdio: 'inherit' });
+        build.once('error', reject);
+        build.once('exit', (code, signal) => code === 0 ? resolve()
+          : reject(new Error(`Frontend QA build failed (${signal || code}).`)));
+      });
+      if (!fs.existsSync(path.join(context.root, 'client/dist/index.html'))) throw new Error('Frontend QA build did not produce client/dist/index.html.');
+    }
     fixture = { ...fixtureIdentity(), databaseFingerprint };
     fs.writeFileSync(fixtureFile, JSON.stringify(fixture, null, 2), { mode: 0o600 });
     await seed(db, fixture);
