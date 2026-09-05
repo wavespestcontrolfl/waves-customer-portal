@@ -310,7 +310,11 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
 
   const alternateAddress = Boolean(svc.address_diverges);
   const propertyPrefs = alternateAddress ? null : prefs;
-  const codes = accessCodes(propertyPrefs);
+  // Every code on file is scrubbed from the grounding and checked in the
+  // model output even when none is shown: a primary-home code pasted into a
+  // visit note must not surface on an alternate-address card.
+  const knownCodes = accessCodes(prefs);
+  const codes = alternateAddress ? [] : knownCodes;
   const lastVisitFact = lastVisit ? (({ startedAt, ...rest }) => rest)(lastVisit) : null;
   const name = clean(`${svc.first_name || ''} ${svc.last_name || ''}`, 80);
   const program = clean(svc.waveguard_tier ? `${svc.service_type} · WaveGuard ${svc.waveguard_tier}` : svc.service_type, 80);
@@ -326,6 +330,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     rig: rigAssignment(svc),
     access: { codes },
+    knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
     // one) → no forecast at all: an office forecast would judge a property
     // elsewhere in the service area, and a verdict is acted on.
@@ -350,7 +355,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       calls,
       irrigation: serviceLine === 'lawn' ? wateringLine(propertyPrefs) : null,
       rain7d: alternateAddress ? null : rain7d,
-    }, codes),
+    }, knownCodes),
     cache: { stored: parseJson(svc.job_card), generatedAt: svc.job_card_generated_at || null },
   };
 }
@@ -577,7 +582,7 @@ async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
   if (stored?.grounding_hash === hash && stored.source === 'model' && stored.text) {
     return { text: stored.text, source: 'model', cached: true };
   }
-  const written = await writeParagraph(template, facts.access.codes, deps, criticalFacts(facts.facts));
+  const written = await writeParagraph(template, facts.knownCodes || facts.access.codes, deps, criticalFacts(facts.facts));
   const row = { version: PROMPT_VERSION, grounding_hash: hash, text: written.text, source: written.source };
   const prior = facts.cache.generatedAt;
   await dbh('scheduled_services')

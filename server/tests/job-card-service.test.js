@@ -865,7 +865,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     return dbh;
   };
   const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', watering_days: '["Mon"]' };
-  const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges });
+  const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
     const deps = { getRecentCalls: async () => [] };
@@ -873,6 +873,9 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(away.access.codes).toEqual([]);
     expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: 'dog' });
     expect(jobCard.buildTemplateParagraph(away.facts)).toContain('visit at a non-primary address');
+    // The primary home's code is still scrubbed from notes and still a leak check for the rewrite (hook P1).
+    expect(away.facts.visitNotes).toBe('Try [code] first');
+    expect(away.knownCodes).toEqual([{ label: 'Property gate', code: '4545#' }]);
     const home = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs }), deps);
     expect(home.access.codes).toEqual([{ label: 'Property gate', code: '4545#' }]);
     expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false });
