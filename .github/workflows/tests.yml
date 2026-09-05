@@ -180,7 +180,6 @@ jobs:
         run: |
           npm run dev:migrate
           npm run dev:migrate
-      - run: npm run build
       - name: Real auth, booking, settlement and report journeys
         run: npm run qa:e2e
       - name: Remove synthetic accounts and journey records
