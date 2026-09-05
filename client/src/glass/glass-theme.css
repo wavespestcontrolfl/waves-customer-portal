@@ -455,7 +455,10 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
    zoom) with a 14px placeholder in the muted grey. ===== */
 html[data-glass-theme] [data-glass]:not([data-glass="modal"]) { border-radius: 12px !important; }
 html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
-html[data-glass-theme] button:not([data-glass-pill]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
+/* r10 controls — except a control that authors its own round shape (pill 999 /
+   circle 50%), tagged or inline: the multi-service selector on /book, the
+   carousel arrows, switches and close buttons keep their geometry. */
+html[data-glass-theme] button:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
 html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
 html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
 html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
