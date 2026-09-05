@@ -687,10 +687,21 @@ async function getAttributionQueue(options = {}) {
 
 // The customer surname as the attribution search compares it: lowercased and
 // apostrophe-free in every form (ASCII ', typographic ’ ‘, modifier ʼ) —
-// mirroring normalizeName in review-click-correlation. Accents stay: no
-// unaccent extension exists, so the caller binds a de-accented AND an
-// as-typed operand against this one expression (GH codex r4 P1, r5 P2).
-const LAST_NAME_APOSTROPHE_FREE = "regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g')";
+// mirroring normalizeName in review-click-correlation — and then de-accented
+// the same way it is (combining marks only: every precomposed Latin letter
+// NFD splits into base + mark; ß ø ł æ are NOT folded on either side). No
+// unaccent extension exists, so `translate()` carries the table; one
+// expression for both spelling directions — a reviewer typed without accents
+// against a record stored with them, and the reverse (GH codex r4 P1, r5 P2,
+// r8 P2).
+const FOLD = [
+  ['a', 'áàâäãåāąǎạảấầẩẫậắằẳẵặ'], ['c', 'çćčĉċ'], ['d', 'ď'], ['e', 'éèêëēęěėĕẹẻẽếềểễệ'], ['g', 'ğĝġģ'],
+  ['i', 'íìîïīįǐĩỉị'], ['l', 'ĺļľ'], ['n', 'ñńňņ'], ['o', 'óòôöõōőǒơọỏốồổỗộớờởỡợ'], ['r', 'řŕŗ'],
+  ['s', 'śšşŝș'], ['t', 'ťţț'], ['u', 'úùûüūůűųǔũưụủứừửữự'], ['w', 'ŵ'], ['y', 'ýÿŷỳỵỷỹ'], ['z', 'źžż'],
+];
+const FOLD_FROM = FOLD.map(([, chars]) => chars).join('');
+const FOLD_TO = FOLD.map(([base, chars]) => base.repeat(chars.length)).join('');
+const LAST_NAME_FOLDED = `translate(regexp_replace(LOWER(last_name), '[''’‘ʼ]', '', 'g'), '${FOLD_FROM}', '${FOLD_TO}')`;
 
 async function searchAttributionCandidates(options = {}) {
   const conn = options.conn || db;
@@ -716,8 +727,12 @@ async function searchAttributionCandidates(options = {}) {
   const reviewAt = review.review_created_at || review.created_at || new Date();
   const reviewDateOnly = etBusinessDate(reviewAt);
   const serviceCutoff = etBusinessDateOffset(reviewAt, -90);
+  // Live customers only: `active` survives archiving (the archive path stamps
+  // deleted_at alone), and an archived record must never be offered for a
+  // link it could not be confirmed against (GH codex r8 P2).
   let query = conn('customers')
     .where({ active: true })
+    .whereNull('deleted_at')
     .orderByRaw(
       `(EXISTS (SELECT 1 FROM service_records sr WHERE sr.customer_id = customers.id AND sr.technician_id IS NOT NULL AND sr.service_date BETWEEN ? AND ?)
         OR EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.customer_id = customers.id AND ss.status = 'completed' AND ss.technician_id IS NOT NULL AND ss.scheduled_date BETWEEN ? AND ?)) DESC, last_name ASC`,
@@ -744,17 +759,15 @@ async function searchAttributionCandidates(options = {}) {
     // customer record ("Sam Northgate"): the COMPLETE surname alone is also a
     // hit (owner ruling 2026-09-03) — every whole-word suffix of the name,
     // so "De La Cruz" is found and not just "Cruz" (GH codex r1 P1). The
-    // suffixes are de-accented while LOWER(last_name) keeps accents, and no
-    // unaccent extension exists: the lowercase name is ALSO bound as-is, so
-    // a "Muñoz-Pérez" reviewer finds the customer whether the record keeps
-    // the accents or dropped them (GH codex r1 P2). BOTH operands compare
-    // against the apostrophe-free column and carry no apostrophe themselves,
-    // so "O’Connor" finds a record stored "O'Connor" or "OConnor" (GH codex
-    // r4 P1) and "Pat O’Muñoz" finds "O'Muñoz" whichever clause the accent
-    // survives on (GH codex r5 P2). Surnames derive from the
-    // REVIEWER NAME fallback only — an explicit search-box value keeps the
-    // plain field matching ("10 Main Street" must not add every customer
-    // surnamed Street, ranked ahead of the address hit; GH codex r2 P2).
+    // suffixes are normalized (lowercase, de-accented, apostrophe-free,
+    // dashes canonical) and the column is folded the same way
+    // (LAST_NAME_FOLDED), so "Muñoz-Pérez" / "Munoz-Perez" typed finds the
+    // record whichever way it is stored (GH codex r1 P2, r8 P2), and
+    // "O’Connor" finds "O'Connor" or "OConnor" (GH codex r4 P1, r5 P2).
+    // Surnames derive from the REVIEWER NAME fallback only — an explicit
+    // search-box value keeps the plain field matching ("10 Main Street" must
+    // not add every customer surnamed Street, ranked ahead of the address
+    // hit; GH codex r2 P2).
     const { reviewerSurnames } = require('./review-click-correlation');
     const surnames = search ? [] : reviewerSurnames(fallbackName);
     query = query.where(function searchCustomers() {
@@ -762,9 +775,7 @@ async function searchAttributionCandidates(options = {}) {
         .orWhereILike('last_name', like)
         .orWhereRaw("LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?", [likeLower]);
       if (surnames.length) {
-        const lower = terms.toLowerCase().replace(/['’‘ʼ]/g, '');
-        this.orWhereRaw(`${LAST_NAME_APOSTROPHE_FREE} IN (${surnames.map(() => '?').join(', ')})`, surnames)
-          .orWhereRaw(`(? = ${LAST_NAME_APOSTROPHE_FREE} OR ? LIKE ('% ' || ${LAST_NAME_APOSTROPHE_FREE}))`, [lower, lower]);
+        this.orWhereRaw(`${LAST_NAME_FOLDED} IN (${surnames.map(() => '?').join(', ')})`, surnames);
       }
       this.orWhereILike('phone', like)
         .orWhereILike('email', like)
@@ -791,6 +802,7 @@ async function searchAttributionCandidates(options = {}) {
     else if (at < 0 && (review.link_source === 'click_auto' || review.link_source === 'manual_no_visit')) {
       const current = await conn('customers')
         .where({ id: review.customer_id, active: true })
+        .whereNull('deleted_at')
         .first(
           'id',
           'first_name',

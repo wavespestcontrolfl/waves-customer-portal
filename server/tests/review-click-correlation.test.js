@@ -353,6 +353,12 @@ describe('reviewerSurnames', () => {
     // A letter NFD cannot fold to a-z fails closed: no surname evidence at
     // all, never a manufactured one ("gro") (GH codex r7 P1).
     expect(reviewerSurnames('Pat Groß')).toEqual([]);
+    // Generational / professional suffixes are not surnames (GH codex r8 P1);
+    // every dash form is the ASCII hyphen (GH codex r8 P1).
+    expect(reviewerSurnames('John Smith Jr.')).toEqual(['john smith', 'smith']);
+    expect(reviewerSurnames('Pat Jones III')).toEqual(['pat jones', 'jones']);
+    expect(reviewerSurnames('Ana Smith\u2011Jones')).toEqual(['ana smith-jones', 'smith-jones']);
+    expect(reviewerSurnames('Ana Smith\u2014Jones')).toEqual(['ana smith-jones', 'smith-jones']);
     expect(reviewerSurnames('Søren Kierkegaard')).toEqual([]);
     expect(reviewerSurnames('Łukasz Nowak')).toEqual([]);
     expect(reviewerSurnames('Dana B.')).toEqual(['dana b']);
@@ -435,8 +441,6 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(clause[1].map((b) => (b instanceof Date ? b.toISOString() : b))).toEqual([
       'bradenton', '2026-08-04T18:00:00.000Z', '2026-08-08T00:00:00.000Z',
       'bradenton', '2026-08-04T18:00:00.000Z', '2026-08-08T00:00:00.000Z',
-      // the unlocated in-window latest-click arm (GH codex r7 P1)
-      '2026-08-04T18:00:00.000Z', '2026-08-08T00:00:00.000Z',
     ]);
     // The same row with its Parrish re-tap OUTSIDE the window is no clicker
     // elsewhere: the surname links.
@@ -462,7 +466,7 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
     expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Pat Gro' }, { conn: stored })).toBeNull();
   });
 
-  test('refuses when a same-surname row\'s first pair is stamped elsewhere OUT of the window and its latest tap is in-window but UNSTAMPED — invisible to the main scan, counted by the inverse one (GH codex r7 P1)', async () => {
+  test('a row whose first pair is stamped elsewhere OUT of the window and whose latest tap is in-window but UNSTAMPED is admitted by the main scan and competes against EVERY rung (GH codex r7/r8 P1)', async () => {
     const legacy = { last_redirected_at: null, last_google_location: null };
     const hidden = northgate({
       customer_id: 'cust-northgate-4', first_name: 'Blake',
@@ -470,11 +474,35 @@ describe('findConfidentClickMatch — click_name rung (owner ruling 2026-09-03)'
       last_google_location: null, last_redirected_at: '2026-08-07T16:00:00.000Z', // latest: in window, unlocated
     });
     const conn = makeConn({ clickRows: [northgate(legacy), hidden, other()] });
+    // click_name: two Northgates.
     expect(await findConfidentClickMatch(REVIEW, { conn })).toBeNull();
-    expect(conn.captured.whereRaw.some(([sql]) => String(sql).includes('rr.last_google_location IS NULL AND rr.last_redirected_at >= ?'))).toBe(true);
-    // The same row with its latest tap OUT of the window is no ambiguity.
+    // The SQL location filter admits the unstamped latest pair.
+    const filter = conn.captured.where.find((args) => typeof args[0] === 'function')[0];
+    const calls = [];
+    const rec = { whereNull: (c) => { calls.push(['whereNull', c]); return rec; }, orWhereNull: (c) => { calls.push(['orWhereNull', c]); return rec; }, orWhere: (...a) => { calls.push(['orWhere', ...a]); return rec; } };
+    filter.call(rec);
+    expect(calls).toContainEqual(['orWhereNull', 'rr.last_google_location']);
+    // The JS pass keeps the unlocated in-window pair (annotated null) and
+    // drops the elsewhere pair; the suggestion list shows the customer.
+    const list = await findLikelyReviewers(REVIEW, { conn });
+    expect(list.find((c) => c.customerId === 'cust-northgate-4')).toMatchObject({ locationMatch: null, locationConflict: true, nameMatch: true });
+    // click_near: the hidden customer tapped 2h before — crowding, so the
+    // 45s clicker is refused (GH codex r8 P1).
+    const near = makeConn({ clickRows: [other({ customer_id: 'cust-riverside-2', redirected_at: '2026-08-07T17:59:15.000Z' }), { ...hidden, last_name: 'Bayshore' }, other()] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'SunshineGal88' }, { conn: near })).toBeNull();
+    // The same row with its latest tap OUT of the window is no competition.
     const stale = makeConn({ clickRows: [northgate(legacy), { ...hidden, last_redirected_at: '2026-08-01T13:00:00.000Z' }, other()] });
     expect((await findConfidentClickMatch(REVIEW, { conn: stale }))?.rung).toBe('click_name');
+  });
+
+  test('"John Smith Jr." links the lone Smith clicker and never a customer stored "Jr"; a typographic hyphen matches "Smith-Jones", not "SmithJones" (GH codex r8 P1)', async () => {
+    const legacy = { last_redirected_at: null, last_google_location: null };
+    const jr = makeConn({ clickRows: [northgate({ last_name: 'Smith', ...legacy }), other({ last_name: 'Jr' })] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'John Smith Jr.' }, { conn: jr })).toMatchObject({ customerId: 'cust-northgate', rung: 'click_name' });
+    const jrOnly = makeConn({ clickRows: [northgate({ last_name: 'Jr', ...legacy }), other({ last_name: 'Jones' })] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'John Smith Jr.' }, { conn: jrOnly })).toBeNull();
+    const dash = makeConn({ clickRows: [northgate({ last_name: 'Smith-Jones', ...legacy }), other({ last_name: 'SmithJones' })] });
+    expect(await findConfidentClickMatch({ ...REVIEW, reviewer_name: 'Ana Smith\u2011Jones' }, { conn: dash })).toMatchObject({ customerId: 'cust-northgate', rung: 'click_name' });
   });
 
   test('an ARCHIVED same-surname clicker still counts as ambiguity — unselectable, never suggested, never linked (GH codex r6 P1)', async () => {
