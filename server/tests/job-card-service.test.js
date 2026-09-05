@@ -792,6 +792,20 @@ describe('PR review r5', () => {
 });
 
 describe('PR review r6', () => {
+  test('a rig that lapsed after noon withholds the card amounts with the tank reason (hook P1)', async () => {
+    const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
+    const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
+    const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'Rig calibration expired' });
+    expect(card.planned).toBeNull();
+    expect(card.amountNote).toBe('Rig calibration expired — amount withheld');
+    const [ok] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: null });
+    expect(ok.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
+    // The boundary: a calibration valid at noon but expired by the time the card opens.
+    const cal = { carrier_gal_per_1000: 2, expires_at: '2026-09-04T18:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    expect(jobCard.tankFromCalibrations([cal], new Date('2026-09-04T16:00:00Z')).calibrated).toBe(true);
+    expect(jobCard.tankFromCalibrations([cal], new Date('2026-09-04T20:00:00Z')).calibrated).toBe(false);
+  });
+
   test('the lawn plan is built strict so a catalog outage is a plan block, not an empty card (P2)', async () => {
     const buildPlan = jest.fn().mockRejectedValue(new Error('products_catalog down'));
     const out = await jobCard.resolveVisitProducts({ facts: { isLawn: true, serviceId: 'svc1' }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan } });

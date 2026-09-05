@@ -953,7 +953,7 @@ function linesFromProtocolText(visit, catalog) {
   return out;
 }
 
-async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, includePricing = false, dbh = db }) {
+async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
   // One card per catalog product: two protocol lines can resolve to the same
   // row (a base line plus a conditional). The selected line wins the card;
   // the other line's text rides along.
@@ -975,7 +975,11 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // The catalog contract holds on this path too: a rate whose label
     // provenance is unverified is not shown as an actionable amount.
     const unverified = line.planMix?.amount > 0 && !p.label_verified_at;
-    const plannedMix = !blocked && line.selected !== false && line.planMix?.amount > 0 && !unverified ? line.planMix : null;
+    // The plan validates the rig at noon on the service day; the card judges
+    // it at the later of noon and now (tankFromCalibrations). A rig that
+    // lapsed since noon withholds every planned amount here too, with the
+    // Tank section's own reason.
+    const plannedMix = !blocked && !tankReason && line.selected !== false && line.planMix?.amount > 0 && !unverified ? line.planMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
     const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
@@ -996,7 +1000,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
-      amountNote: unverified ? 'Label rate not yet verified — amount withheld' : null,
+      amountNote: unverified ? 'Label rate not yet verified — amount withheld' : (tankReason && line.planMix?.amount > 0 ? `${tankReason} — amount withheld` : null),
       short,
       stockNote,
       onHand,
@@ -1076,7 +1080,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
-  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, includePricing, dbh });
+  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 
   return {
     enabled: true,
