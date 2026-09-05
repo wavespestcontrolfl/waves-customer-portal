@@ -25,7 +25,8 @@ test('audit may reuse a matching server but does not take ownership', async () =
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
   try {
-    const preview = await previewServer(root, url);
+    const preview = await previewServer(root, `${url}/`);
+    assert.equal(preview.baseUrl, url, 'A copied URL with a trailing slash must keep same-origin requests working');
     await preview.close();
     assert.equal((await fetch(url)).status, 200);
   } finally { await new Promise((resolve) => server.close(resolve)); }

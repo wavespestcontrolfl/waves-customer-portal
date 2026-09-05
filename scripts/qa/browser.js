@@ -7,11 +7,11 @@ const { setup, childEnvironment, git, checkoutStamp } = require('../dev/context'
 
 async function previewServer(root, requestedUrl) {
   const context = await setup(root);
-  const baseUrl = requestedUrl || `http://127.0.0.1:${context.ports.client}`;
-  const url = new URL(baseUrl);
+  const url = new URL(requestedUrl || `http://127.0.0.1:${context.ports.client}`);
   if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.protocol !== 'http:') {
     throw new Error('Preview audits require a local HTTP server.');
   }
+  const baseUrl = url.origin;
   const stamp = checkoutStamp(root);
   async function probe() {
     let response;
