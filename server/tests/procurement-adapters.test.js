@@ -355,6 +355,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (st.responsiveIdentity && sel === S.checkoutAccount) return hiddenThen('Account # 99999', 'Account # 12345');
       if (st.responsiveIdentity && sel === S.checkoutShipTo) return hiddenThen('Ship to: 9 Other Rd', 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205');
       if (st.responsiveIdentity && sel === S.checkoutTotal) return hiddenThen('Order total $999.00', st.checkoutTotalText || 'Order total $99.00');
+      // totalTexts: N shown total nodes, each its own text (nested `.grand-total` + `.price` = same figure twice; two figures = ambiguous) (r17 P2)
+      if (sel === S.checkoutTotal && st.totalTexts) return el({ count: st.totalTexts.length, nth: (i) => el({ count: 1, visible: true, text: st.totalTexts[i] }) });
       if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalByRead ? st.totalByRead(st.totalReads) : st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
@@ -373,6 +375,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.orderNumber && !st.placeClicked && st.orderNumberBaselineUnreadable) return el({ count: 1, isVisibleThrows: true });
       if (sel === S.orderNumber && !st.placeClicked && st.orderNumbersBeforeClick) return el({ count: st.orderNumbersBeforeClick.length, nth: (i) => el({ count: 1, visible: true, text: st.orderNumbersBeforeClick[i] }) });
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
+      // orderNumberRetained: the SPA keeps the pre-click reference node (orderNumberBeforeClick) shown and APPENDS the confirmation node (r17 P2)
+      if (sel === S.orderNumber && st.orderNumberRetained) return el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? st.orderNumberBeforeClick : 'Order # SO-778899' }) });
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
       if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? (st.orderNumberLateText || 'Processing order…') : 'Order # SO-778899' }); }
       // orderNumberNested: the h1 wrapping the strong — both match, both shown, one identifier (r12 P2); orderNumberNestedDifferent: two shown nodes, different ids
@@ -419,7 +423,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['terms_unreadable', { termsUnreadable: true }], // unknown ≠ accepted (r4 P2)
     ['account_hidden', { accountVisible: false }], // a hidden node carrying the right number is not what the checkout shows
     ['ship_to_hidden', { shipToVisible: false }],
-    ['checkout_total_ambiguous', { totalCount: 2 }], // hidden desktop/mobile duplicate
+    ['checkout_total_ambiguous', { totalTexts: ['Order total $99.00', 'Order total $105.93'] }], // two shown figures
+    ['checkout_total_ambiguous', { totalTexts: ['Order total $99.00', 'Subtotal $49.00 · Total $99.00'] }], // an unparsable sibling is not the same figure
     ['checkout_total_hidden', { totalVisible: false }],
     ['no_checkout_total', { totalCount: 0 }],
     ['ship_to_ambiguous', { shipToCount: 3 }],
@@ -519,6 +524,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order # pending · Total $105.93')).toBeNull(); // a price is never an id (r10 P2)
     expect(s1._internals.orderNumberIn('Order # pending · Ships to 34205')).toBeNull(); // no unlabeled fallback: a ZIP is never an id (r16 P2)
     expect(s1._internals.orderNumberIn('Your confirmation number is 55501234')).toBe('55501234');
+    expect(s1._internals.orderNumberIn('Your order number is 55501234.')).toBe('55501234'); // the sentence's period is not part of the id (r17 P2)
+    expect(s1._internals.orderNumberIn('Order # SO-12345.')).toBe('SO-12345');
+    expect(s1._internals.orderNumberIn('Order date 2026-09-05.')).toBeNull();
+    expect(s1._internals.orderNumberIn('Order # pending. Total $105.93.')).toBeNull();
     expect(s1._internals.orderNumberIn('Order ref SO-778899')).toBe('SO-778899');
     expect(s1._internals.orderNumberIn('Reference 55501 · Ready')).toBeNull();
     expect(s1._internals.orderNumberIn('Total 1,234.56 · Order # SO-778899')).toBe('SO-778899');
@@ -614,6 +623,34 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   test('the cart total is the ONE visible total — a hidden stale copy ahead of it is never the dry-run or cap figure (r12 P2)', async () => {
     const { deps } = fakeSiteOne({ cartTotalHiddenFirst: true });
     expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+  });
+
+  test('nested checkout-total markup (.grand-total wrapping its .price) is ONE figure — the order places on it (r17 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ totalTexts: ['Order total $105.93', '$105.93'] });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 10593 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('a retained pre-click reference node beside the appended confirmation node: the ONE new identifier is the order number (r17 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'Order ref SO-000001', orderNumberRetained: true });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('a dry run validates the Place Order control: hidden-only, disabled, or duplicated refuses at the dry-run stop, nothing clicked, cart emptied (r17 P2)', async () => {
+    for (const [patch, reason] of [[{ placeOrderHiddenOnly: true }, 'no_place_order'], [{ placeOrderDisabled: true }, 'place_order_unactionable'], [{ placeOrderHiddenFirst: true, placeOrderDisabled: true }, 'place_order_unactionable']]) {
+      const { st, deps } = fakeSiteOne(patch);
+      await expect(s1.place(args({ dryRun: true }), deps)).rejects.toMatchObject({ refuse: reason });
+      expect(st.placeClicked).toBe(0);
+      expect(st.hiddenPlaceClicked).toBeUndefined();
+      expect(st.cart).toEqual([]);
+    }
+    const ok = fakeSiteOne({ placeOrderHiddenFirst: true });
+    const r = await s1.place(args({ dryRun: true }), ok.deps);
+    expect(r).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(r.evidence.placeOrderValidated).toBe(true);
+    expect(ok.st.trialDone).toBe(true);
+    expect(ok.st.placeClicked).toBe(0);
   });
 
   test('loginConfigured mirrors validatePlaceArgs: login + account number (r12 P2)', () => {

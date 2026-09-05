@@ -612,10 +612,19 @@ async function verifyCheckoutLines(page, { vendorSku, qty, evidence, upload }) {
 // Counted among SHOWN matches: a hidden responsive copy beside the one
 // visible reading is not ambiguity (Codex #3876 r12 P2) — the lone hidden
 // match still reports as hidden, and two visible readings stay ambiguous.
-async function readExactlyOne(page, selector) {
+// `same(text)`: nested markup (`.order-summary .grand-total` wrapping the
+// `.price` it contains) matches the ONE figure twice — shown matches that
+// all parse to the SAME value are one reading (the innermost text is
+// returned); different values stay ambiguous (Codex #3876 r17 P2).
+async function readExactlyOne(page, selector, { same } = {}) {
   const { all, shown } = await matches(page, selector);
-  if (shown.length > 1) return { count: shown.length, text: '', visible: false };
-  const target = shown[0] || (all.length === 1 ? all[0] : null);
+  let target = shown[0] || (all.length === 1 ? all[0] : null);
+  if (shown.length > 1) {
+    const texts = same ? await Promise.all(shown.map((el) => el.textContent().then((t) => String(t || ''), () => null))) : [];
+    const values = new Set(texts.map((t) => (t == null ? null : same(t))));
+    if (values.size !== 1 || values.has(null)) return { count: shown.length, text: '', visible: false };
+    target = shown[texts.reduce((best, t, i) => (t.length < texts[best].length ? i : best), 0)];
+  }
   if (!target) return { count: 0, text: '', visible: false };
   const handle = await target.elementHandle({ timeout: 1500 }).catch(() => null);
   if (!handle) return { count: 1, text: '', visible: false };
@@ -783,7 +792,7 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
 // awaited between the read and the click (pre-push P0 on #3876).
 async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) {
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
-  const total = await readExactlyOne(page, SELECTORS.checkoutTotal);
+  const total = await readExactlyOne(page, SELECTORS.checkoutTotal, { same: parseMoney });
   if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
   if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
   const finalCents = parseMoney(total.text);
@@ -798,19 +807,12 @@ async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) 
 // Returns the order number; calls markSubmitted() at the click boundary — the
 // caller's cart cleanup guard flips only when the click actually happened
 // (a pre-click refusal here still cleans the cart — Codex #3853 r15 P2).
-// The text of the ONE shown confirmation-number node, or null. Nested
-// matches (an h1 wrapping the strong that carries the number) are one node
-// when every shown match parses to the SAME identifier — the innermost text
-// is returned; different identifiers stay ambiguous (Codex #3876 r12 P2).
-async function shownOrderText(page) {
+// The whitespace-normalized text of every shown confirmation-number node.
+async function shownOrderTexts(page) {
   const nodes = (await matches(page, SELECTORS.orderNumber).catch(() => ({ shown: [] }))).shown;
-  if (!nodes.length) return null;
   const texts = [];
   for (const n of nodes) texts.push((await n.textContent().catch(() => '') || '').replace(/\s+/g, ' '));
-  if (texts.length === 1) return texts[0];
-  const ids = new Set(texts.map((t) => orderNumberIn(t)));
-  if (ids.size !== 1 || ids.has(null)) return null;
-  return texts.reduce((a, b) => (b.length < a.length ? b : a));
+  return texts;
 }
 
 // EVERY shown confirmation-selector node before the click — each text and
@@ -830,6 +832,20 @@ async function preClickOrderBaseline(page, refuse) {
     }
   } catch (e) { await refuse('confirmation_baseline_unreadable', `the confirmation-number nodes could not be read before the click (${String(e.message).slice(0, 80)}) — nothing submitted`); }
   return { texts, ids };
+}
+
+// The Place Order control, proven actionable WITHOUT dispatching: the one
+// visible control, resolved to an element handle, trial-clicked (Playwright's
+// actionability checks — a disabled / covered control refuses here). Runs
+// on every pass of the pre-click loop and at a dry run's stop, so a green
+// dry run has exercised the control the first live order will click (Codex
+// #3876 r17 P2). Returns the handle.
+async function trialPlaceOrder(page, placeOrder, refuse) {
+  const handle = await placeOrder.elementHandle({ timeout: 1500 }).catch(() => null);
+  if (!handle) await refuse('place_order_unactionable', 'the Place Order control could not be resolved — nothing submitted');
+  try { await handle.click({ trial: true, timeout: 5000 }); }
+  catch (e) { await refuse('place_order_unactionable', `the Place Order control cannot be clicked (${String(e.message).slice(0, 80)}) — nothing submitted`); }
+  return handle;
 }
 
 async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines }) {
@@ -886,10 +902,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
       await gate(cents, 'total at the click');
       continue;
     }
-    placeHandle = await placeOrder.elementHandle({ timeout: 1500 }).catch(() => null);
-    if (!placeHandle) await refuse('place_order_unactionable', 'the Place Order control could not be resolved — nothing submitted');
-    try { await placeHandle.click({ trial: true, timeout: 5000 }); }
-    catch (e) { await refuse('place_order_unactionable', `the Place Order control cannot be clicked (${String(e.message).slice(0, 80)}) — nothing submitted`); }
+    placeHandle = await trialPlaceOrder(page, placeOrder, refuse);
     await recheckTenderAtClick(page, radio, { evidence, upload });
     await identity();
     await lines();
@@ -939,22 +952,30 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   return { number, cents };
 }
 
-// Wait (bounded) for a shown confirmation-number node whose text differs
-// from every node shown BEFORE the click AND whose parsed identifier is none
-// of theirs: a reference node whose status text alone changes ("PO reference
-// 55501 · Ready" → "… · Validation failed") is not a new confirmation (Codex
-// #3876 r5 P2), nor is one of two pre-click nodes left standing alone after
-// a rejected click (r7 P2); a timeout leaves the ambiguous path to decide.
-// Returns the confirmation number, or null at the timeout. The node's first
-// render ("Processing order…", an empty element) is not the outcome: polling
-// continues until the changed text yields a number (Codex #3876 r4 P2).
+// Wait (bounded) for exactly ONE new identifier among the shown
+// confirmation-number nodes. Each shown node is judged on its own against
+// the pre-click baseline: a node whose text was shown before the click, or
+// whose identifier was, is not evidence — a reference node whose status text
+// alone changes ("PO reference 55501 · Ready" → "… · Validation failed") is
+// not a new confirmation (Codex #3876 r5 P2), nor is one of two pre-click
+// nodes left standing alone after a rejected click (r7 P2), nor a retained
+// reference node beside the confirmation the SPA appended (r17 P2). Nested
+// matches (an h1 wrapping the strong that carries the number) are one
+// identifier (r12 P2); two DIFFERENT new identifiers stay ambiguous. A node's
+// first render ("Processing order…", an empty element) is not the outcome:
+// polling continues until a text yields a number (Codex #3876 r4 P2); a
+// timeout returns null and leaves the ambiguous path to decide.
 async function waitForNewOrderNumber(page, baseline, timeout) {
   const deadline = Date.now() + timeout;
   for (;;) {
     if (!isTrustedSiteOneUrl(page.url())) throw new Error(`confirmation page left the trusted host (${String(page.url()).slice(0, 80)})`);
-    const text = await shownOrderText(page);
-    const number = text != null && !baseline.texts.has(text) ? orderNumberIn(text) : null;
-    if (number && !baseline.ids.has(number.toUpperCase())) return number;
+    const fresh = new Map();
+    for (const text of await shownOrderTexts(page)) {
+      if (baseline.texts.has(text)) continue;
+      const number = orderNumberIn(text);
+      if (number && !baseline.ids.has(number.toUpperCase())) fresh.set(number.toUpperCase(), number);
+    }
+    if (fresh.size === 1) return fresh.values().next().value;
     if (Date.now() >= deadline) return null;
     await page.waitForTimeout(500);
   }
@@ -999,8 +1020,11 @@ function orderNumberIn(text) {
   // no unlabeled fallback: "Order # pending · Ships to 34205" must keep
   // polling, not record the ZIP (Codex #3876 r16 P2). Labels: order /
   // confirmation, optionally followed by confirmation / number / no. / id /
-  // ref / #.
-  for (const m of String(text).matchAll(/(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9/.-]{5,})/gi)) if (isId(m[1])) return m[1];
+  // ref / #. An identifier ends in a letter or digit: the sentence's own
+  // period ("Your order number is 55501234.") is prose, not part of the id —
+  // recorded with it, the same number rerendered without it would read as a
+  // new one, and the date / money exclusions would miss (Codex #3876 r17 P2).
+  for (const m of String(text).matchAll(/(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1])) return m[1];
   return null;
 }
 
@@ -1020,8 +1044,16 @@ async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToToke
   // A dry run has now exercised every checkout selector and the final cap
   // check; it stops HERE, before the one click, and bells the checkout
   // total — selector drift is caught before any live purchase (Codex #3876
-  // r2 P1). The caller's finally empties the cart.
-  if (dryRun) { await shot(page, 'dry-run-stop', evidence, upload); return { dryRun: true, amountCents: finalCents, externalOrderNumber: null, evidence }; }
+  // r2 P1). The Place Order control is resolved and trial-clicked too, so a
+  // missing / ambiguous / disabled control is a dry-run refusal, not the
+  // first live order's park (r17 P2). The caller's finally empties the cart.
+  if (dryRun) {
+    const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence);
+    await trialPlaceOrder(page, placeOrder, async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); });
+    evidence.placeOrderValidated = true;
+    await shot(page, 'dry-run-stop', evidence, upload);
+    return { dryRun: true, amountCents: finalCents, externalOrderNumber: null, evidence };
+  }
   let placed;
   const identity = () => verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
   const lines = () => verifyCheckoutLines(page, { vendorSku, qty, evidence, upload });
