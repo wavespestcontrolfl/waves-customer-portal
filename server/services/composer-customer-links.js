@@ -1121,6 +1121,15 @@ async function checkPriceChangeLinks(ctx) {
     if (!deliveredPriceChangeNotice(notice) || dateOnly(notice.effective_date) < etDateString()) {
       return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
     }
+    // Corrections are separate rows and nothing supersedes the earlier one,
+    // so a notice texted before the operator clicks Send is still delivered,
+    // upcoming and linkable — but it is no longer the customer's terms. The
+    // link must be the newest texted notice, the builder's own pick (GH
+    // Codex #3893 r7 P1).
+    const newest = await newestTextedPriceChangeNotice(notice.customer_id);
+    if (!newest || newest.id !== notice.id) {
+      return refuseSend('A newer price change notice has been sent to this customer — remove the link and insert a fresh one.');
+    }
     const bad = await ownedByRecipient(ctx, notice.customer_id, 'price change notice link');
     if (bad) return bad;
     ctx.bearers += 1;
@@ -1902,16 +1911,46 @@ const RECEIPT_INVOICE_STATUSES = ['paid', 'refunded'];
  * already suppresses the homeowner text for it (pre-push Codex P0) — never
  * selected here. Raw permanent URL, nothing minted.
  */
+const RECEIPT_CANDIDATES = 20;
+// When the invoice settled, from the linked payment the receipt viewer
+// renders: the refund webhook NULLs paid_at on a full refund (its updated_at
+// is that refund event), so the row's own stamps alone misorder a refunded
+// invoice against a later-created one paid earlier (GH Codex #3893 r7 P2).
+function receiptSettledAt(invoice, payment) {
+  const stamp = invoice.status === 'refunded'
+    ? (payment.refunded_at || invoice.updated_at)
+    : (invoice.paid_at || payment.created_at || invoice.updated_at);
+  return new Date(stamp || invoice.created_at || 0).getTime();
+}
+
 async function buildReceiptLink(customerIds) {
-  const invoice = await db('invoices')
+  const rows = await db('invoices')
     .whereIn('customer_id', customerIds)
     .whereIn('status', RECEIPT_INVOICE_STATUSES)
     .whereNull('payer_id')
     .whereNotNull('token')
-    // Settled most recently first; a row settled without a paid_at stamp
-    // falls back to its creation order, id last for a stable tie-break.
-    .orderByRaw('COALESCE(paid_at, created_at) DESC, id DESC')
-    .first('id', 'customer_id', 'token', 'invoice_number', 'status', 'total', 'paid_at');
+    // A bounded recent window; the pick below orders by the linked
+    // payment's settlement event, which the row alone cannot.
+    .orderByRaw('COALESCE(paid_at, updated_at, created_at) DESC, id DESC')
+    .limit(RECEIPT_CANDIDATES);
+  // The receipt route's own payment resolution (metadata, PI / charge id,
+  // manual-payment description). A refunded invoice whose refund record
+  // cannot be resolved has no receipt — its PDF answers 409 rather than
+  // render a 'paid' receipt for a refunded invoice — so it is skipped, not
+  // sent, and cannot shadow an older valid one (r7 P2).
+  const { loadPaymentForInvoice } = require('../routes/receipt-v2');
+  let invoice = null;
+  let settledAt = -Infinity;
+  for (const row of rows) {
+    const payment = await loadPaymentForInvoice(row.id, row.customer_id, {
+      stripePaymentIntentId: row.stripe_payment_intent_id,
+      stripeChargeId: row.stripe_charge_id,
+      invoiceNumber: row.invoice_number,
+    });
+    if (row.status === 'refunded' && !payment) continue;
+    const at = receiptSettledAt(row, payment || {});
+    if (at > settledAt) { invoice = row; settledAt = at; }
+  }
   if (!invoice) return { url: null, line: '', reason: 'No paid invoice on this account yet' };
   const url = `${publicPortalUrl()}/receipt/${invoice.token}`;
   const number = invoice.invoice_number ? `invoice ${invoice.invoice_number}` : 'your payment';
@@ -1953,8 +1992,10 @@ function deliveredPriceChangeNotice(notice) {
  * (STRICT_OWNER_KINDS) and /sms re-binds it. Permanent token, raw URL — the
  * same link the notices lane texted (price-change-notices.js).
  */
-async function buildPriceChangeNoticeLink(customerId) {
-  const notice = await db('price_change_notices')
+// The customer's newest TEXTED notice for a change still ahead — the one
+// row the composer may link, for the builder and the send seam alike.
+function newestTextedPriceChangeNotice(customerId) {
+  return db('price_change_notices')
     .where({ customer_id: customerId })
     .whereIn('status', PRICE_CHANGE_LINKABLE_STATUSES)
     .whereNotNull('sent_at')
@@ -1965,6 +2006,10 @@ async function buildPriceChangeNoticeLink(customerId) {
     // (GH Codex #3893 r5 P1).
     .orderBy([{ column: 'sent_at', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .first('id', 'notice_token', 'effective_date', 'current_amount_cents', 'new_amount_cents', 'cadence_label', 'status');
+}
+
+async function buildPriceChangeNoticeLink(customerId) {
+  const notice = await newestTextedPriceChangeNotice(customerId);
   if (!notice) return { url: null, line: '', reason: 'No upcoming price change notice for this customer' };
   const { formatMoney } = require('./price-change-notices');
   const url = `${publicPortalUrl()}/price-change/${notice.notice_token}`;
@@ -1994,16 +2039,22 @@ const PROJECT_REPORT_HELD_STATUSES = ['held', 'releasing'];
 // report was never sent (project-completion.js report_not_sent), and the
 // public viewer has no status gate past the token, so a closed row alone is
 // not an issued report; the project send flow stamps sent_at (GH Codex
-// #3893 r3 P1). Both the builder and the send seam require it.
+// #3893 r3 P1). Both the builder and the send seam require it — or the
+// migrated historical delivery: 20260511000001_projects_delivery_status
+// marks reports sent before channel-level evidence 'legacy_sent', and
+// those rows can carry no sent_at while their public token still opens
+// (r7 P2).
 const PROJECT_REPORT_STATUSES = ['sent', 'closed'];
+const PROJECT_REPORT_LEGACY_DELIVERY = 'legacy_sent';
 const issuedProjectReport = (project) => Boolean(project)
-  && PROJECT_REPORT_STATUSES.includes(String(project.status || '')) && Boolean(project.sent_at);
+  && PROJECT_REPORT_STATUSES.includes(String(project.status || ''))
+  && Boolean(project.sent_at || project.delivery_status === PROJECT_REPORT_LEGACY_DELIVERY);
 
 // The project a public report segment opens, exactly as the viewer resolves
 // it (reports-public loadProjectForReport): a full token matches its row; a
 // vanity prefix must match exactly one.
 async function linkableProjectReport(lookup) {
-  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'report_token', 'report_hold_status'];
+  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
   if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...COLUMNS);
   const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`).limit(2);
   return rows.length === 1 ? rows[0] : null;
@@ -2023,9 +2074,11 @@ async function buildProjectReportLink(customerIds) {
     const rows = await db('projects')
       .whereIn('customer_id', customerIds)
       .whereIn('status', PROJECT_REPORT_STATUSES)
-      .whereNotNull('sent_at')
+      .where((q) => q.whereNotNull('sent_at').orWhere({ delivery_status: PROJECT_REPORT_LEGACY_DELIVERY }))
       .whereNotNull('report_token')
-      .orderByRaw('sent_at DESC, id DESC')
+      // A migrated legacy delivery without sent_at sorts after every
+      // stamped one (it predates the stamp).
+      .orderByRaw('sent_at DESC NULLS LAST, id DESC')
       .offset(offset)
       .limit(PAGE);
     project = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;

@@ -70,6 +70,9 @@ jest.mock('../services/price-change-notices', () => ({
   formatMoney: (cents) => { const n = Number(cents || 0) / 100; return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`; },
 }));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
+// The receipt route's own payment resolution (metadata → PI / charge →
+// manual description); the receipt quick link orders and vets by it.
+jest.mock('../routes/receipt-v2', () => ({ loadPaymentForInvoice: jest.fn(async () => null) }));
 // The real predicate: typedReportDelivery set to anything but auto_send is
 // suppressed (internal_only / disabled typed reports 404 publicly).
 jest.mock('../routes/reports-public', () => ({
@@ -1031,9 +1034,15 @@ describe('buildServiceReportLink', () => {
 });
 
 describe('buildReceiptLink', () => {
+  const { loadPaymentForInvoice } = require('../routes/receipt-v2');
+  const PAID = { id: 'inv-1', customer_id: 'c2', token: 'r'.repeat(64), invoice_number: 'INV-1042', status: 'paid', total: '85.00', paid_at: '2026-08-30T15:00:00Z', created_at: '2026-08-29T00:00:00Z', updated_at: '2026-08-30T15:00:00Z', stripe_payment_intent_id: 'pi_1', stripe_charge_id: null };
+
   test('the account\'s most recently settled invoice — permanent /receipt token, raw URL, nothing minted', async () => {
-    mockBuilders = { invoices: chainBuilder({ firstRow: { id: 'inv-1', customer_id: 'c2', token: 'r'.repeat(64), invoice_number: 'INV-1042', status: 'paid', total: '85.00', paid_at: '2026-08-30T15:00:00Z' } }) };
+    mockBuilders = { invoices: chainBuilder({ rows: [PAID] }) };
+    loadPaymentForInvoice.mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' });
     const r = await buildReceiptLink(['c1', 'c2']);
+    // Vetted by the receipt route's own payment linkage.
+    expect(loadPaymentForInvoice).toHaveBeenCalledWith('inv-1', 'c2', { stripePaymentIntentId: 'pi_1', stripeChargeId: null, invoiceNumber: 'INV-1042' });
     expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
     // Exactly the statuses the receipt viewer renders: a 'prepaid' close-out
     // shows "Payment not completed" and its PDF 409s (pre-push Codex P1), an
@@ -1053,10 +1062,32 @@ describe('buildReceiptLink', () => {
   });
 
   test('no settled invoice → reason', async () => {
-    mockBuilders = { invoices: chainBuilder({ firstRow: null }) };
+    mockBuilders = { invoices: chainBuilder({ rows: [] }) };
     const r = await buildReceiptLink(['c1']);
     expect(r.url).toBeNull();
     expect(r.reason).toMatch(/No paid invoice/);
+  });
+
+  test('ordered by the linked payment\'s settlement event: a full refund NULLs paid_at, so an older-created invoice refunded last still wins (GH Codex #3893 r7 P2)', async () => {
+    const refunded = { ...PAID, id: 'inv-0', token: 'q'.repeat(64), invoice_number: 'INV-1001', status: 'refunded', paid_at: null, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-09-02T10:00:00Z' };
+    mockBuilders = { invoices: chainBuilder({ rows: [PAID, refunded] }) };
+    loadPaymentForInvoice
+      .mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' })
+      .mockResolvedValueOnce({ id: 'pay-0', created_at: '2026-08-02T15:00:00Z', refunded_at: '2026-09-02T10:00:00Z' });
+    const r = await buildReceiptLink(['c1', 'c2']);
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'q'.repeat(64)}`);
+    expect(r.receipt.status).toBe('refunded');
+  });
+
+  test('a refunded invoice with no resolvable refund record has no receipt (its PDF 409s) — skipped, never shadowing an older valid one (r7 P2)', async () => {
+    const refunded = { ...PAID, id: 'inv-0', token: 'q'.repeat(64), invoice_number: 'INV-1001', status: 'refunded', paid_at: null, updated_at: '2026-09-02T10:00:00Z' };
+    mockBuilders = { invoices: chainBuilder({ rows: [refunded, PAID] }) };
+    loadPaymentForInvoice.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' });
+    const r = await buildReceiptLink(['c1', 'c2']);
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
+    mockBuilders = { invoices: chainBuilder({ rows: [refunded] }) };
+    loadPaymentForInvoice.mockResolvedValueOnce(null);
+    expect((await buildReceiptLink(['c1'])).reason).toMatch(/No paid invoice/);
   });
 });
 
@@ -1111,8 +1142,14 @@ describe('buildProjectReportLink', () => {
     expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
     expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('status', ['sent', 'closed']);
     // Delivery evidence too: completing a visit closes a project and mints
-    // its token even when the report was never sent (GH Codex #3893 r3 P1).
-    expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('sent_at');
+    // its token even when the report was never sent (GH Codex #3893 r3 P1)
+    // — sent_at, or the migrated 'legacy_sent' delivery that predates the
+    // stamp (r7 P2).
+    const evidence = mockBuilders.projects.where.mock.calls.find(([arg]) => typeof arg === 'function')[0];
+    const q = { whereNotNull: jest.fn(() => q), orWhere: jest.fn(() => q) };
+    evidence(q);
+    expect(q.whereNotNull).toHaveBeenCalledWith('sent_at');
+    expect(q.orWhere).toHaveBeenCalledWith({ delivery_status: 'legacy_sent' });
     expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
     expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/project/dana-${'f'.repeat(12)}`);
@@ -1982,6 +2019,10 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana_lee.jr-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
         expect(mockBuilders.projects.where).toHaveBeenCalledWith('report_token', 'like', `${FULL.slice(0, 12)}%`);
         expect(mockBuilders.projects.limit).toHaveBeenCalledWith(2);
+        // A migrated historical delivery ('legacy_sent', no sent_at) is an
+        // issued report whose token still opens (r7 P2).
+        wireProject({ full: project({ sent_at: null, delivery_status: 'legacy_sent' }) });
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
       });
 
       test('an ambiguous prefix, a vanished project, a payment-held report, or another account\'s report refuses', async () => {
@@ -2043,6 +2084,13 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       // text is the lane's, with its template and opt-out footer (r6 P1).
       wireNotice({ row: notice({ sms_sent: false }) });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+      // A correction texted after the draft was written is a separate row
+      // that supersedes this one: the link must be the customer's newest
+      // texted notice (r7 P1).
+      wireNotice();
+      mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2' }));
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
+      expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ customer_id: 'c1' });
       wireNotice({ row: notice({ effective_date: '2020-01-01' }) });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
       wireNotice({ row: null });
