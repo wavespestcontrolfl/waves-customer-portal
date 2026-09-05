@@ -1086,7 +1086,7 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
       return refuseSend('This project report is no longer viewable — remove the link before sending.');
     }
     if (!textedProjectReport(project)) {
-      return refuseSend('This project report has only gone out by email — its first text is sent from the project, not here. Remove the link before sending.');
+      return refuseSend('This project report has not been texted yet — its first text is sent from the project, not here. Remove the link before sending.');
     }
     if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
       return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
@@ -1877,13 +1877,30 @@ const issuedProjectReport = (project) => Boolean(project)
 // it never sends a report's first text: that is the flow's, with the
 // project_report_ready template, its kill switch and the delivery record.
 // sent_at is stamped on an email-only delivery too (no phone, template
-// off), so the evidence is the flow's own SMS leg (delivery_channels.sms.ok
+// off), so the evidence is the flow's own SMS leg (delivery_channels.sms
 // — the record it writes per attempt; a later resend that could not text
 // clears it, and the report drops out until the flow texts it again). A
 // migrated 'legacy_sent' delivery predates channel evidence and can carry
-// no SMS leg, so it is not linkable here (GH Codex #3893 r15 P1).
-const PROJECT_REPORT_SMS_LEG_SQL = "delivery_channels->'sms'->>'ok' = 'true'";
-const textedProjectReport = (project) => Boolean(project && project.delivery_channels && project.delivery_channels.sms && project.delivery_channels.sms.ok === true);
+// no SMS leg, so it is not linkable here (GH Codex #3893 r15 P1). `ok`
+// alone is not delivery: an after-hours payment-hold release records the
+// QUEUED text as { ok: true, scheduled: true } before the provider has it,
+// and the deferred replay never writes back to delivery_channels — so a
+// scheduled leg is not evidence, and the report becomes linkable only once
+// the flow next texts it (r16 P1). { ok: true, deduplicated: true } is a
+// text already out, and counts.
+const PROJECT_REPORT_SMS_LEG_SQL = "delivery_channels->'sms'->>'ok' = 'true' AND COALESCE(delivery_channels->'sms'->>'scheduled', 'false') <> 'true'";
+function textedProjectReport(project) {
+  const sms = project && project.delivery_channels && project.delivery_channels.sms;
+  return Boolean(sms && sms.ok === true && sms.scheduled !== true);
+}
+// The columns the eligibility predicates read — never `*`: projects carries
+// multi-MB blobs (wdo_signature, property_profile, wdo_history) that the
+// list route also skips, and a Quick Link scan may touch 15 rows (r16 P2).
+const PROJECT_REPORT_LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'delivery_channels', 'report_token', 'report_hold_status'];
+// What the line and toast read for the ONE chosen project: the title scrub
+// (projectTitle — findings' and archived filings' recorded fees) and the
+// vanity path (report_token, customer_id, id).
+const PROJECT_REPORT_TITLE_COLUMNS = ['id', 'customer_id', 'title', 'project_type', 'project_date', 'report_token', 'findings', 'wdo_sent_filings'];
 
 /**
  * The project send flow's duplicate-delivery claim (admin-projects /send):
@@ -1952,9 +1969,8 @@ async function releaseProjectReportSends(claim) {
 // it (reports-public loadProjectForReport): a full token matches its row; a
 // vanity prefix must match exactly one.
 async function linkableProjectReport(lookup) {
-  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'delivery_channels', 'report_token', 'report_hold_status'];
-  if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...COLUMNS);
-  const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`).limit(2);
+  if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...PROJECT_REPORT_LINK_COLUMNS);
+  const rows = await db('projects').select(PROJECT_REPORT_LINK_COLUMNS).where('report_token', 'like', `${lookup.value}%`).limit(2);
   return rows.length === 1 ? rows[0] : null;
 }
 
@@ -1968,9 +1984,12 @@ async function linkableProjectReport(lookup) {
  */
 async function buildProjectReportLink(customerIds) {
   const PAGE = 15;
-  let project = null;
+  let pick = null;
   for (let offset = 0; ; offset += PAGE) {
+    // The eligibility scan carries only what the pick needs; the chosen
+    // project's title fields are loaded once below (r16 P2).
     const rows = await db('projects')
+      .select('id', 'customer_id', 'report_hold_status')
       .whereIn('customer_id', customerIds)
       .whereIn('status', PROJECT_REPORT_STATUSES)
       .whereNotNull('sent_at')
@@ -1981,10 +2000,12 @@ async function buildProjectReportLink(customerIds) {
       .orderByRaw('sent_at DESC, created_at DESC, id DESC')
       .offset(offset)
       .limit(PAGE);
-    project = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;
-    if (project || rows.length < PAGE) break;
+    pick = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;
+    if (pick || rows.length < PAGE) break;
   }
-  if (!project) return { url: null, line: '', reason: 'No texted project report on this account yet — a report that only went by email is re-sent from the project' };
+  if (!pick) return { url: null, line: '', reason: 'No texted project report on this account yet — text it from the project first' };
+  const project = await db('projects').where({ id: pick.id }).first(...PROJECT_REPORT_TITLE_COLUMNS);
+  if (!project) return { url: null, line: '', reason: 'No texted project report on this account yet — text it from the project first' };
   const customer = await db('customers').where({ id: project.customer_id }).first('first_name', 'last_name');
   const path = await require('./project-report-links').projectReportPathForProject(db, project, customer || {});
   if (!path) return { url: null, line: '', reason: 'No project report on this account yet' };
