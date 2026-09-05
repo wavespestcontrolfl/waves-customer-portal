@@ -215,6 +215,10 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
 
 
 describe('Lawn water coverage requires affirmative moisture evidence', () => {
+  test('keeps affirmative moisture evidence in a separate summary field', () => {
+    const report = buildLawnReportV2({ lawnAssessment: baseAssessment({ ...CASES.healthy, observations: 'No weeds seen', aiSummary: 'Dry patches remain near the driveway.' }) });
+    expect(report.water.coverageWatch).toBe(true);
+  });
   const renderObservation = observations => buildLawnReportV2({
     lawnAssessment: baseAssessment({ ...CASES.healthy, observations, aiSummary: 'Dense green turf with ordinary edge wear.' }),
   });
@@ -223,6 +227,7 @@ describe('Lawn water coverage requires affirmative moisture evidence', () => {
     'No signs of weeds, disease, drought stress, or watering problems are visible.',
     'The turf is free of drought stress.',
     'The lawn is not dry.',
+    'No weeds and drought stress are visible.',
     'Let damp areas dry out before the next inspection.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
@@ -233,6 +238,7 @@ describe('Lawn water coverage requires affirmative moisture evidence', () => {
   test.each([
     'Dry patches remain near the driveway.',
     'No disease is visible, and dry patches remain near the driveway.',
+    'No weeds were seen and dry patches remain near the driveway.',
     'No irrigation reaches the west side, leaving dry patches.',
     'No disease is visible, but the west side is dry.',
     'No drought stress in the front; sprinkler coverage is uneven in the back.',

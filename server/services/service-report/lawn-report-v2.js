@@ -555,11 +555,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // satisfy the dry regex (codex P1 r11), alongside the r8 removals of
   // 'moisture'/'irrigation' (both appear in wet observations and flipped a
   // confirmed-overwatering read into a dry-coverage story).
-  const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`
+  const obsText = `${lawnAssessment.observations || ''}. ${lawnAssessment.aiSummary || ''}`
     .toLowerCase()
     .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '')
     // Absence is not evidence of dryness. Keep contrasting affirmative clauses.
-    .replace(/\b(?:no|not|without|free of|absent|none|negative for)\b(?:(?!\b(?:but|however|yet)\b|,\s*(?:and\b|leaving\b|while\b|whereas\b))[^.!?;])*/g, '');
+    .replace(/\b(?:no|not|without|free of|absent|none|negative for)\b(?:(?!\b(?:but|however|yet)\b|\band\b(?=[^.!?;,]{0,60}\b(?:remain|remains|persist|persists|looks?|shows?|(?:is|are)\s+(?:dry|drier))\b)|,\s*(?:and\b|leaving\b|while\b|whereas\b))[^.!?;])*/g, '');
   // DRY-specific signals only — not generic "stress" (heat/insect).
   // "uneven"/"coverage" need MOISTURE context: the repo uses "uneven" for
   // ordinary color variation and "coverage" for turf density, and a bare
