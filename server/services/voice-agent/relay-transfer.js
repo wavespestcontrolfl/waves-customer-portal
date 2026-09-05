@@ -449,10 +449,18 @@ function composeRelaySegment(call) {
   let text = String((stash && stash.text) || '').trim();
   let tmeta = stash && stash.metadata && typeof stash.metadata === 'object' ? stash.metadata : null;
   if (!text) {
-    if (call.transcription_provider !== TRANSCRIPTION_PROVIDER) return null;
-    text = String(call.transcription || '').trim();
-    tmeta = call.transcription_metadata;
-    if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
+    if (call.transcription_provider === TRANSCRIPTION_PROVIDER) {
+      text = String(call.transcription || '').trim();
+      tmeta = call.transcription_metadata;
+      if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
+    }
+  }
+  // PR 2B: the segments themselves are the third source — a resumed leg that
+  // failed before any turn wrote no stash and the recording swap cleared the
+  // columns, but every earlier socket appended its segment.
+  if (!text && Array.isArray(meta.relay_segments)) {
+    text = String(require('./relay-recovery').segmentsText(meta.relay_segments) || '').trim();
+    tmeta = null;
   }
   if (!text) return null;
   return {

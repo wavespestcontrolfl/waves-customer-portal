@@ -137,7 +137,9 @@ describe('relay-recovery module', () => {
     expect(state.segmentsText).toHaveLength(recovery.RESUME_SEED_MAX_CHARS + 3);
     expect(state.segmentsText.startsWith('[…]')).toBe(true);
     expect(state.reconnectMs).toBe(5);
-    expect(await recovery.readReconnectState(db, 'CA-1')).toEqual({ reconnects: 1, reconnectMs: 5 });
+    expect(await recovery.readReconnectState(db, 'CA-1')).toEqual({ reconnects: 1, reconnectMs: 5, profile: null });
+    primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_profile_id: 'flux_fast_v1', relay_attrs: { speechModel: 'flux' } } } });
+    expect((await recovery.readReconnectState(db, 'CA-1')).profile).toEqual({ relayProfileId: 'flux_fast_v1', relayAttrs: { speechModel: 'flux' } });
   });
 
   test('promises ride the segment and are restored (latest per kind) with their expectation and timestamp; caller turns are extracted (hook P1)', async () => {
@@ -302,6 +304,9 @@ describe('the conversation side', () => {
     const { composeRelaySegment } = require('../services/voice-agent/relay-transfer');
     expect(composeRelaySegment({ metadata: { relay_reconnects: 1, relay_transcript: { text: 'Caller: first\n\n[Reconnected]\nCaller: second' } }, call_outcome: 'voicemail' })).toEqual(expect.objectContaining({ text: '[AI segment]\nCaller: first\n\n[Reconnected]\nCaller: second' }));
     expect(composeRelaySegment({ metadata: { relay_transcript: { text: 'x' } }, call_outcome: 'voicemail' })).toBeNull(); // no transfer, no reconnect ⇒ today's overwrite
+    // the SEGMENTS are the third source: a resumed leg that failed before any turn wrote no stash and the swap cleared the columns
+    expect(composeRelaySegment({ metadata: { relay_reconnects: 1, relay_segments: [{ generation: 2, text: 'Caller: second' }, { generation: 1, text: 'Caller: first' }] }, transcription: null, transcription_provider: null, call_outcome: 'voicemail' }))
+      .toEqual({ text: '[AI segment]\nCaller: first\n\n[Reconnected]\nCaller: second', metadata: { provider: 'conversation_relay' } });
     // …and the processor's in-UPDATE composition guard (relayPending) engages on a reconnected row too (hook P1)
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain("meta.relay_transfer_ring_at || (Number(meta.relay_reconnects) || 0) > 0)) || row.call_outcome === 'ai_transferred';");

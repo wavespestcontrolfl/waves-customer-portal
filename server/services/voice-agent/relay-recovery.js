@@ -265,8 +265,14 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
     if (!row) return null;
     let meta = row.metadata;
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    if (!meta || typeof meta !== 'object') return { reconnects: 0, reconnectMs: null };
-    return { reconnects: Number(meta.relay_reconnects) || 0, reconnectMs: Number(meta.relay_reconnect_ms) || null };
+    if (!meta || typeof meta !== 'object') return { reconnects: 0, reconnectMs: null, profile: null };
+    // The relay profile the first leg was stamped with (id + validated
+    // attrs) — the resumed leg opens with the SAME one, so a sandbox cell
+    // or a production profile is attributed to the whole call.
+    const profile = meta.relay_profile_id
+      ? { relayProfileId: String(meta.relay_profile_id), relayAttrs: (meta.relay_attrs && typeof meta.relay_attrs === 'object') ? meta.relay_attrs : {} }
+      : null;
+    return { reconnects: Number(meta.relay_reconnects) || 0, reconnectMs: Number(meta.relay_reconnect_ms) || null, profile };
   });
   const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); });
   try { return await Promise.race([read, timeout]); } catch { return null; } finally { clearTimeout(timer); }

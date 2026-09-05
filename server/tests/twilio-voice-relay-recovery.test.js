@@ -123,15 +123,18 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(res.body).toContain('<Parameter name="lang" value="es" />');
   });
 
-  test('a sandbox failure reconnects on the sandbox action with the sandbox socket — never staff, never voicemail', async () => {
+  test('a sandbox failure reconnects on the sandbox action with the sandbox socket — never staff, never voicemail — and with the SAME profile the first leg was stamped with (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     process.env.SERVER_DOMAIN = 'preview.example.test';
-    primeDb();
+    const { updates } = primeDb({ firstRow: { metadata: { relay_profile_id: 'flux_fast_v1', relay_attrs: { transcriptionProvider: 'Deepgram', speechModel: 'flux' } } } });
     const res = mockRes();
     await handlerFor('/relay-complete')({ body: FAILED, query: { sandbox: '1' } }, res);
     delete process.env.SERVER_DOMAIN;
     expect(res.body).toMatch(/<Connect action="\/api\/webhooks\/twilio\/relay-complete\?sandbox=1&amp;gen=\d+" method="POST">/);
     expect(res.body).toContain('url="wss://preview.example.test/ws/voice-agent?callSid=CA-rc-1');
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="flux_fast_v1" />');
+    expect(updates.some((u) => u.metadata && String(u.metadata.bindings && u.metadata.bindings[0]).includes('"relay_profile_id":"flux_fast_v1"'))).toBe(true); // re-stamped, same profile
     expect(res.body).not.toContain('<Record');
     expect(res.body).not.toContain('<Hangup');
   });

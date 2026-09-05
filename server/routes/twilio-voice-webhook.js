@@ -1847,7 +1847,11 @@ async function attemptRelayReconnect(req, callSid, failure) {
     return { xml: null, duplicate: false, secondFailure: false };
   }
   const spanish = language === 'es';
-  const relayOpts = activeRelayTwiMLOptions(spanish ? { language: SPANISH_LANGUAGE } : {});
+  // The SAME relay profile the first leg opened with (the row's stamp —
+  // a sandbox cell, raw cell-99 attrs, or the production profile), so the
+  // recovery is attributed to that profile; no stamp ⇒ the active profile.
+  const stamped = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
+  const relayOpts = (stamped && stamped.profile) ? stamped.profile : activeRelayTwiMLOptions(spanish ? { language: SPANISH_LANGUAGE } : {});
   await withDeadline(stampRelayProfile(callSid, relayOpts));
   logger.info(`[relay-complete] reconnecting ${maskSid(callSid)} after ${failure} (${sandbox ? 'sandbox' : 'prod'}${spanish ? ', es' : ''})`);
   // The resumed leg's action carries the reconnect generation, so its own
