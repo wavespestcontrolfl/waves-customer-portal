@@ -88,7 +88,11 @@ const PREP_CONFIG = Object.freeze({
     // Inspection Service" (20260507000002) is a diagnostic walkthrough and
     // gets none of it, like the lawn and termite matchers (GH Codex #3856
     // r26 P1). prep.rodent covers inspections itself, so rodent stays.
-    excludeKeywords: ['lawn pest', { keyword: 'rodent', unless: 'pest%rodent' }, inspectionOnly('inspect'), inspectionOnly('assess')],
+    // The catalog's "Waves Pest Control Appointment" (general_appointment,
+    // 20260408000001) is the placeholder for a booking whose service type
+    // is not yet known — nothing is known to be an interior treatment, so
+    // it gets no prep (GH Codex #3856 r31 P1).
+    excludeKeywords: ['lawn pest', 'appointment', { keyword: 'rodent', unless: 'pest%rodent' }, inspectionOnly('inspect'), inspectionOnly('assess')],
     emailTemplateKey: 'prep.interior_pest',
     smsStandaloneKey: null,
   },
@@ -99,7 +103,12 @@ const PREP_CONFIG = Object.freeze({
     // children and pets off treated turf — a "Lawn Health Inspection" /
     // "Lawn Inspect" evaluation (service library) or a lawn assessment
     // applies nothing, so it gets no treatment prep (GH Codex #3856 r22 P1).
-    excludeKeywords: [inspectionOnly('inspect'), inspectionOnly('assess')],
+    // Mechanical / material lawn work — "Lawn Dethatching" (catalog: no
+    // pesticide application), "Lawn Plugging", "Lawn Top Dressing"
+    // (20260808080000) — applies no product either: the guide's dry-time
+    // and post-treatment irrigation steps do not describe that visit
+    // (GH Codex #3856 r31 P1).
+    excludeKeywords: ['dethatch', 'plugging', 'top dress', inspectionOnly('inspect'), inspectionOnly('assess')],
     emailTemplateKey: 'prep.lawn',
     smsStandaloneKey: null,
   },

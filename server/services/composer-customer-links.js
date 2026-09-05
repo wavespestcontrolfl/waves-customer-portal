@@ -1278,19 +1278,27 @@ async function markPrepGuidesSent(preps, actorId) {
     }
     if (marked.has(`${customerId}:${pestType}`)) continue;
     marked.add(`${customerId}:${pestType}`);
-    await db('customer_interactions').insert({
-      customer_id: customerId,
-      interaction_type: 'sms_outbound',
-      admin_user_id: actorId || null,
-      subject: `${pestType} prep info sent`,
-      body: 'Prep SMS sent via the Communications composer (prep guide link).',
-    });
     // A sequence-backed guide (flea / bed bug / cockroach) texted here is the
     // prep delivery: the customer's live enrolment still awaiting its prep
     // step is settled, as the manual sender does, or the runner — which
     // consults neither the stamp above nor the marker — emails the same
-    // prep on its next tick (GH Codex #3856 r30 P1). Fail-soft inside.
+    // prep on its next tick (GH Codex #3856 r30 P1). Fail-soft inside, and
+    // BEFORE the audit marker: the duplicate-send fence must not depend on
+    // a bookkeeping insert succeeding (GH Codex #3856 r31 P1).
     await settleHeldEnrollment(customerId, templateKey);
+    try {
+      await db('customer_interactions').insert({
+        customer_id: customerId,
+        interaction_type: 'sms_outbound',
+        admin_user_id: actorId || null,
+        subject: `${pestType} prep info sent`,
+        body: 'Prep SMS sent via the Communications composer (prep guide link).',
+      });
+    } catch (markErr) {
+      // The text already left; a lost marker only costs the tagger's replay
+      // guard for this pest, and the next prep in the batch still settles.
+      logger.warn(`[composer-customer-links] prep replay marker failed for customer ${customerId} (${pestType}): ${markErr.message}`);
+    }
   }
 }
 

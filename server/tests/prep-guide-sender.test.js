@@ -693,6 +693,13 @@ describe('sendPrepToCustomer', () => {
     expect(excluded).toBe(true);
   });
 
+  test('the interior-pest visit match excludes the generic "Waves Pest Control Appointment" placeholder — an unknown service type gets no interior treatment prep (GH Codex #3856 r31 P1)', async () => {
+    upcomingVisitRow = { ...VISIT, service_type: 'Waves Pest Control Appointment' };
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'interior_pest', channel: 'email' });
+    const excluded = scheduledQueries.some((q) => q.whereRaw.mock.calls.some(([sql, args]) => sql === 'LOWER(service_type) NOT LIKE ?' && args[0] === '%appointment%'));
+    expect(excluded).toBe(true);
+  });
+
   test('the interior-pest visit match excludes a rodent-led name unless it is a pest-primary "pest ... rodent" plan', async () => {
     upcomingVisitRow = VISIT;
     await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'interior_pest', channel: 'email' });
@@ -749,6 +756,17 @@ describe('sendPrepToCustomer', () => {
     const ex = inspectionOnlyExclusions();
     expect(ex.map((e) => e.keyword)).toEqual(expect.arrayContaining(['%inspect%', '%assess%']));
     expect(ex.every((e) => e.unless.includes('%treatment%'))).toBe(true);
+  });
+
+  test('the lawn visit match excludes mechanical work — "Lawn Dethatching", "Lawn Plugging" and "Lawn Top Dressing" apply no product and get no dry-time / irrigation prep (GH Codex #3856 r31 P1)', async () => {
+    upcomingVisitRow = { ...VISIT, service_type: 'Lawn Dethatching' };
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'lawn', channel: 'email' });
+    const plain = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
+      .filter(([sql]) => sql === 'LOWER(service_type) NOT LIKE ?')
+      .map(([, args]) => args[0]));
+    // Unconditional: no treatment cue lifts these (a top dressing is never
+    // an application).
+    expect(plain).toEqual(expect.arrayContaining(['%dethatch%', '%plugging%', '%top dress%']));
   });
 
   test('losing the prep-page claim (another guide keyed the row after the read) refuses the text', async () => {

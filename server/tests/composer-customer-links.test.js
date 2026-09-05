@@ -1863,6 +1863,28 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(settleHeldEnrollment).toHaveBeenCalledWith('c2', 'prep.bed_bug');
   });
 
+  test('markPrepGuidesSent settles the enrolment BEFORE the replay marker, and a failed marker insert neither skips the settle nor aborts the batch (GH Codex #3856 r31 P1)', async () => {
+    const { settleHeldEnrollment } = require('../services/prep-guide-sender');
+    settleHeldEnrollment.mockClear();
+    const insert = jest.fn(async () => { throw new Error('customer_interactions down'); });
+    const stamp = { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), update: jest.fn(async () => 1) };
+    mockBuilders = { customer_interactions: { insert }, scheduled_services: stamp };
+    mockDb.fn = { now: () => 'NOW()' };
+    await expect(markPrepGuidesSent([
+      { customerId: 'c1', pestType: 'flea', serviceId: 'svc-1', templateKey: 'prep.flea' },
+      { customerId: 'c2', pestType: 'cockroach', serviceId: 'svc-2', templateKey: 'prep.cockroach' },
+    ], 'admin-9')).resolves.toBeUndefined();
+    // Both customers' live step-0 enrolments are settled — the duplicate-send
+    // fence does not ride on the audit write — and the settle ran first.
+    expect(settleHeldEnrollment).toHaveBeenCalledTimes(2);
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c1', 'prep.flea');
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c2', 'prep.cockroach');
+    expect(settleHeldEnrollment.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
+    expect(insert).toHaveBeenCalledTimes(2);
+    // The delivered-page stamp still lands for each visit.
+    expect(stamp.update).toHaveBeenCalledTimes(2);
+  });
+
   test('markStatementsSent goes through the email delivery\'s own finalized → sent writer, per statement', async () => {
     const { markStatementSent } = require('../services/payer-statement-email');
     await markStatementsSent([31, 52]);
