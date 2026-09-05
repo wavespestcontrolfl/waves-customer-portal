@@ -452,7 +452,12 @@ describe('pre-push hook round 9', () => {
     // The column salvage itself only takes an ai_transferred row whose columns are still Sandy's (provider NULL / conversation_relay).
     const src = require('fs').readFileSync(require.resolve('../services/voice-agent/relay-conversation'), 'utf8');
     expect(builder.whereRaw).toHaveBeenCalledWith("(call_outcome = 'relay_failed' OR transcription_provider IS NULL OR transcription_provider = ?)", ['conversation_relay']);
-    expect(updates[2]).not.toHaveProperty('transcription'); // the recording owns the columns
+    // The recording owns the columns — unless the processor already wrote the recorded leg ALONE (it read the row
+    // before this stash): then the AI segment is prepended in the same statement (codex r6 P1); a composite / empty
+    // column / Sandy's own transcript is left as it is.
+    expect(updates[2].transcription.sql).toMatch(/^CASE WHEN \(transcription IS NOT NULL AND transcription <> '' AND transcription NOT LIKE '\[AI segment\]%' AND transcription_provider IS DISTINCT FROM 'conversation_relay'\) THEN \? \|\| E'\\n\\n\[' \|\| CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END \|\| E' segment\]\\n' \|\| transcription ELSE transcription END$/);
+    expect(updates[2].transcription.bindings[0]).toMatch(/^\[AI segment\]\n/);
+    expect(updates[2].transcript_structured.sql).toMatch(/THEN NULL ELSE transcript_structured END$/);
     expect(updates[2].metadata.bindings[0]).toContain('"relay_transcript"');
     const logger = require('../services/logger');
     expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('transcript NOT persisted'));

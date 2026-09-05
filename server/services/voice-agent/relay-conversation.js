@@ -1988,11 +1988,23 @@ class RelayConversation {
         // owns the columns, but the AI segment still rides
         // metadata.relay_transcript on the transfer-marked row (hook P1).
         if (transcriptUpdate && !updated && !salvaged && this._transferRequested === true) {
+          // …and when the processor already wrote the RECORDED leg alone
+          // (it read the row before this stash existed), the AI segment is
+          // prepended to that transcript in the same statement — the shape
+          // the processor's own composite has (codex r6 P1). A composite or
+          // an empty column is left alone; a composite has no structured form.
+          const RECORDED_ONLY = "(transcription IS NOT NULL AND transcription <> '' AND transcription NOT LIKE '[AI segment]%' AND transcription_provider IS DISTINCT FROM 'conversation_relay')";
+          const aiSegment = `[AI segment]\n${transcriptUpdate.transcription}`;
           salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['voicemail', 'ai_transferred']).whereRaw("(metadata->'relay_handoff') IS NOT NULL"))
             .update({
               metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
                 relay_transcript: { text: transcriptUpdate.transcription, metadata: JSON.parse(transcriptUpdate.transcription_metadata) },
               })]),
+              transcription: db.raw(
+                `CASE WHEN ${RECORDED_ONLY} THEN ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]\\n' || transcription ELSE transcription END`,
+                [aiSegment],
+              ),
+              transcript_structured: db.raw(`CASE WHEN ${RECORDED_ONLY} THEN NULL ELSE transcript_structured END`),
               updated_at: new Date(),
             });
           if (salvaged) logger.info(`[voice-relay] AI segment stashed on a voicemail-after-transfer row callSid=${maskSid(this.callSid)}`);
