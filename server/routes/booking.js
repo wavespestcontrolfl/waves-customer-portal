@@ -1173,12 +1173,15 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // Default landing keeps the tight 4-per-day cap; a specific-date / AI
     // search opens it up so the customer sees the full block of options.
     const perDayCap = expandOpenDays ? 8 : 4;
-    const cappedSlots = slots.map(s => ({ ...s, is_best_fit: s === best })).slice(0, perDayCap);
+    // "nearby" (route-efficient) is a per-slot fact — the picker labels
+    // each time from its own flag; the day rolls them up for the calendar.
+    const cappedSlots = slots
+      .map(s => ({ ...s, is_best_fit: s === best, nearby: s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES }))
+      .slice(0, perDayCap);
     days.push({
       date,
       ...labels,
-      // A day is "nearby" when at least one of its slots is route-efficient.
-      nearby: cappedSlots.some(s => s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES),
+      nearby: cappedSlots.some(s => s.nearby),
       slots: cappedSlots,
     });
   }

@@ -7977,7 +7977,6 @@ function EstimateViewPageInner() {
                   selectedFrequency={selectedFrequency}
                   serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
-                  quickPick={seamlessAutoPay}
                   cityLabel={estimateCity}
                 />
               </div>

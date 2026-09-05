@@ -138,8 +138,8 @@ beforeAll(() => {
 });
 
 async function bookThroughToReview() {
-  // Slot list loads → pick the first slot.
-  const slotButtons = await screen.findAllByRole('button', { name: /Arrival window/i });
+  // Slot list loads → pick the first time (shared SchedulePicker: "Choose 9:00 AM on …").
+  const slotButtons = await screen.findAllByRole('button', { name: /^Choose / });
   fireEvent.click(slotButtons[0]);
 
   // Payment preference appears once a slot is selected → reserve → review.
@@ -197,12 +197,13 @@ describe('EstimateViewPage review-phase accept failure', () => {
     // …and the slot picker frozen: taps are blocked by the aria-disabled
     // pointer-events wrapper, and even a synthetic click (jsdom ignores CSS
     // pointer-events) is dropped by the guarded onSelect.
-    const slotButtons = screen.getAllByRole('button', { name: /Arrival window/i });
-    expect(slotButtons[0].closest('[aria-disabled="true"]')).not.toBeNull();
-    const otherSlot = slotButtons[1];
-    expect(otherSlot).toHaveAttribute('aria-pressed', 'false');
-    fireEvent.click(otherSlot);
-    expect(otherSlot).toHaveAttribute('aria-pressed', 'false');
+    // The shared picker shows the picked day's times only, so the picked slot
+    // is the one to tap: unguarded, that tap would deselect it (onSelect(null)).
+    const [pickedSlot] = screen.getAllByRole('button', { name: /^Choose / });
+    expect(pickedSlot.closest('[aria-disabled="true"]')).not.toBeNull();
+    expect(pickedSlot).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(pickedSlot);
+    expect(pickedSlot).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('a slot search started before submit cannot clear the selection when it resolves mid-accept', async () => {
@@ -220,7 +221,7 @@ describe('EstimateViewPage review-phase accept failure', () => {
     render(<EstimateViewPage />);
 
     // Pick a slot, then start an AI search that hangs on the gate.
-    const slotButtons = await screen.findAllByRole('button', { name: /Arrival window/i });
+    const slotButtons = await screen.findAllByRole('button', { name: /^Choose / });
     fireEvent.click(slotButtons[0]);
     const searchInput = screen.getByLabelText('Search for a service date or time');
     fireEvent.change(searchInput, { target: { value: 'anything next tuesday' } });
@@ -245,7 +246,7 @@ describe('EstimateViewPage review-phase accept failure', () => {
 
     // Selection survives: the slot the in-flight accept is committing stays
     // picked, and the payment section (gated on selectedSlotId) stays up.
-    const slotsAfter = screen.getAllByRole('button', { name: /Arrival window/i });
+    const slotsAfter = screen.getAllByRole('button', { name: /^Choose / });
     expect(slotsAfter[0]).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /Pay per application/i })).toBeInTheDocument();
   });
@@ -265,7 +266,7 @@ describe('EstimateViewPage review-phase accept failure', () => {
     render(<EstimateViewPage />);
 
     // Pick a slot, then start an AI search that hangs on the gate.
-    const slotButtons = await screen.findAllByRole('button', { name: /Arrival window/i });
+    const slotButtons = await screen.findAllByRole('button', { name: /^Choose / });
     fireEvent.click(slotButtons[0]);
     const searchInput = screen.getByLabelText('Search for a service date or time');
     fireEvent.change(searchInput, { target: { value: 'anything next tuesday' } });
@@ -292,7 +293,7 @@ describe('EstimateViewPage review-phase accept failure', () => {
     // the stale search had cleared it, the slot would be unpressed and the
     // payment section (gated on selectedSlotId) gone.
     fireEvent.click(screen.getByRole('button', { name: 'Go back' }));
-    const slotsAfter = await screen.findAllByRole('button', { name: /Arrival window/i });
+    const slotsAfter = await screen.findAllByRole('button', { name: /^Choose / });
     expect(slotsAfter[0]).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /Pay per application/i })).toBeInTheDocument();
   });
@@ -315,7 +316,7 @@ describe('EstimateViewPage review-phase accept failure', () => {
     expect(await screen.findByRole('checkbox')).toBeEnabled();
 
     // Book: slot → payment preference → confirm (hangs → 'submitting').
-    const slotButtons = await screen.findAllByRole('button', { name: /Arrival window/i });
+    const slotButtons = await screen.findAllByRole('button', { name: /^Choose / });
     fireEvent.click(slotButtons[0]);
     fireEvent.click(await screen.findByRole('button', { name: 'Book + pay on service day' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm booking' }));
