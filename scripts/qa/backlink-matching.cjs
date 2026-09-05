@@ -55,7 +55,27 @@ stub('models/db', proxy);
     }
     console.log('PASS terminal placements lose their stale ambiguity markers');
     await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
+    for (const agent_state of ['rejected', 'watching']) {
+      await trx('seo_link_domains').where({ id: oid }).update({ agent_state });
+      assert.equal((await V.reconcileOutreach({ ownerMatch: { prospectId: second, backlinkId: backlink } })).matched, 0);
+      assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).status, 'contacted');
+      assert.equal(await trx('seo_link_placement_backlinks').where({ backlink_id: backlink }).first(), undefined);
+    }
+    await trx('seo_link_domains').where({ id: oid }).update({ agent_state: 'acquiring' });
+    console.log('PASS stale owner click refuses rejected/watching domain decisions');
+    const sibling = randomUUID(), siblingLink = randomUUID(), siblingTarget = 'https://wavespestcontrol.com/lawn-care/';
+    await trx('seo_link_prospects').insert({ id: sibling, domain_id: oid, path_id: opath, target_domain: publisher, target_page: siblingTarget, location_key: 'sarasota', status: 'contacted', link_type: 'resource', outreach_status: 'sent', outreach_sent_at: sent, follow_up_status: 'drafted' });
+    await trx('seo_backlinks').insert({ id: siblingLink, source_domain: publisher, source_url: `https://${publisher}/lawn`, target_url: siblingTarget, status: 'active', discovery_source: 'dataforseo', first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date()) });
+    gates.delete('linkAuthority');
     assert.deepEqual(await V.reconcileOutreach({ownerMatch:{prospectId:second,backlinkId:backlink}}),{matched:1,ambiguous:0});
+    const untouched = await trx('seo_link_prospects').where({ id: sibling }).first();
+    assert.equal(untouched.status, 'contacted'); assert.equal(untouched.follow_up_status, 'drafted');
+    assert.equal(await trx('seo_link_placement_backlinks').where({ backlink_id: siblingLink }).first(), undefined);
+    gates.add('linkAuthority');
+    assert.equal((await V.reconcileOutreach()).matched, 1);
+    assert.equal((await trx('seo_link_prospects').where({ id: sibling }).first()).status, 'placed');
+    console.log('PASS gate-off owner assignment leaves non-selected placement untouched; gate-on reconciliation resumes');
+
     const chosen = await trx('seo_link_prospects').where({id:second}).first();
     assert.equal(chosen.status,'placed');assert.equal(chosen.backlink_id,backlink);assert.equal(chosen.follow_up_status,'skipped');
     assert.equal((await trx('seo_link_prospects').where({id:first}).first()).status,'contacted');

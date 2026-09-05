@@ -6,9 +6,9 @@ const { runExclusive } = require('../utils/cron-lock');
 const { reconcileOutreach } = require('../services/seo/link-prospect-verifier');
 const router = require('../routes/admin-backlink-agent-v2');
 const handler = router.stack.find((layer) => layer.route?.path === '/prospects/:id/reconcile-backlink').route.stack.at(-1).handle;
-const prospectId = '00000000-0000-4000-8000-000000000001';
-const backlinkId = '00000000-0000-4000-8000-000000000002';
-const call = () => new Promise((resolve, reject) => handler({ params: { id: prospectId }, body: { backlink_id: backlinkId } }, {
+const prospectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1';
+const backlinkId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2';
+const call = (uppercase = false) => new Promise((resolve, reject) => handler({ params: { id: uppercase ? prospectId.toUpperCase() : prospectId }, body: { backlink_id: uppercase ? backlinkId.toUpperCase() : backlinkId } }, {
   code: 200, status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code, body }); },
 }, reject));
 beforeEach(() => jest.clearAllMocks());
@@ -26,4 +26,11 @@ test('owner assignment holds the scan lease through evidence revalidation and mu
   reconcileOutreach.mockImplementation(async (args) => { expect(held).toBe(true); expect(args.ownerMatch).toMatchObject({ prospectId, backlinkId }); return { matched: 1, ambiguous: 0 }; });
   expect((await call()).code).toBe(200);
   expect(held).toBe(false);
+});
+
+test('uppercase UUIDs are normalized before verifier identity checks', async () => {
+  runExclusive.mockImplementation(async (_key, work) => work());
+  reconcileOutreach.mockResolvedValue({ matched: 1, ambiguous: 0 });
+  expect((await call(true)).code).toBe(200);
+  expect(reconcileOutreach).toHaveBeenCalledWith({ ownerMatch: { prospectId, backlinkId, actorId: null } });
 });

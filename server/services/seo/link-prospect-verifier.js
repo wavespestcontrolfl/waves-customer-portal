@@ -275,6 +275,11 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
   for (const domain of domains) {
     const result = await db.transaction(async (trx) => {
       await lockProspectDomain(trx, domain);
+      if (ownerMatch) {
+        const selected = pending.find((p) => p.id === ownerMatch.prospectId);
+        const currentDomain = await trx('seo_link_domains').where({ id: selected.domain_id }).forUpdate().first();
+        if (!require('./link-authority-selection').BRIDGE_STATES.includes(currentDomain?.agent_state)) return { matched: 0, ambiguous: 0 };
+      }
       const rows = await trx('seo_link_prospects')
         .whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain])
         .forUpdate();
@@ -301,7 +306,7 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
       let matched = 0, ambiguous = 0;
       let ownerAssigned = false;
       for (const link of links) {
-        if (ownerMatch && !ownerAssigned && link.id !== ownerMatch.backlinkId) continue;
+        if (ownerMatch && link.id !== ownerMatch.backlinkId && (!ownerAssigned || !isEnabled('linkAuthority'))) continue;
         const ownerId = ownership.get(link.id);
         // Existing ownership also identifies a recovery among same-target siblings.
         const candidates = ownerId ? placements.filter((p) => p.id === ownerId) : placements;
