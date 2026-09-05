@@ -5,6 +5,9 @@
  *   - an arrival reminder card for `geofence_arrival_reminder` (tech confirms / dismisses)
  *   - an auto-started info card for `geofence_timer_started`
  *   - a stop toast (with Undo) for `geofence_timer_stopped`
+ *   - a visit card for `visit_assigned` / `visit_unassigned` /
+ *     `visit_rescheduled` / `visit_cancelled` (tech-visit-notifications.js) —
+ *     no auto-dismiss: it waits until the tech taps "Got it"
  *
  * Mount once inside TechLayout / TechHomePage — it renders a fixed-position
  * container so the parent layout doesn't need to reserve space.
@@ -35,6 +38,22 @@ const POLL_MS = 10_000;
 const REMINDER_AUTODISMISS_MS = 5 * 60 * 1000;
 const STOP_TOAST_MS = 15_000;
 const MAX_STORM_CARDS = 2;
+
+// Visit cards are the tech's record of a schedule change; they never
+// auto-dismiss (the 5-min reminder timer would mark them read unseen).
+const VISIT_TYPES = new Set(['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']);
+const VISIT_ACCENT = {
+  visit_assigned: '#0ea5e9',
+  visit_rescheduled: '#f59e0b',
+  visit_unassigned: '#94a3b8',
+  visit_cancelled: '#ef4444',
+};
+const VISIT_ICON = {
+  visit_assigned: '🗓',
+  visit_rescheduled: '⏱',
+  visit_unassigned: '↪',
+  visit_cancelled: '✕',
+};
 
 const COLORS = {
   bg: '#1e293b',
@@ -146,7 +165,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
   // marking them read here would hide them from every future unreadOnly poll
   // without the tech ever seeing them.
   useEffect(() => {
-    const timers = cards.map((n) => {
+    const timers = cards.filter((n) => !VISIT_TYPES.has(n.type)).map((n) => {
       const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
       return setTimeout(() => removeCard(n.id, { silent: true }), ms);
     });
@@ -205,6 +224,9 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
           )}
           {n.type === 'geofence_timer_stopped' && (
             <StopToast n={n} onUndo={() => handleUndo(n)} onDismiss={() => removeCard(n.id, { silent: true })} />
+          )}
+          {VISIT_TYPES.has(n.type) && (
+            <VisitCard n={n} onDismiss={() => removeCard(n.id)} />
           )}
           {n.type === 'storm_watch_alert' && (
             <StormCard
@@ -297,6 +319,44 @@ function SelectorCard({ n, onPick, onDismiss }) {
         ))}
       </div>
       <button onClick={onDismiss} style={btnSecondary}>Not here yet</button>
+    </div>
+  );
+}
+
+// A schedule change on the tech's own route (tech-visit-notifications.js).
+// Headline + who + the details the server composed; "Got it" dismisses.
+function VisitCard({ n, onDismiss }) {
+  const p = n.payload || {};
+  const lines = [];
+  if (n.type === 'visit_rescheduled') {
+    if (p.service_type) lines.push(p.service_type);
+    if (p.previous_when) lines.push({ text: `Was ${p.previous_when}`, struck: true });
+    if (p.when) lines.push(`Now ${p.when}`);
+  } else {
+    lines.push([p.service_type, p.when].filter(Boolean).join(' · '));
+    if (n.type === 'visit_assigned' && p.address) lines.push(p.address);
+    if (n.type === 'visit_unassigned') lines.push(p.now_with ? `Now with ${p.now_with}` : 'Now unassigned');
+  }
+  if (p.actor) {
+    const verb = { visit_assigned: 'Assigned', visit_unassigned: 'Reassigned', visit_rescheduled: 'Moved', visit_cancelled: 'Cancelled' }[n.type];
+    lines.push(`${verb} ${p.actor}`);
+  }
+  return (
+    <div style={cardStyle(VISIT_ACCENT[n.type] || COLORS.teal)} data-testid="visit-notice">
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
+        {VISIT_ICON[n.type]} {p.headline || 'Schedule change'}
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+        {p.customer_name || 'Customer'}
+      </div>
+      <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 12, lineHeight: 1.4 }}>
+        {lines.filter(Boolean).map((line, i) => (
+          typeof line === 'string'
+            ? <div key={i}>{line}</div>
+            : <div key={i} style={{ textDecoration: 'line-through', color: '#64748b' }}>{line.text}</div>
+        ))}
+      </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>
   );
 }

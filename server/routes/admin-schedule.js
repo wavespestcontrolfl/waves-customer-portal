@@ -7434,6 +7434,7 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        actorId: req.technicianId || null,
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.
         expectOccurrenceIds: ackedIds,
@@ -8424,6 +8425,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // reschedule text after commit. start stays null for date-only visits
     // (no fabricated 08:00 goes into a customer text).
     let scheduleMoveForNotice = null;
+    let techMoveForNotice = null;
     // Live (or tracker-rewound) row moved to a new date through this edit —
     // captured inside the trx; drives the rebooker-parity post-commit
     // effects (tech_status release + customer tracker refresh) after commit.
@@ -8928,7 +8930,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // same treatment via resetAppointmentReminderForScheduleRewrite below.)
         const reminderFieldsTouched = updates.scheduled_date !== undefined || updates.window_start !== undefined;
         const reminderBefore = reminderFieldsTouched
-          ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start', 'window_end', 'technician_id')
           : null;
         if (dateActuallyMoves) {
           // The fence was taken BEFORE the FOR UPDATE above (lock-order
@@ -9100,6 +9102,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
             scheduleMoveForNotice = { date: nextDate, start: nextStart || null };
+            techMoveForNotice = {
+              technicianId: requestedTechnicianId !== undefined ? requestedTechnicianId : (reminderBefore.technician_id || null),
+              previous: { date: prevDate, windowStart: reminderBefore.window_start, windowEnd: reminderBefore.window_end },
+            };
           }
         }
       }
@@ -10437,6 +10443,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // (Codex #3361 r2 P0). At-most-once via the helper's guarded stamp
     // (the notice sender's own belt call no-ops after this one); no-op for
     // every other row.
+    // Tech-facing notice for a same-tech date/time move (a tech change in the
+    // same edit already told both techs through assignScheduleJobs).
+    if (techMoveForNotice && techMoveForNotice.technicianId && !assignmentNeedsChange) {
+      require('../services/tech-visit-notifications').notifyVisitRescheduled({
+        visitId: req.params.id,
+        technicianId: techMoveForNotice.technicianId,
+        actorId: req.technicianId || null,
+        previous: techMoveForNotice.previous,
+      });
+    }
     if (scheduleMoveForNotice) {
       const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
       await activateLegacyOutboundReviewRowIfNeeded(db, req.params.id, 'schedule-update-details');

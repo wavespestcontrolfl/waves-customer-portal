@@ -15,6 +15,13 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
+// Tech-facing notices (tech-visit-notifications.js) ride the rebooker's
+// post-commit tail; the hook contract (sides, actor, previous slot) is
+// asserted below, the service itself in tech-visit-notifications.test.js.
+jest.mock('../services/tech-visit-notifications', () => ({
+  notifyAssignmentChange: jest.fn().mockResolvedValue(undefined),
+  notifyVisitRescheduled: jest.fn().mockResolvedValue(undefined),
+}));
 // Inert blackout lookups: rescheduleSeries' non-admin guards (blackout, then
 // seasonal winter) lazy-require this module, and the real one queries the db.
 jest.mock('../services/scheduling/blackout-dates', () => ({
@@ -275,6 +282,39 @@ describe('live-status reschedule override (allowLive)', () => {
         'svc-1', etDateString(), { start: '23:58', end: '23:59' }, 'customer_request', 'admin',
       )).resolves.toMatchObject({ success: true, newDate: etDateString() });
       expect(updateQuery.update).toHaveBeenCalled();
+    });
+  });
+
+  test('a same-tech move tells the holder, with the previous slot and the acting staff row', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin',
+      { allowLive: true, actorId: 'virginia' },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+    expect(notifyVisitRescheduled).toHaveBeenCalledWith({
+      visitId: 'svc-1',
+      technicianId: 'tech-1',
+      actorId: 'virginia',
+      previous: { date: BASE, windowStart: '09:00:00', windowEnd: '11:00:00' },
+    });
+  });
+
+  test('a move that also changes the tech tells both techs (no duplicate "moved" card); system callers are named by initiatedBy', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+      { technicianId: 'tech-2' },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(notifyVisitRescheduled).not.toHaveBeenCalled();
+    expect(notifyAssignmentChange).toHaveBeenCalledWith({
+      visitId: 'svc-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: 'customer_self_serve',
     });
   });
 

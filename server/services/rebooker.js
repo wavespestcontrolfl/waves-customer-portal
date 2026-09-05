@@ -1489,6 +1489,42 @@ class SmartRebooker {
       });
     });
 
+    // Tech-facing notice (tech-visit-notifications.js), post-commit and
+    // best-effort: a tech change tells both techs; a same-tech date/window
+    // move tells the holder. options.actorId is the acting staff row when a
+    // staff surface made the move (so their own move stays silent); system
+    // callers are named by initiatedBy.
+    try {
+      const techNotices = require('./tech-visit-notifications');
+      const noticeActor = options.actorId || initiatedBy || null;
+      const priorTechId = service.technician_id || null;
+      const noticeTechChanged = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        && (options.technicianId || null) !== priorTechId;
+      if (noticeTechChanged) {
+        await techNotices.notifyAssignmentChange({
+          visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
+        });
+      } else if (priorTechId) {
+        const priorDay = service.scheduled_date instanceof Date
+          ? service.scheduled_date.toISOString().slice(0, 10)
+          : String(service.scheduled_date).slice(0, 10);
+        const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+        const slotChanged = priorDay !== newDateStr
+          || hhmm(updates.window_start) !== hhmm(service.window_start)
+          || hhmm(updates.window_end) !== hhmm(service.window_end);
+        if (slotChanged) {
+          await techNotices.notifyVisitRescheduled({
+            visitId: serviceId,
+            technicianId: priorTechId,
+            actorId: noticeActor,
+            previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
+          });
+        }
+      }
+    } catch (noticeErr) {
+      logger.warn(`[rebooker] tech notice failed for ${serviceId} (move already committed): ${noticeErr.message}`);
+    }
+
     // Live override post-commit cleanup:
     //   1. The tech's tech_status row still points at this job
     //      (en_route / on_site). Release it so the tech shows idle and

@@ -2370,6 +2370,15 @@ const gates = {
   // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
   // FIX alerts are not routed here. Kill switch: unset. This entry is for
   // logGateStatus; the helper reads both env vars at CALL time.
+  // Tech visit notifications (Field Team Program Phase 0 item 2,
+  // services/tech-visit-notifications.js): the assigned field technician gets
+  // a tech-home card + a one-line push when a visit is assigned to them, taken
+  // off them, moved, or cancelled. Staff-only — never a customer channel.
+  // OFF unless set, dev AND prod; unset is the kill switch. The service reads
+  // gateEnvValue at CALL time, so a flip needs no redeploy; this entry is for
+  // logGateStatus.
+  techVisitNotifications: gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS'),
+
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
   // Closeout money + comms alerts — services/closeout-alerts.js maps three

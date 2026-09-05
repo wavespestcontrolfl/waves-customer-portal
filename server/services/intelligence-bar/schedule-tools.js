@@ -149,14 +149,14 @@ Use for: "find time for", "when can we schedule", "best slot for", "fit in a new
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeScheduleTool(toolName, input) {
+async function executeScheduleTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'optimize_all_routes': return await optimizeAllRoutes(input);
       case 'optimize_tech_route': return await optimizeTechRoute(input);
-      case 'assign_technician': return await assignTechnician(input);
+      case 'assign_technician': return await assignTechnician(input, actionContext);
       case 'move_stops_to_day': return await moveStopsToDay(input);
-      case 'swap_tech_assignments': return await swapTechAssignments(input);
+      case 'swap_tech_assignments': return await swapTechAssignments(input, actionContext);
       case 'find_schedule_gaps': return await findScheduleGaps(input);
       case 'find_available_slots': return await findAvailableSlotsTool(input);
       case 'get_day_summary': return await getDaySummary(input.date);
@@ -482,7 +482,7 @@ async function optimizeTechRoute(input) {
 }
 
 
-async function assignTechnician(input) {
+async function assignTechnician(input, actionContext = {}) {
   const { service_ids: serviceIds, technician_name: techName, confirmed } = input;
   let tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
@@ -641,6 +641,19 @@ async function assignTechnician(input) {
       return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
     }
     throw err;
+  }
+
+  // Tech-facing notices (tech-visit-notifications.js): this writer bypasses
+  // assignDispatchJob, so it tells both techs itself. Post-commit,
+  // best-effort; the operator's own moves stay silent.
+  {
+    const { notifyAssignmentChange } = require('../tech-visit-notifications');
+    for (const s of services) {
+      if ((s.current_tech_id || null) === tech.id) continue;
+      await notifyAssignmentChange({
+        visitId: s.id, fromTechId: s.current_tech_id || null, toTechId: tech.id, actorId: actionContext.technicianId || null,
+      });
+    }
   }
 
   // Visit-group seam (visit-group-scope.md §2; codex #3590 r9): this
@@ -1230,7 +1243,7 @@ async function moveStopsToDay(input) {
 }
 
 
-async function swapTechAssignments(input) {
+async function swapTechAssignments(input, actionContext = {}) {
   const { date, tech_a_name: techAName, tech_b_name: techBName, confirmed } = input;
   const techA = await db('technicians').whereILike('name', `%${techAName}%`).first();
   const techB = await db('technicians').whereILike('name', `%${techBName}%`).first();
@@ -1323,6 +1336,16 @@ async function swapTechAssignments(input) {
       return { error: 'The stops on one of these days changed after the card was shown — nothing was swapped. Ask again for a fresh card.', preview_changed: true };
     }
     throw err;
+  }
+
+  // Tech-facing notices (tech-visit-notifications.js): a swap is two
+  // reassignments per stop; both techs hear each one. Post-commit,
+  // best-effort; the operator's own swap stays silent for them.
+  {
+    const { notifyAssignmentChange } = require('../tech-visit-notifications');
+    const swapActor = actionContext.technicianId || null;
+    for (const sid of aIds) await notifyAssignmentChange({ visitId: sid, fromTechId: techA.id, toTechId: techB.id, actorId: swapActor });
+    for (const sid of bIds) await notifyAssignmentChange({ visitId: sid, fromTechId: techB.id, toTechId: techA.id, actorId: swapActor });
   }
 
   // Visit-group seam (codex #3590 r9): a whole-day swap moves every child

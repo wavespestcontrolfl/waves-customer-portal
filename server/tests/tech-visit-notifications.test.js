@@ -1,0 +1,196 @@
+// tech-visit-notifications.js — the assigned field tech's card + one-line
+// push for assignment / removal / move / cancel (Field Team Program Phase 0
+// item 2). Silent rules are the contract: gate off, the actor's own change,
+// a non-assignable recipient. A push failure never loses the card.
+const mockSendTechNotification = jest.fn().mockResolvedValue(undefined);
+const mockSendToAdminUser = jest.fn().mockResolvedValue({ sent: 1 });
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/geofence-handler', () => ({
+  sendTechNotification: (...args) => mockSendTechNotification(...args),
+}));
+jest.mock('../services/push-notifications', () => ({
+  sendToAdminUser: (...args) => mockSendToAdminUser(...args),
+}));
+
+const db = require('../models/db');
+const logger = require('../services/logger');
+const notices = require('../services/tech-visit-notifications');
+
+const TECH = { id: 'tech-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true };
+const ADAM_ID = '11111111-1111-4111-8111-111111111111';
+const ADAM = { id: ADAM_ID, name: 'Adam Benetti', employment_status: 'active', field_dispatchable: true };
+const VISIT = {
+  id: 'visit-1', service_type: 'Pest Control', scheduled_date: '2026-09-10', window_start: '09:00:00', window_end: '11:00:00',
+  technician_id: 'tech-1', cust_first_name: 'Ana', cust_last_name: 'Ruiz', cust_address: '4312 Cortez Rd W', cust_city: 'Bradenton',
+};
+
+function chain(first) {
+  const c = {};
+  for (const m of ['where', 'leftJoin', 'select']) c[m] = jest.fn(() => c);
+  c.first = jest.fn(async () => first);
+  return c;
+}
+
+// technicians rows by id; one visit row for scheduled_services.
+function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT } = {}) {
+  db.mockImplementation((table) => {
+    if (table === 'technicians') {
+      const c = chain(null);
+      c.where = jest.fn((arg) => { c.first = jest.fn(async () => techs[arg.id] || null); return c; });
+      return c;
+    }
+    if (table === 'scheduled_services as s') return chain(visit);
+    throw new Error(`unexpected table ${table}`);
+  });
+}
+
+describe('notifyTechVisitChange', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
+    prime();
+  });
+  afterAll(() => { delete process.env.GATE_TECH_VISIT_NOTIFICATIONS; });
+
+  test('gate off (unset) → nothing is read or written', async () => {
+    delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: false, skipped: 'gate_off' });
+    expect(db).not.toHaveBeenCalled();
+    expect(mockSendTechNotification).not.toHaveBeenCalled();
+  });
+
+  test('the actor is never told about their own change (Adam assigning Adam)', async () => {
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: ADAM_ID, actorId: ADAM_ID });
+    expect(out).toEqual({ sent: false, skipped: 'self' });
+    expect(mockSendTechNotification).not.toHaveBeenCalled();
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['prospective placeholder', { employment_status: 'prospective', field_dispatchable: false }],
+    ['inactive account', { employment_status: 'inactive', field_dispatchable: true }],
+    ['office-only admin', { employment_status: 'active', field_dispatchable: false }],
+  ])('a %s never receives a card or a push', async (_label, row) => {
+    prime({ techs: { 'tech-9': { id: 'tech-9', name: 'Tech Nine', ...row }, [ADAM_ID]: ADAM } });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-9', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: false, skipped: 'not_assignable' });
+    expect(mockSendTechNotification).not.toHaveBeenCalled();
+  });
+
+  test('assigned: one feed row with the composed card + the one-line push', async () => {
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    expect(mockSendTechNotification).toHaveBeenCalledTimes(1);
+    const [techId, row] = mockSendTechNotification.mock.calls[0];
+    expect(techId).toBe('tech-1');
+    expect(row.type).toBe('visit_assigned');
+    expect(row.message).toBe('New visit on your route: Ruiz — Pest Control · Thu Sep 10, 9–11 AM · 4312 Cortez Rd W, Bradenton · Assigned by Adam');
+    expect(row.payload).toMatchObject({
+      kind: 'assigned', visit_id: 'visit-1', headline: 'New visit on your route', customer_name: 'Ruiz',
+      service_type: 'Pest Control', when: 'Thu Sep 10, 9–11 AM', address: '4312 Cortez Rd W, Bradenton', actor: 'by Adam',
+    });
+    // Owner ruling 2026-09-05: the push is one line, no details.
+    expect(mockSendToAdminUser).toHaveBeenCalledWith('tech-1', expect.objectContaining({
+      title: 'You have a new visit on your route', body: '', url: '/tech', tag: 'visit-visit-1',
+    }));
+  });
+
+  test('unassigned names who has it now; rescheduled carries the previous slot; cancelled names the actor', async () => {
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1', actorId: ADAM_ID, newTechnicianId: ADAM_ID });
+    expect(mockSendTechNotification.mock.calls[0][1]).toMatchObject({
+      type: 'visit_unassigned',
+      payload: { headline: 'Moved off your route', now_with: 'Adam Benetti', actor: 'by Adam' },
+    });
+
+    await notices.notifyTechVisitChange({
+      visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1', actorId: 'customer_self_serve',
+      previous: { date: '2026-09-09', windowStart: '13:00', windowEnd: '15:00' },
+    });
+    expect(mockSendTechNotification.mock.calls[1][1]).toMatchObject({
+      type: 'visit_rescheduled',
+      payload: { headline: 'Visit moved', previous_when: 'Wed Sep 9, 1–3 PM', when: 'Thu Sep 10, 9–11 AM', actor: 'by the customer online' },
+    });
+
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(mockSendTechNotification.mock.calls[2][1]).toMatchObject({
+      type: 'visit_cancelled',
+      payload: { headline: 'Visit cancelled', actor: 'by Adam' },
+    });
+    expect(mockSendToAdminUser).toHaveBeenLastCalledWith('tech-1', expect.objectContaining({ title: 'A visit on your route was cancelled' }));
+  });
+
+  test('a push failure is logged and the card still counts as sent', async () => {
+    mockSendToAdminUser.mockRejectedValueOnce(new Error('apns down'));
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    expect(mockSendTechNotification).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('push failed'));
+  });
+
+  test('a read failure never throws to the writer', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' }))
+      .resolves.toEqual({ sent: false, skipped: 'error' });
+    expect(logger.error).toHaveBeenCalled();
+  });
+});
+
+describe('notifyAssignmentChange (both sides of a tech change)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_TECH_VISIT_NOTIFICATIONS = 'true';
+    prime({ techs: { 'tech-1': TECH, 'tech-2': { ...TECH, id: 'tech-2', name: 'Tech Two' }, [ADAM_ID]: ADAM } });
+  });
+
+  test('previous holder hears it left, new holder hears it arrived; the actor is skipped on their own side', async () => {
+    await notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID });
+    expect(mockSendTechNotification.mock.calls.map(([id, row]) => [id, row.type])).toEqual([
+      ['tech-1', 'visit_unassigned'],
+      ['tech-2', 'visit_assigned'],
+    ]);
+    jest.clearAllMocks();
+    // Adam takes it himself: only the tech who lost it hears.
+    await notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: ADAM_ID, actorId: ADAM_ID });
+    expect(mockSendTechNotification.mock.calls.map(([id, row]) => [id, row.type])).toEqual([['tech-1', 'visit_unassigned']]);
+  });
+
+  test('no change (same tech, or both null) is a no-op; gate off never reads', async () => {
+    expect(notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-1' })).toBeNull();
+    expect(notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: null, toTechId: null })).toBeNull();
+    delete process.env.GATE_TECH_VISIT_NOTIFICATIONS;
+    expect(notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2' })).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('inside a caller transaction the notice waits for the OUTERMOST commit and is dropped on rollback', async () => {
+    let resolveCommit; let rejectCommit;
+    const trx = { executionPromise: new Promise((res, rej) => { resolveCommit = res; rejectCommit = rej; }) };
+    notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID, trx });
+    await Promise.resolve();
+    expect(mockSendTechNotification).not.toHaveBeenCalled();
+    resolveCommit();
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendTechNotification).toHaveBeenCalledTimes(2);
+
+    jest.clearAllMocks();
+    const rolled = { executionPromise: new Promise((_res, rej) => { rejectCommit = rej; }) };
+    notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID, trx: rolled });
+    rejectCommit(new Error('rollback'));
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendTechNotification).not.toHaveBeenCalled();
+  });
+});
+
+describe('formatWhen', () => {
+  const { formatWhen } = notices._test;
+  test('ET day label + compressed window', () => {
+    expect(formatWhen('2026-09-10', '09:00:00', '11:00:00')).toBe('Thu Sep 10, 9–11 AM');
+    expect(formatWhen('2026-09-10', '11:00', '13:00')).toBe('Thu Sep 10, 11 AM–1 PM');
+    expect(formatWhen('2026-09-10', '09:30', null)).toBe('Thu Sep 10, 9:30 AM');
+    expect(formatWhen(new Date('2026-09-10T12:00:00Z'), null, null)).toBe('Thu Sep 10');
+    expect(formatWhen(null, '09:00', '11:00')).toBeNull();
+  });
+});

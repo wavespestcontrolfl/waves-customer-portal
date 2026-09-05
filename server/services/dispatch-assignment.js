@@ -226,6 +226,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     throw err;
   }
 
+  // Tech-facing notice (tech-visit-notifications.js): the previous holder
+  // hears the stop left their route, the new one hears it arrived. Runs after
+  // the outermost commit, best-effort; silent for the actor's own move, for a
+  // non-assignable recipient, and while GATE_TECH_VISIT_NOTIFICATIONS is off.
+  require('./tech-visit-notifications').notifyAssignmentChange({
+    visitId: jobId, fromTechId, toTechId: newTechId, actorId, trx,
+  });
+
   if (emit) {
     const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId })
       .catch((err) => logger.error(`[dispatch-assignment] broadcast failed for ${jobId}: ${err.message}`));

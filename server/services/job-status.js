@@ -859,6 +859,17 @@ async function transitionJobStatus({
     })();
   }
 
+  // Tech-facing cancel notice (tech-visit-notifications.js): the assigned
+  // tech hears a cancel from any path — dispatch status, series, bulk,
+  // customer, track-transitions. Both call sites below run after commit;
+  // best-effort, silent for the actor's own cancel and while the gate is off.
+  function notifyTechOfCancel(adminPayload) {
+    if (String(toStatus) !== 'cancelled' || !adminPayload?.tech_id) return;
+    require('./tech-visit-notifications').notifyVisitCancelled({
+      visitId: jobId, technicianId: adminPayload.tech_id, actorId: transitionedBy || null,
+    });
+  }
+
   function maybeReparkFollowupObligation() {
     // Cancelling/skipping/no-showing a completion-linked follow-up child
     // resurfaces the source visit's owed follow-up as a fresh dispatch
@@ -940,6 +951,7 @@ async function transitionJobStatus({
         .then(() => {
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();
+          notifyTechOfCancel(adminPayload);
           processCancelNoticeClaim();
           processLegacyOutboundActivation();
         })
@@ -965,6 +977,7 @@ async function transitionJobStatus({
   // trx committed by here.
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
   maybeReparkFollowupObligation();
+  notifyTechOfCancel(captured.adminPayload);
   processCancelNoticeClaim();
   processLegacyOutboundActivation();
   return {

@@ -15945,7 +15945,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // rewinds the tracker lifecycle and frees the tech. Terminal states
     // (completed / cancelled / skipped) still 409. The customer-SMS
     // self-serve path (reschedule-sms.js) does NOT get this override.
-    const rescheduleOptions = { allowLive: true };
+    const rescheduleOptions = { allowLive: true, actorId: req.technicianId || null };
     const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
     if (hasTechnicianId) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
