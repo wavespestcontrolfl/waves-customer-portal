@@ -1,5 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { adminFetch } from "../../../utils/admin-fetch";
 import { useHubParams } from "./hubParams";
 import WindowPresets, { windowLabel } from "./WindowPresets";
@@ -17,23 +16,29 @@ import LaneCard from "./LaneCard";
 
 export default function AgentControlCenterTab({ areas = [], setRefreshHandler }) {
   const { area, window: windowKey, status, set: setHubParams } = useHubParams();
-  const [searchParams] = useSearchParams();
   const [data, setData] = useState(null);
+  // A quick run of filter clicks starts several reads; only the newest may
+  // land (an older, slower response would paint the wrong scope).
+  const requestSeq = useRef(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const areaKnown = areas.some((a) => a.key === area);
   const load = useCallback(async () => {
+    const seq = (requestSeq.current += 1);
     setLoading(true);
     setError(null);
     try {
       const qs = new URLSearchParams({ window: windowKey, status });
       if (areaKnown) qs.set("area", area);
-      setData(await adminFetch(`/admin/agents/control/lanes?${qs.toString()}`));
+      const next = await adminFetch(`/admin/agents/control/lanes?${qs.toString()}`);
+      if (seq !== requestSeq.current) return;
+      setData(next);
     } catch (e) {
+      if (seq !== requestSeq.current) return;
       setError(e?.message || "Failed to load the control center");
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [area, areaKnown, windowKey, status]);
 
@@ -48,18 +53,10 @@ export default function AgentControlCenterTab({ areas = [], setRefreshHandler })
     return () => setRefreshHandler?.(null);
   }, [setRefreshHandler, load, loading]);
 
-  // "Runs →" on a card: the Runs tab with the lane in the URL, the other
-  // hub params (area, window) carried along.
-  const runsHrefFor = useCallback(
-    (laneId) => {
-      const params = new URLSearchParams(searchParams);
-      params.set("tab", "activity");
-      params.set("lane", laneId);
-      params.delete("status");
-      return `/admin/agents?${params.toString()}`;
-    },
-    [searchParams]
-  );
+  // "Runs →" on a card: the Runs tab. It carries no lane / window params
+  // yet — the Runs tab does not read them until C1 wires the run index, and
+  // a link must not promise a filter the destination ignores.
+  const runsHref = "/admin/agents?tab=activity";
 
   const grouped = useMemo(() => {
     const lanes = data?.lanes || [];
@@ -130,7 +127,7 @@ export default function AgentControlCenterTab({ areas = [], setRefreshHandler })
             </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
               {lanes.map((l) => (
-                <LaneCard key={l.id} lane={l} basis={basis} runsHref={runsHrefFor(l.id)} />
+                <LaneCard key={l.id} lane={l} basis={basis} runsHref={runsHref} />
               ))}
             </div>
           </section>

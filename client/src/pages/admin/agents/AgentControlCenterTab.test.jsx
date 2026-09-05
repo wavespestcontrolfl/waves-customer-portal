@@ -121,7 +121,7 @@ describe("AgentControlCenterTab", () => {
     expect(within(card).getByText("arrives with cost tracking")).toBeInTheDocument();
     expect(within(card).getAllByText("arrives with verification")).toHaveLength(2);
     expect(within(card).getByText(/Runs on/)).toHaveTextContent("Runs on claude-sonnet-5 · Backup gpt-5.6-terra · Judged");
-    expect(within(card).getByRole("link", { name: /Runs/ })).toHaveAttribute("href", "/admin/agents?tab=activity&area=sms&window=today&lane=sms_draft");
+    expect(within(card).getByRole("link", { name: /Runs/ })).toHaveAttribute("href", "/admin/agents?tab=activity");
     expect(within(card).queryByRole("list", { name: "Attention reasons" })).toBeNull();
     // scoped to one area: the calls-area lane is not grouped in
     expect(screen.queryByText("Call transcription")).toBeNull();
@@ -157,6 +157,25 @@ describe("AgentControlCenterTab", () => {
     renderTab("/admin/agents?tab=overview");
     await screen.findByText("SMS intent");
     expect(screen.queryByRole("heading", { name: "Needs attention" })).toBeNull();
+  });
+
+  it("lets only the newest scope's response paint: a slower earlier read never overwrites it", async () => {
+    renderTab("/admin/agents?tab=overview");
+    await screen.findByText("SMS reply draft");
+    // the next read (Idle) hangs; the one after it (All) answers at once
+    let resolveSlow;
+    adminFetch.mockImplementationOnce(() => new Promise((resolve) => { resolveSlow = resolve; }));
+    adminFetch.mockImplementationOnce(async () => ({ ...PAYLOAD, counts: { ...PAYLOAD.counts, all: 7 } }));
+    fireEvent.click(screen.getByRole("button", { name: /^Idle/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^All/ }));
+    const summary = () => screen.getByText(/lanes ·/).textContent;
+    await screen.findAllByText("7");
+    expect(summary()).toContain("7 lanes");
+    resolveSlow({ ...PAYLOAD, counts: { ...PAYLOAD.counts, all: 99 }, lanes: [] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(summary()).toContain("7 lanes");
+    expect(screen.queryAllByText("99")).toHaveLength(0);
+    expect(screen.getByText("SMS reply draft")).toBeInTheDocument();
   });
 
   it("writes ?status= and ?window= to the URL (defaults never litter it) and refetches", async () => {
