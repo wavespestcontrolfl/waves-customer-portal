@@ -511,15 +511,24 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
 /* Reduce Transparency (iOS / macOS) and Windows High Contrast: the same
    solid fallback, no blur, and a real border so the card edge survives. */
 @media (prefers-reduced-transparency: reduce) {
+  /* :hover / :active listed too — the interactive rules above carry a
+     pseudo-class, so without them a hovered chip would win the cascade and
+     go translucent again. */
   html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass]:hover,
   html[data-glass-theme] [data-glass="soft"],
-  html[data-glass-theme] [data-glass="chip"] {
+  html[data-glass-theme] [data-glass="soft"]:hover,
+  html[data-glass-theme] [data-glass="chip"],
+  html[data-glass-theme] [data-glass="chip"]:hover,
+  html[data-glass-theme] [data-glass="chip"]:active {
     background: rgba(255, 255, 255, 0.93) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
   /* Accent controls too: solid gold, no blur, no sheen. */
-  html[data-glass-theme] [data-glass-accent] {
+  html[data-glass-theme] [data-glass-accent],
+  html[data-glass-theme] [data-glass-accent]:hover,
+  html[data-glass-theme] [data-glass-accent]:active {
     background: #F4B014 !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
