@@ -116,7 +116,7 @@ postgres('atomic relay segment append and composition', () => {
       promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at }] });
     const newer = buildSegment({ generation: 2, sessionKey: 'b', text: 'Agent: I will send you an estimate when the office opens.',
       promises: [{ kind: 'send_estimate', verdict: true, expectation: 'when_office_opens', at }] });
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', transcription: old.text,
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', transcription: old.text, call_outcome: 'ai_handled',
       metadata: { relay_session_claim_owner: 'b', relay_segments: [old] } });
     const trx = await db.transaction();
     let pass;
@@ -169,6 +169,22 @@ postgres('atomic relay segment append and composition', () => {
     const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture' });
     expect(await convo._refreshCallSummary(old)).toBe(true);
     expect((await db('call_log').first()).call_summary).toContain('first leg | second leg');
+  });
+
+  test.each([
+    ['relay_failed', {}, 0], ['voicemail', {}, 0],
+    ['ai_handled', {}, 1], ['ai_transferred', {}, 1],
+    ['voicemail', { relay_handoff: { reason: 'fixture' } }, 1],
+    ['voicemail', { relay_reconnects: 1 }, 1],
+  ])('late commitment eligibility follows durable outcome %s and evidence %j', async (outcome, evidence, expected) => {
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    const segment = buildSegment({ generation: 1, sessionKey: 'a', text: 'Agent: I will send you an estimate.',
+      promises: [{ kind: 'send_estimate', verdict: true }] });
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: outcome,
+      metadata: { relay_session_claim_owner: 'a', relay_segments: [segment], ...evidence } });
+    expect(await recordRelayCommitments(db, { callSid: 'CA-fixture', sessionKey: 'a', transcript: segment.text }))
+      .toMatchObject({ written: expected });
+    expect(await db('call_commitments').select()).toHaveLength(expected);
   });
 
 });

@@ -1585,7 +1585,7 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
   try {
     if (!callSid) return summary;
     return await conn.transaction(async (trx) => {
-      const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source');
+      const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source', 'call_outcome');
       if (!call) return summary;
       // A voice-agent sandbox call is a test: a promise Sandy makes on it
       // must never become office work in the Owed queue.
@@ -1599,6 +1599,11 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
       // owner; ownership alone does not make that pre-read current.
       const metadata = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
       if (Array.isArray(metadata.relay_segments) && metadata.relay_segments.length) {
+        // A late append must have the same durable eligibility as normal
+        // finalization: handled calls, or a real transfer/reconnect salvage.
+        const eligible = ['ai_handled', 'ai_transferred'].includes(call.call_outcome)
+          || (call.call_outcome === 'voicemail' && (metadata.relay_handoff || Number(metadata.relay_reconnects) > 0));
+        if (!eligible) return summary;
         const { segmentsText, latestPromises } = require('./voice-agent/relay-segments');
         transcript = segmentsText(metadata.relay_segments);
         const estimate = latestPromises(metadata.relay_segments).find((p) => p.kind === 'send_estimate');
