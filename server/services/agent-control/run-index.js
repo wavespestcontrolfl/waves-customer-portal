@@ -18,8 +18,12 @@
  *   done       terminal + succeeded
  *   failed     terminal + not succeeded
  *
- * Paging is a keyset cursor over (startedAt desc, key) so a run that lands
- * between two pages never shifts the next page. Read-only.
+ * Paging is a keyset cursor over (pagedAt desc, key) — pagedAt is each
+ * source's IMMUTABLE creation / recording stamp, never the active span it
+ * displays as startedAt (which moves on a resume, a scheduled send, a
+ * publishing claim: a row crossing the cursor would repeat or vanish;
+ * Codex r14) — so a run that lands or changes between two pages never
+ * shifts the next page. Read-only.
  */
 
 const db = require('../../models/db');
@@ -90,7 +94,7 @@ function bucketsOf(run) {
 }
 
 function sortKey(run) {
-  return `${run.startedAt || run.createdAt || ''}|${run.key}`;
+  return `${run.pagedAt || run.createdAt || ''}|${run.key}`;
 }
 
 function validate({ preset, status, area, lane, limit, now }) {
@@ -134,7 +138,7 @@ function decodeCursor(cursor) {
 }
 
 function positionOf(run) {
-  return { at: new Date(run.startedAt || run.createdAt), id: run.id };
+  return { at: new Date(run.pagedAt || run.createdAt), id: run.id };
 }
 
 function countBuckets(scoped) {
@@ -143,7 +147,7 @@ function countBuckets(scoped) {
   return counts;
 }
 
-// One page: a k-way merge over the sources, newest start first. Every
+// One page: a k-way merge over the sources, newest pagedAt first. Every
 // source is read from its own keyset position (the cursor) in slices —
 // the whole window on the first page (the counting scan, COUNT_SCAN_LIMIT
 // per source), `pageSize + 1` on cursor pages — and refilled when its

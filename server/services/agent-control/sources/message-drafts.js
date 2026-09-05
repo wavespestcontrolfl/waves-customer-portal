@@ -23,8 +23,11 @@ const DECISION_STATUS = `(SELECT ad.status ${DECISION})`;
 const DECISION_ACTIVE = `(SELECT ${decisions.activeFrom('ad')} ${DECISION})`;
 // every live decision state but the owner's own review — projected onto the draft
 const PROJECTED_LIVE = decisions.LIVE_STATUSES.filter((s) => s !== 'pending_review');
-// Sort / page key = the run's startedAt in fromRow: the decision's span while
-// it is projected, else the draft's creation.
+// The window is judged on the run's startedAt in fromRow: the decision's
+// span while it is projected, else the draft's creation. The page key is
+// the creation alone (immutable — the span moves when the owner schedules
+// the send and back when it lands; Codex r14).
+const PAGED = () => db.raw("date_trunc('milliseconds', d.created_at)");
 const START = () => db.raw(`date_trunc('milliseconds', COALESCE(CASE WHEN d.status = 'suggested' AND ${DECISION_STATUS} IN (${PROJECTED_LIVE.map(() => '?').join(', ')}) THEN ${DECISION_ACTIVE} END, d.created_at))`, PROJECTED_LIVE);
 const COLUMNS = () => [
   'd.id', 'd.intent', 'd.drafter', 'd.draft_ms', 'd.created_at', 'd.approved_at', 'd.sent_at', 'd.status',
@@ -153,7 +156,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
         q.where('d.status', 'pending');
         q.orWhere((s) => s.where('d.status', 'suggested').whereIn(db.raw(`COALESCE(${DECISION_STATUS}, 'pending_review')`), decisions.LIVE_STATUSES));
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'd.id' }), { start: START(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'd.id' }), { start: PAGED(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

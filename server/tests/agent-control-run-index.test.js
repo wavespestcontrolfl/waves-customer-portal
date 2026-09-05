@@ -395,9 +395,9 @@ describe('listRuns', () => {
     expect(spies.agentDecisions).toHaveBeenCalled();
   });
 
-  // A source behaving like its SQL: order (start desc, id desc), resume strictly after the cursor, cap at limit.
+  // A source behaving like its SQL: order (pagedAt desc, id desc), resume strictly after the cursor, cap at limit.
   const sqlLike = (rows) => async ({ cursor, limit }) => {
-    const key = (r) => [new Date(r.startedAt).getTime(), r.id];
+    const key = (r) => [new Date(r.pagedAt).getTime(), r.id];
     const sorted = [...rows].sort((x, y) => (key(y)[0] - key(x)[0]) || (key(y)[1] < key(x)[1] ? -1 : key(y)[1] > key(x)[1] ? 1 : 0));
     const after = cursor ? sorted.filter((r) => key(r)[0] < cursor.at.getTime() || (key(r)[0] === cursor.at.getTime() && r.id < cursor.id)) : sorted;
     return { runs: after.slice(0, limit), unavailable: false };
@@ -414,7 +414,7 @@ describe('listRuns', () => {
     const p2 = await runIndex.listRuns({ limit: 2, cursor: p1.nextCursor, now: NOW });
     expect(p2.runs.map((r) => r.id)).toEqual([3, 4].map(uid));
     expect(p2.counts).toBeNull();
-    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ cursor: { at: new Date(p1.runs[1].startedAt), id: uid(2) }, limit: 3 }));
+    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ cursor: { at: new Date(p1.runs[1].pagedAt), id: uid(2) }, limit: 3 }));
     const p3 = await runIndex.listRuns({ limit: 2, cursor: p2.nextCursor, now: NOW });
     expect(p3.runs.map((r) => r.id)).toEqual([5].map(uid));
     expect(p3.nextCursor).toBeNull();
@@ -597,5 +597,41 @@ describe('routes', () => {
       expect((await fetch(`${base}/api/admin/agents/control/runs/nope/1`, admin)).status).toBe(400);
       expect((await fetch(`${base}/api/admin/agents/control/runs/job_health/missing`, admin)).status).toBe(404);
     });
+  });
+});
+
+describe('paging key', () => {
+  test('pagedAt is the immutable creation stamp (an adapter may name its own); the span a run displays is not the page key', () => {
+    const { canonicalRun } = require('../services/agent-control/sources/shape');
+    const r = canonicalRun({ source: 's', id: 1, createdAt: ago(9e3), startedAt: ago(2e3) });
+    expect(r.pagedAt).toBe(ago(9e3).toISOString());
+    expect(r.startedAt).toBe(ago(2e3).toISOString());
+    expect(canonicalRun({ source: 's', id: 1, createdAt: ago(9e3), pagedAt: ago(7e3) }).pagedAt).toBe(ago(7e3).toISOString());
+  });
+
+  test('the merge orders and bookmarks on pagedAt, never on the span a run displays (Codex r14)', async () => {
+    const runIndex = require('../services/agent-control/run-index');
+    const decisions = require('../services/agent-control/sources/agent-decisions');
+    // row 2 is a scheduled decision: created second, its span is in the future; row 4 resumed just now
+    const mk = (i, startedAt) => canonicalRun({ source: 'agent_decisions', id: uid(i), workflowId: 'w', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i * 1000), startedAt });
+    const rows = [mk(1), mk(2, ago(-600e3)), mk(3), mk(4, ago(0))];
+    // the adapter's SQL: (pagedAt desc, id desc), resuming strictly after the cursor
+    const key = (r) => [new Date(r.pagedAt).getTime(), r.id];
+    const spy = jest.spyOn(decisions, 'list').mockImplementation(async ({ cursor, limit }) => {
+      const sorted = [...rows].sort((x, y) => (key(y)[0] - key(x)[0]) || (key(y)[1] < key(x)[1] ? -1 : 1));
+      const after = cursor ? sorted.filter((r) => key(r)[0] < cursor.at.getTime() || (key(r)[0] === cursor.at.getTime() && r.id < cursor.id)) : sorted;
+      return { runs: after.slice(0, limit), unavailable: false };
+    });
+    try {
+      const p1 = await runIndex.listRuns({ limit: 2, now: NOW });
+      // creation order, not span order (a span-ordered merge would list 4 and 2 first)
+      expect(p1.runs.map((r) => r.id)).toEqual([uid(1), uid(2)]);
+      const p2 = await runIndex.listRuns({ limit: 2, cursor: p1.nextCursor, now: NOW });
+      // the source resumes from row 2's pagedAt — its creation — not from its future span
+      expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: { at: new Date(rows[1].pagedAt), id: uid(2) } }));
+      expect(new Date(rows[1].pagedAt).getTime()).toBeLessThan(new Date(rows[1].startedAt).getTime());
+      expect(p2.runs.map((r) => r.id)).toEqual([uid(3), uid(4)]);
+      expect(p2.nextCursor).toBeNull();
+    } finally { spy.mockRestore(); }
   });
 });

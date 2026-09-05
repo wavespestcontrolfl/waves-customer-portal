@@ -19,7 +19,8 @@ const SOURCE = 'managed_sessions';
 // session row's latency_ms is GREATEST across turns, so a longer later turn
 // would move a start derived from it — and with it an already-paged row
 // behind its cursor; pre-push audit), else the session row's own.
-// Sort / page on that same start so the cursor and the rows agree. The
+// The window and the display use that start; the PAGE key is the session
+// row's own created_at (PAGED below). The
 // latest activity is the newest turn's FINISH — its start + latency, the
 // wall time the recorder measured before the usage GET (created_at is
 // after it, so a slow fetch would push the finish and the duration out by
@@ -31,7 +32,10 @@ const TURNS = "FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.p
 const TURN_START = 'COALESCE(t.started_at, t.created_at - make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0))';
 const FIRST_TURN_START = `(SELECT ${TURN_START} ${TURNS} ORDER BY ${TURN_START} ASC LIMIT 1)`;
 const SESSION_START = `COALESCE(started_at, ${FIRST_TURN_START}, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))`;
-const START = () => db.raw(`date_trunc('milliseconds', ${SESSION_START})`);
+// the page key: the session row's recording time, immutable (SESSION_START
+// can move earlier when a re-record recovers a first turn; Codex r14); the
+// window is judged on LAST_TURN
+const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
 const TURN_END = 'COALESCE(t.started_at + make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0), t.created_at)';
 const LAST_TURN = `COALESCE((SELECT max(${TURN_END}) ${TURNS}), started_at + make_interval(secs => COALESCE(latency_ms, 0) / 1000.0), created_at)`;
 const ID = 'provider_ref';
@@ -67,6 +71,7 @@ function fromRow(s) {
     createdAt: startedAt,
     startedAt,
     finishedAt,
+    pagedAt: s.created_at,
     // the latency for one turn; the wall span for a session that kept turning
     durationMs: s.latency_ms == null ? null : finishedAt.getTime() - startedAt.getTime(),
     // a failed turn (ok = false) is not done — the detail timeline labels it failed
@@ -89,7 +94,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(baseQuery()
       // windowed on the latest turn, paged on the start (see LAST_TURN)
-      .whereRaw(`${LAST_TURN} >= ?`, [from]), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: START(), id: ID, cursor, limit });
+      .whereRaw(`${LAST_TURN} >= ?`, [from]), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: PAGED(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

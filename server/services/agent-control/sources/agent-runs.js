@@ -61,12 +61,14 @@ function fromRow(run, steps = []) {
   });
 }
 
-// Sort / page key = the run's startedAt in fromRow. No date_trunc here: the
-// writer stamps started_at AND created_at from JS Dates (ms precision), so
-// the cursor compares exactly, and the bare expression is what
-// agent_runs_start_idx indexes (date_trunc on timestamptz is not
-// IMMUTABLE, so it could not be) (Codex r9).
+// The window is judged on the active span (started_at moves on a reopen /
+// resume; created_at backs a queued row that never started). The page key
+// is created_at — the run's pagedAt — which the writer stamps ONCE from a
+// JS Date (ms precision, so the cursor compares exactly; no date_trunc,
+// and agent_runs_created_idx indexes the bare column). Paging on the span
+// let a resumed run cross the cursor and repeat or vanish (Codex r14).
 const START = () => db.raw('COALESCE(r.started_at, r.created_at)');
+const PAGED = () => db.raw('r.created_at');
 const ID = 'r.id';
 // Step / tool-call counts are the CURRENT attempt's (attempt_no = r.attempts):
 // health.js reads them against the per-run budget, and a retry starts
@@ -92,7 +94,7 @@ async function list({ from, cursor = null, laneId = null, limit = 200 } = {}) {
         q.where('r.lifecycle', '<>', 'terminal');
         q.orWhere(START(), '>=', from);
       })
-      .modify((q) => { if (laneId) q.where('r.lane_id', laneId); }), { start: START(), id: ID, cursor, limit });
+      .modify((q) => { if (laneId) q.where('r.lane_id', laneId); }), { start: PAGED(), id: ID, cursor, limit });
     return { runs: rows.map((r) => fromRow(r)), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

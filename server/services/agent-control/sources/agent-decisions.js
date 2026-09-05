@@ -29,6 +29,9 @@ function activeFrom(t) {
 }
 const ACTIVE_FROM = activeFrom('agent_decisions');
 const START = () => db.raw(`date_trunc('milliseconds', ${ACTIVE_FROM})`);
+// the page key: the row's creation, immutable (ACTIVE_FROM moves when the
+// decision is scheduled and back when it resolves; Codex r14)
+const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
 const ID = 'id';
 const COLUMNS = () => [
   'id', 'workflow', 'agent_name', 'mode', 'status', 'entity_type', 'entity_id', 'customer_id', 'lead_id',
@@ -171,7 +174,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .where((q) => {
         q.whereIn('status', LIVE_STATUSES);
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: START(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: PAGED(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

@@ -34,6 +34,9 @@ const PUBLISHING = "outcome LIKE 'publishing%'";
 const PUBLISHING_RE = /^publishing/;
 // Sort / page key = the run's startedAt in fromRow (spanFor), at ms precision.
 const START = () => db.raw(`date_trunc('milliseconds', COALESCE(${EXECUTION_STARTED_AT}, CASE WHEN ${PUBLISHING} THEN updated_at END, claimed_at, created_at))`);
+// the page key: the row's creation, immutable (START moves with the span — an
+// approval, a publishing claim; Codex r14); ms-truncated to compare with a JS cursor
+const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
 const ID = 'id';
 const COLUMNS = () => [
   'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
@@ -199,7 +202,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
         q.orWhereRaw(REVIEW_PARKED_GATE);
         q.orWhereRaw(PUBLISHING);
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: START(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: PAGED(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

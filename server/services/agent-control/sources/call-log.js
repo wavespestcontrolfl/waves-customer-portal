@@ -16,6 +16,8 @@ const SOURCE = 'call_log';
 const LANE = 'call_extraction';
 // Sort / page key = the run's startedAt in fromRow, at ms precision.
 const START = () => db.raw("date_trunc('milliseconds', COALESCE(processing_started_at, created_at))");
+// the page key: the call's creation, immutable (processing_started_at moves on every retry; Codex r14)
+const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
 const ID = 'id';
 const PAN_DETECTED = "(transcription_metadata::jsonb ->> 'pan_detected') = 'true'";
 const COLUMNS = () => [
@@ -212,7 +214,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
           .where('created_at', '>', db.raw(`NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'`))
           .whereRaw(SWEEP_CLAIMABLE));
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'call_log.id' }), { start: START(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'call_log.id' }), { start: PAGED(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

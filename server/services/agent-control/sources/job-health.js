@@ -10,6 +10,9 @@ const { LANE_RUNTIME } = require('../lane-policies');
 const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'job_health';
+// One row per job, and its tick start is its only stamp: a job that ticks
+// between two pages is a NEW run under the same key, so it may appear
+// again — the one source with no immutable page key (Codex r14).
 const START = () => db.raw("date_trunc('milliseconds', last_started_at)");
 const ID = 'job_name';
 const COLUMNS = ['job_name', 'last_started_at', 'last_finished_at', 'last_success_at', 'last_status', 'last_error', 'last_duration_ms', 'consecutive_failures', 'updated_at'];

@@ -11,6 +11,9 @@
  *     lifecycle, result, verification, disposition,
  *     failureClass, errorCode, errorMessage,
  *     createdAt, startedAt, finishedAt, lastHeartbeatAt, lastProgressAt,
+ *     pagedAt (the IMMUTABLE stamp run-index orders and pages on — a
+ *       source's creation / recording time, never its active span, which
+ *       moves when a run resumes or a decision is scheduled; default createdAt),
  *     progressSequence, durationMs, attempts, maxAttempts,
  *     stepsDone, stepsTotal, toolCalls, steps: [{ key, label, status, detail, ms, toolName }],
  *     sideEffectClass, riskTier, link, detail, entity: { type, id } | null,
@@ -67,7 +70,7 @@ const FIELD_DEFAULTS = Object.freeze({
   laneId: null, workflowId: null, area: null, title: null, subtitle: null,
   lifecycle: 'terminal', result: null, verification: 'unjudged', disposition: null,
   failureClass: null, errorCode: null, errorMessage: null,
-  createdAt: null, startedAt: null, finishedAt: null, lastHeartbeatAt: null, lastProgressAt: null,
+  createdAt: null, startedAt: null, finishedAt: null, lastHeartbeatAt: null, lastProgressAt: null, pagedAt: null,
   progressSequence: 0, durationMs: null, attempts: null, maxAttempts: 1,
   stepsDone: null, stepsTotal: null, toolCalls: 0, steps: [],
   sideEffectClass: null, link: null, detail: null, entity: null, workItemId: null, traceId: null, canonical: false,
@@ -79,6 +82,7 @@ function defined(fields) {
 
 // null = no limit the producer applies (a call's transcription retry has no cap)
 const optionalNumber = (v) => (v == null ? null : Number(v));
+const orElse = (v, fallback) => (v == null ? fallback : v);
 
 function canonicalRun(fields) {
   const f = { ...FIELD_DEFAULTS, ...defined(fields) };
@@ -87,7 +91,7 @@ function canonicalRun(fields) {
   // policyFor(null) is the default policy, which names no side-effect class
   const sideEffectClass = f.sideEffectClass ?? policyFor(f.laneId).side_effect_class ?? null;
   const lifecycle = oneOf(LIFECYCLE, f.lifecycle, 'terminal');
-  const startedAt = f.startedAt ?? f.createdAt;
+  const startedAt = orElse(f.startedAt, f.createdAt);
   const entity = f.entity && f.entity.type ? { type: String(f.entity.type), id: f.entity.id == null ? null : String(f.entity.id) } : null;
   return {
     key: `${source}:${id}`,
@@ -112,6 +116,7 @@ function canonicalRun(fields) {
     finishedAt: iso(f.finishedAt),
     lastHeartbeatAt: iso(f.lastHeartbeatAt),
     lastProgressAt: iso(f.lastProgressAt),
+    pagedAt: iso(orElse(f.pagedAt, f.createdAt)),
     progressSequence: Number(f.progressSequence),
     durationMs: f.durationMs == null ? durationBetween(startedAt, f.finishedAt) : Number(f.durationMs),
     attempts: Number(f.attempts ?? (lifecycle === 'queued' ? 0 : 1)),
@@ -131,8 +136,13 @@ function canonicalRun(fields) {
   };
 }
 
-// Keyset paging every adapter applies the same way: rows order by (start
-// DESC, id DESC) and a `cursor` = { at, id } (the last row a previous page
+// Keyset paging every adapter applies the same way: rows order by (`start`
+// DESC, id DESC) — `start` is the source's IMMUTABLE paging expression
+// (the row's pagedAt: its creation / recording stamp), never the active
+// span the row displays as startedAt: a span moves (a resume, a scheduled
+// send, a publishing claim), and a row that moved across the cursor would
+// repeat on the next page or vanish from it (Codex r14). A `cursor` =
+// { at, id } (the last row a previous page
 // consumed) selects only rows strictly after it in that order. `start` is
 // the adapter's start expression truncated to milliseconds so the JS Date
 // the cursor carries compares exactly (timestamptz keeps microseconds).
