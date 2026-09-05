@@ -57,12 +57,12 @@ function formatDate(value) {
   }
 }
 
-function gateTag(summary) {
+function gateTag(summary, qualityGate) {
   if (!summary) return { tone: "neutral", label: "—" };
   // comparison_ok === false means the comparison-table gate failed (named
   // competitors); it previously wasn't checked here, so a failing draft
   // could show "Gate passed".
-  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false || summary.comparison_ok === false || summary.topic_ok === false) {
+  if ((summary.hard_failures || []).length > 0 || (qualityGate?.ok === false || (summary.quality_ok === false && summary.quality_score != null)) || summary.uniqueness_ok === false || summary.seo_completion_ok === false || summary.comparison_ok === false || summary.topic_ok === false) {
     return { tone: "alert", label: "Needs fix" };
   }
   if ((summary.soft_failures || []).length > 0) return { tone: "neutral", label: "Soft flags" };
@@ -108,10 +108,12 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [status, setStatus] = useState("all");
   const [detailVersion, setDetailVersion] = useState(0);
   const listRequest = useRef(0);
+  const listInFlight = useRef(null);
   const actionType = view === "review" ? "other" : "new_supporting_blog";
 
   const load = useCallback(async () => {
     const request = ++listRequest.current;
+    listInFlight.current = request;
     setLoading(true);
     setError("");
     try {
@@ -123,6 +125,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     } catch (err) {
       if (request === listRequest.current) setError(err.message);
     } finally {
+      if (listInFlight.current === request) listInFlight.current = null;
       if (request === listRequest.current) setLoading(false);
     }
   }, [offset, status, actionType]);
@@ -161,9 +164,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   useEffect(() => {
     void load();
-    const timer = setInterval(() => { void load(); }, 30000);
+    const timer = setInterval(() => {
+      if (listInFlight.current === null) void load();
+    }, 30000);
     return () => { clearInterval(timer); listRequest.current += 1; };
   }, [load]);
+
+  useEffect(() => { setReviewNote(""); }, [selectedId]);
+  useEffect(() => { setLinkReviewNote(""); }, [selectedLinkId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -252,7 +260,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const linkCounts = linkData?.counts || {};
   const gateSummary = selected?.run?.gate_summary;
   const reviewActions = selected?.review_actions || {};
-  const selectedGate = gateTag(gateSummary);
+  const selectedGate = gateTag(gateSummary, selected?.run?.quality_gate_result);
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
   const uniquenessFailures = gateSummary?.uniqueness_failures || [];
@@ -356,7 +364,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
               ) : (
                 <div className="flex flex-col gap-2.5">
                   {items.map((item) => {
-                    const gt = gateTag(item.run?.gate_summary);
+                    const gt = gateTag(item.run?.gate_summary, item.run?.quality_gate_result);
                     const named = isNamedCompetitor(item);
                     const meta = [item.city, item.service, item.bucket].filter(Boolean).join(" · ");
                     return (
@@ -477,8 +485,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                     )}
 
                     <Section
-                      icon={selectedGate.label === "Gate passed" ? CheckCircle2 : AlertTriangle}
-                      ok={selectedGate.label === "Gate passed"}
+                      icon={selectedGate.tone === "alert" ? AlertTriangle : selectedGate.tone === "green" ? CheckCircle2 : RefreshCw}
+                      ok={selectedGate.tone === "neutral" ? undefined : selectedGate.tone === "green"}
                       title="Gate summary"
                     >
                       <div className="grid gap-1 text-13 text-zinc-600">
@@ -911,7 +919,7 @@ function Section({ icon: Icon, ok, title, children }) {
   return (
     <div className="border-t border-zinc-200 pt-4">
       <div className="mb-2 flex items-center gap-2">
-        {Icon && <Icon size={15} strokeWidth={2} className={ok ? "text-[#2E7D20]" : "text-[#B42318]"} />}
+        {Icon && <Icon size={15} strokeWidth={2} className={ok === undefined ? "text-zinc-500" : ok ? "text-[#2E7D20]" : "text-[#B42318]"} />}
         <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
       </div>
       {children}

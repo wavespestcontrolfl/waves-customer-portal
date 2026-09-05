@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AutonomousContentReviewPage from './AutonomousContentReviewPage';
 
 let revision;
@@ -28,7 +28,7 @@ beforeEach(() => {
     return { ok: true, json: async () => data };
   }));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('autonomous blog monitor', () => {
   it('shows failed topic checks and offers no human publishing decisions', async () => {
@@ -66,5 +66,72 @@ describe('autonomous blog monitor', () => {
     await screen.findByText('51–51 of 51');
     fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'skipped' } });
     await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('status=skipped&limit=50&offset=0'))).toBe(true));
+  });
+});
+
+
+describe('review regressions', () => {
+  it('clears content notes on selection changes but preserves them on refresh', async () => {
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => url.includes('actionType=other')
+      ? { ok: true, json: async () => ({ items: [item('other-1'), { ...item('other-2'), action_type: 'refresh_existing_blog' }], total: 2 }) }
+      : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    const note = await screen.findByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'First record note' } });
+    revision = 2;
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await screen.findByText('Full draft revision 2');
+    expect(screen.getByPlaceholderText('Reviewer note (optional)').value).toBe('First record note');
+    fireEvent.click(screen.getByText('Seasonal ants other-2'));
+    await waitFor(() => expect(screen.queryByDisplayValue('First record note')).toBeNull());
+  });
+
+  it('clears link notes when switching tasks', async () => {
+    const original = fetch.getMockImplementation();
+    const links = ['link-1', 'link-2'].map(id => ({ id, anchor_text: id, status: 'failed', review_actions: { can_requeue: true } }));
+    fetch.mockImplementation(async (url, opts) => url.includes('/internal-links')
+      ? { ok: true, json: async () => url.includes('?') ? { items: links } : { item: links.find(it => url.endsWith(it.id)) } }
+      : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Links' }));
+    const note = await screen.findByPlaceholderText('Reviewer note (optional)');
+    fireEvent.change(note, { target: { value: 'Link one note' } });
+    fireEvent.click(screen.getByText('link-2'));
+    await waitFor(() => expect(screen.getByPlaceholderText('Reviewer note (optional)').value).toBe(''));
+  });
+
+  it.each([
+    [{ quality_ok: false, quality_score: null, uniqueness_ok: true }, {}, 'In review'],
+    [{ quality_ok: true, uniqueness_ok: true, soft_failures: ['Check wording'] }, { ok: true }, 'Soft flags'],
+    [{ quality_ok: false, quality_score: 20 }, { ok: false }, 'Needs fix'],
+  ])('distinguishes incomplete, soft, and failed gate results', async (summary, quality, label) => {
+    const record = item();
+    record.run.gate_summary = summary;
+    record.run.quality_gate_result = quality;
+    fetch.mockImplementation(async url => ({ ok: true, json: async () => url.includes('/review?')
+      ? { items: [record], total: 1 } : url.includes('/review/') ? { item: record } : { items: [] } }));
+    const { container } = render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(container.querySelectorAll('.lucide-triangle-alert, .lucide-alert-triangle').length).toBe(label === 'Needs fix' ? 1 : 0);
+  });
+
+  it('lets a slow list response finish before polling again', async () => {
+    vi.useFakeTimers();
+    const original = fetch.getMockImplementation();
+    let finish;
+    fetch.mockImplementation((url, opts) => url.includes('/review?')
+      ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ items: [item()], total: 1 }) }); })
+      : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(61000); });
+    expect(fetch.mock.calls.filter(([url]) => url.includes('/review?'))).toHaveLength(1);
+    await act(async () => { finish(); });
+    expect(screen.getByText('Full draft revision 1')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(fetch.mock.calls.filter(([url]) => url.includes('/review?'))).toHaveLength(2);
   });
 });
