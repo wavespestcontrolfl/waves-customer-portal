@@ -21,10 +21,11 @@ jest.mock('../models/db', () => {
   const store = {};
   const state = { failNext: null, idSeq: 0 }; // failNext: table whose next op throws
   const uuid = () => `00000000-0000-4000-8000-${String(++state.idSeq).padStart(12, '0')}`;
-  const matches = (row, where) => Object.entries(where).every(([k, v]) => String(row[k]) === String(v));
+  const matches = (row, where, whereNot) => Object.entries(where).every(([k, v]) => String(row[k]) === String(v))
+    && Object.entries(whereNot || {}).every(([k, v]) => String(row[k]) !== String(v));
   const db = (table) => {
     if (!store[table]) store[table] = [];
-    const st = { where: {}, op: null, payload: null, returning: null, ignore: false, first: false };
+    const st = { where: {}, whereNot: null, max: null, op: null, payload: null, returning: null, ignore: false, first: false };
     const chain = {
       insert(rows) { st.op = 'insert'; st.payload = rows; return chain; },
       onConflict() { return chain; },
@@ -33,6 +34,8 @@ jest.mock('../models/db', () => {
       where(obj) { if (typeof obj === 'object') Object.assign(st.where, obj); return chain; },
       first() { st.first = true; return chain; },
       update(patch) { st.op = 'update'; st.payload = patch; return chain; },
+      whereNot(col, val) { st.whereNot = { ...(st.whereNot || {}), [col]: val }; return chain; },
+      max(expr) { st.max = expr; st.first = true; return chain; },
       then(resolve, reject) {
         try {
           if (state.failNext === table) { state.failNext = null; throw new Error(`fake ${table} down`); }
@@ -52,7 +55,7 @@ jest.mock('../models/db', () => {
           } else if (st.op === 'update') {
             out = 0;
             for (const r of rows) {
-              if (!matches(r, st.where)) continue;
+              if (!matches(r, st.where, st.whereNot)) continue;
               for (const [k, v] of Object.entries(st.payload)) {
                 if (v && typeof v === 'object' && v.__merge) r[k] = { ...(r[k] || {}), ...v.__merge };
                 else if (v && typeof v === 'object' && v.__inc) r[k] = Number(r[k] || 0) + 1;
@@ -60,9 +63,13 @@ jest.mock('../models/db', () => {
               }
               out += 1;
             }
-            if (st.returning) out = rows.filter((r) => matches(r, st.where)).map((r) => ({ [st.returning]: r[st.returning] }));
+            if (st.returning) out = rows.filter((r) => matches(r, st.where, st.whereNot)).map((r) => ({ [st.returning]: r[st.returning] }));
+          } else if (st.max) {
+            const [col, alias] = String(st.max).split(' as ');
+            const found = rows.filter((r) => matches(r, st.where, st.whereNot));
+            out = { [alias]: found.length ? Math.max(...found.map((r) => Number(r[col] || 0))) : null };
           } else {
-            const found = rows.filter((r) => matches(r, st.where));
+            const found = rows.filter((r) => matches(r, st.where, st.whereNot));
             out = st.first ? found[0] || null : found;
           }
           resolve(out);
@@ -261,6 +268,32 @@ describe('concurrent starts', () => {
     } finally { nowSpy.mockRestore(); }
     expect(mockWarn).toHaveBeenCalledTimes(1);
     expect(mockWarn.mock.calls[0][0]).toBe('[agent-runs] run_events failed (Error)');
+  });
+});
+
+describe('a spent handle', () => {
+  test('after finish / fail the handle is one-shot: later calls are no-ops, the run and its artifacts / events stay as they were', async () => {
+    const h = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    expect(await h.finish({ disposition: 'applied', artifacts: [{ kind: 'draft', content: 'x' }] })).toBe(true);
+    const snapshot = JSON.stringify([runRow(), store.run_artifacts, store.run_events]);
+    expect(await h.finish({ disposition: 'applied', artifacts: [{ kind: 'draft', content: 'again' }] })).toBe(false);
+    expect(await h.fail({ error: new Error('late') })).toMatchObject({ retry: false, stale: true });
+    await h.resume();
+    await h.checkpoint({ n: 1 });
+    await h.heartbeat({ progress: true });
+    expect(await h.step({ key: 'late' }, async () => 'still runs')).toBe('still runs');
+    expect(JSON.stringify([runRow(), store.run_artifacts, store.run_events])).toBe(snapshot);
+    expect(store.agent_run_steps ?? []).toHaveLength(0);
+  });
+
+  test('a retry continues the step numbering, so the timeline orders across attempts', async () => {
+    const a = await runs.startRun(base);
+    await a.step({ key: 'one' }, async () => 1);
+    await a.step({ key: 'two' }, async () => 2);
+    await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: true });
+    const b = await runs.startRun({ ...base, maxAttempts: 2 });
+    await b.step({ key: 'three' }, async () => 3);
+    expect(store.agent_run_steps.map((s) => [s.step_key, s.seq])).toEqual([['one', 1], ['two', 2], ['three', 3]]);
   });
 });
 

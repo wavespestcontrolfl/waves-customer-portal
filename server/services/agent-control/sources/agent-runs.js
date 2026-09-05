@@ -46,6 +46,7 @@ function fromRow(run, steps = []) {
       detail: s.detail || null,
       ms: s.duration_ms == null ? null : Number(s.duration_ms),
       toolName: s.tool_name || null,
+      attemptNo: s.attempt_no == null ? null : Number(s.attempt_no),
       startedAt: s.started_at,
       finishedAt: s.finished_at,
       spanId: s.span_id || null,
@@ -100,7 +101,10 @@ async function get(id) {
     const run = await baseQuery().where('r.id', id).first();
     if (!run) return null;
     const [steps, attempts, artifacts, events, workItem] = await Promise.all([
-      db('agent_run_steps').where({ run_id: id }).orderBy('seq', 'asc'),
+      // every attempt's steps, in attempt order then seq (seq is per run,
+      // but a pre-fix retry may have restarted it)
+      db('agent_run_steps as s').leftJoin('agent_attempts as a', 'a.id', 's.attempt_id').select('s.*', 'a.attempt_no')
+        .where('s.run_id', id).orderBy([{ column: 'a.attempt_no', order: 'asc' }, { column: 's.seq', order: 'asc' }, { column: 's.started_at', order: 'asc' }]),
       db('agent_attempts').where({ run_id: id }).orderBy('attempt_no', 'asc'),
       db('run_artifacts').where({ run_id: id }).orderBy('created_at', 'asc'),
       db('run_events').where({ run_id: id }).orderBy('created_at', 'asc'),

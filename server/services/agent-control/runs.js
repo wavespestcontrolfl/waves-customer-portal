@@ -229,6 +229,10 @@ async function openAttempt(conn, run, policy, now) {
   const [attempt] = await conn('agent_attempts')
     .insert({ run_id: run.id, attempt_no: attemptNo, worker_id: WORKER_ID, started_at: now })
     .returning('id');
+  // step seq is per RUN: a retry's steps continue the numbering so the
+  // timeline orders across attempts
+  const last = await conn('agent_run_steps').where({ run_id: run.id }).max('seq as max_seq').first();
+  run.max_seq = Number((last && last.max_seq) || 0);
   return { attemptId: attempt ? attempt.id || attempt : null, attemptNo };
 }
 
@@ -273,12 +277,17 @@ async function startRun(args = {}) {
 function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, traceId, workflowId }) {
   const runId = run.id;
   const budget = policy.budget || {};
-  let seq = 0;
+  let seq = Number(run.max_seq || 0); // continues across attempts (openAttempt reads the max)
   let toolCalls = 0;
   let budgetFlagged = false;
   let progress = Number(run.progress_sequence || 0);
-  // this handle's attempt is the run's current one (see openAttempt)
-  const fenced = (conn = db) => conn('agent_runs').where({ id: runId, attempts: attemptNo });
+  // this handle's attempt is the run's current one (see openAttempt) and
+  // the run is still open: a terminal run is changed only by openAttempt
+  const fenced = (conn = db) => conn('agent_runs').where({ id: runId, attempts: attemptNo }).whereNot('lifecycle', 'terminal');
+  // one-shot: after finish / fail this handle is spent — every later call is
+  // a no-op (a retry goes through startRun → openAttempt)
+  let closed = false;
+  const spent = () => closed;
 
   async function touch(patch, extendLease = true) {
     const now = new Date();
@@ -291,6 +300,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   }
 
   async function heartbeat({ progress: progressed = false } = {}) {
+    if (spent()) return null;
     const patch = {};
     if (progressed) {
       progress += 1;
@@ -311,6 +321,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   }
 
   async function step({ key, label = null, toolName = null } = {}, fn) {
+    if (spent()) return context.withStep(crypto.randomUUID(), () => fn());
     seq += 1;
     if (toolName) toolCalls += 1;
     if (budget.max_steps && seq > budget.max_steps) await flagBudget('steps');
@@ -367,17 +378,20 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   }
 
   async function wait(kind = 'external', reason = null) {
+    if (spent()) return null;
     const lifecycle = kind === 'human' ? 'waiting_human' : 'waiting_external';
     await touch({ lifecycle, last_progress_at: new Date() }, false);
     await insertEvent(runId, 'waiting', clip(reason, 2000), { kind });
   }
 
   async function resume(reason = null) {
+    if (spent()) return null;
     await touch({ lifecycle: 'running', last_progress_at: new Date() });
     await insertEvent(runId, 'resumed', clip(reason, 2000));
   }
 
   async function checkpoint(data = {}) {
+    if (spent()) return null;
     await touch({ summary: db.raw('summary || ?::jsonb', [jsonb(data)]), last_progress_at: new Date() });
     await insertEvent(runId, 'checkpoint', null, data);
   }
@@ -413,6 +427,8 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   // attempt row and nothing else. The run + work-item writes share one
   // transaction so the pair is atomic.
   async function finish({ result = 'succeeded', disposition = null, summary = null, artifacts = null } = {}) {
+    if (spent()) return false;
+    closed = true;
     const now = new Date();
     const res = RESULT.includes(result) ? result : 'succeeded';
     const dispo = DISPOSITION.includes(disposition) ? disposition : null;
@@ -444,6 +460,8 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   }
 
   async function fail({ error = null, errorCode = null, failureClass = null, retryable = false } = {}) {
+    if (spent()) return { retry: false, failureClass: null, result: null, stale: true };
+    closed = true;
     const now = new Date();
     const err = error && typeof error === 'object' ? error : { message: error, code: null };
     const code = clip(errorCode ?? err.code, 80);
