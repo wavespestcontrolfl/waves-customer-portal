@@ -403,6 +403,10 @@ function attachVoiceRelay(httpServer) {
             ttsVoice: typeof p.tts_voice === 'string' ? p.tts_voice : null,
             // Proven from the call_log row at upgrade — never the frame.
             sandbox: authenticatedSandboxCall,
+            // PR 2B: the reconnected leg's TwiML says so. A HINT only — the
+            // session re-proves it from the row's reconnect stamp before it
+            // seeds prior turns or skips its capture floor.
+            resumed: p.resumed === '1',
             send,
             endSession,
           });

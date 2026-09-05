@@ -1709,6 +1709,19 @@ router.post('/relay-complete', async (req, res) => {
     await appendRelayTransfer(req, twiml, callSid, handoff);
     return res.type('text/xml').send(twiml.toString());
   }
+  // Sandy PR 2B (GATE_VOICE_RELAY_RECOVERY): a FAILED relay leg is
+  // reconnected ONCE — the relay re-renders with a resumed greeting and the
+  // fresh token's newer generation hands the claim to the new socket. A
+  // second failure hands the caller to the office (transfer gate on, office
+  // open) or falls to today's paths below. Gate off ⇒ this block is skipped
+  // and everything below is byte-identical to today.
+  if (failed && callSid && require('../services/voice-agent/relay-recovery').isRecoveryGateOn()) {
+    const reconnectXml = await attemptRelayReconnect(req, callSid, failure);
+    if (reconnectXml) return res.type('text/xml').send(reconnectXml);
+    if ((req.query || {}).sandbox !== '1' && await appendSecondFailureTransfer(req, twiml, callSid)) {
+      return res.type('text/xml').send(twiml.toString());
+    }
+  }
   // A sandbox call (the signed ?sandbox=1 the sandbox route itself rendered)
   // never falls to voicemail: a recording on a test call would enter the
   // voicemail pipeline as a customer message. It ends with the failure
@@ -1751,6 +1764,107 @@ router.post('/relay-complete', async (req, res) => {
   }
   res.type('text/xml').send(twiml.toString());
 });
+
+/**
+ * PR 2B — the one reconnect. The claim is ONE bounded, fenced UPDATE
+ * (relay-recovery.claimReconnect): 0 rows = already reconnected or not
+ * resumable ⇒ null (the caller takes the second-failure path); an
+ * unconfirmed claim (timeout / error) ⇒ null too, and a claim that LANDS
+ * after the deadline is put back to the fallback's shape when it does (the
+ * deadline cannot cancel a queued UPDATE). Then the relay renders again for
+ * the same CallSid — same action (language / sandbox), resumed greeting,
+ * `resumed=1` parameter — with a token minted AFTER the stamp, so the new
+ * socket's generation is ≥ the row's reconnect fence. Returns the TwiML
+ * string, or null when nothing was rendered.
+ */
+async function attemptRelayReconnect(req, callSid, failure) {
+  const recovery = require('../services/voice-agent/relay-recovery');
+  const nowMs = Date.now();
+  const claimPromise = recovery.claimReconnect(db, { callSid, nowMs })
+    .catch((err) => { logger.warn(`[relay-complete] reconnect claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
+  const claimed = await withDeadline(claimPromise, STAMP_DEADLINE_MS, 'timeout');
+  if (claimed === 'timeout') {
+    void claimPromise
+      .then((rows) => (Number(rows) > 0 ? recovery.undoLateReconnect(db, { callSid, nowMs }) : 0))
+      .then((rows) => { if (Number(rows) > 0) logger.warn(`[relay-complete] late reconnect claim for ${maskSid(callSid)} put back to voicemail`); })
+      .catch((err) => logger.warn(`[relay-complete] late reconnect compensation failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  if (!(Number(claimed) > 0)) {
+    logger.info(`[relay-complete] no reconnect for ${maskSid(callSid)} (${claimed === 0 ? 'already reconnected or not resumable' : claimed}) after ${failure}`);
+    return null;
+  }
+  const sandbox = (req.query || {}).sandbox === '1';
+  const language = relayCompleteLanguage(req);
+  const { buildRelayTwiML, RELAY_WS_PATH, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
+  let wsUrl = null;
+  let spanishVoice = null;
+  if (sandbox) {
+    wsUrl = `wss://${sandboxRelayHost(req)}${RELAY_WS_PATH}`;
+  } else {
+    try {
+      const routingConfig = await withDeadline(getCallRoutingConfig(db), STAMP_DEADLINE_MS, null);
+      if (routingConfig && agentHandoffKind(routingConfig) === 'relay') {
+        wsUrl = routingConfig.agentEndpoint.trim();
+        spanishVoice = routingConfig.spanishVoice || null; // the Spanish leg's voice, as the vestibule renders it
+      }
+    } catch (err) {
+      logger.warn(`[relay-complete] reconnect routing lookup failed for ${maskSid(callSid)}: ${err.message}`);
+    }
+  }
+  if (!wsUrl) {
+    // The claim landed but nothing can answer it: put the row back so the
+    // fallback below is what the record says happened.
+    logger.warn(`[relay-complete] reconnect for ${maskSid(callSid)} has no reachable relay — falling back`);
+    await withDeadline(
+      recovery.undoLateReconnect(db, { callSid, nowMs, outcome: sandbox ? 'relay_failed' : 'voicemail', answeredBy: sandbox ? null : 'voicemail', status: 'failed' })
+        .catch((err) => logger.warn(`[relay-complete] reconnect undo failed for ${maskSid(callSid)}: ${err.message}`)),
+      STAMP_DEADLINE_MS,
+    );
+    return null;
+  }
+  const spanish = language === 'es';
+  const relayOpts = activeRelayTwiMLOptions(spanish ? { language: SPANISH_LANGUAGE } : {});
+  await withDeadline(stampRelayProfile(callSid, relayOpts));
+  logger.info(`[relay-complete] reconnecting ${maskSid(callSid)} after ${failure} (${sandbox ? 'sandbox' : 'prod'}${spanish ? ', es' : ''})`);
+  return buildRelayTwiML({
+    wsUrl,
+    callSid,
+    action: sandbox ? RELAY_COMPLETE_ACTION_SANDBOX : (spanish ? RELAY_COMPLETE_ACTION_ES : RELAY_COMPLETE_ACTION),
+    ...(spanish ? { language: SPANISH_LANGUAGE, ...(spanishVoice ? { voice: spanishVoice } : {}) } : {}),
+    welcomeGreeting: recovery.resumeGreeting(language),
+    ...relayOpts,
+    parameters: { resumed: '1', ...(spanish ? { lang: 'es' } : {}) },
+  });
+}
+
+/**
+ * PR 2B — the second failure: office open AND the transfer gate on ⇒ the
+ * 2A staff ring (owner-bound to the row's current claim owner, read bounded;
+ * the whisper is the generic line — no packet). Anything else ⇒ false and
+ * the caller falls to today's voicemail. The capture floor already ran at
+ * the first segment's close, so the lead exists either way.
+ */
+async function appendSecondFailureTransfer(req, twiml, callSid) {
+  try {
+    const { isTransferGateOn } = require('../services/voice-agent/relay-transfer');
+    if (!isTransferGateOn()) return false;
+    const { loadOfficeHours, isOfficeOpenAt } = require('../services/voice-agent/relay-context');
+    const hours = await withDeadline(loadOfficeHours(), STAMP_DEADLINE_MS, null);
+    if (!hours || isOfficeOpenAt(hours, new Date()) !== true) return false;
+    const row = await withDeadline(
+      db('call_log').where('twilio_call_sid', callSid).first('metadata').then((r) => r || null),
+      STAMP_DEADLINE_MS,
+      null,
+    );
+    const owner = row ? (parseJsonObject(row.metadata).relay_session_claim_owner || null) : null;
+    logger.info(`[relay-complete] second failure for ${maskSid(callSid)} — office open, ringing staff`);
+    await appendRelayTransfer(req, twiml, callSid, { reason: 'transfer', owner: owner ? String(owner) : null });
+    return true;
+  } catch (err) {
+    logger.warn(`[relay-complete] second-failure transfer skipped for ${maskSid(callSid)}: ${err.message}`);
+    return false;
+  }
+}
 
 // =========================================================================
 // POST /api/webhooks/twilio/relay-sandbox — the ONLY test path for Sandy.

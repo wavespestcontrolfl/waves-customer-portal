@@ -1,0 +1,176 @@
+/**
+ * Sandy PR 2B — voice-session recovery (GATE_VOICE_RELAY_RECOVERY).
+ *
+ * Twilio does not reconnect a dropped <ConversationRelay> socket: the call
+ * fails and /relay-complete fires. This module is the small, testable core
+ * of the recovery: the ONE reconnect claim per CallSid, the segment record
+ * every socket appends at close, the SQL that composes the whole call from
+ * its segments, the resumed session's proof, and the provider-failure
+ * policy. Everything here is fail-closed: an unconfirmed claim never
+ * re-renders, an unproven `resumed` hint changes nothing, the gate is read
+ * at call time so unsetting it is the live kill switch.
+ */
+const logger = require('../logger');
+
+const RECONNECT_LIMIT = 1;
+const RESUME_STATE_TIMEOUT_MS = 2000;
+const PROVIDER_FAILURE_LIMIT = 2;
+const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
+const MAX_SEGMENT_TEXT_CHARS = 20000;
+
+function isRecoveryGateOn() {
+  return process.env.GATE_VOICE_RELAY_RECOVERY === 'true';
+}
+
+/**
+ * The reconnect claim — ONE statement, atomic, fenced: only a row that has
+ * never reconnected AND is still live or AI-handled (a voicemail /
+ * transferred / relay_failed row is never resumed) takes the stamp. The same
+ * statement puts the call back into its live shape (the first socket's close
+ * may already have stamped it completed / ai_handled) so the resumed session
+ * can transfer and reconcile like any live session. `relay_reconnect_ms` is
+ * the GENERATION FENCE for close-time column writes: the new token is minted
+ * after this stamp, so its generation is ≥ the fence and the old socket's is
+ * below it. Returns the row count (0 = not resumable / already reconnected).
+ */
+function claimReconnect(db, { callSid, nowMs = Date.now() }) {
+  return db('call_log')
+    .where('twilio_call_sid', callSid)
+    .whereRaw("COALESCE((metadata->>'relay_reconnects')::int, 0) < ?", [RECONNECT_LIMIT])
+    .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_handled'))
+    .update({
+      metadata: db.raw(
+        "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_reconnects', COALESCE((metadata->>'relay_reconnects')::int, 0) + 1, 'relay_reconnect_ms', ?::bigint)",
+        [nowMs],
+      ),
+      call_outcome: null,
+      status: 'in-progress',
+      answered_by: 'ai_agent',
+      updated_at: new Date(),
+    });
+}
+
+/**
+ * The compensator for a claim that timed out but LANDS later (the deadline
+ * cannot cancel a queued UPDATE): the caller is already in the fallback, so
+ * the live shape the claim restored is put back to what the fallback wrote.
+ * Fenced on the claim's own marks, so a row a later socket actually resumed
+ * is left alone.
+ */
+function undoLateReconnect(db, { callSid, nowMs, outcome = 'voicemail', answeredBy = 'voicemail', status = 'completed' }) {
+  return db('call_log')
+    .where('twilio_call_sid', callSid)
+    .whereRaw("(metadata->>'relay_reconnect_ms')::bigint = ?", [nowMs])
+    .whereNull('call_outcome')
+    .update({ call_outcome: outcome, answered_by: answeredBy, status, updated_at: new Date() });
+}
+
+/** The welcome greeting Twilio speaks on the reconnected leg. */
+function resumeGreeting(language) {
+  return require('./relay-language').copy('resumed', language);
+}
+
+/** One socket's close record — played text only (buildTranscriptText reads played text). */
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured }) {
+  return {
+    generation: Number(generation) || 0,
+    session_key: sessionKey || null,
+    reason: reason || null,
+    text: String(text || '').slice(0, MAX_SEGMENT_TEXT_CHARS),
+    turns: Number(turns) || 0,
+    latency: latency || null,
+    versions: versions || null,
+    lead_captured: leadCaptured === true,
+    ended_at: new Date().toISOString(),
+  };
+}
+
+/** metadata := metadata || { relay_segments: existing || [segment] } — an append, never an overwrite. */
+function appendSegmentSql(db, segment) {
+  return db.raw(
+    "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segments', COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb)",
+    [JSON.stringify([segment])],
+  );
+}
+
+/**
+ * The whole call's transcript composed from EVERY segment on the row (the
+ * closing socket appends its own segment FIRST, in its own statement) in
+ * generation order, separated by [Reconnected]. NULL when the row has no
+ * segments — callers COALESCE to their local text.
+ */
+function composeSegmentsSql(db) {
+  return db.raw(
+    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord) FROM jsonb_array_elements(COALESCE(metadata->'relay_segments', '[]'::jsonb)) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
+    [SEGMENT_SEPARATOR],
+  );
+}
+
+/** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
+function generationFenceSql(q, generation) {
+  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0]);
+}
+
+/** Order segments the way the SQL does; the in-memory twin for summaries/tests. */
+function segmentsText(segments = []) {
+  return [...(Array.isArray(segments) ? segments : [])]
+    .filter((s) => s && String(s.text || '').trim())
+    .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0))
+    .map((s) => String(s.text))
+    .join(SEGMENT_SEPARATOR);
+}
+
+/**
+ * The resumed session's PROOF (bounded, fail-soft null): the row's reconnect
+ * stamp, the earlier segments' played text (for the one-time history seed)
+ * and the linked lead. A `resumed` <Parameter> without this proof is ignored.
+ */
+async function loadResumeState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_MS } = {}) {
+  if (!callSid) return null;
+  let timer;
+  const read = db('call_log').where('twilio_call_sid', callSid).first('metadata')
+    .then((row) => {
+      if (!row) return null;
+      let meta = row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      if (!meta || typeof meta !== 'object') return null;
+      const reconnects = Number(meta.relay_reconnects) || 0;
+      if (reconnects <= 0) return null;
+      return {
+        reconnects,
+        segmentsText: segmentsText(meta.relay_segments),
+        relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : null,
+      };
+    });
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); });
+  try {
+    return await Promise.race([read, timeout]);
+  } catch (err) {
+    logger.warn(`[voice-relay-recovery] resume state read failed: ${err.message}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 'handoff' once either counter reaches the limit; null otherwise. */
+function providerFailurePolicy({ modelFailures = 0, toolFailures = 0 } = {}) {
+  return (modelFailures >= PROVIDER_FAILURE_LIMIT || toolFailures >= PROVIDER_FAILURE_LIMIT) ? 'handoff' : null;
+}
+
+module.exports = {
+  RECONNECT_LIMIT,
+  PROVIDER_FAILURE_LIMIT,
+  SEGMENT_SEPARATOR,
+  isRecoveryGateOn,
+  claimReconnect,
+  undoLateReconnect,
+  resumeGreeting,
+  buildSegment,
+  appendSegmentSql,
+  composeSegmentsSql,
+  generationFenceSql,
+  segmentsText,
+  loadResumeState,
+  providerFailurePolicy,
+};

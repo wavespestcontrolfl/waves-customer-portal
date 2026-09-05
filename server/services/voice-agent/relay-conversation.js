@@ -482,7 +482,7 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -530,6 +530,15 @@ class RelayConversation {
     // the one-per-call transfer latch.
     this._toolOutcomes = [];
     this._transferRequested = false;
+    // PR 2B — session recovery. `resumed` is the reconnected leg's HINT
+    // (unverified frame input); `_resume` is the row's proof, loaded below.
+    this._resumedHint = resumed === true;
+    this._resume = null;
+    this._resumeReady = null;
+    this._resumeSeeded = false;
+    this._modelFailures = 0; // consecutive model timeouts / errors
+    this._toolFailures = 0; // consecutive failed tools
+    this._handoffForFailure = false; // the provider-failure handoff ran (once per call)
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -685,6 +694,19 @@ class RelayConversation {
       this._officeHoursReady = loadOfficeHours()
         .then((hours) => { this._officeHours = hours; })
         .catch(() => {});
+    }
+    // PR 2B: a reconnected leg proves the hint from the row (bounded,
+    // fail-soft) before it seeds the earlier turns or skips its capture
+    // floor. Gate read at call time — off ⇒ nothing is loaded.
+    if (this._resumedHint && this.callSid && require('./relay-recovery').isRecoveryGateOn()) {
+      const { loadResumeState } = require('./relay-recovery');
+      this._resumeReady = loadResumeState(db, this.callSid)
+        .then((state) => {
+          this._resume = state || null;
+          if (state) logger.info(`[voice-relay] resumed session proven callSid=${maskSid(this.callSid)} reconnects=${state.reconnects} priorChars=${state.segmentsText.length} lead=${state.relayLeadId ? 'linked' : 'none'}`);
+          else logger.warn(`[voice-relay] resumed hint NOT proven by the row callSid=${maskSid(this.callSid)} — treated as a fresh session`);
+        })
+        .catch(() => { this._resume = null; });
     }
   }
 
@@ -1520,6 +1542,46 @@ class RelayConversation {
    * whose call_log row never vouched for its ANI) is out only on a proven
    * foreign owner.
    */
+  /**
+   * PR 2B — the provider-failure handoff (GATE_VOICE_RELAY_RECOVERY). A
+   * second consecutive model failure, or a second failed tool, ends the
+   * "could you say that again?" loop: Sandy says so, then transfers when the
+   * office is open (the 2A tool does its own fencing and ends the leg) or
+   * takes the callback (capture floor) and ends the call. Once per call.
+   * Returns true when it took over the turn.
+   */
+  async _maybeHandoffForFailure(toolCtx) {
+    const { isRecoveryGateOn, providerFailurePolicy } = require('./relay-recovery');
+    if (!isRecoveryGateOn() || this._handoffForFailure || this.ended || this._ending) return false;
+    if (providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) !== 'handoff') return false;
+    this._handoffForFailure = true;
+    const { copy } = require('./relay-language');
+    logger.warn(`[voice-relay] provider-failure handoff callSid=${maskSid(this.callSid)} model=${this._modelFailures} tools=${this._toolFailures}`);
+    this.say(copy('troubleConnecting', this.language));
+    const { isTransferAvailable } = require('./relay-transfer');
+    const officeOpen = toolCtx && typeof toolCtx.officeOpenNow === 'function' ? toolCtx.officeOpenNow() : null;
+    if (toolCtx && isTransferAvailable(officeOpen)) {
+      try {
+        const { executeTool } = require('./relay-tools');
+        const out = await executeTool('transfer_to_office', { intent: 'system trouble', summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
+        this._recordTurn('tool', 'transfer_to_office');
+        if (/Transferring the caller/.test(String(out || ''))) return true;
+        logger.warn(`[voice-relay] provider-failure transfer refused callSid=${maskSid(this.callSid)} — taking the callback instead`);
+      } catch (err) {
+        logger.warn(`[voice-relay] provider-failure transfer failed callSid=${maskSid(this.callSid)}: ${err.message} — taking the callback instead`);
+      }
+    }
+    this.say(copy('troubleCallback', this.language));
+    try { await this._runCaptureFloor('provider_failure'); } catch { /* best-effort by contract */ }
+    if (!this._ending) {
+      this._ending = true;
+      try { if (this._endSession) this._endSession({ reason: 'provider_failure', captured: this.leadCaptured, owner: this.sessionKey || null }); } catch (e) {
+        logger.error(`[voice-relay] endSession (provider_failure) failed callSid=${this.callSid}: ${e.message}`);
+      }
+    }
+    return true;
+  }
+
   async _sessionSuperseded() {
     if (!this.sessionKey || !this.callSid) return false;
     // ⭐ ONLY A CLAIMED SESSION CAN BE SUPERSEDED. An UNVERIFIED session never
@@ -1546,6 +1608,9 @@ class RelayConversation {
     if (this._contextReady) {
       try { await this._contextReady; } catch { /* fail closed to unknown */ }
     }
+    if (this._resumeReady) {
+      try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
+    }
     // The boundary covers the MODEL too, not just tools: a superseded socket
     // could otherwise keep answering account questions straight from its
     // frozen KNOWN CALLER block without ever touching a tool. Checked AFTER
@@ -1570,6 +1635,16 @@ class RelayConversation {
       this.messages.push(
         { role: 'user', content: this._callerContext.dataTurn },
         { role: 'assistant', content: 'Noted — I have the recent text history for this number.' },
+      );
+    }
+    // PR 2B: the earlier segment(s) of a reconnected call ride the USER role
+    // the same way, ONCE, as played text — the model resumes instead of
+    // starting over. Only when the row proved the reconnect.
+    if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
+      this._resumeSeeded = true;
+      this.messages.push(
+        { role: 'user', content: `[Earlier in this call, before the line dropped — the caller may pick up where this left off]\n${this._resume.segmentsText}` },
+        { role: 'assistant', content: 'Understood — I have what we covered before the line dropped.' },
       );
     }
     const toolCtx = this._buildToolCtx();
@@ -1695,15 +1770,20 @@ class RelayConversation {
         // turn keeps its FIRST stamp, not the last round's.
         stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
+        this._modelFailures = 0; // a completed round resets the streak
       } catch (err) {
         if (streamTimedOut) {
           stat.timedOut = true;
           logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
+          this._modelFailures += 1;
+          if (await this._maybeHandoffForFailure(toolCtx)) return;
           this.say(require('./relay-language').copy('streamTimeout', this.language));
           return;
         }
         if (this._controller.signal.aborted) return; // barge-in; caller is talking
         logger.error(`[voice-relay] anthropic error callSid=${this.callSid}: ${err.message}`);
+        this._modelFailures += 1;
+        if (await this._maybeHandoffForFailure(toolCtx)) return;
         this.say(require('./relay-language').copy('modelError', this.language));
         return;
       } finally {
@@ -1776,7 +1856,9 @@ class RelayConversation {
           // refusal / caught failure is not a success — the handoff card
           // must not tell staff a failed lookup succeeded, codex r1 P2).
           const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
-          this._toolOutcomes.push({ name: block.name, ok: !sentinel && toolCtx.toolFailed !== true });
+          const toolOk = !sentinel && toolCtx.toolFailed !== true;
+          this._toolOutcomes.push({ name: block.name, ok: toolOk });
+          this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
           // A transfer (or any end) inside this round ends the SESSION: no
           // further tool in the same response may run — a booking or capture
@@ -1792,6 +1874,9 @@ class RelayConversation {
           }
         }
         this.messages.push({ role: 'user', content: results });
+        // PR 2B: a second failed tool in one call hands the caller off
+        // instead of another round of "let me try that again".
+        if (await this._maybeHandoffForFailure(toolCtx)) return;
         continue; // let the model respond to the tool result
       }
       this._maybeEndAfterTurn(); // lead captured + agent done → end the call
@@ -1866,6 +1951,38 @@ class RelayConversation {
     // lead the replacement will also mint) or the reporting reconcile
     // (overwriting the replacement's transcript/outcome with this socket's
     // partial view). The replacement session owns the record now.
+    // PR 2B: EVERY socket's turns land as a SEGMENT first (metadata-only
+    // append, fenced on the CallSid alone — an append never overwrites, so
+    // ownership does not matter here). The column write below then composes
+    // the whole call from all segments and is fenced by generation, so an
+    // older socket closing after a reconnect never replaces the record.
+    const recovery = require('./relay-recovery');
+    const recoveryOn = recovery.isRecoveryGateOn();
+    let segmentAppended = false;
+    if (recoveryOn && this.callSid && this._transcript.length) {
+      try {
+        const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
+        const segment = recovery.buildSegment({
+          generation: this.sessionGeneration,
+          sessionKey: this.sessionKey,
+          reason: reason || null,
+          text: buildTranscriptText(this._transcript),
+          turns: this._transcript.length,
+          latency: summarizeTurnStats(this._turnStats),
+          versions: this._versionStamps(),
+          leadCaptured: this.leadCaptured && !this._noLeadCreated,
+        });
+        const appended = await withTimeout(
+          db('call_log').where('twilio_call_sid', this.callSid).update({ metadata: recovery.appendSegmentSql(db, segment), updated_at: new Date() }),
+          WRITE_DRAIN_TIMEOUT_MS,
+          0,
+        );
+        segmentAppended = Number(appended) > 0;
+        if (!segmentAppended) logger.warn(`[voice-relay] segment NOT appended callSid=${maskSid(this.callSid)} (no row / timeout) — the column write carries this socket's text alone`);
+      } catch (err) {
+        logger.warn(`[voice-relay] segment append failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      }
+    }
     const supersededAtClose = this.sessionKey
       ? await this._sessionSuperseded().catch(() => false)
       : false;
@@ -1935,7 +2052,25 @@ class RelayConversation {
         // NULL owner allowed: an unverified session (claim never won — the
         // row is unclaimed) still owns its own honest reconcile; only a
         // FOREIGN owner means the record belongs to a replacement.
-        const fenceOwner = (q) => this._fenceOwner(q);
+        // PR 2B: the GENERATION FENCE rides every close-time column write —
+        // a socket older than the row's latest reconnect stamp writes no
+        // columns (its segment is already appended); the resumed socket's
+        // generation is ≥ the stamp and composes the whole call.
+        const fenceOwner = (q) => (recoveryOn ? recovery.generationFenceSql(this._fenceOwner(q), this.sessionGeneration) : this._fenceOwner(q));
+        // …and the transcript column is composed from ALL segments (in
+        // generation order, `[Reconnected]` between them) when this socket's
+        // segment landed; a call with one segment reads exactly as before.
+        // (transcriptUpdate.transcription stays this socket's text — the
+        // salvage / stash below use it as the relay_transcript stash.)
+        let composedTranscription = null;
+        if (recoveryOn && segmentAppended && transcriptUpdate && transcriptUpdate.transcription) {
+          composedTranscription = db.raw('COALESCE(?, ?)', [recovery.composeSegmentsSql(db), transcriptUpdate.transcription]);
+          try {
+            const tm = JSON.parse(transcriptUpdate.transcription_metadata);
+            tm.segments = { this_generation: this.sessionGeneration, appended: true };
+            transcriptUpdate.transcription_metadata = JSON.stringify(tm);
+          } catch { /* keep the metadata as built */ }
+        }
         fenceOwner(reconcileQuery);
         const updated = await reconcileQuery
           .update({
@@ -1945,6 +2080,7 @@ class RelayConversation {
             duration_seconds: Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
             updated_at: new Date(),
             ...(transcriptUpdate || {}),
+            ...(composedTranscription ? { transcription: composedTranscription } : {}),
           });
         // LOUD on a dropped audit record: 0 rows with a real transcript means
         // either the voicemail guard fired (a genuinely failed relay leg) or
@@ -2078,6 +2214,13 @@ class RelayConversation {
     // matching capture_lead in relay-tools.
     const callerPhone = toE164(this.from || '');
     if (this.leadCaptured || !isLikelyE164(callerPhone)) return;
+    // PR 2B: a resumed call whose earlier segment already linked a lead keeps
+    // it — a floor write here would overwrite that lead's summary with this
+    // segment alone (same-call reuse updates, it does not duplicate).
+    if (this._resume && this._resume.relayLeadId) {
+      logger.info(`[voice-relay] capture-floor skipped — lead ${this._resume.relayLeadId} already linked before the reconnect callSid=${maskSid(this.callSid)}`);
+      return;
+    }
     // A sandbox call ends with no lead BY DESIGN (its call_log row is the artifact).
     if (this.sandbox) {
       logger.info(`[voice-relay] capture-floor skipped — sandbox call callSid=${this.callSid}`);
