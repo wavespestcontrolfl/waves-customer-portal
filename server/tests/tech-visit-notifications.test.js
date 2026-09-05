@@ -17,6 +17,7 @@ const db = require('../models/db');
 // The card transaction (lock + check + insert) runs against the same mock.
 const transactions = [];
 db.transaction = (fn) => { transactions.push(fn); return fn(db); };
+db.raw = jest.fn((sql) => sql);
 function cardsTable() {
   return {
     insert: jest.fn(async (row) => {
@@ -215,6 +216,17 @@ describe('notifyTechVisitChange', () => {
     expect(logged).not.toContain('insert failed');
     expect(logged).not.toContain('Ruiz');
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('card not written'));
+  });
+
+  test('the card carries the unit (line 2) — the tech has no details link to find the door', async () => {
+    prime({ visit: { ...VISIT, address_line2: 'Apt 4' } });
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' });
+    expect(mockWriteCard.mock.calls[0][1].payload.address).toBe('4312 Cortez Rd W, Apt 4, Bradenton');
+    prime({ visit: { ...VISIT, service_address_line1: '88 Palm Ave', address_line2: 'Unit 12', service_address_city: 'Parrish' } });
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' });
+    expect(mockWriteCard.mock.calls[1][1].payload.address).toBe('88 Palm Ave, Unit 12, Parrish');
+    // The line-2 column is the canonical stamped-vs-customer resolution, on the visit read.
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('as address_line2'));
   });
 
   test('the card names the visit\'s stamped service address when one exists (a different property than the address on file)', async () => {

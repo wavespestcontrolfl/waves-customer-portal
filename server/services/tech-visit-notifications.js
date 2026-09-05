@@ -28,6 +28,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { stampedLine2Sql } = require('./stamped-address');
 const { gateEnvValue } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
 const { parseETDateTime, TZ } = require('../utils/datetime-et');
@@ -147,11 +148,15 @@ function customerLabel(visit) {
 
 // Where the truck goes: the visit's stamped service address when the
 // booking stamped one (phone bookings always do, and it may be a different
-// property than the customer's address on file), else the customer's.
+// property than the customer's address on file), else the customer's. The
+// unit (line 2) rides along — the card has no details link, so a condo
+// booking without it sends the tech to the building, not the door (codex
+// r11 P2); `address_line2` is resolved by stampedLine2Sql (a diverging
+// stamp never borrows the customer's unit).
 function placeLabel(visit) {
   const stamped = visit.service_address_line1
-    ? [visit.service_address_line1, visit.service_address_city].filter(Boolean)
-    : [visit.cust_address, visit.cust_city].filter(Boolean);
+    ? [visit.service_address_line1, visit.address_line2, visit.service_address_city].filter(Boolean)
+    : [visit.cust_address, visit.address_line2, visit.cust_city].filter(Boolean);
   return stamped.join(', ') || null;
 }
 
@@ -226,6 +231,7 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
     's.source_action', 's.service_address_line1', 's.service_address_city',
     'c.first_name as cust_first_name', 'c.last_name as cust_last_name',
     'c.address_line1 as cust_address', 'c.city as cust_city',
+    conn.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
   );
 }
 

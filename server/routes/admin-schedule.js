@@ -7171,7 +7171,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // (visit 2) off the schedule too — shared with the track-
             // transitions cancel path; best-effort after the parent commit.
             try {
-              const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id });
+              const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id, actorId: req.technicianId || null });
               if (cancelled > 0) {
                 logger.info(`[admin-schedule] bulk cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${id}`);
               }

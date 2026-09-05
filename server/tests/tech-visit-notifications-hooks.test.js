@@ -348,6 +348,9 @@ describe('Codex r9 writers (source order)', () => {
     expect(track).not.toContain('cascadeCallFollowUpCancel(serviceId);');
     const offboarding = read('../services/customer-offboarding.js');
     expect(offboarding).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });");
+    const bulk = read('../routes/admin-schedule.js');
+    expect(bulk).toContain("await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id, actorId: req.technicianId || null });");
+    expect(bulk).not.toContain("cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id })");
   });
 
   test('a grouped move re-pointed to another technician names the customer on the card, never on dispatch_alerts.resolved_by', () => {
