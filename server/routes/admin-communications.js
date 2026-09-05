@@ -249,31 +249,6 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
   return outcome;
 }
 
-// A composer-carried price-change notice link: the provider call runs under
-// the customer's `price-notice:<customer>` lock — the one the notices lane
-// (price-change-notices createAndSendBatch) holds while it delivers and
-// finalizes that customer's notice — with the newest-notice check re-run
-// inside it, so a correction finishing between the pre-send check and the
-// handoff refuses the stale re-share instead of texting obsolete terms
-// (GH Codex #3893 r13 P1). A held lock reports not-sent (retry in a moment).
-async function dispatchPriceNoticeLinkSend(notices, dispatch, recheck) {
-  const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
-  const customerIds = [...new Set(notices.map((n) => n.customerId))];
-  const locked = async (i) => {
-    if (i < customerIds.length) {
-      return runExclusive(`price-notice:${customerIds[i]}`, () => locked(i + 1), { recordHealth: false, waitForSlot: false });
-    }
-    const fresh = await recheck();
-    if (!fresh.ok) return { sent: false, blocked: false, reason: fresh.error };
-    return dispatch();
-  };
-  const outcome = await locked(0);
-  if (wasLockSkipped(outcome)) {
-    return { sent: false, blocked: false, reason: 'A price change notice is being sent to this customer right now — try again in a moment.' };
-  }
-  return outcome;
-}
-
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
@@ -299,9 +274,6 @@ router.post('/sms', async (req, res, next) => {
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
   let prepLinkSends = null;
-  // Verified composer price-change notice links — dispatched under the
-  // customer's notice lock with the newest-notice check re-run inside it.
-  let priceNoticeSends = null;
   // Composer-carried contract signing links: a prepared link is ACTIVATED
   // (delivered state stamped, windowed from the send) before the provider
   // call — handed back on every no-send exit, recorded after a real send.
@@ -633,7 +605,6 @@ router.post('/sms', async (req, res, next) => {
       if (!bearerCheck.ok) return abortUnsent(409, bearerCheck.error);
       if (bearerCheck.statements) statementLinkIds = bearerCheck.statements;
       if (bearerCheck.preps) prepLinkSends = bearerCheck.preps;
-      if (bearerCheck.priceNotices) priceNoticeSends = bearerCheck.priceNotices;
       // A bearer send to a number exactly one live customer owns is that
       // customer's text (a pasted URL never passes /customer-link to adopt
       // its owner): trust the row the seam verified so the recipient's own
@@ -821,18 +792,13 @@ router.post('/sms', async (req, res, next) => {
         humanAuthored: !bodyIsUnchangedAgentDraft,
       },
     });
-    const recheckOptions = () => ({
-      trustedCustomerId: trustedCustomerId || null,
-      usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
-    });
-    const dispatchPreps = prepLinkSends
-      ? () => dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
-        .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), recheckOptions()))
-      : dispatch;
-    const result = priceNoticeSends
-      ? await dispatchPriceNoticeLinkSend(priceNoticeSends, dispatchPreps, () => require('../services/composer-customer-links')
-        .recheckPriceChangeLinks(cleanBody, normalizePhoneLast10(to), recheckOptions()))
-      : await dispatchPreps();
+    const result = prepLinkSends
+      ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
+        .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), {
+          trustedCustomerId: trustedCustomerId || null,
+          usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
+        }))
+      : await dispatch();
     // The reservation has done its job — the real provider row now exists (on
     // success) or no send happened (on failure). Clear it so it can't linger as
     // a stuck 'sending' row blocking auto-sends to the thread.
@@ -2220,7 +2186,7 @@ const EMAIL_SEND_CHANNELS = ['email', 'both'];
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
 // card_request | prep_guide | service_report | contract | statement |
-// price_change | project_report. Same
+// project_report. Same
 // fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
@@ -2357,9 +2323,6 @@ function composerLinkBuilders() {
     statement: null,
     // A project report is the account's, like a service report.
     project_report: (ids) => builders.buildProjectReportLink(ids),
-    // A price-change notice names its customer and their price — the
-    // phone owner's own row only. STRICT_OWNER_KINDS below.
-    price_change: (ids, primaryId) => builders.buildPriceChangeNoticeLink(primaryId),
   };
 }
 
@@ -2373,9 +2336,7 @@ function composerLinkBuilders() {
 // ownership re-checked at /sms).
 // Card requests and contract signing links are the same class of bearer
 // (per row, money- or signature-adjacent) and take the same rule.
-// A price-change notice page is the customer's own (first name + their
-// price) and the row the notices lane targeted — same per-row rule.
-const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_guide', 'price_change'];
+const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_guide'];
 // Appointment pages and service reports are account-scoped (any sibling's
 // visit or report) but the TEXT is a customer-specific bearer, so the
 // resolved phone owner rides back for them too: the /sms send then carries
@@ -2420,7 +2381,7 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'priceChange', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {

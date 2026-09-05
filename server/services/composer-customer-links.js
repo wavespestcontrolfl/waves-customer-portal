@@ -32,8 +32,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
-const { formatDisplayDate } = require('../utils/date-only');
+const { etCalendarDayOf } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 // Estimate statuses that count as "open" for a composer insert: delivered or
@@ -639,15 +638,6 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
-    // A price-change notice page is the customer's own (first name + their
-    // price); /sms binds it to the recipient row and re-reads that the
-    // change is still upcoming.
-    label: 'Price change notice',
-    fragment: /\/price-change\//i,
-    token: (run, host) => canonicalPortalToken(run, host, PRICE_CHANGE_TOKEN_RE, ANY_SCHEME),
-    applies: async () => true,
-  },
-  {
     label: 'Contract signing',
     fragment: /\/contract\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i, ANY_SCHEME),
@@ -741,8 +731,6 @@ const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
 // #3893 r5 P1). Judged before the service-report seam, which skips these runs.
 const PROJECT_REPORT_PATH_RE = /^\/report\/project\/([^/]+)$/i;
 const PROJECT_REPORT_RUN_RE = /\/report\/project\//i;
-// price-change-notices.js mints notice_token as 16 random bytes, hex.
-const PRICE_CHANGE_TOKEN_RE = /^\/price-change\/([a-f0-9]{32})$/i;
 
 // Appointment page links (GH Codex #3844 r2 P1): every /appointment route
 // 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
@@ -1097,6 +1085,9 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
     if (!issuedProjectReport(project)) {
       return refuseSend('This project report is no longer viewable — remove the link before sending.');
     }
+    if (!textedProjectReport(project)) {
+      return refuseSend('This project report has only gone out by email — its first text is sent from the project, not here. Remove the link before sending.');
+    }
     if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
       return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
     }
@@ -1106,46 +1097,6 @@ async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) 
     // The send flow's delivery claim is taken by the caller BEFORE dispatch
     // (claimProjectReportSends), keyed to the delivery state seen here.
     projectReports.push({ id: project.id, deliveryStatus: project.delivery_status || null });
-  }
-  return null;
-}
-
-// Price-change notices: the notice must still be one the composer would
-// insert (a delivered notice for a change still ahead — the builder's
-// predicate, re-run) and belong to the recipient's own row.
-async function checkPriceChangeLinks(ctx, notices) {
-  for (const run of linkRuns(ctx.runs, /\/price-change\//i)) {
-    const token = canonicalPortalToken(run, ctx.hosts, PRICE_CHANGE_TOKEN_RE);
-    if (!token) return refuseSend('A price change notice link in this message is not on the Waves portal — remove it before sending.');
-    // Stored lowercase; the public route lowercases before its lookup, so a
-    // pasted upper-cased token is the same working page and is judged the
-    // same (pre-push Codex P1).
-    const notice = await db('price_change_notices').where({ notice_token: token.toLowerCase() }).first('id', 'customer_id', 'status', 'effective_date', 'sent_at', 'sms_sent');
-    if (!deliveredPriceChangeNotice(notice)) {
-      return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
-    }
-    // Corrections are separate rows and nothing supersedes the earlier one,
-    // so a notice texted before the operator clicks Send is still delivered,
-    // upcoming and linkable — but it is no longer the customer's terms. The
-    // link must be the newest texted notice, the builder's own pick (GH
-    // Codex #3893 r7 P1) — judged newest BEFORE upcoming, so a correction
-    // whose date has passed still retires the older notice it corrected
-    // (r10 P1).
-    const newest = await newestDeliveredPriceChangeNotice(notice.customer_id);
-    if (!newest || newest.id !== notice.id) {
-      return refuseSend('A newer price change notice has been sent to this customer — remove the link and insert a fresh one.');
-    }
-    if (!upcomingPriceChange(notice)) {
-      return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
-    }
-    const bad = await ownedByRecipient(ctx, notice.customer_id, 'price change notice link');
-    if (bad) return bad;
-    ctx.bearers += 1;
-    // The caller dispatches under this customer's notice lock and re-runs
-    // this check inside it (recheckPriceChangeLinks) — the notices lane
-    // takes the same lock per customer, so a correction cannot finish
-    // between this read and the provider handoff (GH Codex #3893 r13 P1).
-    notices.push({ customerId: notice.customer_id, noticeId: notice.id });
   }
   return null;
 }
@@ -1288,12 +1239,10 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
   const statements = [];
   const preps = [];
   const projectReports = [];
-  const priceNotices = [];
   const checks = [
     () => checkContractLinks(ctx, contracts),
     () => checkPrepLinks(ctx, preps),
     () => checkStatementLinks(ctx, statements),
-    () => checkPriceChangeLinks(ctx, priceNotices),
     () => checkAccountBoundLinks(ctx, projectReports),
     () => checkCardLinks(ctx, cards),
   ];
@@ -1309,7 +1258,6 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
     ...(projectReports.length ? { projectReports } : {}),
-    ...(priceNotices.length ? { priceNotices } : {}),
   };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that
@@ -1329,30 +1277,6 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     if (rows.length === 1) out.customerId = rows[0].id;
   }
   return out;
-}
-
-/**
- * Price-change notice links only, re-run INSIDE the customer's
- * `price-notice:<customer>` lock immediately before dispatch: the notices
- * lane finalizes a correction under the same lock, so the newest-notice read
- * here is the one the provider handoff acts on (GH Codex #3893 r13 P1).
- * Same predicates as the pre-lock check; the caller reports a refusal as a
- * not-sent result.
- */
-async function recheckPriceChangeLinks(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
-  const ctx = {
-    runs: decodedRuns(body),
-    body,
-    hosts: ownedPortalHosts(),
-    toLast10: String(toLast10 || ''),
-    trustedCustomerId,
-    usDestination,
-    bearers: 0,
-    contractId: null,
-  };
-  const priceNotices = [];
-  const refusal = await checkPriceChangeLinks(ctx, priceNotices);
-  return refusal || { ok: true, priceNotices };
 }
 
 /**
@@ -1935,86 +1859,6 @@ async function buildContractSigningLink(customerIds) {
   };
 }
 
-// A notice the composer may RE-SHARE: one the notices lane already delivered
-// (sent / viewed). The lane owns first delivery — its claim (draft /
-// unreachable → sending), the price_change_notice SMS template with its
-// opt-out footer, and the sms_sent / sent finalization — so an 'unreachable'
-// notice is re-attempted from Pricing → Notices once the contact is fixed,
-// never texted from here (GH Codex #3893 r2 P1 ×2); draft / sending rows
-// are its in-flight state.
-const PRICE_CHANGE_LINKABLE_STATUSES = ['sent', 'viewed'];
-// Status alone is not delivery evidence: /price-change/:token flips ANY
-// resolved row to 'viewed' (a draft or unreachable one included), and a
-// failed or blocked attempt keeps the full link in messaging_audit_log —
-// staff opening it while investigating must not turn the composer into the
-// notice's first send. sent_at is stamped only by the lane's success branch
-// (GH Codex #3893 r5 P1) — and that branch also fires when only the EMAIL
-// leg delivered (sms_sent=false), so the SMS flag is required as well:
-// the composer re-shares a text the lane already sent, never sends the
-// first one without the price_change_notice template and its opt-out
-// footer (r6 P1). An email-only notice is re-attempted from Pricing →
-// Notices.
-function deliveredPriceChangeNotice(notice) {
-  return Boolean(notice && notice.sent_at && notice.sms_sent === true && PRICE_CHANGE_LINKABLE_STATUSES.includes(notice.status));
-}
-
-/**
- * Price-change notice link — the phone owner's OWN newest TEXTED notice
- * for a change still ahead (effective today or later, ET): a "here it is
- * again" for a customer who asks. The page shows the customer's first name
- * and their price, so the route resolves the row strictly
- * (STRICT_OWNER_KINDS) and /sms re-binds it. Permanent token, raw URL — the
- * same link the notices lane texted (price-change-notices.js).
- */
-// The customer's newest DELIVERED notice (the lane's success stamp, either
-// channel) — the one row that can be the composer's link, for the builder
-// and the send seam alike. Newest is judged before every other predicate:
-// a later correction is the customer's terms even once its date has passed
-// (GH Codex #3893 r10 P1) and even when it went by email only (r11 P1), so
-// filtering to upcoming or texted first would let the older notice it
-// corrected resurface as "newest". Whether that newest notice was texted
-// (deliveredPriceChangeNotice — the composer re-shares texts only) and is
-// still ahead (upcomingPriceChange) is judged afterwards.
-function newestDeliveredPriceChangeNotice(customerId) {
-  return db('price_change_notices')
-    .where({ customer_id: customerId })
-    .whereIn('status', PRICE_CHANGE_LINKABLE_STATUSES)
-    .whereNotNull('sent_at')
-    // Newest ISSUED, not farthest-out: a later correction effective sooner
-    // must not be shadowed by an older notice with a farther effective date
-    // (GH Codex #3893 r5 P1).
-    .orderBy([{ column: 'sent_at', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
-    .first('id', 'notice_token', 'effective_date', 'current_amount_cents', 'new_amount_cents', 'cadence_label', 'status', 'sent_at', 'sms_sent');
-}
-// Still ahead: effective today (ET) or later.
-const upcomingPriceChange = (notice) => dateOnly(notice.effective_date) >= etDateString();
-
-async function buildPriceChangeNoticeLink(customerId) {
-  const notice = await newestDeliveredPriceChangeNotice(customerId);
-  if (!notice || !upcomingPriceChange(notice)) return { url: null, line: '', reason: 'No upcoming price change notice for this customer' };
-  // The newest notice went by email only: its first text is the lane's
-  // (template + opt-out footer), never the composer's, and the older
-  // texted notice it corrected is not the customer's terms (r11 P1).
-  if (!deliveredPriceChangeNotice(notice)) return { url: null, line: '', reason: 'The latest price change notice was emailed, not texted — re-send it from Pricing → Notices before texting a link' };
-  const { formatMoney } = require('./price-change-notices');
-  const url = `${publicPortalUrl()}/price-change/${notice.notice_token}`;
-  const effectiveDate = dateOnly(notice.effective_date);
-  return {
-    url,
-    line: `Here are the details of your upcoming price change, effective ${formatDisplayDate(effectiveDate)}: ${url}\n\n`,
-    // Immediate sends only — the notice must still be upcoming at delivery.
-    immediateOnly: true,
-    priceChange: {
-      id: notice.id,
-      effectiveDate,
-      currentPrice: formatMoney(notice.current_amount_cents),
-      newPrice: formatMoney(notice.new_amount_cents),
-      cadenceLabel: notice.cadence_label || 'month',
-      status: notice.status,
-    },
-  };
-}
-
 // A project whose public viewer would answer 402 (pay card) instead of the
 // report — reports-public heldReportPaymentContext's own set.
 const PROJECT_REPORT_HELD_STATUSES = ['held', 'releasing'];
@@ -2024,16 +1868,22 @@ const PROJECT_REPORT_HELD_STATUSES = ['held', 'releasing'];
 // report was never sent (project-completion.js report_not_sent), and the
 // public viewer has no status gate past the token, so a closed row alone is
 // not an issued report; the project send flow stamps sent_at (GH Codex
-// #3893 r3 P1). Both the builder and the send seam require it — or the
-// migrated historical delivery: 20260511000001_projects_delivery_status
-// marks reports sent before channel-level evidence 'legacy_sent', and
-// those rows can carry no sent_at while their public token still opens
-// (r7 P2).
+// #3893 r3 P1).
 const PROJECT_REPORT_STATUSES = ['sent', 'closed'];
-const PROJECT_REPORT_LEGACY_DELIVERY = 'legacy_sent';
 const issuedProjectReport = (project) => Boolean(project)
   && PROJECT_REPORT_STATUSES.includes(String(project.status || ''))
-  && Boolean(project.sent_at || project.delivery_status === PROJECT_REPORT_LEGACY_DELIVERY);
+  && Boolean(project.sent_at);
+// The composer RE-SHARES a text the project send flow already delivered —
+// it never sends a report's first text: that is the flow's, with the
+// project_report_ready template, its kill switch and the delivery record.
+// sent_at is stamped on an email-only delivery too (no phone, template
+// off), so the evidence is the flow's own SMS leg (delivery_channels.sms.ok
+// — the record it writes per attempt; a later resend that could not text
+// clears it, and the report drops out until the flow texts it again). A
+// migrated 'legacy_sent' delivery predates channel evidence and can carry
+// no SMS leg, so it is not linkable here (GH Codex #3893 r15 P1).
+const PROJECT_REPORT_SMS_LEG_SQL = "delivery_channels->'sms'->>'ok' = 'true'";
+const textedProjectReport = (project) => Boolean(project && project.delivery_channels && project.delivery_channels.sms && project.delivery_channels.sms.ok === true);
 
 /**
  * The project send flow's duplicate-delivery claim (admin-projects /send):
@@ -2054,21 +1904,10 @@ const issuedProjectReport = (project) => Boolean(project)
  *     delivery state is restored, token-guarded (only THIS claim is
  *     cleared). A stale claim taken over restores to 'failed', as the flow
  *     itself normalizes a crashed send.
- * A migrated 'legacy_sent' report is NOT claimed: delivery_status is its
- * only issuance evidence (sent_at is null), so a claim that crashed before
- * its release — or the flow's own stale takeover normalizing it to
- * 'failed' — would erase the proof a working public token still deserves
- * (pre-push Codex P1; GH Codex #3893 r11 P2 asks the same of the flow).
- * Those rows get the read-only check instead: a live flow claim refuses;
- * a durable issued-at field, honoured by the flow's own revert, is the
- * follow-up that closes the residual window for them.
+ * Only reports the flow has texted reach here (textedProjectReport), so a
+ * migrated 'legacy_sent' row — whose delivery_status is its only issuance
+ * evidence — is never claimed and never has that evidence overwritten.
  */
-const PROJECT_SEND_CLAIM_STALE_MS = 10 * 60 * 1000;
-function liveProjectSendClaim(row) {
-  if (!row || row.delivery_status !== 'sending') return false;
-  const claimedAt = new Date(row.updated_at || 0).getTime();
-  return Number.isFinite(claimedAt) && claimedAt >= Date.now() - PROJECT_SEND_CLAIM_STALE_MS;
-}
 async function claimProjectReportSends(projectReports) {
   const crypto = require('crypto');
   const won = [];
@@ -2079,20 +1918,6 @@ async function claimProjectReportSends(projectReports) {
   // (pre-push Codex P1).
   const unique = [...new Map(projectReports.map((p) => [p.id, p])).values()];
   for (const { id, deliveryStatus } of unique) {
-    if (deliveryStatus === PROJECT_REPORT_LEGACY_DELIVERY) {
-      let row;
-      try {
-        row = await db('projects').where({ id }).first('delivery_status', 'updated_at');
-      } catch (err) {
-        await releaseProjectReportSends({ projects: won });
-        throw err;
-      }
-      if (liveProjectSendClaim(row)) {
-        await releaseProjectReportSends({ projects: won });
-        return { ok: false, error: CLAIMED };
-      }
-      continue;
-    }
     const token = crypto.randomBytes(12).toString('hex');
     const seenSending = deliveryStatus === 'sending';
     const q = db('projects').where({ id });
@@ -2127,16 +1952,17 @@ async function releaseProjectReportSends(claim) {
 // it (reports-public loadProjectForReport): a full token matches its row; a
 // vanity prefix must match exactly one.
 async function linkableProjectReport(lookup) {
-  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
+  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'delivery_channels', 'report_token', 'report_hold_status'];
   if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...COLUMNS);
   const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`).limit(2);
   return rows.length === 1 ? rows[0] : null;
 }
 
 /**
- * Project report link — the account's newest issued project report (WDO /
- * specialty; a household shares them like service reports), skipping one on
- * a payment hold (its page is a pay card until the invoice settles). The
+ * Project report link — the account's newest issued AND texted project
+ * report (WDO / specialty; a household shares them like service reports),
+ * skipping one on a payment hold (its page is a pay card until the invoice
+ * settles). The
  * vanity path the report emails use (projectReportPathForProject); the
  * token is the project's permanent report_token, nothing minted.
  */
@@ -2147,19 +1973,18 @@ async function buildProjectReportLink(customerIds) {
     const rows = await db('projects')
       .whereIn('customer_id', customerIds)
       .whereIn('status', PROJECT_REPORT_STATUSES)
-      .where((q) => q.whereNotNull('sent_at').orWhere({ delivery_status: PROJECT_REPORT_LEGACY_DELIVERY }))
+      .whereNotNull('sent_at')
+      .whereRaw(PROJECT_REPORT_SMS_LEG_SQL)
       .whereNotNull('report_token')
-      // A migrated legacy delivery without sent_at sorts after every
-      // stamped one (it predates the stamp).
-      // … by creation among themselves — projects.id is a random UUID, not
-      // a chronological key (r8 P2).
-      .orderByRaw('sent_at DESC NULLS LAST, created_at DESC, id DESC')
+      // Newest issued first; ties by creation — projects.id is a random
+      // UUID, not a chronological key (r8 P2).
+      .orderByRaw('sent_at DESC, created_at DESC, id DESC')
       .offset(offset)
       .limit(PAGE);
     project = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;
     if (project || rows.length < PAGE) break;
   }
-  if (!project) return { url: null, line: '', reason: 'No project report on this account yet' };
+  if (!project) return { url: null, line: '', reason: 'No texted project report on this account yet — a report that only went by email is re-sent from the project' };
   const customer = await db('customers').where({ id: project.customer_id }).first('first_name', 'last_name');
   const path = await require('./project-report-links').projectReportPathForProject(db, project, customer || {});
   if (!path) return { url: null, line: '', reason: 'No project report on this account yet' };
@@ -2250,7 +2075,6 @@ module.exports = {
   markCardRequestSends,
   claimProjectReportSends,
   releaseProjectReportSends,
-  recheckPriceChangeLinks,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,
@@ -2258,6 +2082,5 @@ module.exports = {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
-  buildPriceChangeNoticeLink,
   buildProjectReportLink,
 };

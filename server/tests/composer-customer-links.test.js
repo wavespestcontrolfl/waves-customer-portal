@@ -66,9 +66,6 @@ jest.mock('../services/project-report-links', () => ({
   ...jest.requireActual('../services/project-report-links'),
   projectReportPathForProject: jest.fn(async (_db, project, customer) => `/report/project/${String(customer?.first_name || 'customer').toLowerCase()}-${String(project.report_token).slice(0, 12)}`),
 }));
-jest.mock('../services/price-change-notices', () => ({
-  formatMoney: (cents) => { const n = Number(cents || 0) / 100; return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`; },
-}));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
 // The real predicate: typedReportDelivery set to anything but auto_send is
 // suppressed (internal_only / disabled typed reports 404 publicly).
@@ -137,7 +134,6 @@ const {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
-  buildPriceChangeNoticeLink,
   buildProjectReportLink,
   markStatementsSent,
   markPrepGuidesSent,
@@ -146,7 +142,6 @@ const {
   markCardRequestSends,
   claimProjectReportSends,
   releaseProjectReportSends,
-  recheckPriceChangeLinks,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -1032,70 +1027,12 @@ describe('buildServiceReportLink', () => {
   });
 });
 
-describe('buildPriceChangeNoticeLink', () => {
-  const NOTICE = { id: 'n1', notice_token: 'a'.repeat(32), effective_date: '2099-01-01', current_amount_cents: 6500, new_amount_cents: 7000, cadence_label: 'month', status: 'sent', sent_at: '2026-09-01T12:00:00Z', sms_sent: true };
-
-  test('the phone owner\'s own newest upcoming DELIVERED notice (sent / viewed) — immediate-only, permanent token', async () => {
-    mockBuilders = { price_change_notices: chainBuilder({ firstRow: NOTICE }) };
-    const r = await buildPriceChangeNoticeLink('c1');
-    expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ customer_id: 'c1' });
-    // Re-share only: first delivery (claim, template + opt-out footer, sent
-    // finalization) is the notices lane's — an 'unreachable' notice is never
-    // texted from the composer (GH Codex #3893 r2 P1 ×2).
-    expect(mockBuilders.price_change_notices.whereIn).toHaveBeenCalledWith('status', ['sent', 'viewed']);
-    // Status is not delivery evidence (the public page marks any row
-    // 'viewed'); the lane's success stamp is required (r5 P1).
-    expect(mockBuilders.price_change_notices.whereNotNull).toHaveBeenCalledWith('sent_at');
-    // Texted is NOT a query filter either: the newest delivered notice is
-    // picked across channels, then must have been texted — an email-only
-    // correction retires the older texted notice instead of being filtered
-    // out ahead of it (r11 P1; the r6 P1 rule now lives in the predicate).
-    expect(mockBuilders.price_change_notices.where).not.toHaveBeenCalledWith({ sms_sent: true });
-    // The date is NOT a query filter: the newest texted notice is picked
-    // first and only then judged upcoming, so a correction whose date has
-    // passed still retires the older notice it corrected (r10 P1).
-    expect(mockBuilders.price_change_notices.where).not.toHaveBeenCalledWith('effective_date', expect.anything(), expect.anything());
-    // Newest ISSUED wins — never the farthest-out effective date, so a later
-    // correction is not shadowed by an older notice (r5 P1).
-    expect(mockBuilders.price_change_notices.orderBy).toHaveBeenCalledWith([
-      { column: 'sent_at', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' },
-    ]);
-    expect(r.url).toBe(`https://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`);
-    expect(r.line).toMatch(/^Here are the details of your upcoming price change, effective .*2099: https:\/\/portal/);
-    expect(r.immediateOnly).toBe(true);
-    expect(r.priceChange).toEqual({ id: 'n1', effectiveDate: '2099-01-01', currentPrice: '$65', newPrice: '$70', cadenceLabel: 'month', status: 'sent' });
-  });
-
-  test('no upcoming notice → reason', async () => {
-    mockBuilders = { price_change_notices: chainBuilder({ firstRow: null }) };
-    const r = await buildPriceChangeNoticeLink('c1');
-    expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/No upcoming price change/);
-  });
-
-  test('the newest texted notice is a correction already in effect → no link, and the older notice it corrected does not resurface (r10 P1)', async () => {
-    mockBuilders = { price_change_notices: chainBuilder({ firstRow: { ...NOTICE, id: 'n2', effective_date: '2020-01-01' } }) };
-    const r = await buildPriceChangeNoticeLink('c1');
-    expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/No upcoming price change/);
-    // One pick — nothing re-queries for an older upcoming row.
-    expect(mockBuilders.price_change_notices.first).toHaveBeenCalledTimes(1);
-  });
-
-  test('the newest delivered notice went by email only → no link (its first text is the lane\'s), and the older texted notice does not resurface (r11 P1)', async () => {
-    mockBuilders = { price_change_notices: chainBuilder({ firstRow: { ...NOTICE, id: 'n2', sms_sent: false } }) };
-    const r = await buildPriceChangeNoticeLink('c1');
-    expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/emailed, not texted — re-send it from Pricing/);
-    expect(mockBuilders.price_change_notices.first).toHaveBeenCalledTimes(1);
-  });
-});
-
 describe('buildProjectReportLink', () => {
-  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z' };
-  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z' };
+  const TEXTED = { sms: { ok: true }, email: { ok: true } };
+  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z', delivery_channels: TEXTED };
+  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z', delivery_channels: TEXTED };
 
-  test('the account\'s newest issued report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
+  test('the account\'s newest issued AND texted report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
     mockBuilders = {
       projects: chainBuilder({ rows: [HELD, ISSUED] }),
       customers: chainBuilder({ firstRow: { first_name: 'Dana', last_name: 'Lee' } }),
@@ -1105,17 +1042,16 @@ describe('buildProjectReportLink', () => {
     expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('status', ['sent', 'closed']);
     // Delivery evidence too: completing a visit closes a project and mints
     // its token even when the report was never sent (GH Codex #3893 r3 P1)
-    // — sent_at, or the migrated 'legacy_sent' delivery that predates the
-    // stamp (r7 P2).
-    const evidence = mockBuilders.projects.where.mock.calls.find(([arg]) => typeof arg === 'function')[0];
-    const q = { whereNotNull: jest.fn(() => q), orWhere: jest.fn(() => q) };
-    evidence(q);
-    expect(q.whereNotNull).toHaveBeenCalledWith('sent_at');
-    expect(q.orWhere).toHaveBeenCalledWith({ delivery_status: 'legacy_sent' });
+    // — sent_at AND the send flow's own SMS leg: the composer re-shares a
+    // text the flow delivered, never sends a report's first text (an
+    // email-only delivery stamps sent_at too — r15 P1). A migrated
+    // 'legacy_sent' row carries no SMS leg and drops out with it.
+    expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('sent_at');
+    expect(mockBuilders.projects.whereRaw).toHaveBeenCalledWith("delivery_channels->'sms'->>'ok' = 'true'");
     expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
-    // Stamped first; legacy rows by creation among themselves (id is a
-    // random UUID, not chronological — r8 P2).
-    expect(mockBuilders.projects.orderByRaw).toHaveBeenCalledWith('sent_at DESC NULLS LAST, created_at DESC, id DESC');
+    // Newest issued first; ties by creation (id is a random UUID, not
+    // chronological — r8 P2).
+    expect(mockBuilders.projects.orderByRaw).toHaveBeenCalledWith('sent_at DESC, created_at DESC, id DESC');
     expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/project/dana-${'f'.repeat(12)}`);
     // The title rides the email path's type-gated fee scrub (projectTitle),
@@ -1131,7 +1067,7 @@ describe('buildProjectReportLink', () => {
     mockBuilders = { projects: chainBuilder({ rows: [HELD] }) };
     const r = await buildProjectReportLink(['c1']);
     expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/No project report/);
+    expect(r.reason).toMatch(/No texted project report/);
   });
 });
 
@@ -1269,17 +1205,16 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck('Here is your latest service report: wavespest.co/l/rep1')).toEqual({ present: true, label: 'Service report' });
   });
 
-  test('a project report link (vanity or full-token form) and a price change notice link are immediate-only; the project form is not mistaken for a service report', async () => {
+  test('a project report link (vanity or full-token form) is immediate-only; the project form is not mistaken for a service report', async () => {
     mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
     expect(await immediateOnlyLinkSendCheck(`Here is your report: portal.wavespestcontrol.com/report/project/dana-lee-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`)).toEqual({ present: true, label: 'Project report' });
     // The viewer ignores the slug — a working vanity URL with `_` / `.` in
     // it is the same report and is fenced the same (r5 P1).
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana_lee.jr-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });
-    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
     // An explicit http:// owned link is still a protected link (fence reads presence).
-    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
-    expect(await immediateOnlyLinkSendCheck(`evil.example/price-change/${'a'.repeat(32)}`)).toEqual({ present: false });
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`)).toEqual({ present: true, label: 'Project report' });
+    expect(await immediateOnlyLinkSendCheck(`evil.example/report/project/${'f'.repeat(32)}`)).toEqual({ present: false });
   });
 
   test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
@@ -1967,7 +1902,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
     describe('project report links resolve as the viewer does and bind to the account', () => {
       const FULL = 'f'.repeat(32);
-      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', report_token: FULL, report_hold_status: null, ...over });
+      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', delivery_channels: { sms: { ok: true }, email: { ok: true } }, report_token: FULL, report_hold_status: null, ...over });
       function wireProject({ full = project(), byPrefix = [project()], ...account } = {}) {
         wireAccount(account);
         mockBuilders.projects = chainBuilder({ firstRow: full, rows: byPrefix });
@@ -1988,10 +1923,9 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana_lee.jr-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
         expect(mockBuilders.projects.where).toHaveBeenCalledWith('report_token', 'like', `${FULL.slice(0, 12)}%`);
         expect(mockBuilders.projects.limit).toHaveBeenCalledWith(2);
-        // A migrated historical delivery ('legacy_sent', no sent_at) is an
-        // issued report whose token still opens (r7 P2).
-        wireProject({ full: project({ sent_at: null, delivery_status: 'legacy_sent' }) });
-        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK('legacy_sent'));
+        // The verified delivery state rides back for the claim.
+        wireProject({ full: project({ delivery_status: 'sent' }) });
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK('sent'));
       });
 
       test('an ambiguous prefix, a vanished project, a payment-held report, or another account\'s report refuses', async () => {
@@ -2007,6 +1941,14 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         // the token exists, the report was not issued (GH Codex #3893 r3 P1).
         wireProject({ full: project({ sent_at: null }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        // Issued by EMAIL only (no phone, or the report SMS template off /
+        // failed): sent_at is stamped, but the composer must not perform
+        // the report's first text outside the project send flow (r15 P1).
+        // A migrated 'legacy_sent' row carries no SMS leg either.
+        wireProject({ full: project({ delivery_channels: { email: { ok: true }, sms: { ok: false, error: 'no phone on file' } } }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/only gone out by email/);
+        wireProject({ full: project({ sent_at: null, delivery_channels: null, delivery_status: 'legacy_sent' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: project({ report_hold_status: 'held' }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);
         wireProject({ full: project({ customer_id: 'c9' }), linkCustomer: acct('c9', 'other') });
@@ -2016,81 +1958,6 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect((await bearerLinkSendCheck(`https://evil.example/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
         expect((await bearerLinkSendCheck('portal.wavespestcontrol.com/report/project/just-a-slug', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
       });
-    });
-  });
-
-  describe('price change notice links are bound to the recipient\'s OWN row at the send', () => {
-    const NOTICE_TOKEN = 'a'.repeat(32);
-    const notice = (over = {}) => ({ id: 'n1', customer_id: 'c1', status: 'sent', effective_date: '2099-01-01', sent_at: '2026-09-01T12:00:00Z', sms_sent: true, ...over });
-    function wireNotice({ row = notice(), owner = { id: 'c1', phone: '+1 (941) 555-0100' } } = {}) {
-      wire({ owner });
-      mockBuilders.price_change_notices = chainBuilder({ firstRow: row });
-    }
-
-    // The verified notice rides back so /sms dispatches under the customer's
-    // notice lock and re-checks it inside (r13 P1).
-    const OK = { ok: true, priceNotices: [{ customerId: 'c1', noticeId: 'n1' }] };
-
-    test('a delivered notice for a change still ahead, owned by the recipient, passes as a bearer', async () => {
-      wireNotice({ row: notice({ status: 'viewed' }) });
-      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK);
-      expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
-      expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c1' });
-      // An upper-cased token is the same working page (the public route
-      // lowercases before its lookup) — looked up lower-cased, not refused.
-      wireNotice();
-      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN.toUpperCase()}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK);
-      expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
-    });
-
-    test('recheckPriceChangeLinks re-runs the same predicates inside the notice lock — a correction delivered meanwhile refuses, an unchanged notice passes (r13 P1)', async () => {
-      wireNotice();
-      expect(await recheckPriceChangeLinks(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK);
-      wireNotice();
-      mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2' }));
-      expect((await recheckPriceChangeLinks(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
-    });
-
-    test('an undelivered (draft / sending / unreachable) notice, a past change, a vanished token, or another customer\'s notice refuses', async () => {
-      wireNotice({ row: notice({ status: 'sending' }) });
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
-      // First delivery is the notices lane's (claim + template + finalization).
-      wireNotice({ row: notice({ status: 'unreachable' }) });
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
-      // 'viewed' without the lane's success stamp = a failed-attempt link
-      // opened from the audit log, not a delivered notice (r5 P1).
-      wireNotice({ row: notice({ status: 'viewed', sent_at: null }) });
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
-      // Email-only delivery ('sent' + sent_at, sms_sent false): the first
-      // text is the lane's, with its template and opt-out footer (r6 P1).
-      wireNotice({ row: notice({ sms_sent: false }) });
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
-      // A correction texted after the draft was written is a separate row
-      // that supersedes this one: the link must be the customer's newest
-      // texted notice (r7 P1).
-      wireNotice();
-      mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2' }));
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
-      expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ customer_id: 'c1' });
-      // The correction retires the older notice even once its own date has
-      // passed — newest is judged before upcoming, so obsolete notice A
-      // cannot resurface as the customer's terms (r10 P1).
-      wireNotice();
-      mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2', effective_date: '2020-01-01' }));
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
-      // … and so does a correction delivered by EMAIL only (r11 P1).
-      wireNotice();
-      mockBuilders.price_change_notices.first.mockResolvedValueOnce(notice()).mockResolvedValueOnce(notice({ id: 'n2', sms_sent: false }));
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/newer price change notice/);
-      expect(mockBuilders.price_change_notices.where).not.toHaveBeenCalledWith({ sms_sent: true });
-      wireNotice({ row: notice({ effective_date: '2020-01-01' }) });
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
-      wireNotice({ row: null });
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
-      wireNotice({ owner: { id: 'c9', phone: '+1 (941) 555-0199' } });
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
-      wireNotice();
-      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c2' })).error).toMatch(/Pick this customer/);
     });
   });
 
@@ -2186,30 +2053,6 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(r.claim.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
     });
 
-    test('claim: a migrated legacy_sent report is never claimed — delivery_status is its only issuance evidence — but a LIVE flow claim on it still refuses (pre-push Codex P1)', async () => {
-      const projects = chainBuilder({ firstRow: { delivery_status: 'legacy_sent', updated_at: '2026-01-01T00:00:00Z' } });
-      mockBuilders = { projects };
-      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'legacy_sent' }, { id: 'p2', deliveryStatus: 'sent' }]);
-      expect(r.ok).toBe(true);
-      // Read, not written; only the stamped report carries a claim.
-      expect(projects.first).toHaveBeenCalledWith('delivery_status', 'updated_at');
-      expect(claimUpdate(projects)).toHaveLength(1);
-      expect(r.claim.projects.map((p) => p.id)).toEqual(['p2']);
-      // The flow is re-sending the legacy report right now: refuse, and hand
-      // back the claim already won. A stale claim (past ten minutes) passes.
-      const busy = chainBuilder({ firstRow: { delivery_status: 'sending', updated_at: new Date().toISOString() } });
-      mockBuilders = { projects: busy };
-      const lost = await claimProjectReportSends([{ id: 'p2', deliveryStatus: 'sent' }, { id: 'p1', deliveryStatus: 'legacy_sent' }]);
-      expect(lost.ok).toBe(false);
-      expect(lost.error).toMatch(/being re-sent right now/);
-      expect(claimUpdate(busy)).toHaveLength(2);
-      expect(claimUpdate(busy)[1][0]).toMatchObject({ delivery_status: 'sent', delivery_claim_token: null });
-      const stale = chainBuilder({ firstRow: { delivery_status: 'sending', updated_at: '2020-01-01T00:00:00Z' } });
-      mockBuilders = { projects: stale };
-      expect((await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'legacy_sent' }])).ok).toBe(true);
-      expect(claimUpdate(stale)).toHaveLength(0);
-    });
-
     test('claim lost (the flow is sending right now, or the state moved): every claim this call won is handed back, token-guarded, and the send refuses', async () => {
       const projects = chainBuilder();
       projects.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
@@ -2234,9 +2077,9 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     test('release: restores the delivery state this claim replaced, only where the row still carries this claim', async () => {
       const projects = chainBuilder();
       mockBuilders = { projects };
-      await releaseProjectReportSends({ projects: [{ id: 'p1', token: 't1', previousStatus: 'legacy_sent' }, { id: 'p3', token: 't3', previousStatus: 'failed' }] });
+      await releaseProjectReportSends({ projects: [{ id: 'p1', token: 't1', previousStatus: 'partial' }, { id: 'p3', token: 't3', previousStatus: 'failed' }] });
       expect(projects.where).toHaveBeenCalledWith({ id: 'p1', delivery_status: 'sending', delivery_claim_token: 't1' });
-      expect(projects.update).toHaveBeenCalledWith({ delivery_status: 'legacy_sent', delivery_claim_token: null, updated_at: 'NOW()' });
+      expect(projects.update).toHaveBeenCalledWith({ delivery_status: 'partial', delivery_claim_token: null, updated_at: 'NOW()' });
       expect(projects.where).toHaveBeenCalledWith({ id: 'p3', delivery_status: 'sending', delivery_claim_token: 't3' });
       expect(projects.update).toHaveBeenCalledWith({ delivery_status: 'failed', delivery_claim_token: null, updated_at: 'NOW()' });
     });

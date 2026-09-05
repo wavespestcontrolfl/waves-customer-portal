@@ -705,64 +705,6 @@ describe('admin communications SMS route', () => {
       });
     });
 
-    // A composer-carried price-change notice link: the provider call runs
-    // under the customer's notice lock (shared with the notices lane) with
-    // the newest-notice check re-run inside it (GH Codex #3893 r13 P1).
-    describe('price change notice link in the body', () => {
-      const NOTICE_BODY = `Details: portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`;
-      const NOTICES = [{ customerId: 'cust-A', noticeId: 'n1' }];
-      const ccl = () => require('../services/composer-customer-links');
-      const { runExclusive } = require('../utils/cron-lock');
-      let bearerSpy;
-      let recheckSpy;
-      beforeEach(() => {
-        bearerSpy = jest.spyOn(ccl(), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, priceNotices: NOTICES });
-        recheckSpy = jest.spyOn(ccl(), 'recheckPriceChangeLinks').mockResolvedValue({ ok: true, priceNotices: NOTICES });
-        db.mockImplementation((table) => {
-          const first = jest.fn();
-          if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
-          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), del: jest.fn(async () => 1) };
-        });
-      });
-      afterEach(() => {
-        bearerSpy.mockRestore();
-        recheckSpy.mockRestore();
-        runExclusive.mockImplementation(async (_key, fn) => fn());
-      });
-
-      test('a real send: the lock is taken and the notice re-checked BEFORE the provider call', async () => {
-        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9', provider: 'twilio' });
-        await withServer(async (baseUrl) => {
-          const res = await send(baseUrl, { customerId: 'cust-A', body: NOTICE_BODY });
-          expect(res.status).toBe(200);
-          expect(runExclusive).toHaveBeenCalledWith('price-notice:cust-A', expect.any(Function), { recordHealth: false, waitForSlot: false });
-          const lockTaken = runExclusive.mock.invocationCallOrder[runExclusive.mock.calls.findIndex(([key]) => key === 'price-notice:cust-A')];
-          expect(lockTaken).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
-          expect(recheckSpy).toHaveBeenCalledWith(NOTICE_BODY, '5551234567', { trustedCustomerId: 'cust-A', usDestination: true });
-          expect(recheckSpy.mock.invocationCallOrder[0]).toBeGreaterThan(lockTaken);
-          expect(recheckSpy.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
-        });
-      });
-
-      test('a correction delivered between the pre-send check and the lock refuses as not-sent; a held lock (the lane is sending) reports retry-in-a-moment', async () => {
-        recheckSpy.mockResolvedValue({ ok: false, error: 'A newer price change notice has been sent to this customer — remove the link and insert a fresh one.' });
-        await withServer(async (baseUrl) => {
-          const res = await send(baseUrl, { customerId: 'cust-A', body: NOTICE_BODY });
-          expect(res.status).toBe(422);
-          expect((await res.json()).error).toMatch(/newer price change notice/);
-          expect(sendCustomerMessage).not.toHaveBeenCalled();
-        });
-        recheckSpy.mockResolvedValue({ ok: true, priceNotices: NOTICES });
-        runExclusive.mockImplementation(async (key, fn) => (key.startsWith('price-notice:') ? { skipped: true, reason: 'lease_held' } : fn()));
-        await withServer(async (baseUrl) => {
-          const res = await send(baseUrl, { customerId: 'cust-A', body: NOTICE_BODY });
-          expect(res.status).toBe(422);
-          expect((await res.json()).error).toMatch(/being sent to this customer right now/);
-          expect(sendCustomerMessage).not.toHaveBeenCalled();
-        });
-      });
-    });
-
     // A composer-carried project report link: the project send flow's own
     // delivery claim is taken before the provider call and handed back once
     // the provider has answered, so a resend that starts meanwhile 409s on

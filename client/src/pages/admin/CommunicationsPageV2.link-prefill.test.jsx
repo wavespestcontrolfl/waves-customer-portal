@@ -178,7 +178,6 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
       "contract",
       "statement",
       "project_report",
-      "price_change",
       "portal_login",
       "cancel_plan",
     ]);

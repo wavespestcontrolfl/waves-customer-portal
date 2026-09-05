@@ -23,7 +23,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 const { CITY_TO_LOCATION } = require('../config/locations');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { portalUrl } = require('../utils/portal-url');
@@ -322,152 +321,128 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
   const byId = new Map(customers.map((c) => [c.id, c]));
   const summary = { created: 0, emailed: 0, texted: 0, unreachable: 0, alreadyNotified: 0, failed: 0 };
 
-  // One customer's notice, start to finish (event lookup → claim → legs →
-  // finalize). Runs under the customer's notice lock below.
-  const sendOne = async (row) => {
-    try {
-      // Retry idempotency: the change EVENT for a customer is identified
-      // by (customer, effective date, current → new amount), not by
-      // batch_id — a re-run of the same confirmed change after a partial
-      // failure must not re-notice customers who already got theirs.
-      const existing = await db('price_change_notices')
-        .where({
-          customer_id: row.customerId,
-          effective_date: effective,
-          current_amount_cents: row.currentCents,
-          new_amount_cents: row.newCents,
-        })
-        .orderBy('created_at', 'desc')
-        .first();
-      if (existing && ['sent', 'viewed'].includes(existing.status)) {
-        summary.alreadyNotified += 1;
-        return;
-      }
-
-      let notice = existing;
-      let token = existing ? existing.notice_token : null;
-      if (!notice) {
-        token = crypto.randomBytes(16).toString('hex');
-        // onConflict on the event tuple (unique index): if a concurrent
-        // /send won the insert race between our lookup and here, we get
-        // nothing back — the winner is already sending, so skip rather
-        // than double-text the customer.
-        const inserted = await db('price_change_notices').insert({
-          batch_id: batchId,
-          customer_id: row.customerId,
-          current_amount_cents: row.currentCents,
-          new_amount_cents: row.newCents,
-          cadence_label: cadence,
-          effective_date: effective,
-          notice_token: token,
-          status: 'draft',
-          created_by: actorId || null,
-          metadata: JSON.stringify({ increase: inc, location_id: loc }),
-        }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning('*');
-        if (!inserted.length) {
-          summary.alreadyNotified += 1;
-          return;
-        }
-        notice = inserted[0];
-        summary.created += 1;
-      }
-
-      // Atomically claim the row for this attempt (draft → sending): two
-      // admins retrying the same change can both pass the lookup above,
-      // and the SMS leg has no provider idempotency key, so only the
-      // claim winner may send. A crash mid-send leaves 'sending', which
-      // becomes reclaimable once stale.
-      const claimed = await db('price_change_notices')
-        .where({ id: notice.id })
-        .where(function claimable() {
-          // 'unreachable' stays claimable: if the office later adds a
-          // phone/email or clears a block, rerunning the same change
-          // re-attempts delivery instead of skipping the customer.
-          this.whereIn('status', ['draft', 'unreachable'])
-            .orWhere(function staleSending() {
-              this.where({ status: 'sending' })
-                .where('updated_at', '<', new Date(Date.now() - CLAIM_STALE_MS));
-            });
-        })
-        .update({ status: 'sending', updated_at: new Date() });
-      if (!claimed) {
-        summary.alreadyNotified += 1;
-        return;
-      }
-
-      const customer = byId.get(row.customerId);
-      const vars = {
-        current_price: formatMoney(row.currentCents),
-        new_price: formatMoney(row.newCents),
-        effective_date: effectiveLabel,
-        cadence_label: cadence,
-        price_change_url: portalUrl(`/price-change/${token}`),
-      };
-      // Keyed to the change event (stable across retry batches) so the
-      // email library dedupes even if a crash left the row in 'draft'
-      // after the email went out; the email leg appends a hash of the
-      // resolved recipient so a corrected address sends fresh.
-      const idempotencyKeyBase = `price_change:${row.customerId}:${effective}:${row.currentCents}:${row.newCents}`;
-      const email = await sendNoticeEmail({ customer, idempotencyKeyBase, vars });
-      const sms = await sendNoticeSms({ customer, vars, actorId, hasEmailLeg: email.sent, operatorInitiated });
-      if (email.sent) summary.emailed += 1;
-      if (sms.sent) summary.texted += 1;
-
-      if (!email.sent && !sms.sent) {
-        if (email.attempted || sms.attempted) {
-          // A resolvable recipient (incl. billing-contact email) with
-          // zero delivered legs is a provider or template failure —
-          // release the claim back to 'draft' so a retry of the same
-          // change resumes it instead of skipping a customer who never
-          // got their advance notice.
-          summary.failed += 1;
-          await db('price_change_notices').where({ id: notice.id }).update({ status: 'draft', updated_at: new Date() });
-        } else {
-          // No contact at all, or every leg policy-blocked (bounce
-          // suppression, STOP). NOT 'sent' — the row stays claimable so
-          // adding contact info and rerunning the same change delivers;
-          // until then it surfaces in the unreachable count for office
-          // follow-up.
-          summary.unreachable += 1;
-          await db('price_change_notices').where({ id: notice.id }).update({ status: 'unreachable', updated_at: new Date() });
-        }
-        return;
-      }
-
-      await db('price_change_notices').where({ id: notice.id }).update({
-        email_sent: email.sent,
-        sms_sent: sms.sent,
-        status: 'sent',
-        sent_at: new Date(),
-        updated_at: new Date(),
-      });
-    } catch (err) {
-      summary.failed += 1;
-      logger.error(`[price-change] notice failed for customer ${row.customerId}: ${err.message}`);
-    }
-  };
-
   for (let i = 0; i < rows.length; i += SEND_CONCURRENCY) {
     const batch = rows.slice(i, i + SEND_CONCURRENCY);
     await Promise.all(batch.map(async (row) => {
-      // Serialized per customer with the composer's re-share of this
-      // customer's notice: admin-communications dispatchPriceNoticeLinkSend
-      // holds the same `price-notice:<customer>` lock through its provider
-      // handoff and re-reads the newest notice inside it, so a correction
-      // finishing here cannot race a stale re-share out (GH Codex #3893 r13
-      // P1). The chunk fires SEND_CONCURRENCY locks at once but cron-lock
-      // caps concurrent holders at half the pool, so these WAIT for a slot
-      // (a waiter pins no connection; bounded by cron-lock's slot deadline)
-      // instead of failing fast — fail-fast would drop every notice past
-      // the cap in each chunk, and a rerun would starve the same rows
-      // behind the already-notified ones ahead of them (GH Codex #3893 r14
-      // P1). A lock held by a composer re-share, or no slot before the
-      // deadline, counts the row as failed — nothing was claimed, so
-      // rerunning the change resumes it.
-      const outcome = await runExclusive(`price-notice:${row.customerId}`, () => sendOne(row), { recordHealth: false, waitForSlot: true });
-      if (wasLockSkipped(outcome)) {
+      try {
+        // Retry idempotency: the change EVENT for a customer is identified
+        // by (customer, effective date, current → new amount), not by
+        // batch_id — a re-run of the same confirmed change after a partial
+        // failure must not re-notice customers who already got theirs.
+        const existing = await db('price_change_notices')
+          .where({
+            customer_id: row.customerId,
+            effective_date: effective,
+            current_amount_cents: row.currentCents,
+            new_amount_cents: row.newCents,
+          })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (existing && ['sent', 'viewed'].includes(existing.status)) {
+          summary.alreadyNotified += 1;
+          return;
+        }
+
+        let notice = existing;
+        let token = existing ? existing.notice_token : null;
+        if (!notice) {
+          token = crypto.randomBytes(16).toString('hex');
+          // onConflict on the event tuple (unique index): if a concurrent
+          // /send won the insert race between our lookup and here, we get
+          // nothing back — the winner is already sending, so skip rather
+          // than double-text the customer.
+          const inserted = await db('price_change_notices').insert({
+            batch_id: batchId,
+            customer_id: row.customerId,
+            current_amount_cents: row.currentCents,
+            new_amount_cents: row.newCents,
+            cadence_label: cadence,
+            effective_date: effective,
+            notice_token: token,
+            status: 'draft',
+            created_by: actorId || null,
+            metadata: JSON.stringify({ increase: inc, location_id: loc }),
+          }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning('*');
+          if (!inserted.length) {
+            summary.alreadyNotified += 1;
+            return;
+          }
+          notice = inserted[0];
+          summary.created += 1;
+        }
+
+        // Atomically claim the row for this attempt (draft → sending): two
+        // admins retrying the same change can both pass the lookup above,
+        // and the SMS leg has no provider idempotency key, so only the
+        // claim winner may send. A crash mid-send leaves 'sending', which
+        // becomes reclaimable once stale.
+        const claimed = await db('price_change_notices')
+          .where({ id: notice.id })
+          .where(function claimable() {
+            // 'unreachable' stays claimable: if the office later adds a
+            // phone/email or clears a block, rerunning the same change
+            // re-attempts delivery instead of skipping the customer.
+            this.whereIn('status', ['draft', 'unreachable'])
+              .orWhere(function staleSending() {
+                this.where({ status: 'sending' })
+                  .where('updated_at', '<', new Date(Date.now() - CLAIM_STALE_MS));
+              });
+          })
+          .update({ status: 'sending', updated_at: new Date() });
+        if (!claimed) {
+          summary.alreadyNotified += 1;
+          return;
+        }
+
+        const customer = byId.get(row.customerId);
+        const vars = {
+          current_price: formatMoney(row.currentCents),
+          new_price: formatMoney(row.newCents),
+          effective_date: effectiveLabel,
+          cadence_label: cadence,
+          price_change_url: portalUrl(`/price-change/${token}`),
+        };
+        // Keyed to the change event (stable across retry batches) so the
+        // email library dedupes even if a crash left the row in 'draft'
+        // after the email went out; the email leg appends a hash of the
+        // resolved recipient so a corrected address sends fresh.
+        const idempotencyKeyBase = `price_change:${row.customerId}:${effective}:${row.currentCents}:${row.newCents}`;
+        const email = await sendNoticeEmail({ customer, idempotencyKeyBase, vars });
+        const sms = await sendNoticeSms({ customer, vars, actorId, hasEmailLeg: email.sent, operatorInitiated });
+        if (email.sent) summary.emailed += 1;
+        if (sms.sent) summary.texted += 1;
+
+        if (!email.sent && !sms.sent) {
+          if (email.attempted || sms.attempted) {
+            // A resolvable recipient (incl. billing-contact email) with
+            // zero delivered legs is a provider or template failure —
+            // release the claim back to 'draft' so a retry of the same
+            // change resumes it instead of skipping a customer who never
+            // got their advance notice.
+            summary.failed += 1;
+            await db('price_change_notices').where({ id: notice.id }).update({ status: 'draft', updated_at: new Date() });
+          } else {
+            // No contact at all, or every leg policy-blocked (bounce
+            // suppression, STOP). NOT 'sent' — the row stays claimable so
+            // adding contact info and rerunning the same change delivers;
+            // until then it surfaces in the unreachable count for office
+            // follow-up.
+            summary.unreachable += 1;
+            await db('price_change_notices').where({ id: notice.id }).update({ status: 'unreachable', updated_at: new Date() });
+          }
+          return;
+        }
+
+        await db('price_change_notices').where({ id: notice.id }).update({
+          email_sent: email.sent,
+          sms_sent: sms.sent,
+          status: 'sent',
+          sent_at: new Date(),
+          updated_at: new Date(),
+        });
+      } catch (err) {
         summary.failed += 1;
-        logger.warn(`[price-change] notice for customer ${row.customerId} not attempted — the customer's notice lock is held (${outcome.reason}); rerun the change to resume`);
+        logger.error(`[price-change] notice failed for customer ${row.customerId}: ${err.message}`);
       }
     }));
   }
