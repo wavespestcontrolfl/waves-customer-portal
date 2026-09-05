@@ -11672,7 +11672,17 @@ export function CompletionPanel({
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
   }, [service.id]);
 
+  // Save the newest edit when Details, checkout, or Close unmounts the panel
+  // before the autosave delay. Discovery below resets the ref for a new visit.
+  useEffect(() => () => {
+    const draft = draftSnapshotRef.current;
+    if (draft?.serviceId === service.id) {
+      localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
+    }
+  }, [service.id]);
+
   useEffect(() => {
+    draftSnapshotRef.current = null;
     draftReadyRef.current = false;
     setSavedDraft(null);
     setShowDraftPrompt(false);
@@ -11869,11 +11879,10 @@ export function CompletionPanel({
         // billing-409 checkout detour survival).
         companionState,
       };
-    // Latest draft is always reachable synchronously — the billing-409
-    // detour unmounts this panel before the debounce timer fires, and the
-    // cleanup below would otherwise drop the newest edits.
+    // The departure cleanup reads this snapshot before cancelling autosave.
     draftSnapshotRef.current = draft;
     const timer = setTimeout(() => {
+      if (draftSnapshotRef.current !== draft) return;
       localStorage.setItem(
         completionDraftKey(service.id),
         JSON.stringify(draft),
@@ -12341,6 +12350,7 @@ export function CompletionPanel({
   }
 
   function discardDraft() {
+    draftSnapshotRef.current = null;
     localStorage.removeItem(completionDraftKey(service.id));
     // Photos live in memory rather than localStorage. A deliberate Discard
     // must clear them too or old evidence remains attached to the
@@ -13262,6 +13272,7 @@ export function CompletionPanel({
   // when the panel unmounted mid-flight (caller stops without touching
   // submitting state on the stale mount), else "done".
   function finishCompletionSuccess(result) {
+    draftSnapshotRef.current = null;
     sideEffectsRetryRef.current = 0;
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
@@ -13336,6 +13347,7 @@ export function CompletionPanel({
   // completed visit stops being reopenable, run the parent-equivalent
   // bookkeeping, and close out — never the generic failure path.
   function resolveCrossKeyCompleted() {
+    draftSnapshotRef.current = null;
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
     setCommittedReplayReady(false);
