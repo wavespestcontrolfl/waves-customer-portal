@@ -1078,6 +1078,21 @@ class RelayConversation {
     return null;
   }
 
+  /** The turn-cap close: spoken directly, once. */
+  _endForTurnCap() {
+    if (this._ending) return;
+    logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
+    // Neutral copy ON PURPOSE — this line is spoken directly (no model in
+    // the loop to consult CLOCK DATA), so it must be true at 2 AM too.
+    this.say(require('./relay-language').copy('turnCap', this.language));
+    this._ending = true;
+    try {
+      if (this._endSession) this._endSession({ reason: 'turn_cap', captured: this.leadCaptured });
+    } catch (e) {
+      logger.error(`[voice-relay] endSession (turn cap) failed callSid=${this.callSid}: ${e.message}`);
+    }
+  }
+
   /** Handle one transcribed caller turn. Serialized so turns never interleave. */
   handlePrompt(text) {
     const t = String(text || '').trim();
@@ -1094,18 +1109,7 @@ class RelayConversation {
     // call (or a leaked ws key) can't drive the model — and spend Anthropic
     // tokens — without limit. End gracefully rather than going silent.
     if (this._userTurns.length + (this._priorCallerTurns || 0) >= MAX_CALL_TURNS) {
-      if (!this._ending) {
-        logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
-        // Neutral copy ON PURPOSE — this line is spoken directly (no model in
-        // the loop to consult CLOCK DATA), so it must be true at 2 AM too.
-        this.say(require('./relay-language').copy('turnCap', this.language));
-        this._ending = true;
-        try {
-          if (this._endSession) this._endSession({ reason: 'turn_cap', captured: this.leadCaptured });
-        } catch (e) {
-          logger.error(`[voice-relay] endSession (turn cap) failed callSid=${this.callSid}: ${e.message}`);
-        }
-      }
+      this._endForTurnCap();
       return this._chain;
     }
     this._userTurns.push(t);
@@ -1816,6 +1820,14 @@ class RelayConversation {
     }
     if (this._resumeReady) {
       try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
+      // The per-call turn cap, re-judged with the earlier legs' turns now
+      // known (codex r5 P2): handlePrompt admitted this turn before a slow
+      // resume read restored them, so the aggregate is checked again here,
+      // before any model round. This turn is already counted.
+      if (this._userTurns.length + (this._priorCallerTurns || 0) > MAX_CALL_TURNS) {
+        this._endForTurnCap();
+        return;
+      }
     }
     // The boundary covers the MODEL too, not just tools: a superseded socket
     // could otherwise keep answering account questions straight from its
@@ -2291,6 +2303,10 @@ class RelayConversation {
           // …and the replacement's capture floor may have run before this
           // segment landed, with no caller turns to summarise (hook r22 P1).
           await this._refreshFloorLeadSummary(meta);
+          // …and its call_summary likewise (codex r5 P2): a deterministic
+          // summary (or none) is rebuilt from the whole call's caller lines;
+          // a model-written one is left alone.
+          await this._refreshCallSummary(meta);
         } catch (err) {
           logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
         }
@@ -2511,7 +2527,14 @@ class RelayConversation {
         // (ai_transferred is terminal); Sandy's pre-transfer promises must
         // reach the Owed queue from there too (codex r2 P2) — only the
         // transfer's salvage, never a relay_failed row's or the sandbox's.
-        const transferSalvaged = salvaged > 0 && this._transferRequested === true && this.sandbox !== true;
+        // Judged from DURABLE state as well as this socket's latch (codex
+        // r5 P1): on a RECONNECTED call (proven from the row) a production
+        // salvage is the route's second-failure ring (ai_transferred stamped
+        // before this close) — the restored promises reach Owed from there
+        // too. A never-reconnected, never-transferred salvage (relay_failed)
+        // and the sandbox record nothing, as before.
+        const transferSalvaged = salvaged > 0 && this.sandbox !== true
+          && (this._transferRequested === true || Boolean(this._resume && this._resume.reconnects > 0));
         if ((updated || transferSalvaged) && (transcriptUpdate?.transcription || composedFromRowOnly)) {
           // PR 2B: on a reconnected call the persisted transcript is the
           // composed one (all segments); the commitments pass reads THAT
@@ -2533,6 +2556,38 @@ class RelayConversation {
       }
     }
 
+  }
+
+  /**
+   * PR 2B (codex r5 P2) — the late segment's call_summary refresh: the
+   * replacement finalized before this socket's segment landed, so its summary
+   * (a deterministic one from its own turns, or none at all) misses the
+   * caller's pre-drop lines. Rebuilt from EVERY segment's caller lines; a
+   * summary the model wrote (capture_lead's) is never replaced. Bounded,
+   * compare-and-set on the deterministic prefix.
+   */
+  async _refreshCallSummary(meta) {
+    if (!this.callSid) return false;
+    const recovery = require('./relay-recovery');
+    const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
+    if (!callerTurns.length) return false;
+    try {
+      const { buildCallSummary } = require('./relay-transcript');
+      const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
+      const leadCaptured = Boolean(meta.relay_lead_id) || legs.some((seg) => seg && seg.lead_captured === true);
+      const summary = buildCallSummary({ turns: callerTurns.map((text) => ({ role: 'caller', text })), leadCaptured });
+      const rows = await withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid)
+          .where((q) => q.whereNull('call_summary').orWhere('call_summary', 'like', 'AI phone assistant%'))
+          .update({ call_summary: summary, updated_at: new Date() }),
+        WRITE_DRAIN_TIMEOUT_MS,
+        0,
+      );
+      return Number(rows) > 0;
+    } catch (err) {
+      logger.warn(`[voice-relay] call summary refresh after a late segment failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return false;
+    }
   }
 
   /**

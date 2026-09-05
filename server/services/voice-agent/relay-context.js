@@ -118,6 +118,11 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
     // Legacy shape (no sessionKey) keeps the strict one-claim predicate.
     const q = db('call_log').where({ twilio_call_sid: key });
     if (owner) {
+      // Sandy PR 2B: a claimant must be minted at or after the row's LATEST
+      // reconnect stamp (codex r5 P1) — a token from a reconnect render whose
+      // response was lost, still valid after a retry re-stamped the row, is
+      // below the current close-time fence and may not take the call.
+      q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [generation]);
       q.whereRaw(
         `((metadata->>'${RELAY_CLAIM_KEY}') IS NULL `
         + `OR ((metadata->>'${RELAY_CLAIM_OWNER_KEY}') IS DISTINCT FROM ? `

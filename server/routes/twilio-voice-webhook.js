@@ -792,7 +792,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
   if ((req.query || {}).sandbox === '1') {
     logger.info(`[relay-complete] sandbox transfer for ${maskSid(callSid)} — hanging up (no staff ring on the sandbox)`);
     twiml.hangup();
-    return;
+    return 'hangup';
   }
   // The frame names the socket's claim owner (owner-bound writes below).
   const owner = typeof handoff.owner === 'string' && handoff.owner ? handoff.owner.slice(0, 128) : null;
@@ -836,7 +836,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
     const claimed = await withDeadline(claimPromise, STAMP_DEADLINE_MS, 'timeout');
     if (claimed === 0) {
       logger.warn(`[relay-complete] transfer ring already claimed for ${maskSid(callSid)} — retry gets a bare response`);
-      return;
+      return 'bare';
     }
     if (!(Number(claimed) > 0)) {
       // The recorder's action is /voicemail-complete, which never
@@ -860,7 +860,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       }
       queueVoiceMessageSync(callSid);
       appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
-      return;
+      return 'voicemail';
     }
   }
   const forwardNumbers = getFallbackForwardNumbers();
@@ -879,9 +879,10 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
       queueVoiceMessageSync(callSid);
     }
     appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
-    return;
+    return 'voicemail';
   }
   appendStaffRingDial(twiml, forwardNumbers, 30, { language: relayCompleteLanguage(req) });
+  return 'ring';
 }
 
 /** A call_log row that went through a Sandy transfer: the packet, the ring claim, or the outcome. */
@@ -1965,7 +1966,18 @@ async function appendSecondFailureTransfer(req, twiml, callSid) {
     }
     const owner = row ? (parseJsonObject(row.metadata).relay_session_claim_owner || null) : null;
     logger.info(`[relay-complete] second failure for ${maskSid(callSid)} — office open, ringing staff`);
-    await appendRelayTransfer(req, twiml, callSid, { reason: 'transfer', owner: owner ? String(owner) : null });
+    const result = await appendRelayTransfer(req, twiml, callSid, { reason: 'transfer', owner: owner ? String(owner) : null });
+    if (result === 'voicemail') {
+      // The ring fell to voicemail (no staff numbers / unconfirmed ring
+      // claim): the reconnect claim had put the row back to in-progress and
+      // nothing after this voicemail finalizes it — stamp the terminal
+      // status here too (codex r5 P2). Fenced on the voicemail outcome.
+      await withDeadline(
+        db('call_log').where('twilio_call_sid', callSid).where('call_outcome', 'voicemail').update({ status: 'completed', updated_at: new Date() })
+          .catch((err) => logger.warn(`[relay-complete] second-failure voicemail status stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        STAMP_DEADLINE_MS,
+      );
+    }
     return true;
   } catch (err) {
     logger.warn(`[relay-complete] second-failure transfer skipped for ${maskSid(callSid)}: ${err.message}`);

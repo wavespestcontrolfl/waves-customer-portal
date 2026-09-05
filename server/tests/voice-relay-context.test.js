@@ -360,6 +360,8 @@ describe('GATE ON — caller recognition', () => {
       // one bounded flip, never a seesaw; a delayed old socket is strictly
       // older on both axes).
       expect(raws.some((sql) => sql.includes("relay_session_claim_gen')::bigint, 0) < ?"))).toBe(true);
+      // …and a claimant minted BEFORE the row's latest reconnect stamp is refused (codex #3884 r5 P1)
+      expect(raws.some((sql) => sql.includes("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?"))).toBe(true);
       expect(raws.some((sql) => sql.includes("COALESCE(metadata->>'relay_session_claim_owner', '') < ?"))).toBe(true);
       const updateSql = String(builders.call_log.update.mock.calls[0][0].metadata.__raw || builders.call_log.update.mock.calls[0][0].metadata.sql || '');
       expect(updateSql).toContain('relay_session_claim_owner');

@@ -672,6 +672,57 @@ describe('the conversation side', () => {
     }
   });
 
+  test('the turn cap is re-judged after resume hydration: a slow resume read that restores 40 earlier turns ends the call before any model round (codex r5 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: Array.from({ length: 40 }, (_, i) => `Caller: turn ${i}`).join('\n') }] } } });
+    const endSession = jest.fn();
+    const convo = resumedConvo({ callSid: 'CA-cap-late', endSession });
+    // handlePrompt admitted the turn while the read was pending (prior count unknown)
+    convo._priorCallerTurns = 0;
+    convo._userTurns.push('one more');
+    await convo._runLoop('one more').catch(() => {});
+    expect(convo._priorCallerTurns).toBe(40);
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'turn_cap' }));
+    expect(convo.messages.some((m) => m.role === 'user' && String(m.content).includes('one more'))).toBe(false); // no model round
+  });
+
+  test('a route-initiated second-failure transfer (ai_transferred stamped before the resumed close) still records the restored promises from the salvage — judged from the durable outcome, not the local latch (codex r5 P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb({
+      firstRow: { transcription: 'Caller: my ants are back', metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } },
+      updateImpl: jest.fn(async (patch) => { updates.push(patch); return patch.call_outcome === 'ai_handled' ? 0 : 1; }), // the reconcile is fenced out by the transfer outcome; the salvage lands
+    });
+    const convo = resumedConvo({ callSid: 'CA-route-xfer' });
+    convo._sessionSuperseded = jest.fn(async () => false);
+    await convo._resumeReady;
+    convo._recordTurn('caller', 'still here');
+    expect(convo._transferRequested).toBeFalsy();
+    recordRelayCommitments.mockClear();
+    await convo.end('ws_close');
+    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ callSid: 'CA-route-xfer', estimateQueued: true, estimateExpectation: 'about_15_minutes' }));
+    // the sandbox's relay_failed salvage never records
+    const sandbox = resumedConvo({ callSid: 'CA-route-sb', sandbox: true });
+    sandbox._sessionSuperseded = jest.fn(async () => false);
+    await sandbox._resumeReady;
+    sandbox._recordTurn('caller', 'x');
+    recordRelayCommitments.mockClear();
+    await sandbox.end('ws_close');
+    expect(recordRelayCommitments).not.toHaveBeenCalled();
+  });
+
+  test('a late segment rebuilds a deterministic (or missing) call_summary from the whole call\'s caller lines; a model-written summary is left alone (codex r5 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates, guardQ } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back' }, { generation: 2, text: 'Caller: thanks' }] } } });
+    const convo = convoWithTurns();
+    convo._sessionSuperseded = jest.fn(async () => true);
+    await convo.end('ws_close');
+    const refresh = updates.find((u) => typeof u.call_summary === 'string');
+    expect(refresh.call_summary).toBe('AI phone assistant handled this call. Caller said: my ants are back | thanks');
+    expect(guardQ.whereNull).toHaveBeenCalledWith('call_summary');
+    expect(guardQ.orWhere).toHaveBeenCalledWith('call_summary', 'like', 'AI phone assistant%');
+    expect(await convoWithTurns()._refreshCallSummary({ relay_segments: [{ generation: 1, text: 'Agent: only me' }] })).toBe(false);
+  });
+
   test('a lead captured on an earlier leg whose relay_lead_id stamp did not land is still restored as captured (segment lead_captured) (codex r3 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', lead_captured: true }] } } });
