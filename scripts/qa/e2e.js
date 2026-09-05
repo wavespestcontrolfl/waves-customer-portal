@@ -158,7 +158,7 @@ async function main() {
     await step('completion-and-report-redaction', async () => {
       await json(await page.request.post(`${baseUrl}/api/admin/dispatch/${fixture.appointmentId}/complete`, {
         headers: { Authorization: `Bearer ${adminToken}`, 'Idempotency-Key': fixture.runId },
-        data: { technicianNotes: 'QA-PRIVATE-TECH-NOTE-DO-NOT-PUBLISH', customerRecap: 'Assessment completed.',
+        data: { technicianNotes: 'QA-PRIVATE-TECH-NOTE-DO-NOT-PUBLISH', customerRecap: 'Service completed.',
           products: [], sendCompletionSms: false, requestReview: false, offerInspectionCredit: false,
           timeOnSite: 30, areasServiced: ['Exterior'], protocolActionsCompleted: [] },
       }));
@@ -186,7 +186,8 @@ async function main() {
       await exited;
       clearTimeout(timer);
     }
-    fs.writeFileSync(path.join(artifactDir, 'report.json'), JSON.stringify(report, null, 2) + '\n');
+    const reportFile = process.argv.includes('--cleanup') ? 'cleanup.json' : 'report.json';
+    fs.writeFileSync(path.join(artifactDir, reportFile), JSON.stringify(report, null, 2) + '\n');
     await db.destroy();
     console.log(`Private QA artifacts: ${artifactDir}`);
   }

@@ -186,6 +186,9 @@ jobs:
       - name: Remove synthetic accounts and journey records
         if: always()
         run: npm run qa:cleanup
+      - name: Verify retained journey results survived cleanup
+        run: |
+          node -e "const r = require('./.tmp/qa/e2e/report.json'); require('node:assert/strict').equal(r.steps.filter(s => s.passed).length, 6)"
       - name: Application QA evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -193,6 +196,7 @@ jobs:
           name: application-qa-${{ github.sha }}
           path: |
             .tmp/qa/e2e/report.json
+            .tmp/qa/e2e/cleanup.json
             .tmp/qa/e2e/*.png
             .tmp/qa/e2e/trace.zip
           retention-days: 7

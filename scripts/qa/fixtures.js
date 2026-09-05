@@ -36,15 +36,17 @@ async function seed(db, f) {
       onboarding_complete: true, is_primary_profile: true, property_type: 'residential',
       gate_code: 'QA-PRIVATE-ACCESS-DO-NOT-PUBLISH', autopay_enabled: false,
     }).onConflict('id').ignore();
-    const service = await trx('services').where('name', 'Waves Assessment').where({ is_active: true }).first();
-    if (!service) throw new Error('Migrated Waves Assessment catalog row is required.');
+    const service = await trx('services').where({ service_key: 'pest_general_quarterly', is_active: true }).first();
+    if (!service) throw new Error('Migrated general pest catalog row is required for the report journey.');
     f.serviceId = service.id;
     f.serviceName = service.name;
     await trx('estimates').insert({ id: f.estimateId, customer_id: f.customerId, status: 'sent',
       token: f.token, customer_name: 'QA Customer', customer_email: f.customerEmail, customer_phone: f.phone,
       sent_at: new Date(), expires_at: addETDays(new Date(), 30), bill_by_invoice: true,
       use_v2_view: true, category: 'RESIDENTIAL', onetime_total: 99,
-      estimate_data: { oneTime: { items: [{ service: 'assessment', name: service.name, price: 99 }] } },
+      estimate_data: { result: { recurring: { services: [], monthly: 0, annual: 0 },
+        oneTime: { total: 99, membershipFee: 0,
+          items: [{ service: 'pest_general', catalogServiceKey: service.service_key, name: service.name, price: 99 }] } } },
     }).onConflict('id').ignore();
     await trx('scheduled_services').insert({ id: f.appointmentId, customer_id: f.customerId,
       technician_id: f.technicianId, service_id: service.id, service_type: service.name,
@@ -54,7 +56,7 @@ async function seed(db, f) {
       is_recurring: false, create_invoice_on_complete: false,
     }).onConflict('id').ignore();
     await trx('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, token: f.invoiceToken,
-      invoice_number: `QA-${f.runId.slice(0, 8)}`, title: 'QA assessment invoice', subtotal: 99, total: 99,
+      invoice_number: `QA-${f.runId.slice(0, 8)}`, title: 'QA service invoice', subtotal: 99, total: 99,
       status: 'sent', stripe_payment_intent_id: f.paymentIntentId,
       line_items: JSON.stringify([{ description: service.name, quantity: 1, unit_price: 99, amount: 99 }]),
     }).onConflict('id').ignore();
@@ -72,9 +74,12 @@ async function cleanup(db, f) {
     await trx('payments').where({ customer_id: f.customerId }).del();
     await trx('invoices').where({ customer_id: f.customerId }).del();
     await trx('service_records').where({ customer_id: f.customerId }).del();
+    await trx('reschedule_log').whereIn('scheduled_service_id',
+      trx('scheduled_services').select('id').where({ customer_id: f.customerId })).del();
     await trx('scheduled_services').where({ customer_id: f.customerId }).del();
     await trx('estimates').where({ id: f.estimateId }).del();
     await trx('customers').where({ id: f.customerId }).del();
+    await trx('admin_usage_events').whereIn('technician_id', [f.adminId, f.technicianId]).del();
     await trx('technicians').whereIn('id', [f.adminId, f.technicianId]).del();
   });
 }
