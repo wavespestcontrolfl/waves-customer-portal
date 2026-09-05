@@ -1436,7 +1436,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
     const protocols = {
-      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 2, month: 'Any', primary: 'German roach cleanout — Advion Gel per label' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },
       lawn: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] },
     };
     const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'ant', name: 'Advion Ant Gel' }, { id: 'bif', name: 'Bifen IT' }, { id: 'c', name: 'Celsius WG' }];
@@ -1453,6 +1453,9 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       { name: 'Wildlife Trapping Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (specialty)' },
       { name: 'Bee / Wasp Nest Removal', products: 0, visit: null, note: 'No treatment protocol for this add-on (specialty)' },
     ]);
+    // A general pest cleanout add-on follows its key to the perimeter visit, never the German-roach cleanout its name matches (r7 P1); a keyless row keeps the name path.
+    const cleanout = await run({ addons: [{ name: 'Initial Pest Cleanout', category: 'pest_control', serviceKey: 'pest_initial_cleanout' }, { name: 'Initial Pest Cleanout', category: 'pest_control' }] });
+    expect(cleanout.addons.map((a) => a.visit.number)).toEqual([1, 2]);
     // The same identity as the primary line.
     const fireAnt = await run({ serviceType: 'Fire Ant Treatment', serviceCategory: 'specialty', serviceKey: 'fire_ant' });
     expect([fireAnt.visit.visit, fireAnt.lines.map((l) => l.product.id)]).toEqual([3, ['ant']]);

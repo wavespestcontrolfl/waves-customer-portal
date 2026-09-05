@@ -204,6 +204,10 @@ describe('catalog service keys', () => {
     expect(byKey('Termite Inspection Service', 'termite_inspection')).toEqual(['termite', 1, 'termite_inspection']);
     // A short name that classifies as pest by itself still follows its key.
     expect(byKey('Spot Treat', 'termite_spot_treatment')).toEqual(['termite', 4, 'foam_drill']);
+    // The general-pest keys: "Initial Pest Cleanout" is general active-infestation work, not the German-roach cleanout its name matches (job card r7 P1).
+    expect(byKey('Initial Pest Cleanout', 'pest_initial_cleanout')).toEqual(['pest', 1, 'general_pest']);
+    expect(match('Initial Pest Cleanout')).toEqual({ programKey: 'pest', visit: 2, reason: 'german_roach' });
+    expect(byKey('General Pest Control (Monthly)', 'pest_general_monthly')).toEqual(['pest', 1, 'general_pest']);
   });
 
   test('without a claimed key the name path is unchanged', () => {

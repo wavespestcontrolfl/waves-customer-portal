@@ -231,6 +231,10 @@ const MATCH_RULES = [
     programKey: 'pest',
     visit: 1,
     reason: 'general_pest',
+    // The general-pest catalog rows: "Initial Pest Cleanout" is a general
+    // active-infestation treatment, not the German-roach cleanout its name
+    // would otherwise match.
+    serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout'],
     terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter'],
   },
   {
