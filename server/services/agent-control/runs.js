@@ -273,9 +273,33 @@ async function openAttempt(conn, run, policy, now) {
 // A run whose current attempt is LIVE: opened, neither terminal nor queued
 // for a retry, and its lease unexpired — a worker is still heartbeating it
 // (a crashed worker's lease lapses after the policy's stall_after_ms).
+const WAITING = new Set(['waiting_human', 'waiting_external']);
 function isHeld(run, now) {
-  return Number(run.attempts || 0) > 0 && !['terminal', 'queued'].includes(run.lifecycle)
-    && !!run.lease_expires_at && new Date(run.lease_expires_at).getTime() > now.getTime();
+  if (!(Number(run.attempts || 0) > 0) || ['terminal', 'queued'].includes(run.lifecycle)) return false;
+  // a parked attempt (wait()) stopped extending its lease on purpose: it is
+  // owned until resume / finish / fail / supersede, however long the human
+  // or the external party takes — the heartbeat lease is a RUNNING
+  // worker's liveness, not a wait's deadline (Codex r16)
+  if (WAITING.has(run.lifecycle)) return true;
+  return !!run.lease_expires_at && new Date(run.lease_expires_at).getTime() > now.getTime();
+}
+
+// A later start's work item / agent version / workflow bind ON THE ROW,
+// once, when the row has none: the ledger's readers (not just this handle)
+// see the link finish() will mark done, the calls stamp the persisted
+// version, and the handle's scope stamps the same workflow the run reports
+// (Codex r2 / r3 / r16). The persisted value always wins.
+async function bindOnce(trx, run, fields, now) {
+  const patch = {};
+  for (const [col, value] of Object.entries(fields)) if (!run[col] && value) patch[col] = value;
+  if (!Object.keys(patch).length) return;
+  await trx('agent_runs').where({ id: run.id }).update({ ...patch, updated_at: now });
+  Object.assign(run, patch);
+}
+
+function refuse(run) {
+  logger.warn(`[agent-runs] startRun held: ${run.source_system}/${run.source_run_id} attempt ${run.attempts} is ${run.lifecycle} on ${run.worker_id || 'unknown worker'}${WAITING.has(run.lifecycle) ? '' : ` until ${new Date(run.lease_expires_at).toISOString()}`}`);
+  return { held: run };
 }
 
 // The handle a refused start gets: inert (writes nothing) and `held` names
@@ -293,12 +317,15 @@ function heldHandle(args, run) {
  *            summary?, link?, supersede? })
  * Requires laneId or workflowId (CHECK constraint) and sourceSystem +
  * sourceRunId (UNIQUE key). Returns a handle; never throws. A second start
- * on a source key whose attempt is still LIVE (lease unexpired) is refused:
- * the returned handle is inert with `held` set — superseding it would
- * only rewrite the ledger while the first worker's body keeps running, so
- * the business operation could run twice (Codex r15). `supersede: true`
- * is the explicit override for a manual replay. A queued retry, a terminal
- * run and an expired lease (crashed worker) reopen as a new attempt.
+ * on a source key whose attempt is still LIVE — running with its lease
+ * unexpired, or parked in a wait — is refused: the returned handle is
+ * inert with `held` set, and nothing (no work item either) is written for
+ * it — superseding it would only rewrite the ledger while the first
+ * worker's body keeps running or waits, so the business operation could
+ * run twice (Codex r15 / r16). `supersede: true` is the explicit override
+ * for a manual replay (the S4 watchdog's stall handling is the other way
+ * out of a wait whose worker died). A queued retry, a terminal run and an
+ * expired lease on a running attempt (crashed worker) reopen as a new attempt.
  */
 async function startRun(args = {}) {
   if (!runGateOn()) return inertHandle(args);
@@ -323,29 +350,18 @@ async function startRun(args = {}) {
   // or not at all: a crash between the counter bump and the attempt insert
   // would otherwise leave a run whose current attempt has no row.
   const opened = await guarded('startRun', () => db.transaction(async (trx) => {
+    // The existing run first, LOCKED for the transaction: a start refused
+    // for a live attempt leaves nothing behind — not even a work item
+    // minted for the refused start (Codex r16). Two starts on a NEW key
+    // both miss here and serialize on insertRun's locked read instead.
+    const existing = await trx('agent_runs').where({ source_system: clip(args.sourceSystem, 60), source_run_id: clip(args.sourceRunId, 180) }).forUpdate().first();
+    if (existing && isHeld(existing, now) && !args.supersede) return refuse(existing);
     const workItemId = await upsertWorkItem(trx, args, laneId, policy);
-    const run = await insertRun(trx, args, laneId, policy, workItemId, traceId, now);
+    const run = existing || await insertRun(trx, args, laneId, policy, workItemId, traceId, now);
     if (!run) throw new Error('run row missing after insert');
-    // refused before the row is touched: the live attempt keeps its lease,
-    // its work item link and its outcome-to-be
-    if (isHeld(run, now) && !args.supersede) {
-      logger.warn(`[agent-runs] startRun held: ${run.source_system}/${run.source_run_id} attempt ${run.attempts} is live on ${run.worker_id || 'unknown worker'} until ${new Date(run.lease_expires_at).toISOString()}`);
-      return { held: run };
-    }
-    // a run first started without a work item binds one supplied by a later
-    // start ON THE ROW — the ledger's readers (not just this handle) must
-    // see the link finish() will mark done (Codex r2)
-    if (!run.work_item_id && workItemId) {
-      await trx('agent_runs').where({ id: run.id }).update({ work_item_id: workItemId, updated_at: now });
-      run.work_item_id = workItemId;
-    }
-    // likewise the agent version: the persisted one is the run's (its calls
-    // stamp the same id through the context), a later start's binds only
-    // when the row has none (Codex r3)
-    if (!run.agent_version_id && args.agentVersionId) {
-      await trx('agent_runs').where({ id: run.id }).update({ agent_version_id: args.agentVersionId, updated_at: now });
-      run.agent_version_id = args.agentVersionId;
-    }
+    // the new-key race: the row insertRun read was the other start's
+    if (isHeld(run, now) && !args.supersede) return refuse(run);
+    await bindOnce(trx, run, { work_item_id: workItemId, agent_version_id: args.agentVersionId, workflow_id: clip(args.workflowId, 80) }, now);
     // A reopened run keeps ITS lane and policy: the persisted row decides
     // (a money lane cannot be reopened under a read-only one and gain a
     // retry — Codex r1). A mismatch is logged, never honoured.
@@ -361,7 +377,7 @@ async function startRun(args = {}) {
   if (!opened) return inertHandle(args);
   if (opened.held) return heldHandle(args, opened.held);
   // a reopened run keeps the trace its ledger rows already carry
-  return liveHandle({ ...opened, traceId: opened.run.trace_id || traceId, workflowId: opened.run.workflow_id || args.workflowId || null, agentVersionId: opened.run.agent_version_id || null });
+  return liveHandle({ ...opened, traceId: opened.run.trace_id || traceId, workflowId: opened.run.workflow_id || null, agentVersionId: opened.run.agent_version_id || null });
 }
 
 // ── Live handle ──────────────────────────────────────────────────────

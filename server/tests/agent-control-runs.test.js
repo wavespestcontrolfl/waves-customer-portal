@@ -338,6 +338,37 @@ describe('start / step / finish', () => {
 });
 
 describe('concurrent starts', () => {
+  test('a refused start mints no work item for the live run; the same later start binds it once the attempt lapsed (Codex r16)', async () => {
+    const a = await runs.startRun(base);
+    expect(runRow().work_item_id).toBeNull();
+    const b = await runs.startRun({ ...base, workItem: { sourceRef: 'late', title: 'Late' } });
+    expect(b.held).toBeDefined();
+    expect(store.work_items || []).toHaveLength(0);
+    expect(runRow().work_item_id).toBeNull();
+    crash();
+    const c = await runs.startRun({ ...base, workItem: { sourceRef: 'late', title: 'Late' } });
+    expect(c.attemptNo).toBe(2);
+    expect(c.workItemId).toBe(store.work_items[0].id);
+    expect(runRow().work_item_id).toBe(store.work_items[0].id);
+    expect(a.id).toBe(c.id);
+  });
+
+  test('a workflow supplied by a later start binds once on the row, so the handle scope and the run report the same workflow (Codex r16)', async () => {
+    const a = await runs.startRun(base);
+    expect(runRow().workflow_id).toBeNull();
+    expect(a.workflowId).toBeNull();
+    await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
+    const b = await runs.startRun({ ...base, workflowId: 'nightly_sweep' });
+    expect(runRow().workflow_id).toBe('nightly_sweep');
+    expect(b.workflowId).toBe('nightly_sweep');
+    expect(await b.step({ key: 's' }, async () => context.current().workflowId)).toBe('nightly_sweep');
+    await b.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
+    // the persisted workflow wins over a later request
+    const c = await runs.startRun({ ...base, workflowId: 'other' });
+    expect(runRow().workflow_id).toBe('nightly_sweep');
+    expect(c.workflowId).toBe('nightly_sweep');
+  });
+
   test('a second start on a LIVE attempt is refused: a held inert handle, nothing written; runManaged refuses the body; supersede: true overrides (Codex r15)', async () => {
     const a = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
     const ops = state.ops.length;
@@ -357,9 +388,11 @@ describe('concurrent starts', () => {
     const body = jest.fn(async () => 'ran');
     await expect(runs.runManaged(base, body)).rejects.toMatchObject({ code: 'run_in_progress', held: { runId: a.id } });
     expect(body).not.toHaveBeenCalled();
-    // a waiting run still holds its lease → still refused; a queued retry and a lapsed lease reopen
+    // a parked wait is held until an explicit signal — even after its (deliberately unextended) lease lapsed; a queued retry and a lapsed RUNNING lease reopen
     await a.wait('external', 'x');
-    expect((await runs.startRun(base)).held).toBeDefined();
+    crash();
+    expect((await runs.startRun(base)).held).toMatchObject({ runId: a.id, attemptNo: 1 });
+    expect(mockWarn.mock.calls.some((c) => /is waiting_external on/.test(c[0]))).toBe(true);
     // explicit manual replay supersedes
     const c = await runs.startRun({ ...base, supersede: true });
     expect(c.attemptNo).toBe(2);
