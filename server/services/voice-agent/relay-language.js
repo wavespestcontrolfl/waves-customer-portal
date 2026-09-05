@@ -57,6 +57,13 @@ const COPY = {
     en: "Sorry — that's taking me longer than it should. I've made a note for the team to follow up. Is there anything else I can help with?",
     es: 'Disculpe, esto me está tomando más de lo debido. He dejado una nota para que el equipo le dé seguimiento. ¿Hay algo más en lo que pueda ayudarle?',
   },
+  // PR 2B — session recovery. `resumed` is the reconnected leg's welcome
+  // greeting (spoken by Twilio before the socket opens).
+  resumed: {
+    en: 'Sorry, I lost you for a second — where were we?',
+    es: 'Disculpe, se cortó por un segundo. ¿En qué estábamos?',
+  },
+
 };
 
 function copy(key, language) {
