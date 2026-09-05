@@ -405,6 +405,12 @@ describe('pre-push hook round 9', () => {
     // Every fallback path composes through the same closure and reads only the recorded part (hook round 11 P1).
     expect(src.match(/transcription = await composeRelay\(transcription, transcriptionProvenance\);/g)).toHaveLength(3);
     expect(src).toContain("const fresh = await db('call_log').where({ id: call.id }).first('metadata', 'call_outcome', 'transcription', 'transcription_provider', 'transcription_metadata');"); // composed from the CURRENT row, not the claim snapshot
+    // …and when the stash had NOT landed at compose time on a transfer-marked row, every transcript write composes INSIDE the UPDATE
+    // from the row's metadata and reads the written value back (a stash landing between the read and the write is still composed).
+    expect(src).toContain('relayPending = transferred && !segment;');
+    expect(src.match(/await writeTranscript\(/g)).toHaveLength(3);
+    expect(src).toMatch(/CASE WHEN \$\{STASH_SQL\} THEN '\[AI segment\]' \|\| .*\(metadata->'relay_transcript'->>'text'\).*\|\| \?::text ELSE \?::text END/);
+    expect(src).toContain("}, ['transcription']);");
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
     expect(src).toContain("} else if (recordedFallbackOf(call)) {");
     expect(src).toContain("if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;");

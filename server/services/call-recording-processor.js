@@ -6756,8 +6756,39 @@ const CallRecordingProcessor = {
       const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || row.call_outcome === 'ai_transferred';
       return { row, segment: composeRelaySegment(row), transferred, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
     };
+    // Transfer-marked row whose relay text had NOT landed at compose time:
+    // the transcript write below then composes INSIDE the UPDATE from the
+    // row's metadata, so a stash landing between the read and the write is
+    // still composed (hook P1) — and the written value is read back so
+    // extraction sees what the row holds.
+    let relayPending = false;
+    const STASH_SQL = "COALESCE(metadata->'relay_transcript'->>'text', '') <> ''";
+    const composeInSql = (text) => db.raw(
+      `CASE WHEN ${STASH_SQL} THEN '[AI segment]' || E'\\n' || (metadata->'relay_transcript'->>'text') || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || ?::text ELSE ?::text END`,
+      [text, text],
+    );
+    const writeTranscript = async (query, patch) => {
+      if (!relayPending) return Number(await query.update(patch)) || 0;
+      const hasStructured = Object.prototype.hasOwnProperty.call(patch, 'transcript_structured');
+      const rows = await query.update({
+        ...patch,
+        transcription: composeInSql(patch.transcription),
+        transcript_structured: hasStructured
+          ? db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE ?::jsonb END`, [patch.transcript_structured == null ? null : patch.transcript_structured])
+          : db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE transcript_structured END`),
+      }, ['transcription']);
+      const n = Array.isArray(rows) ? rows.length : Number(rows) || 0;
+      const written = Array.isArray(rows) && rows[0] ? rows[0].transcription : null;
+      if (n > 0 && typeof written === 'string' && written.startsWith('[AI segment]')) {
+        recordedSegmentText = patch.transcription;
+        transcription = written;
+        logger.info(`[call-proc] relay stash landed during transcription for ${maskSid(callSid)} — composite written in the UPDATE`);
+      }
+      return n;
+    };
     const composeRelay = async (text, provenance) => {
-      const { segment, label } = await currentRelayState();
+      const { segment, label, transferred } = await currentRelayState();
+      relayPending = transferred && !segment;
       if (!segment) return text;
       recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
       provenance.metadata.relay = segment.metadata;
@@ -6869,10 +6900,10 @@ const CallRecordingProcessor = {
         // multi-minute provider await, by which time a peer may have
         // reclaimed the row. Writing by id alone let a superseded pass
         // overwrite the replacement's transcript (codex P1).
-        const wroteTranscript = await db('call_log')
-          .where({ id: call.id })
-          .where('processing_token', procToken)
-          .update(transcriptUpdate);
+        const wroteTranscript = await writeTranscript(
+          db('call_log').where({ id: call.id }).where('processing_token', procToken),
+          transcriptUpdate,
+        );
         if (!wroteTranscript) {
           // STOP, do not merely skip the write. A zero-row fence here proves
           // a peer owns the call, and everything after this point —
@@ -6947,7 +6978,7 @@ const CallRecordingProcessor = {
         transcription = await composeRelay(transcription, transcriptionProvenance);
         // Token-fenced (post-transcription awaits): the pass that now owns
         // the call scrubs, stamps and quarantines for itself.
-        const fallbackStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+        const fallbackStored = await writeTranscript(db('call_log').where({ id: call.id }).where('processing_token', procToken), {
           // Persist the scrubbed text, not just the local copy — a legacy
           // PAN-bearing row would otherwise stay exposed to every
           // persisted-row consumer (Codex #2676 round-1 P1). Detection is
@@ -6988,7 +7019,7 @@ const CallRecordingProcessor = {
           },
         };
         transcription = await composeRelay(transcription, transcriptionProvenance);
-        const cachedStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+        const cachedStored = await writeTranscript(db('call_log').where({ id: call.id }).where('processing_token', procToken), {
           transcription, // scrubbed — see the fresh-row twin above
           ...(recordedSegmentText ? { transcript_structured: null } : (cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {})),
           transcription_provider: transcriptionProvenance.provider,
