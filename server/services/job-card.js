@@ -313,16 +313,31 @@ async function loadAddons(dbh, serviceId) {
 // before the catalog link, by name. Inspection / other and an unknown
 // category resolve no products. `nonChemical` service keys — the mechanical
 // lawn services (core aeration, dethatching, plugging, top dressing) and
-// rodent sanitation (bleach and manual clean-up) — are work without a
-// chemical program: the catalog classifies them lawn_care / rodent, so the
-// category alone would hand them the program's lines and let the tank
-// search dose any pesticide on them.
+// the rodent rows whose catalog scope has no bait or rodenticide (trapping
+// and its follow-ups, the trap-only retainers, exclusion / wire mesh / bird
+// box, the trapping + exclusion + sanitation bundles, the paid inspection,
+// the guarantee, sanitation) — are work without a chemical program: the
+// catalog classifies them lawn_care / rodent, so the category alone would
+// hand them the program's lines (rodent visit 2 mixes trap setup with
+// Contrac Blox bait stations) and let the tank search dose any pesticide
+// on them. The bait-station services keep the program.
 const ADDON_PROGRAMS = Object.freeze({
   pest_control: { any: ['pest', 'cockroach', 'bed_bug', 'termite'], fallback: 'pest' },
   lawn_care: { any: ['lawn'], fallback: 'lawn', nonChemical: ['lawn_aeration', 'dethatching', 'plugging', 'top_dressing'] },
   mosquito: { any: ['mosquito'], fallback: 'mosquito' },
   termite: { any: ['termite'], fallback: 'termite' },
-  rodent: { any: ['rodent'], fallback: 'rodent', nonChemical: ['rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy'] },
+  rodent: {
+    any: ['rodent'],
+    fallback: 'rodent',
+    nonChemical: [
+      'rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
+      'rodent_trapping', 'rodent_trapping_followup', 'rodent_trapping_followup_3pack',
+      'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
+      'rodent_exclusion_only', 'rodent_wire_mesh', 'rodent_bird_box',
+      'rodent_trapping_exclusion', 'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation',
+      'rodent_inspection', 'rodent_guarantee',
+    ],
+  },
   tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },
   specialty: { any: ['bed_bug'], fallback: null, keys: { fire_ant: 'pest', flea_tick: 'pest', tick_control: 'pest', bed_bug_treatment: 'bed_bug' } },
 });

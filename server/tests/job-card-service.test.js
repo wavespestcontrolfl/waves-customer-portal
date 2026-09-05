@@ -1471,11 +1471,22 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       expect([serviceType, out.lines, out.note]).toEqual([serviceType, [], 'No treatment protocol for this service (lawn_care)']);
     }
     expect(buildPlan).not.toHaveBeenCalled();
-    // Rodent sanitation is bleach and manual clean-up by catalog (r8 P1): no program either, primary or add-on.
-    for (const serviceKey of ['rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy']) {
-      const out = await run({ serviceType: 'Rodent Sanitation — Standard', serviceCategory: 'rodent', serviceKey });
+    // Rodent rows with no bait scope by catalog (r8 + r9 P1): sanitation, trapping, retainers, exclusion, bundles, inspection, guarantee — no program, primary or add-on.
+    for (const serviceKey of [
+      'rodent_sanitation_light', 'rodent_sanitation_medium', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
+      'rodent_trapping', 'rodent_trapping_followup', 'rodent_trapping_followup_3pack', 'trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly',
+      'rodent_exclusion_only', 'rodent_wire_mesh', 'rodent_bird_box', 'rodent_trapping_exclusion', 'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation', 'rodent_inspection', 'rodent_guarantee',
+    ]) {
+      const out = await run({ serviceType: 'Rodent Trapping Service', serviceCategory: 'rodent', serviceKey });
       expect([serviceKey, out.lines, out.note]).toEqual([serviceKey, [], 'No treatment protocol for this service (rodent)']);
     }
+    // The bait-station services keep the program: the trap-only add-on gets no Contrac Blox line, the quarterly bait service does (r9 P1).
+    const rodentProtocols = { ...protocols, rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }, { visit: 2, month: 'Any', primary: 'Install exterior bait stations — Contrac Blox\nSet snap traps in attic zones' }] } };
+    const rodent = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Rodent Trapping Service', category: 'rodent', serviceKey: 'rodent_trapping' }, { name: 'Quarterly Rodent Bait Station Service', category: 'rodent', serviceKey: 'rodent_bait_quarterly' }] }, protocols: rodentProtocols, catalog: [...catalog, { id: 'blox', name: 'Contrac Blox' }], dbh: () => ({}) });
+    expect(rodent.addons).toEqual([
+      { name: 'Rodent Trapping Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (rodent)' },
+      { name: 'Quarterly Rodent Bait Station Service', products: 1, visit: { number: 2, month: 'Any' }, note: null },
+    ]);
     const mechanicalAddon = await run({ addons: [{ name: 'Lawn Dethatching', category: 'lawn_care', serviceKey: 'dethatching' }, { name: 'Lawn Care', category: 'lawn_care', serviceKey: 'lawn_care_recurring' }, { name: 'Rodent Sanitation — Light', category: 'rodent', serviceKey: 'rodent_sanitation_light' }] });
     expect(mechanicalAddon.addons).toEqual([
       { name: 'Lawn Dethatching', products: 0, visit: null, note: 'No treatment protocol for this add-on (lawn_care)' },
