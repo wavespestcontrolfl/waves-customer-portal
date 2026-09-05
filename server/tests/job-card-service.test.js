@@ -244,6 +244,8 @@ describe('buildMixAmount', () => {
       .toEqual({ amount: 82.5, unit: 'oz', gallons: 110, coversSqft: 55000, reason: null });
     expect(jobCard.buildMixAmount({ ratePer1000: 1.5, rateUnit: 'oz', carrierGalPer1000: 2, gallons: 1 }))
       .toEqual({ amount: 0.75, unit: 'oz', gallons: 1, coversSqft: 500, reason: null });
+    // Small doses keep four decimals (Codex r6 P1): 0.113 oz/1,000 at 2 gal/1,000 for 1 gal.
+    expect(jobCard.buildMixAmount({ ratePer1000: 0.113, rateUnit: 'oz', carrierGalPer1000: 2, gallons: 1 }).amount).toBe(0.0565);
   });
 
   test.each([
@@ -299,6 +301,16 @@ describe('access codes never enter the model-safe facts', () => {
     expect(jobCard._test.petLine({ pet_details: 'Dog; gate code 4545#' })).not.toContain('4545');
     // And the validator refuses model text that prints a known code.
     expect(jobCard.validateParagraph('Gate code 4545# on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
+  });
+  test('a known code value pasted bare into any fact string is scrubbed before grounding (Codex r6 P1)', () => {
+    const facts = { entry: '4545#', issues: [{ text: 'Use 4545# at the side gate' }], lastVisit: { summary: 'Fine' }, rain7d: 0.5 };
+    expect(jobCard._test.scrubKnownCodes(facts, [{ label: 'Property gate', code: '4545#' }])).toEqual({
+      entry: '[code]', issues: [{ text: 'Use [code] at the side gate' }], lastVisit: { summary: 'Fine' }, rain7d: 0.5,
+    });
+    // Codes carrying regex metacharacters are matched literally (pre-push P0).
+    expect(jobCard._test.scrubKnownCodes({ entry: 'Try 12*34 or 1234+ or (77)' }, [{ code: '12*34' }, { code: '1234+' }, { code: '(77)' }])).toEqual({ entry: 'Try [code] or [code] or [code]' });
+    // Nothing known → the object is untouched.
+    expect(jobCard._test.scrubKnownCodes(facts, [])).toBe(facts);
   });
 });
 
@@ -387,6 +399,6 @@ describe('mixForProduct', () => {
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
     const out = await jobCard.mixForProduct('p1', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') });
-    expect(out).toMatchObject({ amount: 6.22, unit: 'oz', gallons: 110, rateVerified: false, tankMixable: true });
+    expect(out).toMatchObject({ amount: 6.215, unit: 'oz', gallons: 110, rateVerified: false, tankMixable: true });
   });
 });

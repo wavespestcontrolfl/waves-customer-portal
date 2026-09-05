@@ -24,7 +24,9 @@ const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { getHourlyRainOutlook } = require('./weather-forecast');
-const { detectServiceCategory } = require('../utils/service-normalizer');
+// The classifier that stamps service_records.service_line — a callback
+// visit is 'pest' there, so the history filter must agree.
+const { detectServiceLine } = require('./service-report/service-line-configs');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
@@ -61,6 +63,23 @@ function clean(value, max = 240) {
   // The same redactor the customer-assistant grounding uses: a code typed
   // into a free-text note must not ride into the paragraph or the model.
   return redactAccessCodes(text).slice(0, max);
+}
+/**
+ * Strip the property's KNOWN code values from every string in the
+ * model-safe facts: the keyword redactor cannot catch a bare "4545#" pasted
+ * into a note, but the loader knows the exact values it must never ground.
+ */
+function scrubKnownCodes(value, codes) {
+  const known = codes.map((c) => String(c.code || '').trim()).filter((c) => c.length >= 3);
+  if (!known.length) return value;
+  const re = new RegExp(known.map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+  const walk = (v) => {
+    if (typeof v === 'string') return v.replace(re, '[code]');
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value);
 }
 function cleanRaw(value, max = 240) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -211,7 +230,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     .first();
   if (!svc) return null;
 
-  const serviceLine = detectServiceCategory(svc.service_type);
+  const serviceLine = detectServiceLine(svc.service_type);
   const [prefs, lastVisit, issues] = await Promise.all([
     dbh('property_preferences').where({ customer_id: svc.customer_id }).first().catch(() => null),
     loadLastVisit(dbh, svc.customer_id, serviceLine),
@@ -222,6 +241,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     serviceLine === 'lawn' ? loadRain7d(dbh, svc) : Promise.resolve(null),
   ]);
 
+  const codes = accessCodes(prefs);
   const name = clean(`${svc.first_name || ''} ${svc.last_name || ''}`, 80);
   const program = clean(svc.waveguard_tier ? `${svc.service_type} · WaveGuard ${svc.waveguard_tier}` : svc.service_type, 80);
   const coords = propertyCoords(svc.latitude, svc.longitude);
@@ -235,13 +255,14 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     isLawn: serviceLine === 'lawn',
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     rig: rigAssignment(svc),
-    access: { codes: accessCodes(prefs) },
+    access: { codes },
     coords: coords ? { ...coords, source: 'property' } : { ...OFFICE_COORDS, source: 'office' },
-    // Model-safe facts. Nothing below carries a code or a phone number.
-    facts: {
+    // Model-safe facts. Nothing below carries a code or a phone number:
+    // keyword redaction in clean(), then the known code values themselves.
+    facts: scrubKnownCodes({
       pets: petLine(prefs),
       petsSecured: clean(prefs?.pets_secured_plan, 80),
-      gates: accessCodes(prefs).map((c) => c.label),
+      gates: codes.map((c) => c.label),
       entry: clean(prefs?.access_notes || prefs?.side_gate_access, 120),
       parking: clean(prefs?.parking_notes, 80),
       instructions: clean(prefs?.special_instructions, 120),
@@ -254,7 +275,7 @@ async function loadJobCardFacts(serviceId, dbh = db) {
       calls,
       irrigation: serviceLine === 'lawn' ? wateringLine(prefs) : null,
       rain7d,
-    },
+    }, codes),
     cache: { stored: parseJson(svc.job_card), generatedAt: svc.job_card_generated_at || null },
   };
 }
@@ -586,7 +607,9 @@ function buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000, gallons }) {
   if (!Number.isFinite(rate) || rate <= 0) return { amount: null, unit: rateUnit || null, reason: 'No verified rate on file' };
   if (!Number.isFinite(carrier) || carrier <= 0) return { amount: null, unit: rateUnit || null, reason: 'Rig not calibrated' };
   const amount = (rate / carrier) * gal;
-  return { amount: Math.round(amount * 100) / 100, unit: rateUnit || null, gallons: gal, coversSqft: Math.round((gal / carrier) * 1000), reason: null };
+  // Four decimals: a 1-gal dose of a 0.113 oz/1,000 product at 2 gal/1,000
+  // is 0.0565 oz, which two decimals would inflate by 6 %.
+  return { amount: Math.round(amount * 10000) / 10000, unit: rateUnit || null, gallons: gal, coversSqft: Math.round((gal / carrier) * 1000), reason: null };
 }
 
 /**
@@ -817,5 +840,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes },
 };

@@ -4812,10 +4812,15 @@ function fmtUnit(unit) {
   return unit ? String(unit).replace(/_/g, " ") : "";
 }
 
+// Small doses keep their precision: under 1 oz they render in mL / g (a
+// syringe or scale number), anything else to three significant decimals.
+const SMALL_DOSE = { "fl oz": ["mL", 29.5735], fl_oz: ["mL", 29.5735], oz: ["g", 28.3495] };
 function fmtAmount(amount, unit) {
   if (amount == null) return null;
   const n = Number(amount);
-  const txt = n >= 100 ? Math.round(n).toString() : n.toFixed(2).replace(/\.?0+$/, "");
+  const small = n > 0 && n < 1 ? SMALL_DOSE[String(unit || "").toLowerCase()] : null;
+  if (small) return `${(n * small[1]).toFixed(1).replace(/\.0$/, "")} ${small[0]}`;
+  const txt = n >= 100 ? Math.round(n).toString() : n.toFixed(n < 1 ? 3 : 2).replace(/\.?0+$/, "");
   const u = fmtUnit(unit);
   return `${txt}${u ? ` ${u}` : ""}`;
 }
