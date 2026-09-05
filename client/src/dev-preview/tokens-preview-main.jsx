@@ -133,7 +133,7 @@ function ListsAndAlerts() {
       <div className="waves-ask-card" data-glass="soft" style={{ marginTop: 12 }}>
         <div className="waves-ask-eyebrow" data-gt="eyebrow" style={DOC_EYEBROW}>Ask Waves</div>
         <h2 className="waves-ask-title">Questions about today's service? Ask anything</h2>
-        <p className="waves-ask-intro">What was applied, when it is safe to re-enter, what to watch for, or your next visit.</p>
+        <p className="waves-ask-intro">What was applied, when you can go back in, what to watch for, or your next visit — straight answers in seconds.</p>
         <form className="waves-ask-form" onSubmit={(e) => e.preventDefault()}>
           <input type="text" placeholder="Ask about today's service" aria-label="Ask Waves" />
           <button type="submit" data-glass-accent="">Ask</button>

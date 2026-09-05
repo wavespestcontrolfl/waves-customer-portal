@@ -25,8 +25,6 @@ coherent). Serif accents: `DOC_FONT_SERIF`.
 
 | Token | px | Use |
 |---|---|---|
-| `FS.micro` | 11 | uppercase micro-labels/footnote stamps ONLY (never body) |
-| `FS.caption` | 12 | captions, legal, meta rows, eyebrows |
 | `FS.body` | 14 | default body, buttons, table cells |
 | `FS.bodyLg` | 15 | primary prose paragraphs |
 | `FS.lead` | 16 | lead-ins and ALL text inputs (16 = no iOS focus zoom) |
@@ -35,7 +33,8 @@ coherent). Serif accents: `DOC_FONT_SERIF`.
 
 **Nothing under 14px on a glass surface** — the runtime sheet in
 `glass/glass-theme.css` forces eyebrows and fine print to 14 (owner ruling
-2026-09-03); `FS.micro` / `FS.caption` exist for the print/PDF twin only.
+2026-09-03); the scale starts at `FS.body` (14) — `FS.micro` / `FS.caption` are gone
+(the PDF twin keeps its own 8/9 print sizes).
 `check-portal-brand.js` enforces literal 11/13 today. Weights snap to `FW`
 {400, 500, 600, 700}; `FW.heavy` (800) is print-only and 850 never
 appears. Line heights snap to `LH` {1, 1.1, 1.2, 1.35, 1.5}: solid for

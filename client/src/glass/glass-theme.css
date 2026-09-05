@@ -266,7 +266,7 @@ html[data-glass-theme] [data-glass]:focus-visible {
   outline-offset: 3px;
   box-shadow: 0 0 0 5px rgba(var(--accent), 0.18), 0 16px 48px rgba(4, 57, 94, 0.16) !important;
 }
-html[data-glass-theme] :is(button, a, input, select, textarea, [role="button"], [tabindex]):not([data-glass]):focus-visible {
+html[data-glass-theme] :is(button, a, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])):not([data-glass]):focus-visible {
   outline: 2px solid rgba(var(--accent), 0.9) !important;
   outline-offset: 2px !important;
 }
@@ -502,10 +502,27 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
    cascade or a no-backdrop-filter / reduced-transparency / forced-colors
    viewer keeps the translucent card (GH Codex pre-push P1). */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  /* Same coverage as the Reduce Transparency block below: :hover / :active
+     too, accent controls, and no sheen. */
   html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass]:hover,
   html[data-glass-theme] [data-glass="soft"],
-  html[data-glass-theme] [data-glass="chip"] {
+  html[data-glass-theme] [data-glass="soft"]:hover,
+  html[data-glass-theme] [data-glass="chip"],
+  html[data-glass-theme] [data-glass="chip"]:hover,
+  html[data-glass-theme] [data-glass="chip"]:active {
     background: rgba(255, 255, 255, 0.93) !important;
+  }
+  html[data-glass-theme] [data-glass-accent],
+  html[data-glass-theme] [data-glass-accent]:hover,
+  html[data-glass-theme] [data-glass-accent]:active {
+    background: #F4B014 !important;
+  }
+  html[data-glass-theme] [data-glass]::before,
+  html[data-glass-theme] [data-glass]::after,
+  html[data-glass-theme] [data-glass-accent]::before,
+  html[data-glass-theme] [data-glass-accent]::after {
+    display: none !important;
   }
 }
 /* Reduce Transparency (iOS / macOS) and Windows High Contrast: the same

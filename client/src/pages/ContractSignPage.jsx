@@ -313,7 +313,7 @@ export default function ContractSignPage() {
                 <p style={{ margin: '8px 0 0', color: DOC.muted, fontSize: FS.body, lineHeight: LH.body }}>
                   This Waves document is ready to view. You can save this link or reply to the message that sent it if you have questions.
                 </p>
-                <div style={{ marginTop: SP.md, fontSize: FS.caption, color: DOC.muted, lineHeight: LH.snug }}>
+                <div style={{ marginTop: SP.md, fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug }}>
                   Need help? <HelpPhoneLink tone="dark" inline />
                 </div>
               </div>
@@ -370,7 +370,7 @@ export default function ContractSignPage() {
                 <BrandButton type="submit" disabled={!canSubmit} fullWidth style={{ marginTop: SP.md }}>
                   {submitting ? 'Signing...' : `Sign ${isAutopay ? 'Authorization' : 'Document'}`}
                 </BrandButton>
-                <div style={{ marginTop: SP.sm, fontSize: FS.caption, color: DOC.muted, lineHeight: LH.snug, textAlign: 'center' }}>
+                <div style={{ marginTop: SP.sm, fontSize: FS.body, color: DOC.muted, lineHeight: LH.snug, textAlign: 'center' }}>
                   Need help before signing? <HelpPhoneLink tone="dark" inline />
                 </div>
               </form>
