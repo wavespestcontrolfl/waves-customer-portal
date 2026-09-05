@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
+const { assertAssignableTechnician } = require('../services/technician-eligibility');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 // Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
@@ -1613,6 +1614,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
+      await assertAssignableTechnician(technicianId || null, { conn: trx });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,
@@ -1703,6 +1705,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       return { appt };
     });
 
+    // Tech-facing notice (tech-visit-notifications.js): a lead booked straight
+    // onto a tech's route is a "new visit" to them. Post-commit, gate-dark,
+    // never awaited, silent when the booker IS the tech.
+    if (appt?.technician_id) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: appt.id, kind: 'assigned', technicianId: appt.technician_id, actorId: req.technicianId || null,
+        snapshot: { date: appt.scheduled_date, windowStart: appt.window_start, windowEnd: appt.window_end },
+      });
+    }
     logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
 
     // Fast path only — durable evidence was written in-transaction above.

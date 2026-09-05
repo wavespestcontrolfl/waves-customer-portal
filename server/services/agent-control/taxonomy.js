@@ -125,6 +125,43 @@ const EVAL_FAMILY = Object.freeze([
  * — and infrastructure is the class that pages an operator rather than
  * queueing an eval, which is the safe default for a surprise.
  */
+// The code → class rules, first match wins. Order is the contract: a code
+// can match more than one pattern (`missing_x_invalid` is instruction before
+// incomplete), so a rule only moves with a test that pins the affected code.
+const FAILURE_RULES = [
+  ['incorrect', /^judge_failed$/],
+  ['regression', /^eval_regression$/],
+  // 401/403/404 are provider-side too (credentials, access, model not
+  // found) — Codex r12. `session_error_event`: the Managed Agents stream
+  // emitted an error event. `session_stream_eof`: the stream closed before
+  // any terminal event — the session never said it ended, so the runner does
+  // not get to call it a success (Codex r7 on #3846). `openai_failed` /
+  // `openai_cancelled`: a Responses body that ended in a provider-side
+  // terminal state (not the model's output cut off).
+  ['provider', /^(no_key|all_providers_failed|session_error_event|session_stream_eof|openai_(failed|cancelled))$|_(5\d\d|429|529|503|401|403|404)$/],
+  // status-qualified 408s (Codex r13) and the adapters' own deadlines —
+  // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
+  ['timeout', /^(timeout_budget_exhausted|timeout)$|_(408|timeout)$/],
+  // `<provider>_incomplete`: the output was cut off — OpenAI's `incomplete`
+  // status, Anthropic's stop_reason 'max_tokens' — the same outcome on
+  // either provider (Codex r7 on #3846); past the chain's time budget it is
+  // a timeout instead (classifyFailure, above the table).
+  ['incomplete', /_incomplete$/],
+  // `max_events`: a Managed Agents runner's own SSE event cap ended the
+  // stream before the session did — our budget, not the provider's fault.
+  ['budget', /^(budget_exhausted|max_cost|max_tool_calls|max_events)$/],
+  ['bad_input', /^bad_request$|_(400|413)$/],
+  ['incomplete', /^(empty_json|empty_text|unparseable|truncated)$/],
+  // `<provider>_refusal`: the model declined (stop_reason 'refusal') — the
+  // same family as a safety gate, an eval candidate rather than plumbing.
+  ['instruction', /^banned:|^(safety_gate|validator_rejected)$|_refusal$/],
+  // Lane validators: the model answered, but not in the shape it was told
+  // to (`*_schema_invalid`, `unmappable_*`) or with a required field missing
+  // (`missing_*`). The model's fault — eval candidates, not plumbing.
+  ['instruction', /(^|_)invalid(_|$)|^(unmappable_|not_an?_|forbidden_|retired_|unknown_(code|severity))|_not_(an?_)?(array|object|string|number|boolean)$/],
+  ['incomplete', /^missing_|^(no_json|empty_response|empty_output)$/],
+];
+
 function classifyFailure(errorCode, ctx = {}) {
   const code = String(errorCode || '').toLowerCase();
   if (ctx.tool === true || code.startsWith('tool_')) return 'tool';
@@ -132,38 +169,17 @@ function classifyFailure(errorCode, ctx = {}) {
   // broken validation plumbing, not a rejected answer — whatever ctx says — Codex r23.
   if (code.startsWith('validator_error:')) return 'infrastructure';
   if (ctx.validator === true) return /^(empty_|no_|missing_)|_empty$|_missing$/.test(code) ? 'incomplete' : 'instruction';
-  if (code === 'judge_failed') return 'incorrect';
-  if (code === 'eval_regression') return 'regression';
-  // 401/403/404 are provider-side too (credentials, access, model not found) — Codex r12.
-  // `session_error_event`: the Managed Agents stream emitted an error event.
-  // `session_stream_eof`: the stream closed before any terminal event — the
-  // session never said it ended, so the runner does not get to call it a
-  // success (Codex r7 on #3846).
-  // `openai_failed` / `openai_cancelled`: a Responses body that ended in a
-  // provider-side terminal state (not the model's output cut off).
-  if (code === 'no_key' || code === 'all_providers_failed' || code === 'session_error_event' || code === 'session_stream_eof' || /^openai_(failed|cancelled)$/.test(code) || /_(5\d\d|429|529|503|401|403|404)$/.test(code)) return 'provider';
-  // status-qualified 408s (Codex r13) and the adapters' own deadlines —
-  // `<provider>_timeout` from llm/call.js providerErrorReason (Codex on #3793).
-  if (code === 'timeout_budget_exhausted' || code === 'timeout' || /_(408|timeout)$/.test(code)) return 'timeout';
-  // `<provider>_incomplete`: the output was cut off — OpenAI's `incomplete`
-  // status, Anthropic's stop_reason 'max_tokens' — the same outcome on either
-  // provider (Codex r7 on #3846).
-  if (/_incomplete$/.test(code)) return ctx.pastBudget ? 'timeout' : 'incomplete';
-  // `max_events`: a Managed Agents runner's own SSE event cap ended the
-  // stream before the session did — our budget, not the provider's fault.
-  if (code === 'budget_exhausted' || code === 'max_cost' || code === 'max_tool_calls' || code === 'max_events') return 'budget';
-  if (code === 'bad_request' || /_(400|413)$/.test(code)) return 'bad_input';
-  if (code === 'empty_json' || code === 'empty_text' || code === 'unparseable' || code === 'truncated') return 'incomplete';
-  // `<provider>_refusal`: the model declined (stop_reason 'refusal') — the
-  // same family as a safety gate, an eval candidate rather than plumbing.
-  if (code.startsWith('banned:') || code === 'safety_gate' || code === 'validator_rejected' || /_refusal$/.test(code)) return 'instruction';
-  // Lane validators: the model answered, but not in the shape it was told to
-  // (`*_schema_invalid`, `unmappable_*`) or with a required field missing
-  // (`missing_*`). The model's fault — eval candidates, not plumbing.
-  if (/(^|_)invalid(_|$)/.test(code) || /^(unmappable_|not_an?_|forbidden_|retired_|unknown_(code|severity))/.test(code) || /_not_(an?_)?(array|object|string|number|boolean)$/.test(code)) return 'instruction';
-  if (code.startsWith('missing_') || code === 'no_json' || code === 'empty_response' || code === 'empty_output') return 'incomplete';
-  // Generic `error` (abort, socket hang-up, fetch failed) and anything unknown.
-  return 'infrastructure';
+  // A cut-off answer produced after the chain had already used its time
+  // budget is a timeout, not an incomplete answer (no other rule claims a
+  // `_incomplete` code, so this reads ahead of the table safely).
+  if (ctx.pastBudget && /_incomplete$/.test(code)) return 'timeout';
+  const rule = FAILURE_RULES.find(([, re]) => re.test(code));
+  // Generic `error` (abort, socket hang-up, fetch failed) and anything unknown
+  // is `infrastructure`: the classes that matter for evals and alerting are all
+  // recognisable by name, so a code we have never seen is by construction
+  // something the plumbing produced — the class that pages an operator
+  // rather than queueing an eval, the safe default for a surprise.
+  return rule ? rule[0] : 'infrastructure';
 }
 
 module.exports = {

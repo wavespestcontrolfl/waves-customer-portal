@@ -165,6 +165,12 @@ this skill.
    checks.
 
 ## Autonomy posture
+- Owner directive 2026-09-05: autonomous supporting blogs require NO human
+  interaction, including named-competitor and affiliate posts. Clean drafts
+  publish through the existing checked PR/poller flow. Failed checks retry
+  within existing budgets or skip with a recorded reason. Do not add a
+  portal approval queue or email-reply hold to this blog lane. Product
+  eligibility, facts, content checks, publish caps, and kill switches remain.
 - The portal already has a full autonomous content engine
   (`server/services/content*` + seo services) — audit the gap first, never
   rebuild it. Competitor-intercept briefs run fully autonomous; the

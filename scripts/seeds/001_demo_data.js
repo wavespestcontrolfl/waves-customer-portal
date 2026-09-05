@@ -27,10 +27,14 @@ exports.seed = async function (knex) {
   const techCarlos = uuidv4();
   const techWaves = uuidv4();
 
+  // The migration's history-based backfill has already run by the time a
+  // fresh DB is seeded, so field eligibility is stated explicitly here —
+  // otherwise the demo schedule could not assign its own staff.
+  const dispatchable = { employment_status: 'active', field_dispatchable: true };
   await knex('technicians').insert([
-    { id: techWaves, name: 'Waves', phone: '+19415550100', email: 'waves@wavespestcontrol.com' },
-    { id: techAdam, name: 'Adam B.', phone: '+19415550101', email: 'adam@wavespestcontrol.com' },
-    { id: techCarlos, name: 'Carlos R.', phone: '+19415550102', email: 'carlos@wavespestcontrol.com' },
+    { id: techWaves, name: 'Waves', phone: '+19415550100', email: 'waves@wavespestcontrol.com', ...dispatchable },
+    { id: techAdam, name: 'Adam B.', phone: '+19415550101', email: 'adam@wavespestcontrol.com', ...dispatchable },
+    { id: techCarlos, name: 'Carlos R.', phone: '+19415550102', email: 'carlos@wavespestcontrol.com', ...dispatchable },
   ]);
 
   // ---- Customer ----

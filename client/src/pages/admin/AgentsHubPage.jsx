@@ -1,7 +1,10 @@
 /**
  * <AgentsHubPage> — unified agent oversight surface at /admin/agents.
  * Tabs rendered as one centered pill:
- *   - "Overview"           — AgentOpsPage (fleet health cards + task queue)
+ *   - "Overview"           — AgentOpsPage (fleet health cards + task queue),
+ *                            or the Control center (agents/AgentControlCenterTab:
+ *                            lane cards over the call ledger) once the hub probe
+ *                            reports features.ledger (GATE_AGENT_CONTROL_READ)
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
  *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
  *                            parked message_drafts; approve/revise sends)
@@ -42,6 +45,7 @@ import PendingDraftsTab from "./PendingDraftsTab";
 import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
 import AgentModelsTab from "./AgentModelsTab";
+import AgentControlCenterTab from "./agents/AgentControlCenterTab";
 import AgentQueueTab from "./AgentQueueTab";
 import { adminFetch } from "../../utils/admin-fetch";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -76,9 +80,19 @@ const TAB_LIST = [
 // gate is on (hub probe), so a dark gate renders nothing new.
 const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
 // Tabs that read ?area= get the product-area strip under the tab row
-// (AdminCommandHeader's secondary row). Grows as the control-center tabs land.
+// (AdminCommandHeader's secondary row). Overview joins while it renders the
+// Control center (the old Overview does not read the area).
 const AREA_TABS = new Set([TABS.MODELS]);
 const ALL_AREAS = "all";
+function readsArea(tab, controlCenter) {
+  return AREA_TABS.has(tab) || (controlCenter && tab === TABS.OVERVIEW);
+}
+
+// Overview is the Control center once the ledger phase exists, else the
+// fleet-health page it has always been.
+function OverviewTab({ controlCenter, areas, setRefreshHandler }) {
+  return controlCenter ? <AgentControlCenterTab areas={areas} setRefreshHandler={setRefreshHandler} /> : <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />;
+}
 
 export default function AgentsHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -94,6 +108,9 @@ export default function AgentsHubPage() {
     return () => { disposed = true; };
   }, []);
   const queueAvailable = hub.features.queue === true;
+  // GATE_AGENT_CONTROL_READ: Overview becomes the Control center only when the
+  // server says the ledger phase exists — a dark gate keeps the old Overview.
+  const controlCenter = hub.features.ledger === true;
   const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
@@ -137,7 +154,7 @@ export default function AgentsHubPage() {
   }, []);
   const handleRefresh = () => refreshRef.current?.();
 
-  const showAreas = AREA_TABS.has(tab) && hub.areas.length > 0;
+  const showAreas = readsArea(tab, controlCenter) && hub.areas.length > 0;
   const areaSections = showAreas ? [{ key: ALL_AREAS, label: "All areas" }, ...hub.areas.map((a) => ({ key: a.key, label: a.label }))] : [];
   const activeArea = hub.areas.some((a) => a.key === area) ? area : ALL_AREAS;
 
@@ -169,7 +186,7 @@ export default function AgentsHubPage() {
       />
       <div aria-label="Agents content" className="flex-1 min-h-0 flex flex-col">
         {tab === TABS.OVERVIEW ? (
-          <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
+          <OverviewTab controlCenter={controlCenter} areas={hub.areas} setRefreshHandler={setRefreshHandler} />
         ) : tab === TABS.ACTIVITY ? (
           <AgentActivityTab />
         ) : tab === TABS.DECISIONS ? (

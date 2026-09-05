@@ -115,9 +115,14 @@ describe('slot reservation helpers', () => {
       first: jest.fn().mockResolvedValue(row),
     };
   }
+  function makeAssignableTechnicianBuilder(row = { id: 'tech-1', employment_status: 'active', field_dispatchable: true }) {
+    const b = { where: jest.fn(() => b), forShare: jest.fn(() => b), first: jest.fn().mockResolvedValue(row) };
+    return b;
+  }
   function makeTechnicianBuilder(row = { id: 'tech-1' }) {
     return {
       where: jest.fn().mockReturnThis(),
+      forShare: jest.fn().mockReturnThis(),
       first: jest.fn().mockResolvedValue(row),
     };
   }
@@ -224,7 +229,10 @@ describe('slot reservation helpers', () => {
         expiresAt: '2027-05-20T13:15:00.000Z',
       });
 
-      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-1', active: true });
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ 'technicians.id': 'tech-1' });
+      // Assignability (technician-eligibility.js), not just the legacy flag.
+      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.employment_status', 'active');
+      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.field_dispatchable', true);
       // ORDERING CONTRACT (services/scheduling/occupancy.js): rung 1
       // (date-occupancy) → rung 3 (tech) → rung 4 (zone). The hold row this
       // inserts is COUNTED by findConflictingVisits, so the estimate path is
@@ -357,6 +365,49 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('commitReservation refuses to graduate a hold whose technician was offboarded since the reserve (SLOT_UNAVAILABLE, no write)', async () => {
+    const dateProbeBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ scheduled_date: '2027-05-20' }),
+    };
+    const reservationBuilder = {
+      where: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      forUpdate: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'scheduled-123',
+        source_estimate_id: 'estimate-456',
+        scheduled_date: '2027-05-20',
+        window_start: '09:00:00',
+        window_end: '10:00:00',
+        technician_id: 'tech-1',
+        reservation_expires_at: '2027-05-20T13:15:00.000Z',
+      }),
+    };
+    const updateBuilder = { where: jest.fn().mockReturnThis(), update: jest.fn().mockReturnThis(), returning: jest.fn() };
+    const scheduledBuilders = [dateProbeBuilder, reservationBuilder, updateBuilder];
+    const techBuilder = makeAssignableTechnicianBuilder({ id: 'tech-1', name: 'Tech One', employment_status: 'inactive', field_dispatchable: true });
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledBuilders.shift();
+      if (table === 'technicians') return techBuilder;
+      throw new Error(`unexpected table ${table}`);
+    });
+    trx.raw = jest.fn((sql) => ({ raw: sql }));
+    trx.isTransaction = true; // real knex transactions carry this; the assert locks only on a trx
+
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123',
+      customerId: 'customer-1',
+      paymentMethodPreference: 'card_on_file',
+      estimatedPrice: 219.6,
+      estimate: { id: 'estimate-456', service_interest: 'Pest Control' },
+      trx,
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', slotId: '2027-05-20_09-00_tech-1' });
+    // Locked on the writing trx so the offboarding cannot commit underneath.
+    expect(techBuilder.forShare).toHaveBeenCalled();
+    expect(updateBuilder.update).not.toHaveBeenCalled();
+  });
+
   test('commitReservation rebinds the held row to the accepted service profile', async () => {
     // Unlocked pre-read that keys the date-occupancy lock (rung 1) — taken
     // before the FOR UPDATE so a writer already holding the date lock and
@@ -406,6 +457,9 @@ describe('slot reservation helpers', () => {
     const scheduledBuilders = [dateProbeBuilder, reservationBuilder, conflictBuilder, globalProbeBuilder, updateBuilder];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledBuilders.shift();
+      // Commit-time eligibility re-check (technician-eligibility.js): the held
+      // tech is still assignable in these fixtures.
+      if (table === 'technicians') return makeAssignableTechnicianBuilder();
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -676,7 +730,8 @@ describe('slot reservation helpers', () => {
         estimateId: 'estimate-456',
         slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-ghost' }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
-      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-ghost', active: true });
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ 'technicians.id': 'tech-ghost' });
+      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.employment_status', 'active');
       // Rejected before any scheduled_services query or insert.
       expect(scheduledBuilders).toHaveLength(0);
     } finally {
@@ -1030,6 +1085,9 @@ describe('slot reservation helpers', () => {
     const scheduledBuilders = [dateProbeBuilder, reservationBuilder, globalProbeBuilder, updateBuilder];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledBuilders.shift();
+      // Commit-time eligibility re-check (technician-eligibility.js): the held
+      // tech is still assignable in these fixtures.
+      if (table === 'technicians') return makeAssignableTechnicianBuilder();
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -1101,6 +1159,9 @@ describe('slot reservation helpers', () => {
     const scheduledBuilders = [dateProbeBuilder, reservationBuilder, conflictBuilder, globalProbeBuilder, updateBuilder];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledBuilders.shift();
+      // Commit-time eligibility re-check (technician-eligibility.js): the held
+      // tech is still assignable in these fixtures.
+      if (table === 'technicians') return makeAssignableTechnicianBuilder();
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));
@@ -1155,6 +1216,9 @@ describe('slot reservation helpers', () => {
     const scheduledBuilders = [dateProbeBuilder, reservationBuilder, makeGlobalProbeBuilder([]), updateBuilder];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledBuilders.shift();
+      // Commit-time eligibility re-check (technician-eligibility.js): the held
+      // tech is still assignable in these fixtures.
+      if (table === 'technicians') return makeAssignableTechnicianBuilder();
       throw new Error(`unexpected table ${table}`);
     });
     trx.raw = jest.fn((sql) => ({ raw: sql }));

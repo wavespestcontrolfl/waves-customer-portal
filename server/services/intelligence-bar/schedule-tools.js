@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { assertAssignableTechnician, applyAssignable } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
@@ -148,14 +149,14 @@ Use for: "find time for", "when can we schedule", "best slot for", "fit in a new
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeScheduleTool(toolName, input) {
+async function executeScheduleTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'optimize_all_routes': return await optimizeAllRoutes(input);
       case 'optimize_tech_route': return await optimizeTechRoute(input);
-      case 'assign_technician': return await assignTechnician(input);
-      case 'move_stops_to_day': return await moveStopsToDay(input);
-      case 'swap_tech_assignments': return await swapTechAssignments(input);
+      case 'assign_technician': return await assignTechnician(input, actionContext);
+      case 'move_stops_to_day': return await moveStopsToDay(input, actionContext);
+      case 'swap_tech_assignments': return await swapTechAssignments(input, actionContext);
       case 'find_schedule_gaps': return await findScheduleGaps(input);
       case 'find_available_slots': return await findAvailableSlotsTool(input);
       case 'get_day_summary': return await getDaySummary(input.date);
@@ -481,7 +482,7 @@ async function optimizeTechRoute(input) {
 }
 
 
-async function assignTechnician(input) {
+async function assignTechnician(input, actionContext = {}) {
   const { service_ids: serviceIds, technician_name: techName, confirmed } = input;
   let tech = await db('technicians').whereILike('name', `%${techName}%`).first();
   if (!tech) return { error: `Technician "${techName}" not found` };
@@ -495,6 +496,10 @@ async function assignTechnician(input) {
       'customers.first_name', 'customers.last_name',
       'scheduled_services.service_type',
       'scheduled_services.scheduled_date',
+      // The window rides the assignment notice's snapshot (Codex r4 P2): a
+      // reschedule landing while the notice waits on its recipient lookup
+      // must not make the "new visit" card describe the LATER window.
+      'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.technician_id as current_tech_id',
       // Grouped-visit membership rides the preview (GH r14 P1): the
       // post-commit seam can adopt the new technician for the whole visit
@@ -583,6 +588,7 @@ async function assignTechnician(input) {
   // covering the day.
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   let count;
+  let committedAssignRows = [];
   try {
     count = await db.transaction(async trx => {
     await lockTechDays(trx, services.flatMap(s => [
@@ -623,21 +629,46 @@ async function assignTechnician(input) {
     // already on tech.id are a no-op reassignment: clearing them would
     // erase a valid manual/optimized position (uncapped audit r25 P1) —
     // the predicate is on the row value the UPDATE itself observes.
+    // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE).
+    await assertAssignableTechnician(tech.id, { conn: trx });
     const [{ count: alreadyOn }] = await trx('scheduled_services')
       .whereIn('id', serviceIds)
       .where('technician_id', tech.id)
       .count('id as count');
-    const changed = await trx('scheduled_services')
+    // The COMMITTED schedule of every reassigned row rides back for the
+    // notices (pre-push audit P1): a same-day window edit landing between
+    // the card's read and this lock must not make the "new visit" card
+    // describe the old window.
+    committedAssignRows = await trx('scheduled_services')
       .whereIn('id', serviceIds)
       .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
-      .update({ technician_id: tech.id, route_order: null, updated_at: new Date() });
-    return changed + Number(alreadyOn);
+      .update({ technician_id: tech.id, route_order: null, updated_at: new Date() })
+      .returning(['id', 'scheduled_date', 'window_start', 'window_end']);
+    return committedAssignRows.length + Number(alreadyOn);
     });
   } catch (err) {
     if (err && err.previewChanged) {
       return { error: 'The assignments on these stops changed after the card was shown — nothing was reassigned. Ask again for a fresh card.', preview_changed: true };
     }
     throw err;
+  }
+
+  // Tech-facing notices (tech-visit-notifications.js): this writer bypasses
+  // assignDispatchJob, so it tells both techs itself. Post-commit,
+  // best-effort and NOT awaited — a bulk reassign must not serialize push
+  // delivery into the tool's response; the operator's own moves stay silent.
+  {
+    const { notifyAssignmentChange } = require('../tech-visit-notifications');
+    // Recipients and snapshots come from the rows the UPDATE actually
+    // reassigned (a row already on tech.id was a no-op and stays silent).
+    const preById = new Map(services.map((s) => [String(s.id), s]));
+    for (const row of committedAssignRows) {
+      const pre = preById.get(String(row.id));
+      void notifyAssignmentChange({
+        visitId: row.id, fromTechId: pre?.current_tech_id || null, toTechId: tech.id, actorId: actionContext.technicianId || null,
+        snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
+      });
+    }
   }
 
   // Visit-group seam (visit-group-scope.md §2; codex #3590 r9): this
@@ -678,7 +709,7 @@ async function assignTechnician(input) {
 const TERMINAL_MOVE_STATUSES = new Set(require('./proposal-pins').TERMINAL_APPOINTMENT_STATUSES);
 const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
-async function moveStopsToDay(input) {
+async function moveStopsToDay(input, actionContext = {}) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
   const notifyCustomers = input.notify_customers === true;
 
@@ -969,7 +1000,7 @@ async function moveStopsToDay(input) {
       // Grouped/frozen refusal under the stop lock, AFTER the tech-day
       // fence (lock order; codex #3609 r29 P1) — here it ABORTS the batch.
       await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
-      const updated = await applyTrackLifecycleCas(
+      const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)
           .where('status', String(s.status))
@@ -998,10 +1029,15 @@ async function moveStopsToDay(input) {
           ...(c.wasLive ? { status: 'confirmed' } : {}),
           ...c.liveReset,
           updated_at: new Date(),
-        });
-      if (updated === 0) {
+        })
+        // The technician on the COMMITTED row: the CAS does not pin
+        // technician_id, so the move notice goes to whoever holds the stop
+        // now, not the unlocked pre-read (Codex r4 P1).
+        .returning(['id', 'technician_id']);
+      if (committedRows.length === 0) {
         throw Object.assign(new Error('move_set_changed'), { code: 'MOVE_SET_CHANGED', stopId: s.id });
       }
+      c.committedTechId = committedRows[0]?.technician_id || null;
     }
     return overlappedIds;
   });
@@ -1030,6 +1066,23 @@ async function moveStopsToDay(input) {
     throw err;
   }
   for (const c of classified) movedIds.add(c.s.id);
+
+  // Tech-facing notices (tech-visit-notifications.js): this writer changes
+  // scheduled_date itself, so it tells the holder itself. Post-commit,
+  // best-effort, NOT awaited; the operator's own move stays silent.
+  {
+    const { notifyVisitRescheduled } = require('../tech-visit-notifications');
+    for (const c of classified) {
+      if (!c.committedTechId) continue;
+      void notifyVisitRescheduled({
+        visitId: c.s.id,
+        technicianId: c.committedTechId,
+        actorId: actionContext.technicianId || null,
+        previous: { date: c.oldDate, windowStart: c.s.window_start, windowEnd: c.s.window_end },
+        snapshot: { date: dateStr, windowStart: c.s.window_start, windowEnd: c.s.window_end },
+      });
+    }
+  }
 
   // ── Phase B: post-commit side effects per moved stop — best-effort; the
   // batch is committed, so failures surface as warnings, never unwind it.
@@ -1227,7 +1280,7 @@ async function moveStopsToDay(input) {
 }
 
 
-async function swapTechAssignments(input) {
+async function swapTechAssignments(input, actionContext = {}) {
   const { date, tech_a_name: techAName, tech_b_name: techBName, confirmed } = input;
   const techA = await db('technicians').whereILike('name', `%${techAName}%`).first();
   const techB = await db('technicians').whereILike('name', `%${techBName}%`).first();
@@ -1284,6 +1337,7 @@ async function swapTechAssignments(input) {
     .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
     .forUpdate()
     .select('id', 'visit_id');
+  let committedSwapRows = [];
   try {
     await db.transaction(async trx => {
       // Tech-day fence before any membership write — both real tech-days plus
@@ -1306,15 +1360,41 @@ async function swapTechAssignments(input) {
     // route_order: null on both real reassignments — each stop's sequence
     // number belonged to its OLD tech's run; carrying it into the new tech's
     // day would interleave stale numbers (consumers append NULLs last).
+      // Only a tech RECEIVING stops must be assignable: swapping an offboarded
+      // tech's remaining route onto an eligible one is exactly how their
+      // retained future work gets reassigned.
+      if (bIds.length) await assertAssignableTechnician(techA.id, { conn: trx });
+      if (aIds.length) await assertAssignableTechnician(techB.id, { conn: trx });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
-      if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
-      if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
+      // The COMMITTED schedule of every swapped row rides back for the
+      // notices (pre-push audit P1): a same-day window edit landing between
+      // the card's read and these locks must not put the old window on the
+      // receiving tech's card.
+      const swapReturning = ['id', 'scheduled_date', 'window_start', 'window_end'];
+      if (bIds.length) committedSwapRows.push(...await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() }).returning(swapReturning));
+      if (aIds.length) committedSwapRows.push(...await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() }).returning(swapReturning));
     });
   } catch (err) {
     if (err && err.previewChanged) {
       return { error: 'The stops on one of these days changed after the card was shown — nothing was swapped. Ask again for a fresh card.', preview_changed: true };
     }
     throw err;
+  }
+
+  // Tech-facing notices (tech-visit-notifications.js): a swap is two
+  // reassignments per stop; both techs hear each one. Post-commit,
+  // best-effort and NOT awaited (push delivery stays off the response
+  // path); the operator's own swap stays silent for them.
+  {
+    const { notifyAssignmentChange } = require('../tech-visit-notifications');
+    const swapActor = actionContext.technicianId || null;
+    const swapRows = new Map(committedSwapRows.map((r) => [String(r.id), r]));
+    const swapSnapshot = (sid) => {
+      const r = swapRows.get(String(sid));
+      return r ? { date: r.scheduled_date, windowStart: r.window_start || null, windowEnd: r.window_end || null } : null;
+    };
+    for (const sid of aIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techA.id, toTechId: techB.id, actorId: swapActor, snapshot: swapSnapshot(sid) });
+    for (const sid of bIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techB.id, toTechId: techA.id, actorId: swapActor, snapshot: swapSnapshot(sid) });
   }
 
   // Visit-group seam (codex #3590 r9): a whole-day swap moves every child
@@ -1353,7 +1433,9 @@ async function findScheduleGaps(input) {
   const from = date || date_from || etDateString();
   const to = date || date_to || etDateString(addETDays(new Date(), 6));
 
-  const techs = await db('technicians').where({ active: true }).select('id', 'name');
+  // Capacity = assignable staff only (technician-eligibility.js); an
+  // office-only admin has no route to have gaps in.
+  const techs = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name');
 
   const services = await db('scheduled_services')
     .whereBetween('scheduled_date', [from, to])

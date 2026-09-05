@@ -8,9 +8,8 @@ const { findLiveRestockRequest } = require('../services/procurement/live-restock
 const { AUTO_REORDER_SOURCE } = require('../services/procurement/auto-reorder');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildWaveGuardInventoryForecast } = require('../services/waveguard-inventory-forecast');
 const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
-const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   describeInventoryConversion,
   normalizeInventoryUnit,
@@ -45,6 +44,9 @@ const STAFF_INVENTORY_REQUEST = (req) => {
     // protocol reference.
     return p === '/' || p === '/stats' || p === '/waveguard-forecast'
       || p === '/unit-review' || p === '/restock-requests';
+    // NOTE: /restock-requests/:id/order-evidence (adapter checkout
+    // screenshots — billing account, totals) is owner-only, like every
+    // other cost-bearing read here; the tab shows its button to admins only.
   }
   // NOTE: /service-usage MUTATIONS are protocol CONFIG (products +
   // application rates that drive COGS/pricing) — owner-only. Per-job usage
@@ -835,181 +837,6 @@ async function syncLawnReadinessAfterRestock() {
     appointmentCount,
     resolvedAlerts: 0,
     updatedAlerts,
-  };
-}
-
-function summarizeForecastStatus(row) {
-  if (row.unitMismatchCount > 0) return 'unit_mismatch';
-  if (row.onHand == null) return 'not_tracked';
-  if (row.committedDemand <= 0) return 'ok';
-  if (row.onHand < row.committedDemand) return 'short';
-  if (row.lowStockThreshold != null && row.projectedRemaining <= row.lowStockThreshold) return 'warning';
-  return 'ok';
-}
-
-function forecastPriority(status, firstShortDate) {
-  if (status === 'short') return firstShortDate ? 'urgent' : 'high';
-  if (status === 'warning') return 'high';
-  if (status === 'unit_mismatch' || status === 'not_tracked') return 'normal';
-  return 'low';
-}
-
-async function buildWaveGuardInventoryForecast({ days = 14, limit = 150 } = {}) {
-  const safeDays = Math.max(1, Math.min(90, Number(days || 14)));
-  const safeLimit = Math.max(1, Math.min(300, Number(limit || 150)));
-  const startDate = etDateString();
-  const endDate = etDateString(addETDays(new Date(), safeDays));
-  const services = await db('scheduled_services as ss')
-    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
-    .leftJoin('technicians as t', 'ss.technician_id', 't.id')
-    .whereBetween('ss.scheduled_date', [startDate, endDate])
-    .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled', 'void'])
-    // Real WaveGuard members only — exclude the flat non-member 'Commercial' tier.
-    .whereIn('c.waveguard_tier', ['Bronze', 'Silver', 'Gold', 'Platinum'])
-    .where(function lawnService() {
-      this.whereILike('ss.service_type', '%lawn%')
-        .orWhereILike('ss.service_type', '%fertiliz%')
-        .orWhereILike('ss.service_type', '%turf%');
-    })
-    .select(
-      'ss.id',
-      'ss.customer_id',
-      'ss.service_type',
-      'ss.scheduled_date',
-      'ss.window_start',
-      'c.first_name',
-      'c.last_name',
-      'c.address_line1',
-      'c.city',
-      'c.waveguard_tier',
-      't.name as technician_name',
-    )
-    .orderBy('ss.scheduled_date', 'asc')
-    .orderBy('ss.window_start', 'asc')
-    .limit(safeLimit);
-
-  const productMap = new Map();
-  const errors = [];
-
-  function ensureRow(product, inventory, demandUnit) {
-    const key = String(product.id);
-    if (!productMap.has(key)) {
-      productMap.set(key, {
-        productId: product.id,
-        productName: product.name,
-        category: product.category || null,
-        inventoryUnit: inventory?.unit || null,
-        demandUnit: demandUnit || inventory?.unit || null,
-        onHand: inventory?.onHand != null ? Number(inventory.onHand) : null,
-        lowStockThreshold: inventory?.lowStockThreshold != null ? Number(inventory.lowStockThreshold) : null,
-        committedDemand: 0,
-        unconvertedDemand: 0,
-        unitMismatchCount: 0,
-        conversionConfidence: 'exact_unit',
-        appointments: [],
-        mismatchAppointments: [],
-        firstShortDate: null,
-      });
-    }
-    return productMap.get(key);
-  }
-
-  for (const service of services) {
-    try {
-      const plan = await buildPlanForService(service.id, { db });
-      const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
-      for (const item of plan?.mixCalculator?.items || []) {
-        if (!item?.product?.id) continue;
-        const amount = numberOrNull(item.mix?.amount);
-        if (!amount || amount <= 0) continue;
-        const inventory = item.product.inventory || {};
-        const amountUnit = item.mix?.amountUnit || item.mix?.rateUnit || inventory.unit || null;
-        const row = ensureRow(item.product, inventory, amountUnit);
-        const appointment = {
-          serviceId: service.id,
-          customerId: service.customer_id,
-          customerName,
-          serviceType: service.service_type,
-          scheduledDate: service.scheduled_date,
-          city: service.city,
-          waveguardTier: service.waveguard_tier,
-          protocolWindowTitle: plan?.protocol?.structured?.window?.title || plan?.closeout?.protocolWindowTitle || null,
-          amount,
-          unit: amountUnit,
-          inventoryUnit: row.inventoryUnit || amountUnit,
-          substitution: item.substitution || null,
-        };
-        const conversion = describeInventoryConversion(amount, amountUnit, row.inventoryUnit || amountUnit);
-        appointment.inventoryAmount = conversion.amount;
-        appointment.conversionConfidence = conversion.confidence;
-        if (conversion.convertible && conversion.amount != null) {
-          row.committedDemand = Number((row.committedDemand + conversion.amount).toFixed(4));
-          if (conversion.confidence !== 'exact_unit') row.conversionConfidence = conversion.confidence;
-          row.appointments.push(appointment);
-        } else {
-          row.unconvertedDemand = Number((row.unconvertedDemand + amount).toFixed(4));
-          row.unitMismatchCount += 1;
-          row.conversionConfidence = 'needs_review';
-          row.mismatchAppointments.push(appointment);
-        }
-      }
-    } catch (err) {
-      errors.push({
-        serviceId: service.id,
-        scheduledDate: service.scheduled_date,
-        customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer',
-        message: err.message || 'Forecast plan failed',
-      });
-    }
-  }
-
-  const products = Array.from(productMap.values()).map((row) => {
-    row.projectedRemaining = row.onHand != null
-      ? Number((row.onHand - row.committedDemand).toFixed(4))
-      : null;
-    let runningDemand = 0;
-    for (const appointment of row.appointments.slice().sort((a, b) => String(a.scheduledDate).localeCompare(String(b.scheduledDate)))) {
-      runningDemand = Number((runningDemand + Number(appointment.inventoryAmount || appointment.amount || 0)).toFixed(4));
-      if (row.onHand != null && runningDemand > row.onHand) {
-        row.firstShortDate = appointment.scheduledDate;
-        break;
-      }
-    }
-    row.status = summarizeForecastStatus(row);
-    row.shortfall = row.onHand != null
-      ? Math.max(0, Number((row.committedDemand - row.onHand).toFixed(4)))
-      : null;
-    const targetBuffer = row.lowStockThreshold != null
-      ? row.lowStockThreshold
-      : Number((row.committedDemand * 0.25).toFixed(4));
-    row.targetStock = Number((row.committedDemand + targetBuffer).toFixed(4));
-    row.recommendedOrderQuantity = row.onHand != null
-      ? Math.max(0, Number((row.targetStock - row.onHand).toFixed(4)))
-      : Number((row.committedDemand || row.targetStock || 0).toFixed(4));
-    row.priority = forecastPriority(row.status, row.firstShortDate);
-    return row;
-  }).sort((a, b) => {
-    const rank = { short: 0, warning: 1, unit_mismatch: 2, not_tracked: 3, ok: 4 };
-    return (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
-      || String(a.firstShortDate || a.appointments[0]?.scheduledDate || '').localeCompare(String(b.firstShortDate || b.appointments[0]?.scheduledDate || ''))
-      || a.productName.localeCompare(b.productName);
-  });
-
-  const statusCounts = products.reduce((acc, product) => {
-    acc[product.status] = (acc[product.status] || 0) + 1;
-    return acc;
-  }, { ok: 0, warning: 0, short: 0, unit_mismatch: 0, not_tracked: 0 });
-
-  return {
-    startDate,
-    endDate,
-    days: safeDays,
-    serviceCount: services.length,
-    productCount: products.length,
-    statusCounts,
-    products,
-    errors,
-    generatedAt: new Date().toISOString(),
   };
 }
 
@@ -3103,17 +2930,20 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
     const body = req.body || {};
     const actor = req.technicianId || req.technician?.id || null;
     const actorName = req.technician?.name || req.technician?.email || null;
-    // One transaction, product row LOCKED before the insert, then the SHARED
-    // any-source live-request check under that lock: every restock creator
-    // (this route, the readiness route, the Intelligence Bar tool, the
-    // auto-reorder sweep) runs the same read under the same row lock, so a
-    // writer that resumes after a concurrent commit hands back the request
-    // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
+    // One transaction, product row LOCKED before the insert, then — under
+    // that lock — the dispatcher's live-order check (409 while an automatic
+    // order is placing/placed: the Restock tab carries the order line,
+    // pre-push P0) and the SHARED any-source live-request check every
+    // restock creator runs (this route, the readiness route, the
+    // Intelligence Bar tool, the auto-reorder sweep), so a writer that
+    // resumes after a concurrent commit hands back the request that already
+    // exists instead of raising its twin (Codex r8 P1, r9 P1).
     // allowDuplicate lets staff stack a second STAFF request on purpose; it
     // never stacks one on the sweep's automatic request.
     const outcome = await db.transaction(async (trx) => {
       const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
       if (!product) return { status: 404, body: { error: 'Product not found' } };
+      await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
       const requestedQuantity = numberOrNull(body.requestedQuantity);
       const unit = String(body.unit || product.inventory_unit || product.rate_unit || '').trim();
       if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
@@ -3223,12 +3053,35 @@ function restockMeta(raw) {
 }
 
 // GET /restock-requests — product restock request queue.
+// GET /restock-requests/:id/order-evidence — presigned URLs for the
+// screenshots an order adapter uploaded (dry run, refusal, confirmation), so
+// the owner can validate a dry run and staff can diagnose a parked request
+// without S3 access (Codex #3853 r3 P2). Read-only; keys never leave the row.
+router.get('/restock-requests/:id/order-evidence', async (req, res, next) => {
+  try {
+    if (!(await db.schema.hasTable('vendor_orders'))) return res.json({ screenshots: [] });
+    const order = await db('vendor_orders').where({ restock_request_id: req.params.id }).orderBy('created_at', 'desc').first('id', 'status', 'evidence');
+    const shots = restockMeta(order?.evidence).screenshots || {};
+    const { getEvidenceUrl } = require('../services/seo/signup-evidence');
+    const screenshots = [];
+    for (const [label, key] of Object.entries(shots)) {
+      if (!key) continue;
+      const url = await getEvidenceUrl(key, { expiresIn: 3600 }).catch(() => null);
+      if (url) screenshots.push({ label, url });
+    }
+    res.json({ orderId: order?.id || null, orderStatus: order?.status || null, screenshots });
+  } catch (err) { next(err); }
+});
+
 router.get('/restock-requests', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) {
       return res.json({ requests: [] });
     }
     const status = String(req.query.status || 'open').toLowerCase();
+    // vendor_orders (PR 2 ledger) is one row per request at most; absent
+    // table (older schema) → no order columns.
+    const hasOrders = await db.schema.hasTable('vendor_orders');
     let query = db('product_restock_requests as prr')
       .leftJoin('products_catalog as pc', 'prr.product_id', 'pc.id')
       .leftJoin('scheduled_services as ss', 'prr.scheduled_service_id', 'ss.id')
@@ -3246,13 +3099,23 @@ router.get('/restock-requests', async (req, res, next) => {
         'c.last_name',
         'c.address_line1',
         'c.city',
+        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
+      .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
       .limit(Math.max(1, Math.min(200, Number(req.query.limit || 100))));
-    if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
+    // Active includes a received request whose automatic order landed after
+    // that receipt (evidence.landedAfterReceive): it still needs the second
+    // Receive or a revoke, and its bell links here (Codex r29 P2).
+    if (status === 'active' && hasOrders) query = query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
+    else if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
     const rows = await query;
+    // Technicians see the order outcome (placed / needs review), never the
+    // spend: a single-product order total IS the unit cost — owner-only,
+    // like every other cost field on this router (Codex r1 P2).
+    const showSpend = req.techRole === 'admin';
     res.json({
       requests: rows.map((row) => ({
         id: row.id,
@@ -3272,6 +3135,10 @@ router.get('/restock-requests', async (req, res, next) => {
         // metadata; the tab renders them as the order link (Codex r3 P2).
         vendorSku: restockMeta(row.metadata).vendorSku || null,
         vendorProductUrl: restockMeta(row.metadata).vendorProductUrl || null,
+        // Automatic order outcome (null = never dispatched): placing | placed
+        // | failed | needs_review, with the vendor number, total and the
+        // parked reason so the tab explains why a request still needs a hand.
+        order: hasOrders ? restockOrderView(row, showSpend) : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,
@@ -3288,6 +3155,33 @@ router.get('/restock-requests', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The automatic-order outcome on a Restock row (null = never dispatched):
+// placing | placed | failed | needs_review with the vendor number, total
+// and the parked reason so the tab explains why a request still needs a
+// hand. Spend is owner-only: a single-product order total IS the unit
+// cost, so a technician gets the reason code and no amount (Codex r1 P2).
+// Its own stage, separate from the base row mapping (Codex r10 P2).
+function restockOrderView(row, showSpend) {
+  if (!row.order_status) return null;
+  return {
+    status: row.order_status,
+    adapter: row.order_adapter,
+    externalOrderNumber: row.order_number || null,
+    amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
+    // The parked message can quote the total (cap wording): techs get the
+    // reason code only.
+    error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
+    placedAt: row.order_placed_at || null,
+    revokedAt: row.order_revoked_at || null,
+    // What the order actually bought, in the request's unit (packages round
+    // up) — the tab's receive default; a revoked order is not what arrives.
+    orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
+    // The order landed after the request was received by hand: the tab
+    // offers one more receive (the late order's own) on the received row.
+    landedAfterReceive: !!row.order_landed_after_receive,
+  };
+}
+
 // POST /restock-requests/:id/action — update request status and optionally receive stock.
 router.post('/restock-requests/:id/action', async (req, res, next) => {
   try {
@@ -3296,6 +3190,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     if (!['mark_ordered', 'receive', 'cancel'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
     const actor = req.technicianId || req.technician?.id || null;
     const result = await db.transaction(async (trx) => {
+      // LOCK ORDER: the request's ledger row first, then the request — the
+      // order the dispatcher's record transaction and the revoke CLI use, so
+      // a receive racing a revoke waits instead of deadlocking (hook r27 P1).
+      await trx('vendor_orders').where({ restock_request_id: req.params.id }).forUpdate().first('id');
       // Lock the request row so a double-click / stale tab cannot receive the
       // same request twice (double stock + duplicate restock movement).
       const request = await trx('product_restock_requests').where({ id: req.params.id }).forUpdate().first();
@@ -3304,8 +3202,18 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 404;
         throw err;
       }
+      // Automatic-order guard (pre-push P0s): 409 for every action while the
+      // order is placing; 409 for cancel while a dispatched order is not yet
+      // received or revoked (the next sweep would order again).
+      const dispatch = require('../services/procurement/order-dispatch');
+      const guard = await dispatch.assertManualActionAllowed(trx, request.id, action);
       const status = String(request.status || '').toLowerCase();
-      if (action === 'receive' && !['open', 'ordered'].includes(status)) {
+      // ONE more receive on a received request whose automatic order landed
+      // after that receipt (ledger evidence.landedAfterReceive — Codex r27
+      // P1): this receipt is the late order's own; the marker that kept the
+      // live-order guards closed comes off in the same transaction.
+      const secondReceive = action === 'receive' && status === 'received' && !!guard.landedAfterReceive;
+      if (action === 'receive' && !['open', 'ordered'].includes(status) && !secondReceive) {
         const err = new Error(`Restock request is already ${status}; refresh the list`);
         err.statusCode = 409;
         throw err;
@@ -3323,6 +3231,9 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 409;
         throw err;
       }
+      // The action resolves the request's ledger bell ("order manually" /
+      // "receive or revoke"): retired here so no one follows it (Codex r28 P2).
+      await dispatch.settleRequestLedgerBells(trx, request.id);
       if (action === 'mark_ordered') {
         const [updated] = await trx('product_restock_requests')
           .where({ id: request.id })
@@ -3343,7 +3254,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 404;
         throw err;
       }
-      const quantity = numberOrNull(req.body?.quantity) ?? numberOrNull(request.requested_quantity);
+      // Default = what the automatic order actually bought (packages round
+      // up), else the requested figure (Codex r2 P1).
+      const orderedQuantity = await dispatch.orderedQuantityFor(trx, request.id);
+      const quantity = numberOrNull(req.body?.quantity) ?? orderedQuantity ?? numberOrNull(request.requested_quantity);
       const unit = String(req.body?.unit || request.unit || product.inventory_unit || '').trim();
       if (!quantity || quantity <= 0 || !unit) {
         const err = new Error('Receive quantity and unit are required');
@@ -3379,8 +3293,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
           enteredQuantity: quantity,
           enteredUnit: unit,
           conversionConfidence: received.confidence,
+          ...(secondReceive ? { secondReceive: true } : {}),
         },
       }).returning('*');
+      if (secondReceive) await dispatch.settleLandedAfterReceive(trx, request.id);
       const [updated] = await trx('product_restock_requests')
         .where({ id: request.id })
         .update({ status: 'received', closed_by: actor, closed_at: new Date(), updated_at: new Date() })

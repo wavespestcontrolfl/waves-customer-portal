@@ -303,6 +303,61 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).not.toHaveBeenCalled();
   });
 
+  describe('a server-filed repeat the wizard fallback stamped with this estimate but never converted resumes on retry (codex r35 P1 / pre-push r33)', () => {
+    const marked = (extra = {}) => ({ id: 'lead-dup', status: 'duplicate', estimate_id: 'estimate-1', customer_id: null, phone: '9412269100', email: null, extracted_data: { duplicate_of_lead_id: 'lead-root' }, ...extra });
+    const estimate = { id: 'estimate-1', customer_phone: '+1 (941) 226-9100' };
+
+    test('resumes through the claimed conversion — no re-stamp, status pinned to duplicate, identity as read', async () => {
+      const database = makeAcceptDb({ linked: [marked()], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+      expect(database._updates).toHaveLength(0);
+      expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup', expect.objectContaining({
+        customerId: 'customer-1', estimateId: 'estimate-1', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: null, phone: '9412269100', email: null, estimate_id: 'estimate-1' },
+        // ...and only as the SOLE live row of the estimate, judged in the
+        // conversion's own statement: a retry racing another retry, or a
+        // link of the original to this estimate, converts 0 rows instead of
+        // leaving two won rows (codex #3883 r1 P1).
+        onlyIfSoleLinkedRow: 'estimate-1',
+      }));
+    });
+
+    test('an acceptance that carries NO customer (a manual acceptance of an estimate without one) judges the contact and preserves the row\'s own customer link — never treats a linked row as its own, never writes customer_id NULL (codex #3883 r1 P1)', async () => {
+      // linked to another customer, contact matches the estimate: resumed, link preserved
+      let database = makeAcceptDb({ linked: [marked({ customer_id: 'customer-2' })], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: null, database });
+      expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup', expect.objectContaining({ customerId: undefined, onlyIfSoleLinkedRow: 'estimate-1' }));
+      // linked to another customer, contact drifted from the estimate: not ours
+      jest.clearAllMocks();
+      database = makeAcceptDb({ linked: [marked({ customer_id: 'customer-2', phone: '9415550000' })], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: null, database });
+      expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    });
+
+    test('a duplicate staff closed by hand (no marker) stays closed', async () => {
+      const database = makeAcceptDb({ linked: [marked({ extracted_data: null })], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+      expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    });
+
+    test('another live row of this estimate — won, or still open — is the deal\'s lead; the duplicate is not resumed beside it', async () => {
+      for (const other of [{ id: 'lead-won', status: 'won', estimate_id: 'estimate-1' }, { id: 'lead-open', status: 'contacted', estimate_id: 'estimate-1' }]) {
+        jest.clearAllMocks();
+        const database = makeAcceptDb({ linked: [marked(), other], estimate });
+        await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+        expect(leadAttribution.markConverted.mock.calls.map((c) => c[0])).toEqual(other.status === 'won' ? [] : ['lead-open']);
+      }
+    });
+
+    test('a repeat that is no longer this customer\'s (contact drifted from the estimate; linked to another customer) is left alone', async () => {
+      for (const row of [marked({ phone: '9415550000' }), marked({ customer_id: 'customer-2' })]) {
+        jest.clearAllMocks();
+        const database = makeAcceptDb({ linked: [row], estimate });
+        await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
+        expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+      }
+    });
+  });
+
   test('rescues a quote-wizard lead via estimate_data.lead_id and stamps the estimate link', async () => {
     const database = makeAcceptDb({
       linked: [],
@@ -617,7 +672,34 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: true }]);
     // The other offer's funnel is not ours to book; the named row gets its own (codex r14 P2).
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], onlyIfSoleLinkedRow: 'estimate-2f' }));
+  });
+
+  test('a no-customer fallback whose status claim lost reverts its stamp on the predicate of the customer it WROTE (the row\'s own, preserved) — a concurrent no-customer retry that won keeps its link (codex #3883 r2 P1)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-16', estimate_data: { lead_id: 'lead-dup16' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: { 'lead-dup16': { id: 'lead-dup16', status: 'duplicate', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', extracted_data: { duplicate_of_lead_id: 'lead-gone16' } } },
+      raceRows: {},
+      afterStamp: { 'lead-dup16': { id: 'lead-dup16', status: 'won', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', estimate_id: 'estimate-16' } },
+    });
+    leadAttribution.markConverted.mockResolvedValueOnce(false);
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-16', customerId: null, database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup16', expect.objectContaining({ customerId: undefined, onlyIfStatusIn: ['duplicate'] }));
+    expect(database._claims[1]).toEqual({ id: 'lead-dup16', identity: { estimate_id: 'estimate-16' }, not: { status: 'won', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', estimate_id: 'estimate-16' } });
+  });
+
+  test('the named-row fallback on an acceptance with NO customer: a named row linked to another customer converts only on a matching contact, with its link preserved (codex #3883 r1 P1)', async () => {
+    const leadsById = {
+      'lead-dup15': { id: 'lead-dup15', status: 'duplicate', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', extracted_data: { duplicate_of_lead_id: 'lead-gone15' } },
+    };
+    let database = makeAcceptDb({ linked: [], estimate: { id: 'estimate-15', estimate_data: { lead_id: 'lead-dup15' }, customer_phone: '9415550142', customer_email: 'a@example.com' }, leadsById });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-15', customerId: null, database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup15', expect.objectContaining({ customerId: undefined, onlyIfStatusIn: ['duplicate'], onlyIfSoleLinkedRow: 'estimate-15' }));
+    jest.clearAllMocks();
+    database = makeAcceptDb({ linked: [], estimate: { id: 'estimate-15', estimate_data: { lead_id: 'lead-dup15' }, customer_phone: '9415550000', customer_email: 'b@example.com' }, leadsById });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-15', customerId: null, database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
   });
 
   test('an indirectly resolved original that is ALREADY won records no second win on the duplicate row', async () => {
@@ -633,6 +715,22 @@ describe('lead-estimate link service', () => {
     expect(leadAttribution.markConverted).not.toHaveBeenCalled();
     expect(database._updates).toEqual([]);
     expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+  });
+
+  test('an UNLINKED original that won on a DIFFERENT estimate (its persisted won_estimate_id) is a different deal: this acceptance is credited on the named row, not suppressed as a second win (pre-push P1 on de469d9)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2m', estimate_data: { lead_id: 'lead-dup13' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: {
+        'lead-dup13': { id: 'lead-dup13', status: 'duplicate', customer_id: 'customer-1', extracted_data: { duplicate_of_lead_id: 'lead-orig13' } },
+        'lead-orig13': { id: 'lead-orig13', status: 'won', customer_id: 'customer-1', phone: '9415550142', email: 'a@example.com', estimate_id: null, extracted_data: { won_estimate_id: 'estimate-office' } },
+      },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2m', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalledWith('lead-orig13', expect.anything());
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup13', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
+    expect(database._updates).toEqual([{ id: 'lead-dup13', patch: expect.objectContaining({ estimate_id: 'estimate-2m' }), conditional: true }]);
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
   test('a won original that belongs to a DIFFERENT customer (shared household contact) does not suppress the named row: this deal is credited once, on the named row, with its own funnel row', async () => {
@@ -1375,7 +1473,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
         where: (a, b) => {
           const q = {
             whereNull: (c) => { q._null = c; return q; },
-            forUpdate: () => { q._lock = true; locks.push({ table, where: a }); return q; },
+            forUpdate: () => { q._lock = true; locks.push({ table, where: a, ...(q._scope === undefined ? {} : { scope: q._scope }) }); return q; },
             update: async (patch) => { updated.push({ table, where: a, whereNull: q._null, claimed: !!q._claimed, patch }); return 1; },
             first: async () => {
               if (table === 'ad_service_attribution') return a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id], customer_id: (opts.funnelOwners || {})[a.lead_id] || null } : null;
@@ -1383,14 +1481,16 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
               const row = (q._lock && leadsNow[id]) || rows[id] || null;
               // An object clause beyond the id is a claim: every key must match the row AS IT IS NOW.
               if (!row || typeof a === 'string') return row;
-              return Object.entries(a).every(([k, v]) => (row[k] ?? null) === (v ?? null)) && !(q._null === 'deleted_at' && row.deleted_at) ? row : null;
+              // The locked root read also pins the scope its win persisted (won_estimate_id, else its link).
+              const scopeHolds = q._scope === undefined || ((row.extracted_data && row.extracted_data.won_estimate_id) || row.estimate_id || null) === q._scope;
+              return Object.entries(a).every(([k, v]) => (row[k] ?? null) === (v ?? null)) && !(q._null === 'deleted_at' && row.deleted_at) && scopeHolds ? row : null;
             },
             whereExists: (fn) => {
               const sub = {};
               const bld = { select: () => bld, from: (t) => { sub.from = t; return bld; }, whereRaw: (r) => { sub.whereRaw = r; return bld; }, where: (c) => { sub.where = c; return bld; }, whereNull: (c) => { sub.whereNull = c; return bld; } };
               fn.call(bld); claims.push(sub); q._claimed = true; return q;
             },
-            whereRaw: (sql) => { q._not = sql; return q; },
+            whereRaw: (sql, bindings) => { if (/won_estimate_id/.test(sql)) q._scope = bindings[0]; else q._not = sql; return q; },
             del: async () => { deleted.push({ table, where: a, not: q._not }); return opts.ownCompletesMidTx ? 0 : 1; },
           };
           return q;
@@ -1468,7 +1568,8 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
       expect(database._locks).toEqual([
         { table: 'leads', where: { id: 'rep', status: 'won', customer_id: 'c1', phone: '9415550142', email: 'a@example.com', estimate_id: null } },
-        { table: 'leads', where: { id: 'root', ...ROOT_CLAIM.onlyIfLead } },
+        // ...the root's lock also pins the scope its win persisted (won_estimate_id, else its link).
+        { table: 'leads', where: { id: 'root', ...ROOT_CLAIM.onlyIfLead }, scope: null },
       ]);
     });
 
@@ -1551,7 +1652,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
       expect(stampLeadFunnelRow).not.toHaveBeenCalled();
       // ...judged under the lock on the root as won, with the claimed read.
-      expect(database._locks[1]).toEqual({ table: 'leads', where: { id: 'root', customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'won' } });
+      expect(database._locks[1]).toEqual({ table: 'leads', where: { id: 'root', customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'won' }, scope: null });
       expect(database._claims).toHaveLength(2); // the claimed read + the customer stamp
     });
 
@@ -1643,6 +1744,43 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       // ...and the same root IS the deal when the deposit is on ITS estimate.
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-A' })).resolves.toBeNull();
       expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, expect.objectContaining({ onlyIfLead: expect.objectContaining({ estimate_id: 'e-A' }) }));
+    });
+
+    test('a replayed conversion with no estimate of its own keeps the scope the winning conversion persisted (extracted_data.won_estimate_id): root A stays refused, the repeat keeps its row (codex r37 P1)', async () => {
+      const rows = { rep: repeat('rep', { extracted_data: { duplicate_of_lead_id: 'root', won_estimate_id: 'e-B' } }), root: { id: 'root', status: 'estimate_sent', customer_id: 'c1', phone: '9415550142', estimate_id: 'e-A' } };
+      const database = dbOf(rows, { root: 'estimate_sent' });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
+      expect(database._deleted).toEqual([]);
+      // The event's own estimate still comes first.
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-A' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).toHaveBeenCalledWith('root', 'won', database, expect.objectContaining({ onlyIfLead: expect.objectContaining({ estimate_id: 'e-A' }) }));
+    });
+
+    test('an UNLINKED root that WON on estimate A (its persisted scope) is not the deal a repeat won on estimate B: nothing settles onto it, its row is never dropped beside it, the repeat carries its own (pre-push P1 on de469d9)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'won', customer_id: 'c1', phone: '9415550142', estimate_id: null, extracted_data: { won_estimate_id: 'e-A' } } };
+      const database = dbOf(rows, { root: 'booked', rep: 'booked' }, { funnelOwners: { root: 'c1' } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-B' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(database._deleted).toEqual([]);
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
+      // ...and the SAME root is the deal when the repeat's win is on estimate A: judged on the root's persisted scope, pinned on its lock.
+      stampLeadFunnelRow.mockClear();
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-A' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+      expect(database._locks[database._locks.length - 1]).toEqual(expect.objectContaining({ table: 'leads', where: expect.objectContaining({ id: 'root', status: 'won' }), scope: 'e-A' }));
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: "funnel_stage IS DISTINCT FROM 'completed'" }]);
+    });
+
+    test('a root whose persisted win scope changed between the read and the lock (a conversion on another estimate landed) loses the claim — the repeat carries its own row', async () => {
+      const root = { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null };
+      const rows = { rep: repeat('rep'), root };
+      const database = dbOf(rows, { root: 'lead' }, { leadsNow: { root: { ...root, extracted_data: { won_estimate_id: 'e-A' } } } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1', estimateId: 'e-B' })).resolves.toBeNull();
+      expect(database._locks[1]).toEqual(expect.objectContaining({ table: 'leads', scope: null }));
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
     });
 
     test('a root linked to the SAME estimate as the repeat is the same deal', async () => {

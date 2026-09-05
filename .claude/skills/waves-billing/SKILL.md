@@ -127,8 +127,8 @@ payment path).
 1. Read the relevant AGENTS.md P0 block for the files you're touching.
 2. Make the change following the invariants above; if a change requires
    relaxing one, that's an owner decision — stop and ask Adam.
-3. Money queries/backfills follow the waves-db skill (read-only prod
-   verification, ET window discipline).
+3. Money queries/backfills follow the waves-db skill's target-environment
+   verification, authorization boundaries, and ET window discipline.
 4. Never claim a charge, refund, or payment state without evidence (webhook
    row, `payments` row, or Stripe object read via an authorized session).
 

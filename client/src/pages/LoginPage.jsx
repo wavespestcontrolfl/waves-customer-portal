@@ -5,6 +5,7 @@ import { COLORS as B, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
+import { WavesShell } from '../components/brand';
 import { isNativeApp } from '../native/platform';
 
 const SUPPORT_LINKS = [
@@ -50,7 +51,7 @@ export default function LoginPage() {
   // (audit S2-3). Shown regardless of the failure's real cause, so it leaks
   // nothing about which numbers have accounts.
   const [failedVerifies, setFailedVerifies] = useState(0);
-  useGlassSurface(true, 'full', 'app');
+  useGlassSurface(true);
 
   useEffect(() => {
     if (isAuthenticated) navigate(nextPath, { replace: true });
@@ -104,8 +105,9 @@ export default function LoginPage() {
   if (isAuthenticated) return null;
 
   return (
-    <>
-    <main
+    <WavesShell>
+    {/* WavesShell owns the page's one <main>; this is the login column. */}
+    <div
       className="portal-login-page"
       style={{
         '--login-blue': B.glassNavy,
@@ -125,7 +127,7 @@ export default function LoginPage() {
     >
       <style>{`
         .portal-login-page {
-          min-height: 100vh;
+          flex: 1;
           background: var(--login-bg);
           color: var(--login-text);
           display: flex;
@@ -145,49 +147,21 @@ export default function LoginPage() {
           min-width: 0;
           padding: 8px 0;
         }
-        .portal-login-logo {
-          display: inline-flex;
-          align-items: center;
-          gap: 10px;
-          /* 44px touch-target floor — the 42px logo mark alone fell short */
-          min-height: 44px;
-          text-decoration: none;
-          color: var(--login-blue);
-        }
-        .portal-login-logo img {
-          width: 42px;
-          height: 42px;
-          object-fit: contain;
-        }
-        .portal-login-logo span {
-          font-family: ${FONTS.body};
-          font-size: 15px;
-          font-weight: 800;
-          letter-spacing: 0;
-        }
         .portal-login-eyebrow {
-          margin-top: 28px;
-          display: flex;
-          width: fit-content;
-          max-width: 100%;
-          align-items: center;
-          gap: 8px;
-          padding: 6px 10px;
-          border-radius: 999px;
-          background: var(--login-soft);
-          color: var(--login-blue);
+          margin-top: 0;
+          color: var(--login-muted);
           font-size: 14px;
-          font-weight: 800;
-          border: 1px solid var(--login-soft-border);
+          font-weight: 600;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
         }
         .portal-login-brand h1 {
           margin: 14px 0 12px;
           color: var(--login-blue);
-          font-family: ${FONTS.serif};
-          font-size: 44px;
-          line-height: 1.06;
-          letter-spacing: 0;
-          font-weight: 500;
+          font-size: 40px;
+          line-height: 1.08;
+          letter-spacing: -0.03em;
+          font-weight: 700;
         }
         .portal-login-brand p {
           margin: 0;
@@ -231,13 +205,13 @@ export default function LoginPage() {
           color: var(--login-blue);
           font-family: ${FONTS.body};
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           line-height: 1.2;
         }
         .portal-login-tool-text {
           display: block;
           color: var(--login-muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.35;
           margin-top: 2px;
         }
@@ -306,8 +280,8 @@ export default function LoginPage() {
           gap: 7px;
           color: var(--login-muted);
           font-family: ${FONTS.body};
-          font-size: 12px;
-          font-weight: 800;
+          font-size: 14px;
+          font-weight: 700;
         }
         .portal-login-step-item.active {
           background: var(--login-card);
@@ -321,7 +295,7 @@ export default function LoginPage() {
         .portal-login-field label {
           color: var(--login-blue);
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           letter-spacing: 0;
           font-family: ${FONTS.body};
         }
@@ -358,7 +332,7 @@ export default function LoginPage() {
           border-radius: 10px;
           font-family: ${FONTS.body};
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -443,7 +417,7 @@ export default function LoginPage() {
           gap: 6px;
           font-family: ${FONTS.body};
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           background: #fff;
         }
         .portal-login-help a:hover {
@@ -469,7 +443,7 @@ export default function LoginPage() {
         }
         .portal-login-footer-brand {
           color: var(--login-blue);
-          font-weight: 800;
+          font-weight: 700;
         }
         .portal-login-footer-cities {
           display: inline-flex;
@@ -482,7 +456,7 @@ export default function LoginPage() {
           display: inline-flex;
           align-items: center;
           gap: 6px;
-          font-weight: 800;
+          font-weight: 700;
         }
         @media (max-width: 820px) {
           .portal-login-page {
@@ -520,15 +494,8 @@ export default function LoginPage() {
 
       <div className="portal-login-shell">
         <section className="portal-login-brand" aria-labelledby="portal-login-heading">
-          <a className="portal-login-logo" href="https://wavespestcontrol.com">
-            <img src="/waves-logo.png" alt="Waves" />
-            <span>Waves</span>
-          </a>
-          <div className="portal-login-eyebrow" data-glass="chip" style={{ position: 'relative' }}>
-            <Icon name="lock" size={15} strokeWidth={2.2} />
-            Secure customer access
-          </div>
-          <h1 id="portal-login-heading">Customer Portal</h1>
+          <div data-gt="eyebrow" className="portal-login-eyebrow">Customer portal</div>
+          <h1 id="portal-login-heading">Sign in to Waves</h1>
           <p>Sign in with the phone number on your Waves account to manage service, billing, documents, and property details.</p>
         </section>
 
@@ -540,7 +507,7 @@ export default function LoginPage() {
               </span>
               <div>
                 <h2 className="portal-login-title">
-                  {step === 'phone' ? 'Sign In' : 'Enter Code'}
+                  {step === 'phone' ? 'Sign in' : 'Enter your code'}
                 </h2>
                 <p className="portal-login-subtitle">
                   {step === 'phone'
@@ -583,7 +550,7 @@ export default function LoginPage() {
                     placeholder="(941) 555-0147"
                     aria-describedby="waves-login-phone-help"
                   />
-                  <span id="waves-login-phone-help" style={{ fontSize: 12, color: 'var(--login-muted)', lineHeight: 1.35 }}>
+                  <span id="waves-login-phone-help" style={{ fontSize: 14, color: 'var(--login-muted)', lineHeight: 1.35 }}>
                     Use the mobile number linked to your Waves account.
                   </span>
                 </div>
@@ -604,7 +571,7 @@ export default function LoginPage() {
                     autoFocus
                     aria-describedby="waves-login-code-help"
                   />
-                  <span id="waves-login-code-help" style={{ fontSize: 12, color: 'var(--login-muted)', lineHeight: 1.35 }}>
+                  <span id="waves-login-code-help" style={{ fontSize: 14, color: 'var(--login-muted)', lineHeight: 1.35 }}>
                     Codes are 6 digits and usually arrive within a few seconds.
                   </span>
                 </div>
@@ -620,7 +587,7 @@ export default function LoginPage() {
               >
                 {sending
                   ? busyLabel
-                  : (step === 'phone' ? 'Send Code' : 'Sign In')}
+                  : (step === 'phone' ? 'Send code' : 'Sign in')}
               </button>
 
               {step === 'code' && (
@@ -632,14 +599,14 @@ export default function LoginPage() {
                     disabled={sending}
                   >
                     <Icon name="refresh" size={15} strokeWidth={2} />
-                    Resend Code
+                    Resend code
                   </button>
                   <button
                     type="button"
                     className="portal-login-secondary"
                     onClick={() => { clearError(); setStep('phone'); setCode(''); setFailedVerifies(0); }}
                   >
-                    Use Different Number
+                    Use a different number
                   </button>
                 </>
               )}
@@ -695,10 +662,10 @@ export default function LoginPage() {
               border: '1px solid #E7E2D7',
               textAlign: 'center',
             }}>
-              <div style={{ fontSize: 12, fontWeight: 850, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
                 The Waves App
               </div>
-              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
                 Your home team, one tap away.
               </div>
               <div style={{ marginTop: 6, fontSize: 14, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>
@@ -716,13 +683,7 @@ export default function LoginPage() {
           )}
         </section>
       </div>
-    </main>
-    {/* Logo-only sign-off (owner 2026-07-09): the login screen drops the
-        BrandFooter identity block + TrustFooter legal strip — just the
-        mascot below the support links, styled like BrandFooter's logo row. */}
-    <div style={{ textAlign: 'center', marginTop: 32, padding: '20px 16px', borderTop: `1px solid ${B.grayLight}` }}>
-      <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: 0.6 }} />
     </div>
-    </>
+    </WavesShell>
   );
 }

@@ -286,6 +286,8 @@ router.get('/autonomous/review', async (req, res, next) => {
     const review = await autonomousReviewQueue.listReviewItems({
       status: req.query.status,
       limit: req.query.limit,
+      offset: req.query.offset,
+      actionType: ['new_supporting_blog', 'other'].includes(req.query.actionType) ? req.query.actionType : null,
     });
     res.json(review);
   } catch (err) { next(err); }
