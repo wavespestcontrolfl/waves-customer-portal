@@ -823,7 +823,13 @@ is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
 GET returns the appointment summary (customer first name, service type,
 current date/window, recurring flag, `missed` flag, and — series visits
 only — the `reanchorPullForwardDays` threshold) + live open slots from the
-/book availability engine. POST is a WRITE with two owner-authorized
+/book availability engine (`availability.days[].slots[]` — every slot
+carries its own `nearby` boolean, true when its detour is within
+`NEARBY_DETOUR_MINUTES`; `days[].nearby` and `availability.nearby` are the
+roll-ups. The per-slot flag is shared by every consumer of that engine:
+`/api/booking/availability`, this GET, re-service, and the find-slots
+searches — added in #3888 so the picker labels each time from its own
+route-fit, not the day's). POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day

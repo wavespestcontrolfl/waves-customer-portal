@@ -127,6 +127,16 @@ describe('buildBookingAvailability — gap fan-out', () => {
     expect(startTimes(availability)).toEqual(['10:00']);
   });
 
+  test('nearby is stamped per slot (the picker labels each time from its own flag), the day rolls it up', async () => {
+    findAvailableSlots.mockResolvedValue({
+      slots: [gapSlot('09:00', { detour_minutes: 3, latest_start_min: null }), gapSlot('13:00', { detour_minutes: 25, latest_start_min: null })],
+      total_feasible: 2,
+    });
+    const availability = await build();
+    expect(availability.days[0].slots.map((s) => [s.start_time, s.nearby])).toEqual([['09:00', true], ['13:00', false]]);
+    expect(availability.days[0].nearby).toBe(true);
+  });
+
   test('empty-day 08:00 snap-down is preserved and the day fans out past it', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [gapSlot('08:05', {

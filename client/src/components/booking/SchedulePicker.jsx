@@ -9,8 +9,10 @@
  *
  * Presentational only. Every page keeps its own fetch, search and submit;
  * this component takes the reschedule availability shape
- *   { days: [{ date, fullDate, nearby, rainChance, slots: [{ start_time, start_label, … }] }],
- *     slots?: [ranked { date, start_time }], rangeFrom?, rangeTo? }
+ *   { days: [{ date, fullDate, nearby, rainChance, slots: [{ start_time, start_label, nearby?, slotId?, … }] }],
+ *     slots?: [ranked { date, start_time, slotId? }], rangeFrom?, rangeTo? }
+ * `nearby` on a slot is that slot's own route-fit; the day's flag is the
+ * roll-up the calendar dots and legend use.
  * and hands back the day's own slot object stamped with { date, fullDate },
  * so a page's confirm payload is identical to what its old list produced.
  *
@@ -56,15 +58,15 @@ function addDays(ymd, n) {
 
 // Grid bounds when the payload carries none: at least the two-week window
 // from today (ET) that every availability builder offers by default,
-// widened to reach the last open day. A list that starts far out (a
-// searched or picked date past the window) collapses to the days themselves
-// rather than drawing months of empty cells.
+// widened to reach the last open day. A list that starts past that window
+// (a searched or picked date further out) collapses to the days themselves
+// rather than drawing weeks of empty cells before the first opening.
 export function pickerRange(days) {
   const today = etDateString();
   const first = days[0]?.date;
   const last = days[days.length - 1]?.date;
   let from = first && first < today ? first : today;
-  if (first && first > addDays(from, 91)) from = first;
+  if (first && first > addDays(from, 13)) from = first;
   const twoWeeks = addDays(from, 13);
   return { rangeFrom: from, rangeTo: last && last > twoWeeks ? last : twoWeeks };
 }
@@ -137,8 +139,9 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
   const picks = (slots || [])
     .map((s, i) => {
       const day = s.date ? byDate.get(s.date) : null;
-      const panelSlot = day?.slots?.find((x) => x.start_time === s.start_time);
-      return panelSlot ? { s: panelSlot, day, i, nearby: !!day.nearby } : null;
+      // slotId first (two technicians can share a date + start), else time.
+      const panelSlot = day?.slots?.find((x) => (s.slotId ? x.slotId === s.slotId : x.start_time === s.start_time));
+      return panelSlot ? { s: panelSlot, day, i, nearby: !!panelSlot.nearby } : null;
     })
     .filter(Boolean)
     .sort((a, b) => (Number(b.nearby) - Number(a.nearby)) || (a.i - b.i))
@@ -153,7 +156,7 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
           <button
             type="button"
             data-glass="chip"
-            key={`${day.date}|${slot.start_time}`}
+            key={slot.slotId || `${day.date}|${slot.start_time}`}
             className="wpk-best-chip"
             onClick={() => onPick(slot, day)}
           >
@@ -217,7 +220,7 @@ export function PickerDayGrid({ availability, selectedDate, onSelectDay, frame }
               {open ? (
                 <span className="wpk-day-dots">
                   {day.slots.slice(0, 3).map((slot, i) => (
-                    <i key={i} className={day.nearby ? 'wpk-dot-nearby' : ''} />
+                    <i key={i} className={slot.nearby ? 'wpk-dot-nearby' : ''} />
                   ))}
                 </span>
               ) : null}
@@ -263,13 +266,14 @@ export function PickerTimesPanel({
                   type="button"
                   {...(picked ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
                   className="wpk-time-btn"
+                  data-schedule-slot=""
                   aria-pressed={picked}
-                  aria-label={`Choose ${slot.start_label} on ${day.fullDate}${day.nearby ? ', technician already in your neighborhood' : ''}`}
+                  aria-label={`Choose ${slot.start_label} on ${day.fullDate}${slot.nearby ? ', technician already in your neighborhood' : ''}`}
                   onClick={() => onSelect(picked ? null : stamped)}
                 >
                   <span className="wpk-time-main">
                     {slot.start_label}
-                    {day.nearby ? <span className="wpk-nearby-pill">Tech nearby</span> : null}
+                    {slot.nearby ? <span className="wpk-nearby-pill">Tech nearby</span> : null}
                   </span>
                   {detail ? <span className="wpk-time-detail">{detail}</span> : null}
                 </button>

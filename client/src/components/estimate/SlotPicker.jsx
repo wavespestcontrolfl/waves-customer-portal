@@ -65,7 +65,7 @@ function toAvailability(slots) {
     if (slot.routeOptimal) day.nearby = true;
     if (Number.isFinite(slot.rainChance)) day.rainChance = Math.max(day.rainChance ?? 0, slot.rainChance);
     const { window } = formatSlotDate(slot.date, slot.windowStart);
-    day.slots.push({ ...slot, start_time: slot.windowStart, start_label: String(window || '').split('–')[0] || window });
+    day.slots.push({ ...slot, nearby: !!slot.routeOptimal, start_time: slot.windowStart, start_label: String(window || '').split('–')[0] || window });
   }
   const days = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
   return { days, ...pickerRange(days) };
@@ -327,7 +327,7 @@ export default function SlotPicker({
   const availability = toAvailability(shownSlots);
   // The API lists are engine-ordered (soonest / route-optimal first) — the
   // top three feed the picker's "Our best times" strip.
-  const rankedSlots = activePayload ? null : shownSlots.slice(0, 3).map((slot) => ({ date: slot.date, start_time: slot.windowStart }));
+  const rankedSlots = activePayload ? null : shownSlots.slice(0, 3).map((slot) => ({ slotId: slot.slotId, date: slot.date, start_time: slot.windowStart }));
   const pickerSelected = selectedSlot ? { ...selectedSlot, start_time: selectedSlot.windowStart } : null;
 
   const callUs = (

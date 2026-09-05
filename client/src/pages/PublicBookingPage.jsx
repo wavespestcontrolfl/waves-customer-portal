@@ -266,6 +266,10 @@ export default function PublicBookingPage() {
   const [secureCardUrl, setSecureCardUrl] = useState(null);
   // Custom date/time finder — Waves AI search + 90-day date picker
   const [searchResult, setSearchResult] = useState(null);
+  // Bumped by "Show all open times"; keys the search card so its recap
+  // clears with the results (a stale "Two openings Tuesday afternoon" line
+  // must not sit above the full calendar).
+  const [aiSession, setAiSession] = useState(0);
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
@@ -1164,7 +1168,7 @@ export default function PublicBookingPage() {
                 {searchResult ? (
                   <button
                     type="button"
-                    onClick={() => { setSearchResult(null); setSelectedDate(null); setSelectedSlot(null); }}
+                    onClick={() => { setSearchResult(null); setSelectedDate(null); setSelectedSlot(null); setAiSession((n) => n + 1); }}
                     style={{
                       background: 'transparent', border: 'none', padding: 0, marginBottom: 16,
                       color: COLORS.wavesBlue, fontSize: 14, fontWeight: 700, cursor: 'pointer', textDecoration: 'underline',
@@ -1234,6 +1238,7 @@ export default function PublicBookingPage() {
                 {/* Waves AI date/time search */}
                 <div style={{ marginTop: 20 }}>
                   <WavesAIScheduleSearch
+                    key={aiSession}
                     theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.glassNavy, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
                     onSearch={runAiSearch}
                   />
