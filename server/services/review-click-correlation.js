@@ -67,15 +67,39 @@ function normalizeName(value) {
  * (GH codex r1 P1). A one-token display name ("SunshineGal88") offers no
  * surname and returns []. Trailing generational / professional suffixes
  * are dropped first: "John Smith Jr." offers "smith", never "jr" — a
- * customer stored "Jr" must not be the sole surname match (GH codex r8 P1).
+ * customer stored "Jr" must not be the sole surname match (GH codex r8 P1);
+ * generational numerals run through X, so "Smith VI" offers "smith", never
+ * "vi" (GH codex r9 P1).
+ * A comma fixes the order (GH codex r9 P1): "Smith, John" is last-name-
+ * first, so the surname is the part BEFORE the comma — every whole-word
+ * suffix of it, and a one-token head ("Smith") is a complete surname because
+ * the comma said so. "John Smith, Jr." is a comma that only sets off a
+ * suffix (nothing but suffixes after it) and reads in normal order.
  */
-const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'md', 'dds', 'dvm', 'phd', 'esq', 'cpa']);
+const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x', 'md', 'dds', 'dvm', 'phd', 'esq', 'cpa']);
+
+// Normalized name tokens with the trailing suffixes dropped.
+function nameTokens(value) {
+  const tokens = normalizeName(value).split(' ').filter(Boolean);
+  while (tokens.length && NAME_SUFFIXES.has(tokens[tokens.length - 1])) tokens.pop();
+  return tokens;
+}
+
+// Every whole-word suffix of the tokens, longest first; [] below minTokens.
+const wholeWordSuffixes = (tokens, minTokens) => (tokens.length < minTokens
+  ? []
+  : tokens.map((_, i) => tokens.slice(i).join(' ')).filter((s) => s.length >= 2));
 
 function reviewerSurnames(reviewerName) {
-  const tokens = normalizeName(reviewerName).split(' ').filter(Boolean);
-  while (tokens.length && NAME_SUFFIXES.has(tokens[tokens.length - 1])) tokens.pop();
-  if (tokens.length < 2) return [];
-  return tokens.map((_, i) => tokens.slice(i).join(' ')).filter((s) => s.length >= 2);
+  const raw = String(reviewerName || '');
+  const comma = raw.indexOf(',');
+  if (comma < 0) return wholeWordSuffixes(nameTokens(raw), 2);
+  const head = nameTokens(raw.slice(0, comma));
+  const tail = nameTokens(raw.slice(comma + 1));
+  // Only suffixes after the comma → normal order, suffix set off by a comma.
+  if (!tail.length) return wholeWordSuffixes(head, 2);
+  // Last-name-first: the head IS the surname (a one-token head included).
+  return wholeWordSuffixes(head, 1);
 }
 
 /**

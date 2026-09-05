@@ -362,6 +362,17 @@ describe('reviewerSurnames', () => {
     expect(reviewerSurnames('Søren Kierkegaard')).toEqual([]);
     expect(reviewerSurnames('Łukasz Nowak')).toEqual([]);
     expect(reviewerSurnames('Dana B.')).toEqual(['dana b']);
+    // Later generational numerals (GH codex r9 P1).
+    expect(reviewerSurnames('John Smith VI')).toEqual(['john smith', 'smith']);
+    expect(reviewerSurnames('John Smith X')).toEqual(['john smith', 'smith']);
+    // A comma fixes last-name-first order (GH codex r9 P1): the surname is
+    // the head, a one-token head included; a suffix-only tail is normal order.
+    expect(reviewerSurnames('Smith, John')).toEqual(['smith']);
+    expect(reviewerSurnames('De La Cruz, Maria')).toEqual(['de la cruz', 'la cruz', 'cruz']);
+    expect(reviewerSurnames('Smith, John, III')).toEqual(['smith']);
+    expect(reviewerSurnames('John Smith, Jr.')).toEqual(['john smith', 'smith']);
+    expect(reviewerSurnames('Smith, Jr.')).toEqual([]);
+    expect(reviewerSurnames(', John')).toEqual([]);
     expect(reviewerSurnames('')).toEqual([]);
   });
 });
