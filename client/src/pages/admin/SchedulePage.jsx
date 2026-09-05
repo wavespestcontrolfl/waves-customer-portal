@@ -7680,10 +7680,10 @@ function LawnPreviousVisitCard({ service }) {
     setState({ loading: true, row: null, error: false });
     if (!customerId) { setState({ loading: false, row: null, error: false }); return undefined; }
     adminFetch(`/admin/lawn-assessment/history/${customerId}`)
-      .then((data) => { if (live) setState({ loading: false, row: previousLawnAssessment(data.history, { date: day }), error: false }); })
+      .then((data) => { if (live) setState({ loading: false, row: previousLawnAssessment(data.history, { id: service.id, date: day }), error: false }); })
       .catch(() => { if (live) setState({ loading: false, row: null, error: true }); });
     return () => { live = false; };
-  }, [customerId, day]);
+  }, [customerId, day, service.id]);
   const row = state.row;
   const display = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : `${Math.round(Number(value))}/100`;
   return (
@@ -11063,7 +11063,7 @@ export function CompletionPanel({
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
-    if (!completionImprovements || !isLawn || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
+    if (!completionImprovements || !isLawn || !inventoryAdvisoryTier || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
     if (!products?.length) return;
     const currentSnapshot = JSON.stringify(selectedProducts);
     // Refresh only an untouched seed when today’s assessment changes the plan.
@@ -11075,7 +11075,7 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [completionImprovements, isLawn, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts]);
+  }, [completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
     const area = areasServiced.join(", ");

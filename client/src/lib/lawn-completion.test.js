@@ -57,3 +57,12 @@ it('uses catalog application metadata and ignores unavailable catalog products',
   expect(lawnPlanSelections(items, build, [{ id: 'known', application_method: 'granular_broadcast', max_rate: 4 }]))
     .toEqual([expect.objectContaining({ method: 'granular_broadcast', ceiling: 4, rate: 3 })]);
 });
+
+
+it('selects the newest confirmed retake when appointment dates tie', () => {
+  const original = { id: 'original', service_id: 'prior', appointment_date: '2026-08-01', confirmed_by_tech: true, created_at: '2026-08-01T14:00:00Z' };
+  const retake = { ...original, id: 'retake', created_at: '2026-08-01T14:10:00Z' };
+  for (const rows of [[original, retake], [retake, original]]) {
+    expect(previousLawnAssessment(rows, { id: 'today', date: '2026-09-05' }).id).toBe('retake');
+  }
+});

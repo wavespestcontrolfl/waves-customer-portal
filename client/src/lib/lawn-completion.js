@@ -12,7 +12,8 @@ export function previousLawnAssessment(history, service) {
     .filter((row) => row.confirmed_by_tech === true
       && (!row.service_id || String(row.service_id) !== String(service.id))
       && /^\d{4}-\d{2}-\d{2}$/.test(visitDay(row)) && visitDay(row) < day)
-    .sort((a, b) => visitDay(b).localeCompare(visitDay(a)))[0] || null;
+    .sort((a, b) => visitDay(b).localeCompare(visitDay(a))
+      || (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))[0] || null;
 }
 
 export function lawnPlanSelections(items, buildProduct, catalog) {

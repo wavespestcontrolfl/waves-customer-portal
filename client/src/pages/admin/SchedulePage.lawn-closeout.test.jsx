@@ -33,6 +33,7 @@ beforeEach(async () => {
       if (delayPlan) await new Promise((resolve) => { planResolvers.push(resolve); });
       data = { plan: { protocol: {}, mixCalculator: { items: [{ product: products[0], mix: { ratePer1000: 3, rateUnit: 'fl_oz', amount: mixAmount, amountUnit: 'fl_oz', treatedSqft: 5000 } }] } } };
     }
+    if (url.includes('tech-tips')) data = { available: true, groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }] };
     if (url.includes('completion-actions')) data = { actions: [] };
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
     return { ok: true, json: async () => data };
@@ -100,4 +101,28 @@ it.each([false, true])('refreshes untouched plan defaults while preserving edits
   view.rerender(<CompletionPanel service={{ ...service, id: 'plan-refresh' }} products={products} onClose={() => {}} onSubmit={submit} />);
   await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('treatment-plans/plan-refresh'))).toBe(true));
   await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe(edited ? '12' : '10'));
+});
+
+
+it.each(['Commercial', 'One-Time', null])('does not seed residential products for a %s lawn visit', async (waveguardTier) => {
+  render(<CompletionPanel service={{ ...service, waveguardTier }} products={products} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByText('Assessment confirmed');
+  await waitFor(() => expect(screen.queryByText('Loading treatment plan…')).toBeNull());
+  expect(screen.queryByPlaceholderText('Total')).toBeNull();
+});
+
+
+it('prunes an out-of-line tip restored after the current lawn library has loaded', async () => {
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: 'Synthetic saved draft',
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    selectedTipIds: ['moisture_ac_drip', 'lawn_water_morning'], areasServiced: ['Front yard'],
+  }));
+  mount();
+  await screen.findByPlaceholderText('Search tips…');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await screen.findByText('Assessment confirmed');
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].techTips.ids).toEqual(['lawn_water_morning']);
 });
