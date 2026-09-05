@@ -72,11 +72,22 @@ describe('getVendorLoginCredentials — decrypt failures (Codex #3853 r6 P1)', (
   });
 
   test('a database failure during decrypt is rethrown, never read as "no password"', async () => {
-    await expect(getVendorLoginCredentials(fakeConn(async () => { const e = new Error('terminating connection'); e.code = '57P01'; throw e; }), 'v1')).rejects.toThrow('terminating connection');
-    await expect(getVendorLoginCredentials(fakeConn(async () => { throw new Error('Connection terminated unexpectedly'); }), 'v1')).rejects.toThrow('Connection terminated');
+    await expect(getVendorLoginCredentials(fakeConn(async () => { const e = new Error('terminating connection'); e.code = '57P01'; throw e; }), 'v1')).rejects.toMatchObject({ infrastructure: true, code: '57P01', message: 'vendor credential decrypt failed: database error 57P01' });
+    await expect(getVendorLoginCredentials(fakeConn(async () => { throw new Error('Connection terminated unexpectedly'); }), 'v1')).rejects.toMatchObject({ infrastructure: true, message: 'vendor credential decrypt failed: database error' });
     expect(isInfrastructureError({ code: '08006' })).toBe(true);
     expect(isInfrastructureError({ code: 'ECONNRESET' })).toBe(true);
     expect(isInfrastructureError({ code: '39000' })).toBe(false);
     expect(isInfrastructureError({ code: '22023' })).toBe(false);
+  });
+
+  test('the rethrown error is SANITIZED: a Knex-shaped message embedding the bindings (ciphertext + key) never leaves this module (pre-push hook P0)', async () => {
+    const knexErr = new Error("select pgp_sym_decrypt(dearmor('-----BEGIN PGP MESSAGE-----'), 'k1') AS pw - Connection terminated unexpectedly");
+    knexErr.code = '08006';
+    const err = await getVendorLoginCredentials(fakeConn(async () => { throw knexErr; }), 'v1').catch((e) => e);
+    expect(err).toMatchObject({ infrastructure: true, code: '08006' });
+    expect(err.message).not.toContain('k1');
+    expect(err.message).not.toContain('PGP');
+    expect(err.cause).toBeUndefined();
+    expect(String(err.stack)).not.toContain('k1');
   });
 });

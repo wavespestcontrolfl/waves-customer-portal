@@ -77,7 +77,18 @@ async function getVendorLoginCredentials(conn, vendorId) {
         const r = await conn.raw('SELECT pgp_sym_decrypt(dearmor(?), ?) AS pw', [row.login_password_encrypted, key]);
         const pw = r && r.rows && r.rows[0] && r.rows[0].pw;
         if (pw) { password = pw; break; }
-      } catch (e) { if (isInfrastructureError(e)) throw e; /* wrong key / not armored — try the next candidate */ }
+      } catch (e) {
+        // Wrong key / not armored — try the next candidate. An infrastructure
+        // failure is rethrown SANITIZED: Knex embeds the query's bindings in
+        // its error message — this ciphertext and the key itself — and the
+        // dispatcher logs the message it receives (pre-push hook P0). Only the
+        // classification survives; never the message or the cause.
+        if (!isInfrastructureError(e)) continue;
+        const err = new Error(`vendor credential decrypt failed: database error${e && e.code != null ? ` ${String(e.code)}` : ''}`);
+        err.code = e && e.code != null ? String(e.code) : undefined;
+        err.infrastructure = true;
+        throw err;
+      }
     }
   }
   return {
