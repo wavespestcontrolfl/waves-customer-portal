@@ -1539,7 +1539,13 @@ export default function PublicBookingPage() {
             {vanScene ? (
               <VanScene
                 title="Here's the van to look for in your driveway"
-                stamp={[selectedSlot?.fullDate || selectedDayLabel, selectedSlot?.start_label].filter(Boolean).join(' · ') || null}
+                stamp={(() => {
+                  // Same day · full arrival window the recap above quotes —
+                  // never the bare start (the window is the promise).
+                  const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
+                  const window = selectedSlot?.start_label ? `${selectedSlot.start_label}${end ? ` – ${end}` : ''}` : null;
+                  return [selectedSlot?.fullDate || selectedDayLabel, window].filter(Boolean).join(' · ') || null;
+                })()}
                 style={{ marginBottom: 20, borderRadius: 12, border: `1px solid ${COLORS.slate200}` }}
               />
             ) : null}
