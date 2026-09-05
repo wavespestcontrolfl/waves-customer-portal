@@ -1737,34 +1737,47 @@ class RelayConversation {
         return filedBefore;
       }
       const { triggerNotification } = require('../notification-triggers');
-      const res = await withTimeout(triggerNotification('customer_voicemail_callback', {
+      // The durable evidence a later leg reads (best-effort: without it a
+      // reconnected leg makes no promise — fail-closed, never a double bell).
+      const stampEvidence = () => withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid)
+          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_failure_callback_filed_at: new Date().toISOString() })]) })
+          .catch((err) => logger.warn(`[voice-relay] provider-failure callback evidence stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`)),
+        2000,
+        null,
+      );
+      // Release the dedupe claim (fenced on this leg's own stamp) so a later
+      // leg of the call may still file the one callback — only after a
+      // CONFIRMED failure, never while delivery is unresolved (hook r32 P1).
+      const releaseClaim = () => withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid).where('voicemail_callback_alerted_at', claimStamp).update({ voicemail_callback_alerted_at: null }).catch(() => 0),
+        2000,
+        0,
+      );
+      const notify = triggerNotification('customer_voicemail_callback', {
         name: (this._estimateFields && this._estimateFields.first_name) || null,
         phone,
         service: null,
         customerId: (verified && row && row.customer_id) || null,
         callLogId: (row && row.id) || null,
         reason: 'sandy_provider_failure',
-      }), 3000, null);
+      });
+      const res = await withTimeout(notify, 3000, 'timeout');
+      if (res === 'timeout') {
+        // The bell may already exist or land later: the claim STAYS, and the
+        // original promise's eventual result stamps the evidence or releases
+        // it. No promise is spoken now.
+        logger.warn(`[voice-relay] provider-failure callback delivery unresolved callSid=${maskSid(this.callSid)} — claim kept, no promise made`);
+        void Promise.resolve(notify)
+          .then((late) => (late && late.bellWritten === true ? stampEvidence() : releaseClaim()))
+          .catch(() => releaseClaim());
+        return false;
+      }
       const filed = Boolean(res && res.bellWritten === true);
-      if (filed) {
-        // The durable evidence a later leg reads (best-effort: without it a
-        // reconnected leg makes no promise — fail-closed, never a double bell).
-        await withTimeout(
-          db('call_log').where('twilio_call_sid', this.callSid)
-            .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_failure_callback_filed_at: new Date().toISOString() })]) })
-            .catch((err) => logger.warn(`[voice-relay] provider-failure callback evidence stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`)),
-          2000,
-          null,
-        );
-      } else {
+      if (filed) await stampEvidence();
+      else {
         logger.warn(`[voice-relay] provider-failure callback NOT filed callSid=${maskSid(this.callSid)} — no promise made`);
-        // Release the dedupe claim (fenced on this leg's own stamp) so a
-        // later leg of the call may still file the one callback.
-        await withTimeout(
-          db('call_log').where('twilio_call_sid', this.callSid).where('voicemail_callback_alerted_at', claimStamp).update({ voicemail_callback_alerted_at: null }).catch(() => 0),
-          2000,
-          0,
-        );
+        await releaseClaim();
       }
       return filed;
     } catch (err) {

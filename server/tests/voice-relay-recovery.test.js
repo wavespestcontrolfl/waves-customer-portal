@@ -609,6 +609,42 @@ describe('the conversation side', () => {
     expect(u4.some((u) => u.metadata && String(u.metadata.bindings?.[0] || '').includes('relay_failure_callback_filed_at'))).toBe(false);
   });
 
+  test('a callback delivery that is still UNRESOLVED at the bound keeps the claim (no promise, no release); its eventual result stamps the evidence or releases the claim (hook r32 P1)', async () => {
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    const isEvidence = (u) => u.metadata && String(u.metadata.bindings?.[0] || '').includes('relay_failure_callback_filed_at');
+    const isRelease = (u) => u.voicemail_callback_alerted_at === null;
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      let settle;
+      trig.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
+      const { updates } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', metadata: {} } });
+      const convo = new RelayConversation({ callSid: 'CA-cb-slow', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+      const pending = convo._fileFailureCallback();
+      await jest.advanceTimersByTimeAsync(3100);
+      expect(await pending).toBe(false);
+      expect(updates.some(isRelease)).toBe(false); // the claim is kept while delivery is unresolved
+      expect(updates.some(isEvidence)).toBe(false);
+      settle({ bellWritten: true, push: null }); // the bell landed after all ⇒ evidence
+      await jest.advanceTimersByTimeAsync(10);
+      expect(updates.some(isEvidence)).toBe(true);
+      expect(updates.some(isRelease)).toBe(false);
+      // …and a late CONFIRMED failure releases the claim instead
+      let settle2;
+      trig.mockImplementationOnce(() => new Promise((resolve) => { settle2 = resolve; }));
+      const { updates: u2 } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', metadata: {} } });
+      const second = new RelayConversation({ callSid: 'CA-cb-slow2', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+      const pending2 = second._fileFailureCallback();
+      await jest.advanceTimersByTimeAsync(3100);
+      expect(await pending2).toBe(false);
+      settle2({ bellWritten: false, suppressed: true });
+      await jest.advanceTimersByTimeAsync(10);
+      expect(u2.some(isRelease)).toBe(true);
+      expect(u2.some(isEvidence)).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a lead captured on an earlier leg whose relay_lead_id stamp did not land is still restored as captured (segment lead_captured) (codex r3 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', lead_captured: true }] } } });

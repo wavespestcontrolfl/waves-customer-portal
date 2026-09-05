@@ -71,7 +71,7 @@ describe('relay session → owed commitments', () => {
     // message-sync failure line, and the three telemetry lines (per-turn
     // stats, relay event shape, relay_failed salvage) carry a masked CallSid.
     expect(conversation).toContain("const { maskSid } = require('../twilio-failure-alerts');");
-    expect(conversation.match(/callSid=\$\{maskSid\(this\.callSid\)\}/g)).toHaveLength(24); // PR 2A stash +1; PR 2B recovery (resume proof, handoff, floor skip, segment append, late-segment sync + commitments + floor-lead refresh, callback claim + filing + evidence stamp) +16
+    expect(conversation.match(/callSid=\$\{maskSid\(this\.callSid\)\}/g)).toHaveLength(25); // PR 2A stash +1; PR 2B recovery (resume proof, handoff, floor skip, segment append, late-segment sync + commitments + floor-lead refresh, callback claim + filing + evidence stamp + unresolved delivery) +17
   });
 
   test('the promises are recorded even when the voice-message sync rejects: the sync has its own catch ahead of the commitments block (codex #3725 r18 P2)', () => {
