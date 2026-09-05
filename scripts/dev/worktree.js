@@ -2,7 +2,7 @@
 'use strict';
 
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, execFileSync } = require('node:child_process');
 const { rootDirectory, setup, readContext, identity } = require('./context');
 const { checkRuntime } = require('./runtime');
 
@@ -20,7 +20,9 @@ async function main() {
     checkRuntime(root);
     const target = path.resolve(destination || path.join(root, '..', `wt-${slug}`));
     command('git', ['fetch', 'origin', 'main'], root);
-    command('git', ['worktree', 'add', '-b', `feat/${slug}`, target, 'origin/main'], root);
+    const revision = execFileSync('git', ['rev-parse', 'origin/main'], { cwd: root, encoding: 'utf8' }).trim();
+    checkRuntime(root, revision);
+    command('git', ['worktree', 'add', '-b', `feat/${slug}`, target, revision], root);
     checkRuntime(target);
     command('npm', ['ci', '--no-audit', '--no-fund'], target);
     console.log(JSON.stringify(identity(await setup(target)), null, 2));
