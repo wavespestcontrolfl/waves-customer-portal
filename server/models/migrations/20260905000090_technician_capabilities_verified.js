@@ -26,9 +26,15 @@ const quoted = (list) => list.map((v) => `'${v}'`).join(', ');
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('technician_capabilities'))) return;
 
+  // Each audit column guarded on its own: a preview or hand-reconciled
+  // database with only one of them still converges, both directions.
   if (!(await knex.schema.hasColumn('technician_capabilities', 'verified_by'))) {
     await knex.schema.alterTable('technician_capabilities', (t) => {
       t.uuid('verified_by').nullable().references('id').inTable('technicians').onDelete('SET NULL');
+    });
+  }
+  if (!(await knex.schema.hasColumn('technician_capabilities', 'verified_at'))) {
+    await knex.schema.alterTable('technician_capabilities', (t) => {
       t.timestamp('verified_at', { useTz: true }).nullable();
     });
   }
@@ -68,10 +74,10 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('technician_capabilities'))) return;
   await knex.raw(`ALTER TABLE technician_capabilities DROP CONSTRAINT IF EXISTS ${CATEGORY_CHECK}`);
   await knex.raw(`ALTER TABLE technician_capabilities DROP CONSTRAINT IF EXISTS ${LEVEL_CHECK}`);
+  if (await knex.schema.hasColumn('technician_capabilities', 'verified_at')) {
+    await knex.schema.alterTable('technician_capabilities', (t) => t.dropColumn('verified_at'));
+  }
   if (await knex.schema.hasColumn('technician_capabilities', 'verified_by')) {
-    await knex.schema.alterTable('technician_capabilities', (t) => {
-      t.dropColumn('verified_at');
-      t.dropColumn('verified_by');
-    });
+    await knex.schema.alterTable('technician_capabilities', (t) => t.dropColumn('verified_by'));
   }
 };

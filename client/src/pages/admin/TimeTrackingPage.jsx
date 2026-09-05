@@ -2382,6 +2382,9 @@ export function TeamTab({ showToast }) {
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
   const [capabilitiesTech, setCapabilitiesTech] = useState(null);
+  // The capabilities routes are admin-only; the roster itself is readable by
+  // technicians, so the action is hidden for them rather than 403ing.
+  const isAdmin = useMemo(() => readStaffRole() === "admin", []);
   // Photo upload state. fileInputRef is shared across rows because
   // mounting one <input type=file>per tech is needless DOM. Uploads
   // are serialized: while uploadingId is non-null, every row's Photo
@@ -3220,20 +3223,22 @@ export function TeamTab({ showToast }) {
                     >
                       Earnings
                     </button>{" "}
-                    <button
-                      onClick={() => setCapabilitiesTech(t)}
-                      style={{
-                        padding: "4px 10px",
-                        background: "transparent",
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 6,
-                        color: D.teal,
-                        fontSize: 14,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Capabilities
-                    </button>{" "}
+                    {isAdmin && (
+                      <button
+                        onClick={() => setCapabilitiesTech(t)}
+                        style={{
+                          padding: "4px 10px",
+                          background: "transparent",
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 6,
+                          color: D.teal,
+                          fontSize: 14,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Capabilities
+                      </button>
+                    )}{" "}
                     <button
                       onClick={() => handlePhotoClick(t.id)}
                       disabled={uploadingId !== null}
@@ -3308,6 +3313,16 @@ export function TeamTab({ showToast }) {
   );
 }
 
+// The signed-in staff profile AdminLayoutV2 stores at login; role decides
+// which roster actions render (the server enforces it regardless).
+function readStaffRole() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}").role || null;
+  } catch {
+    return null;
+  }
+}
+
 // Roster sublabel for the Team table: "5 qualified", "2 need review · 1 off",
 // or "Capabilities not set" when the row predates the editor.
 function summarizeCapabilityCounts(summary) {
@@ -3334,11 +3349,40 @@ const CAPABILITY_STATE_OPTIONS = [
 function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
   const isMobile = useIsMobile(640);
   const [rows, setRows] = useState(null);
+  // What the server returned — dirty rows and the optimistic baseline are
+  // computed against it at save time.
+  const [initialRows, setInitialRows] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
-  // `attempt` re-runs the fetch for the Retry button without remounting.
+  // `attempt` re-runs the fetch for the Retry button (and after a stale save).
   const [attempt, setAttempt] = useState(0);
+  const dialogRef = useRef(null);
+  const titleId = `capabilities-title-${tech.id}`;
+
+  // Dialog semantics: focus moves into the dialog on open, stays inside it
+  // (Tab cycles), Escape closes, and focus returns to the opener on close.
+  useEffect(() => {
+    const opener = document.activeElement;
+    const node = dialogRef.current;
+    const focusable = () => Array.from(node?.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])') || []).filter((el) => !el.disabled);
+    focusable()[0]?.focus();
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+      if (e.key !== "Tab") return;
+      const els = focusable();
+      if (!els.length) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (opener && typeof opener.focus === "function") opener.focus();
+    };
+  }, [onClose]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3350,8 +3394,10 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
           `/admin/timetracking/technicians/${tech.id}/capabilities`,
         );
         if (!cancelled) {
+          const loaded = res.capabilities || [];
+          setInitialRows(loaded);
           setRows(
-            (res.capabilities || []).map((c) => ({
+            loaded.map((c) => ({
               ...c,
               // Editing starts every unset category at "Needs review" so a
               // save without touching a row still gives auto-dispatch a
@@ -3379,7 +3425,22 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
     );
 
   const handleSave = async () => {
-    if (!rows) return;
+    if (!rows || !initialRows) return;
+    // Only rows this admin changed (plus categories that had no row yet) are
+    // sent, each pinned to the updated_at it was edited from — a concurrent
+    // save by someone else on another category is never reverted, and a
+    // concurrent change to the SAME category is refused (409) and reloaded.
+    const byCat = new Map(initialRows.map((c) => [c.service_category, c]));
+    const dirty = rows.filter((r) => {
+      const was = byCat.get(r.service_category);
+      if (!was || was.state === "unset") return true;
+      return was.state !== r.state || (was.notes || "") !== r.notes.trim();
+    });
+    if (!dirty.length) {
+      showToast("No capability changes to save");
+      onClose();
+      return;
+    }
     setSaving(true);
     try {
       const res = await adminFetch(
@@ -3387,11 +3448,15 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
         {
           method: "PUT",
           body: JSON.stringify({
-            capabilities: rows.map((r) => ({
-              service_category: r.service_category,
-              state: r.state,
-              notes: r.notes.trim() || null,
-            })),
+            capabilities: dirty.map((r) => {
+              const was = byCat.get(r.service_category);
+              return {
+                service_category: r.service_category,
+                state: r.state,
+                notes: r.notes.trim() || null,
+                expected_updated_at: was && was.updated_at ? new Date(was.updated_at).toISOString() : null,
+              };
+            }),
           }),
         },
       );
@@ -3404,7 +3469,12 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
       onSaved();
       onClose();
     } catch (e) {
-      showToast("Failed: " + e.message);
+      if (/HTTP 409/.test(e.message)) {
+        showToast("Someone else changed this technician's capabilities — reloaded, please review and save again");
+        setAttempt((n) => n + 1);
+      } else {
+        showToast("Failed: " + e.message);
+      }
     }
     setSaving(false);
   };
@@ -3435,6 +3505,10 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
       }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         style={{
           background: D.card,
@@ -3449,7 +3523,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 4 }}>
-          <div style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+          <div id={titleId} style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
             Capabilities — {tech.name}
           </div>
           <button

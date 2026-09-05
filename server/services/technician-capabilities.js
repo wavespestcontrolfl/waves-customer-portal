@@ -39,7 +39,12 @@ function stateOf(row) {
 
 /**
  * Validate a PUT body's `capabilities` array. Returns { error } or { entries }
- * where entries are normalized { service_category, state, notes }.
+ * where entries are normalized { service_category, state, notes, expected_updated_at }:
+ *   - notes: undefined when omitted (the stored note is preserved); null when
+ *     the caller sends null or '' (an explicit clear); else the trimmed text.
+ *   - expected_updated_at: undefined when omitted (no concurrency check); null
+ *     = "I saw no row"; an ISO timestamp = the row's updated_at the caller
+ *     edited from. A mismatch at write time is a stale save (409).
  */
 function normalizeCapabilityEntries(input) {
   if (!Array.isArray(input) || !input.length) {
@@ -58,17 +63,36 @@ function normalizeCapabilityEntries(input) {
     if (!CAPABILITY_STATES.includes(raw.state)) {
       return { error: `state must be one of ${CAPABILITY_STATES.join(', ')}` };
     }
-    let notes = null;
-    if (raw.notes !== undefined && raw.notes !== null) {
+    let notes;
+    if (raw.notes === null) {
+      notes = null;
+    } else if (raw.notes !== undefined) {
       if (typeof raw.notes !== 'string') return { error: 'notes must be a string' };
       notes = raw.notes.trim() || null;
       if (notes && notes.length > MAX_NOTES_LENGTH) {
         return { error: `notes must be ${MAX_NOTES_LENGTH} characters or fewer` };
       }
     }
-    entries.push({ service_category: category, state: raw.state, notes });
+    let expectedUpdatedAt;
+    if (raw.expected_updated_at === null) {
+      expectedUpdatedAt = null;
+    } else if (raw.expected_updated_at !== undefined) {
+      const ts = new Date(raw.expected_updated_at);
+      if (typeof raw.expected_updated_at !== 'string' || Number.isNaN(ts.getTime())) {
+        return { error: 'expected_updated_at must be an ISO timestamp or null' };
+      }
+      expectedUpdatedAt = ts.toISOString();
+    }
+    entries.push({ service_category: category, state: raw.state, notes, expected_updated_at: expectedUpdatedAt });
   }
   return { entries };
+}
+
+function staleError(category) {
+  return Object.assign(
+    new Error(`The ${CATEGORY_LABELS[category] || category} capability changed since you opened it — reload and try again`),
+    { statusCode: 409, code: 'CAPABILITY_STALE', service_category: category, isOperational: true },
+  );
 }
 
 /** All five categories for one tech, missing rows reported as state 'unset'. */
@@ -142,22 +166,38 @@ async function seedNewHireCapabilities(conn, technicianId) {
 /**
  * Upsert the given entries for one tech, stamping who verified them. `off`
  * keeps the row's level (so turning a category back on restores it) and only
- * flips `active`; a brand-new `off` row lands at the new-hire level.
+ * flips `active`; a brand-new `off` row lands at the new-hire level. An
+ * omitted note is preserved; an entry carrying expected_updated_at is checked
+ * against the current row first and refused as CAPABILITY_STALE on a mismatch
+ * (the caller holds the technician row FOR UPDATE, so the check and the write
+ * are one serialized unit).
  */
 async function writeCapabilities(conn, technicianId, entries, actorId) {
   const now = conn.fn.now();
   for (const entry of entries) {
+    if (entry.expected_updated_at !== undefined) {
+      const current = await conn('technician_capabilities')
+        .where({ technician_id: technicianId, service_category: entry.service_category })
+        .first('updated_at');
+      const currentTs = current && current.updated_at ? new Date(current.updated_at).toISOString() : null;
+      if (currentTs !== entry.expected_updated_at) throw staleError(entry.service_category);
+    }
     const row = {
       technician_id: technicianId,
       service_category: entry.service_category,
       source: 'admin',
-      notes: entry.notes,
       active: entry.state !== 'off',
       verified_by: actorId || null,
       verified_at: now,
       updated_at: now,
     };
-    const mergeColumns = ['source', 'notes', 'active', 'verified_by', 'verified_at', 'updated_at'];
+    const mergeColumns = ['source', 'active', 'verified_by', 'verified_at', 'updated_at'];
+    if (entry.notes !== undefined) {
+      row.notes = entry.notes;
+      mergeColumns.push('notes');
+    } else {
+      row.notes = null; // only used when the row is new
+    }
     if (entry.state !== 'off') {
       row.capability_level = entry.state;
       mergeColumns.push('capability_level');

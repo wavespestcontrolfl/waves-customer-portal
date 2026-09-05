@@ -110,8 +110,18 @@ describe('stateOf / normalizeCapabilityEntries', () => {
     ]).error).toMatch(/more than once/);
     expect(normalizeCapabilityEntries([{ service_category: 'lawn', state: 'off', notes: 'x'.repeat(501) }]).error).toMatch(/500/);
     expect(normalizeCapabilityEntries([{ service_category: 'lawn', state: 'off', notes: 42 }]).error).toMatch(/notes/);
-    const ok = normalizeCapabilityEntries([{ service_category: 'lawn', state: 'qualified', notes: '  saw the fungicide round  ' }]);
-    expect(ok.entries).toEqual([{ service_category: 'lawn', state: 'qualified', notes: 'saw the fungicide round' }]);
+    expect(normalizeCapabilityEntries([{ service_category: 'lawn', state: 'off', expected_updated_at: 'yesterday' }]).error).toMatch(/expected_updated_at/);
+    const ok = normalizeCapabilityEntries([{ service_category: 'lawn', state: 'qualified', notes: '  saw the fungicide round  ', expected_updated_at: '2026-09-05T10:00:00.000Z' }]);
+    expect(ok.entries).toEqual([{ service_category: 'lawn', state: 'qualified', notes: 'saw the fungicide round', expected_updated_at: '2026-09-05T10:00:00.000Z' }]);
+    // omitted note → undefined (preserve); '' or null → null (clear); omitted baseline → undefined (no check); null → "I saw no row"
+    const [omitted, cleared, nulled] = normalizeCapabilityEntries([
+      { service_category: 'lawn', state: 'off' },
+      { service_category: 'rodent', state: 'off', notes: '' },
+      { service_category: 'termite', state: 'off', notes: null, expected_updated_at: null },
+    ]).entries;
+    expect(omitted).toEqual({ service_category: 'lawn', state: 'off', notes: undefined, expected_updated_at: undefined });
+    expect(cleared.notes).toBeNull();
+    expect(nulled).toMatchObject({ notes: null, expected_updated_at: null });
   });
 });
 
@@ -180,8 +190,10 @@ describe('PUT /technicians/:id/capabilities', () => {
     // `active` (and the audit stamps) merge, so turning it back on restores
     // the prior level.
     expect(conn.merges).toHaveLength(2);
-    expect(conn.merges[0]).toEqual(expect.arrayContaining(['capability_level', 'active', 'verified_by']));
+    expect(conn.merges[0]).toEqual(expect.arrayContaining(['capability_level', 'active', 'verified_by', 'notes']));
+    // Off keeps the level; an OMITTED note keeps the stored note (not merged)
     expect(conn.merges[1]).not.toContain('capability_level');
+    expect(conn.merges[1]).not.toContain('notes');
     // Only the lawn visit is reported back for manual reassignment; the
     // pest visit is unaffected by turning lawn off. Nothing is moved.
     expect(res.body.futureAssignedVisits).toEqual([
@@ -207,6 +219,69 @@ describe('PUT /technicians/:id/capabilities', () => {
       body: { capabilities: [{ service_category: 'mosquito', state: 'qualified' }] },
     });
     expect(missing.statusCode).toBe(404);
+  });
+});
+
+describe('PUT /technicians/:id/capabilities — optimistic baseline', () => {
+  function connWithRow(currentUpdatedAt) {
+    const conn = fakeConn();
+    const inner = conn.getMockImplementation();
+    conn.mockImplementation((table) => {
+      if (table === 'technician_capabilities') {
+        const chain = inner(table);
+        chain.first = jest.fn(async () => (currentUpdatedAt === undefined ? undefined : { updated_at: currentUpdatedAt }));
+        return chain;
+      }
+      return inner(table);
+    });
+    return conn;
+  }
+
+  test('a matching baseline writes; a mismatched one is refused 409 CAPABILITY_STALE naming the category, nothing written', async () => {
+    let conn = connWithRow(new Date('2026-09-05T10:00:00.000Z'));
+    installDb(conn);
+    const ok = await invoke(putTechnicianCapabilities, {
+      params: { id: 'tech-1' }, technicianId: 'adam',
+      body: { capabilities: [{ service_category: 'lawn', state: 'qualified', expected_updated_at: '2026-09-05T10:00:00Z' }] },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(conn.writes).toHaveLength(1);
+
+    conn = connWithRow(new Date('2026-09-05T10:05:00.000Z'));
+    installDb(conn);
+    const stale = await invoke(putTechnicianCapabilities, {
+      params: { id: 'tech-1' }, technicianId: 'adam',
+      body: { capabilities: [{ service_category: 'lawn', state: 'qualified', expected_updated_at: '2026-09-05T10:00:00Z' }] },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.body).toMatchObject({ code: 'CAPABILITY_STALE', service_category: 'lawn' });
+    expect(conn.writes).toHaveLength(0);
+  });
+
+  test('"I saw no row" (null) is stale once a row exists; an omitted baseline never reads the row', async () => {
+    let conn = connWithRow(new Date('2026-09-05T10:00:00.000Z'));
+    installDb(conn);
+    const stale = await invoke(putTechnicianCapabilities, {
+      params: { id: 'tech-1' }, technicianId: 'adam',
+      body: { capabilities: [{ service_category: 'lawn', state: 'qualified', expected_updated_at: null }] },
+    });
+    expect(stale.statusCode).toBe(409);
+    conn = connWithRow(undefined);
+    installDb(conn);
+    const fresh = await invoke(putTechnicianCapabilities, {
+      params: { id: 'tech-1' }, technicianId: 'adam',
+      body: { capabilities: [{ service_category: 'lawn', state: 'qualified', expected_updated_at: null }] },
+    });
+    expect(fresh.statusCode).toBe(200);
+    conn = connWithRow(new Date('2026-09-05T10:00:00.000Z'));
+    installDb(conn);
+    const unchecked = await invoke(putTechnicianCapabilities, {
+      params: { id: 'tech-1' }, technicianId: 'adam',
+      body: { capabilities: [{ service_category: 'lawn', state: 'qualified' }] },
+    });
+    expect(unchecked.statusCode).toBe(200);
+    const capChains = conn.mock.results.filter((r, i) => conn.mock.calls[i][0] === 'technician_capabilities').map((r) => r.value);
+    expect(capChains.some((c) => c.first.mock.calls.length)).toBe(false);
   });
 });
 

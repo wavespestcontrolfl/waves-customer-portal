@@ -894,7 +894,12 @@ async function putTechnicianCapabilities(req, res, next) {
     const outcome = await db.transaction(async (trx) => {
       const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first('id');
       if (!target) return { notFound: true };
-      await writeCapabilities(trx, target.id, entries, req.technicianId);
+      try {
+        await writeCapabilities(trx, target.id, entries, req.technicianId);
+      } catch (err) {
+        if (err.code === 'CAPABILITY_STALE') return { stale: err };
+        throw err;
+      }
       const turnedOff = new Set(entries.filter((e) => e.state === 'off').map((e) => e.service_category));
       const futureAssignedVisits = turnedOff.size
         ? (await listFutureAssignedVisits(trx, target.id))
@@ -904,6 +909,9 @@ async function putTechnicianCapabilities(req, res, next) {
       return { capabilities, futureAssignedVisits };
     });
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.stale) {
+      return res.status(409).json({ error: outcome.stale.message, code: outcome.stale.code, service_category: outcome.stale.service_category });
+    }
 
     logger.info(`[team] Updated capabilities for technician id=${req.params.id} (${entries.map((e) => `${e.service_category}=${e.state}`).join(', ')}) by staff id=${req.technicianId}`);
     return res.json({
