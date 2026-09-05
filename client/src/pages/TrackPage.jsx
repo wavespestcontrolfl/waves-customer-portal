@@ -1,7 +1,7 @@
 import Icon from '../components/Icon';
-import BrandFooter from '../components/BrandFooter';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { FLOW_COLUMN_MAX } from '../theme-doc';
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
@@ -164,31 +164,13 @@ function useLastUpdated(iso) {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
-        <BrandFooter />
       </div>
     </WavesShell>
   );
 }
 
-function StatusPill({ label, color }) {
-  return (
-    <div data-glass="chip" data-glass-pill="" style={{
-      display: 'inline-block',
-      fontSize: 12, fontWeight: 700,
-      letterSpacing: 0, textTransform: 'uppercase',
-      color, background: `${color}1A`,
-      padding: '6px 12px', borderRadius: 9999,
-    }}>
-      <span style={{
-        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-        background: color, marginRight: 8, verticalAlign: 'middle',
-      }} />
-      {label}
-    </div>
-  );
-}
 
 function EtaHero({ minutes, techFirst, source }) {
   const isNow = minutes != null && minutes < 1;
@@ -554,9 +536,6 @@ function ScheduledCard({ data }) {
   const window = formatWindow(data.window?.start);
   return (
     <Card accent={COLORS.wavesBlue}>
-      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0 }}>
-        Scheduled
-      </div>
       <div style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3 }}>
         {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
         your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
@@ -594,7 +573,9 @@ function EnRouteCard({ data }) {
   return (
     <>
       <Card accent={status.color}>
-        <StatusPill label={status.label} color={status.color} />
+        {/* Distance-derived progress as plain text (no chip) — the only
+            textual signal when the ETA provider returns nothing. */}
+        <div style={{ fontSize: 14, fontWeight: 600, color: status.color }}>{status.label}</div>
         <EtaHero minutes={v?.etaMinutes} techFirst={techFirst} source={v?.etaSource} />
 
         {techCoords && property ? (
@@ -645,9 +626,6 @@ function OnPropertyCard({ data }) {
   const elapsed = useElapsed(data.arrivedAt);
   return (
     <Card accent={COLORS.green}>
-      <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
-        On property
-      </div>
       <TechBlock tech={data.tech} size="lg" />
       <div style={{ fontSize: 22, fontWeight: 600, marginTop: 20, lineHeight: 1.3 }}>
         {techFirst} is servicing your property.
@@ -669,9 +647,6 @@ function CompleteCard({ data }) {
   return (
     <>
       <Card accent={COLORS.green}>
-        <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
-          Service complete
-        </div>
         <TechBlock tech={data.tech} size="lg" />
         <div style={{ fontSize: 22, fontWeight: 600, marginTop: 20, lineHeight: 1.3 }}>
           Thanks for choosing Waves

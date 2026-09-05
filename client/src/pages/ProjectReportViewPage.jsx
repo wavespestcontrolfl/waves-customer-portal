@@ -8,7 +8,6 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { DOC_COLUMN_MAX, DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
-import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -553,7 +552,7 @@ export default function ProjectReportViewPage() {
 
   return (
     <div className="project-report-page" style={{
-      minHeight: '100vh',
+      flex: 1,
       background: ESTIMATE_BG,
       fontFamily: FONT_BODY,
       color: ESTIMATE_TEXT,
@@ -797,9 +796,6 @@ export default function ProjectReportViewPage() {
         </footer>
 
       </div>
-      {/* Newsletter signup lives only on the newsletter pages (owner
-          2026-07-09, supersedes the 2026-07-08 glass-views ruling). */}
-      <BrandFooter variant={isCertificate ? 'contact' : undefined} appBadges={false} />
     </div>
   );
 }

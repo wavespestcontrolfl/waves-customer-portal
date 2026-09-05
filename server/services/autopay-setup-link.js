@@ -13,8 +13,10 @@
  *     is `expires_at` (30 days) plus the row status.
  *   - operator-initiated ONLY (admin button): 'inline' hands the link back
  *     for copy/paste (no comm); 'sms' texts it through the canonical
- *     card_request purpose with operatorInitiated — never a cron, never an
- *     automation trigger.
+ *     card_request purpose with operatorInitiated; 'email' sends the
+ *     payment.autopay_setup_link email template through the email template
+ *     library (audited email_messages row, suppressions, unsubscribe
+ *     headers) — never a cron, never an automation trigger.
  *   - tender is card_or_bank with INSTANT bank verification only (same
  *     precheck + policy as the estimate accept capture,
  *     GATE_ACCEPT_ACH_CAPTURE): a micro-deposit bank would leave the
@@ -23,7 +25,8 @@
  *
  * DARK BY DEFAULT: inert unless GATE_AUTOPAY_SETUP_LINK=true AND (for the
  * SMS delivery) the autopay_setup_link template is active (seeded
- * inactive). Already-minted links keep working when the gate is later
+ * inactive) AND (for the email delivery) the payment.autopay_setup_link
+ * email template is active. Already-minted links keep working when the gate is later
  * turned off — the gate governs new links, never strands a customer
  * mid-flow (same rule as the visit lane).
  */
@@ -37,6 +40,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const KIND = 'customer';
 const PURPOSE = 'autopay_setup_link';
 const TEMPLATE_KEY = 'autopay_setup_link';
+const EMAIL_TEMPLATE_KEY = 'payment.autopay_setup_link';
 const LINK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // Same completion-claim lease as the visit lane.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
@@ -214,13 +218,101 @@ async function setupLinkIneligibility(customerId) {
   return { reason: null, customer };
 }
 
+// The link went out on `channel` — stamp sent_at (pending rows only; a
+// failed stamp must not read as a failed send, since an operator retry
+// would send twice — GH Codex #3726 r1 P2).
+async function markSent(request, customerId, channel, trigger) {
+  try {
+    // sent_at only — updated_at is the completion lease token and a
+    // pending row's stamp must not disturb a claim taken meanwhile.
+    await db('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({ sent_at: new Date() });
+  } catch (stampErr) {
+    logger.warn(`[autopay-setup-link] sent_at stamp failed for request ${request.id} (${channel} already sent): ${stampErr.message}`);
+  }
+  logger.info(`[autopay-setup-link] link sent by ${channel} to customer ${customerId} (request ${request.id}, trigger ${trigger})`);
+  return { requested: true, action: 'sent', reason: 'sent', channel };
+}
+
+// The template library throws for a missing / inactive template or version
+// (never a provider problem) — the office reads that as a dark lever.
+function isTemplateLeverError(err) {
+  if (err?.code === 'EMAIL_TEMPLATE_DISABLED') return true;
+  return /template (not found|version not found)|active template not found/i.test(String(err?.message || ''));
+}
+
+function isEmailLike(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+}
+
+// Email delivery: the account holder's own address (the link saves a
+// payment method on THEIR account, so the billing-contact override does
+// not apply), honoring the customer-level email opt-out. The template
+// library owns the audit row, suppressions, and provider retry; an
+// inactive/missing template throws there and is surfaced as a dark lever
+// (same shape as the SMS template lever). Never throws.
+async function emailSetupLink({ customer, customerId, request, secureUrl, trigger }) {
+  const to = String(customer.email || '').trim();
+  if (!isEmailLike(to)) return skip('no_customer_email');
+  // Fail closed: an unreadable preference is not an enabled one (GH Codex
+  // #3867 P2) — an opted-out customer must never get this optional email
+  // because the prefs read blipped. Retryable skip instead.
+  let prefs;
+  try {
+    prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+  } catch (err) {
+    logger.warn(`[autopay-setup-link] notification_prefs lookup failed for customer ${customerId}: ${err.message}`);
+    return skip('email_prefs_check_uncertain');
+  }
+  if (prefs?.email_enabled === false) return skip('email_opted_out');
+
+  const EmailTemplateLibrary = require('./email-template-library');
+  let result;
+  try {
+    result = await EmailTemplateLibrary.sendTemplate({
+      templateKey: EMAIL_TEMPLATE_KEY,
+      to,
+      payload: {
+        first_name: customer.first_name || 'there',
+        secure_link: secureUrl,
+        expires_on: request.expires_at
+          ? new Date(request.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })
+          : '',
+      },
+      recipientType: 'customer',
+      recipientId: customerId,
+      // Every office click is a deliberate (re)send — a customer who lost the
+      // email gets it again — so the key is per click (UUID, never a clock
+      // value two clicks can share), not per row.
+      triggerEventId: `autopay_setup_link_email:${request.id}:${trigger}`,
+      idempotencyKey: `autopay_setup_link_email:${request.id}:${crypto.randomUUID()}`,
+      // Stream / suppression group come from the template row
+      // (service_operational — an invitation is operational outreach and
+      // must honor that unsubscribe, like autopay.setup_invitation).
+      categories: ['autopay_setup_link', 'payment_setup'],
+      // Provider rejections echo the recipient address — never log them raw.
+      suppressProviderErrorLog: true,
+    });
+  } catch (sendErr) {
+    if (isTemplateLeverError(sendErr)) return skip('email_template_inactive');
+    // Provider errors can echo the recipient address and the body (which
+    // carries the bearer URL) — log only the error class/code.
+    logger.error(`[autopay-setup-link] email send outcome UNCERTAIN for customer ${customerId}: ${String(sendErr?.code || sendErr?.name || 'error')}`);
+    return skip('send_outcome_uncertain');
+  }
+  if (!result?.sent) return skip(result?.reason || 'send_blocked');
+  return markSent(request, customerId, 'email', trigger);
+}
+
 /**
  * The one entry point (operator surfaces only). Returns
- *   { requested, action: 'link_created' | 'sent' | 'auto_secured' | 'skipped', reason, secureUrl?, expiresAt? }
- * Never throws.
+ *   { requested, action: 'link_created' | 'sent' | 'auto_secured' | 'skipped', reason, channel?, secureUrl?, expiresAt? }
+ * ('sent' carries channel: 'sms' | 'email'.) Never throws.
  */
 async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigger = 'admin' }) {
   try {
+    if (!['inline', 'sms', 'email'].includes(delivery)) delivery = 'inline';
     const eligibility = await setupLinkIneligibility(customerId);
     if (eligibility.reason) return skip(eligibility.reason);
     const { customer } = eligibility;
@@ -350,8 +442,13 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
     // only be refused at send.
     if (request.status === 'completing') return skip('completion_in_progress', linkMeta);
 
-    if (delivery !== 'sms') {
+    if (delivery === 'inline') {
       return { requested: true, action: 'link_created', reason: existing && request.id === existing.id ? 'request_exists' : 'created', ...linkMeta };
+    }
+
+    if (delivery === 'email') {
+      const emailed = await emailSetupLink({ customer, customerId, request, secureUrl, trigger });
+      return { ...emailed, ...linkMeta };
     }
 
     if (!customer.phone) return skip('no_customer_phone', linkMeta);
@@ -386,19 +483,8 @@ async function requestAutopaySetupLink({ customerId, delivery = 'inline', trigge
       return skip('send_outcome_uncertain', linkMeta);
     }
     if (!result?.sent) return skip(result?.reason || 'send_blocked', linkMeta);
-    // The text is OUT — a failed sent_at stamp must not read as a failed
-    // send (an operator retry would text twice; GH Codex #3726 r1 P2).
-    try {
-      // sent_at only — updated_at is the completion lease token and a
-      // pending row's stamp must not disturb a claim taken meanwhile.
-      await db('appointment_card_requests')
-        .where({ id: request.id, status: 'pending' })
-        .update({ sent_at: new Date() });
-    } catch (stampErr) {
-      logger.warn(`[autopay-setup-link] sent_at stamp failed for request ${request.id} (text already sent): ${stampErr.message}`);
-    }
-    logger.info(`[autopay-setup-link] link texted to customer ${customerId} (request ${request.id}, trigger ${trigger})`);
-    return { requested: true, action: 'sent', reason: 'sent', ...linkMeta };
+    const sent = await markSent(request, customerId, 'sms', trigger);
+    return { ...sent, ...linkMeta };
   } catch (err) {
     logger.error(`[autopay-setup-link] request failed for customer ${customerId}: ${err.message}`);
     return skip('request_failed');
@@ -974,6 +1060,7 @@ module.exports = {
   KIND,
   PURPOSE,
   TEMPLATE_KEY,
+  EMAIL_TEMPLATE_KEY,
   isAutopaySetupLinkEnabled,
   setupLinkIneligibility,
   requestAutopaySetupLink,

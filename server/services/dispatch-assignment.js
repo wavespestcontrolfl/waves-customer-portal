@@ -3,6 +3,7 @@ const { getIo } = require('../sockets');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
+const { assertAssignableTechnician } = require('./technician-eligibility');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -138,12 +139,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     throw Object.assign(httpError(409, 'Job was reassigned concurrently - the planned technician is stale'), { code: 'ASSIGNMENT_STALE' });
   }
 
-  let tech = null;
-  if (newTechId) {
-    tech = await conn('technicians').where({ id: newTechId }).first();
-    if (!tech) throw httpError(400, 'Unknown technician');
-    if (!tech.active) throw httpError(400, 'Technician is inactive');
-  }
+  // Save-time eligibility (422 TECH_NOT_ASSIGNABLE): a stale board that still
+  // offers a tech who has since gone prospective/inactive/office-only cannot
+  // complete the assignment.
+  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn }) : null;
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -156,6 +155,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   const fromTechId = job.technician_id || null;
   let updatedRow;
   const applyAssignment = async (assignmentTrx) => {
+    // Re-checked FOR SHARE on the writing trx: a Team-tab offboarding or
+    // field-eligibility removal (FOR UPDATE) cannot slip between the
+    // pre-transaction read above and this commit.
+    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx });
     // Tech-day membership fence (scheduling/tech-day-lock.js): reassignment
     // moves the stop between two tech-days on the same date — the nightly
     // reorder's membership read is only safe against writers holding the

@@ -78,7 +78,7 @@ const INVOICE = {
 
 function makeRecorder(overrides = {}) {
   const qb = {};
-  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate'].forEach((m) => {
+  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'whereExists', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => {
     qb[m] = jest.fn(() => qb);
   });
   qb.first = jest.fn(async () => null);
@@ -107,7 +107,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
   let trx;
   let trxInvoices;
   let trxPayments;
-  let trxPlans;
+  let trxPlans, trxCustomers;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -121,10 +121,14 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     });
     trxPayments = makeRecorder();
     trxPlans = makeRecorder();
+    trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
     trx = jest.fn((table) => {
       if (table === 'invoices') return trxInvoices;
       if (table === 'payments') return trxPayments;
       if (table === 'payment_plans') return trxPlans;
+      // apply-credit locks the customer (customer → visit lock order) before
+      // the visit fence and the credit movement.
+      if (table === 'customers') return trxCustomers;
       // completeActivePlansForInvoice also releases plan-owned dunning stops.
       if (table === 'invoice_followup_sequences') return makeRecorder();
       throw new Error(`unexpected trx table ${table}`);
@@ -166,6 +170,34 @@ describe('active payment plans auto-complete when the invoice settles', () => {
         status: 'completed',
         completed_at: expect.any(Date),
       }));
+    });
+  });
+
+  test("apply-credit refuses (409 visit_never_ran) when the invoice's visit is cancelled under the lock — no prepaid flip, no credit movement (#3878 r2 fence)", async () => {
+    const withVisit = { ...INVOICE, scheduled_service_id: 'svc-1' };
+    trxInvoices.first = jest.fn(async () => ({ ...withVisit }));
+    const trxVisits = makeRecorder({ first: jest.fn(async () => ({ id: 'svc-1', status: 'cancelled' })) });
+    const prev = trx.getMockImplementation();
+    trx.mockImplementation((table) => (table === 'scheduled_services' ? trxVisits : prev(table)));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => ({ ...withVisit })) });
+      if (table === 'activity_log') return makeRecorder();
+      throw new Error(`unexpected table ${table}`);
+    });
+    const lockOrder = [];
+    trxCustomers.forUpdate.mockImplementation(() => { lockOrder.push('customers'); return trxCustomers; });
+    trxVisits.forUpdate.mockImplementation(() => { lockOrder.push('scheduled_services'); return trxVisits; });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(409);
+      expect(lockOrder).toEqual(['customers', 'scheduled_services']);
+      const body = await res.json();
+      expect(body.error).toMatch(/visit is cancelled/);
+      expect(trxVisits.forUpdate).toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+      expect(trx).not.toHaveBeenCalledWith('payment_plans');
     });
   });
 
