@@ -745,6 +745,14 @@ describe('PR review r4', () => {
 });
 
 describe('PR review r5', () => {
+  test('a lapsed away-mode date is not "customer away" (hook P1)', () => {
+    const now = new Date('2026-09-04T16:00:00Z');
+    expect(jobCard._test.awayUntil({ away_mode_until: '2026-08-01' }, now)).toBeNull();
+    expect(jobCard._test.awayUntil({ away_mode_until: '2026-09-04' }, now)).toBe('2026-09-04');
+    expect(jobCard._test.awayUntil({ away_mode_until: '2026-09-10' }, now)).toBe('2026-09-10');
+    expect(jobCard._test.awayUntil({}, now)).toBeNull();
+  });
+
   test('a month-keyed program resolves by the appointment month; "Any" programs keep the matcher pick (P1)', async () => {
     const program = { visits: [{ visit: 1, month: 'Jan', primary: 'Celsius WG 1 oz' }, { visit: 9, month: 'Sep', primary: 'Speedzone Southern 1 fl oz' }] };
     expect(jobCard._test.seasonalVisit(program, '2026-09-04').visit).toBe(9);

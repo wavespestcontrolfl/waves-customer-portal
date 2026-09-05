@@ -126,6 +126,14 @@ function accessCodes(prefs) {
     .map(([label, code]) => ({ label, code: cleanRaw(code, 40) }));
 }
 
+// Away mode is a fact only while it is current (ET): a lapsed date is not
+// "customer away".
+function awayUntil(prefs, now = new Date()) {
+  if (!prefs?.away_mode_until) return null;
+  const until = etCalendarDayOf(prefs.away_mode_until);
+  return until && until >= etDateString(now) ? until : null;
+}
+
 function wateringLine(prefs) {
   if (!prefs || prefs.irrigation_system === false) return '';
   const days = parseJson(prefs.watering_days);
@@ -323,7 +331,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       instructions: clean(prefs?.special_instructions, 120),
       contactPreference: prefs?.contact_preference || null,
       chemicalSensitivity: prefs?.chemical_sensitivities ? clean(prefs.chemical_sensitivity_details, 80) || 'yes' : '',
-      awayUntil: prefs?.away_mode_until ? etCalendarDayOf(prefs.away_mode_until) : null,
+      awayUntil: awayUntil(prefs),
       visitNotes: clean(svc.notes, 140),
       lastVisit: lastVisitFact,
       issues,
@@ -1180,5 +1188,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil },
 };
