@@ -76,15 +76,29 @@ function clean(value, max = 240) {
  * model-safe facts: the keyword redactor cannot catch a bare "4545#" pasted
  * into a note, but the loader knows the exact values it must never ground.
  */
-function scrubKnownCodes(value, codes) {
-  // Every non-empty stored value (the property API sets no minimum length);
-  // a short code is matched as a whole token so "12" does not eat dates.
-  const known = codes.map((c) => String(c.code || '').trim()).filter(Boolean);
-  if (!known.length) return value;
+// The known codes as one pattern: every non-empty stored value (the property
+// API sets no minimum length) plus its bare alphanumeric form, so "4545#"
+// on file also catches a note's "Try 4545 first". A short or bare form is
+// matched as a whole token so "12" does not eat dates ("-12", "08.12").
+// Case-insensitive: a code stored as BLUE pasted as blue is still the code.
+function knownCodePattern(codes, flags = 'i') {
   const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Case-insensitive: a code stored as BLUE pasted as blue is still the code.
-  // (a date's "-12" or "08.12" is not the code "12")
-  const re = new RegExp(known.map((c) => (c.length < 4 ? `(?<![A-Za-z0-9.-])${esc(c)}(?![A-Za-z0-9.-])` : esc(c))).join('|'), 'gi');
+  const bounded = (c) => `(?<![A-Za-z0-9.-])${esc(c)}(?![A-Za-z0-9.-])`;
+  // Literal forms before bare forms: "1234+" must be eaten whole, not as
+  // another code's bare "1234" leaving the "+".
+  const literals = [];
+  const bares = [];
+  for (const code of codes.map((c) => String(c.code || '').trim()).filter(Boolean)) {
+    literals.push(code.length < 4 ? bounded(code) : esc(code));
+    const bare = code.replace(/[^A-Za-z0-9]/g, '');
+    if (bare && bare !== code) bares.push(bounded(bare));
+  }
+  const parts = [...literals, ...bares];
+  return parts.length ? new RegExp(parts.join('|'), flags) : null;
+}
+function scrubKnownCodes(value, codes) {
+  const re = knownCodePattern(codes, 'gi');
+  if (!re) return value;
   const walk = (v) => {
     if (typeof v === 'string') return v.replace(re, '[code]');
     if (Array.isArray(v)) return v.map(walk);
@@ -349,7 +363,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       instructions: clean(propertyPrefs?.special_instructions, 120),
       contactPreference: prefs?.contact_preference || null,
       chemicalSensitivity: prefs?.chemical_sensitivities ? clean(prefs.chemical_sensitivity_details, 80) || 'yes' : '',
-      awayUntil: awayUntil(prefs),
+      awayUntil: awayUntil(propertyPrefs),
       visitNotes: clean(svc.notes, 140),
       lastVisit: lastVisitFact,
       issues,
@@ -466,9 +480,8 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   if (sentences.length < 1 || sentences.length > 3) return 'sentence_count';
   if (wordCount(body) > MAX_PARAGRAPH_WORDS) return 'too_long';
   const lower = body.toLowerCase();
-  for (const { code } of codes) {
-    if (code && lower.includes(String(code).toLowerCase())) return 'code_leak';
-  }
+  const codeRe = knownCodePattern(codes);
+  if (codeRe && codeRe.test(body)) return 'code_leak';
   // Every numeric token must come from the grounding AND keep its clause:
   // a content word within three words of it in the output must sit within
   // three words of the same token in the grounding (a "20" moved from
@@ -1140,7 +1153,9 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const tank = tankFromCalibrations(calibrations, serviceInstant);
   const { visit, lines, blocks } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
-  const sprayCheck = buildSprayCheck({ products, hourly, now });
+  // Limits are judged from the appointment start (now once the window has
+  // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
+  const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 

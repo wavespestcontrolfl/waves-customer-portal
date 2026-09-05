@@ -474,6 +474,11 @@ describe('access codes never enter the model-safe facts', () => {
     expect(jobCard._test.petLine({ pet_details: 'Dog; gate code 4545#' })).not.toContain('4545');
     // And the validator refuses model text that prints a known code.
     expect(jobCard.validateParagraph('Gate code 4545# on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
+    // The bare form of a stored code is the code too (Codex r11 P1): the
+    // scrub and the leak check both catch "4545" for "4545#", as a whole token.
+    expect(jobCard._test.scrubKnownCodes({ notes: 'Try 4545 first, then 4545#' }, [{ code: '4545#' }])).toEqual({ notes: 'Try [code] first, then [code]' });
+    expect(jobCard._test.scrubKnownCodes('Visit 2026-09-04 at 14545 Main', [{ code: '4545#' }])).toBe('Visit 2026-09-04 at 14545 Main');
+    expect(jobCard.validateParagraph('Gate code 4545 on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
   });
   test('a known code value pasted bare into any fact string is scrubbed before grounding (Codex r6 P1)', () => {
     const facts = { entry: '4545#', issues: [{ text: 'Use 4545# at the side gate' }], lastVisit: { summary: 'Fine' }, rain7d: 0.5 };
@@ -941,7 +946,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     dbh.raw = (sql) => sql;
     return dbh;
   };
-  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', watering_days: '["Mon"]' };
+  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', away_mode_until: '2099-01-01', watering_days: '["Mon"]' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
@@ -949,16 +954,16 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
     expect(away.access.codes).toEqual([]);
     // Pets and the securing plan are the primary home's as well (Codex r9 P1).
-    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '', instructions: '' });
+    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '', instructions: '', awayUntil: null });
     const awayText = jobCard.buildTemplateParagraph(away.facts);
     expect(awayText).toMatch(/visit at a non-primary address — the home's pets and access details are not shown/i);
-    expect(awayText).not.toMatch(/dog|crated|north side/);
+    expect(awayText).not.toMatch(/dog|crated|north side|away/);
     // The primary home's code is still scrubbed from notes and still a leak check for the rewrite (hook P1).
     expect(away.facts.visitNotes).toBe('Try [code] first');
     expect(away.knownCodes).toEqual([{ label: 'Property gate', code: '4545#' }]);
     const home = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs }), deps);
     expect(home.access.codes).toEqual([{ label: 'Property gate', code: '4545#' }]);
-    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage', instructions: 'Enter from the north side' });
+    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage', instructions: 'Enter from the north side', awayUntil: '2099-01-01' });
   });
 
   test('pet presence is a critical fact even without a securing plan (P1)', () => {

@@ -4901,7 +4901,9 @@ function JobCardProduct({ p, D }) {
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
         {p.short && (
           <div style={{ color: "#C8312F" }}>
-            On hand {fmtAmount(p.onHand, p.onHandUnit)} vs {amount} planned.
+            {amount
+              ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${amount} planned.`
+              : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
           </div>
         )}
         {!p.short && p.onHand != null && (
