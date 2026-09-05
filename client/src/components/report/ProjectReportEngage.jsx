@@ -7,7 +7,7 @@
  */
 import { useState } from 'react';
 import { COLORS as B } from '../../theme-brand';
-import useStickyStuck from '../../hooks/useStickyStuck';
+import Icon from '../Icon';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -36,80 +36,10 @@ function reviewLocationForProject(data = {}) {
     || REVIEW_LOCATIONS[REVIEW_LOCATIONS.length - 1];
 }
 
-const ASK_CSS = `
-.project-ask-wrap { position: sticky; top: 57px; z-index: 8; margin: 0 0 18px; }
-/* stuck-detection sentinel (useStickyStuck) — 1px tall so IntersectionObserver
-   tracks it reliably, margin cancels the height */
-.project-ask-sentinel { height: 1px; margin-bottom: -1px; }
-.project-ask-bar {
-  position: relative;
-  display: grid;
-  grid-template-areas: 'title pills form';
-  grid-template-columns: auto minmax(0, 1fr) minmax(280px, 38%);
-  align-items: center;
-  gap: 10px;
-  border: 1px solid var(--line, #E2E8F0);
-  border-radius: 18px;
-  background: var(--wash, #F8FAFC);
-  padding: 10px 14px;
-}
-.project-ask-title {
-  grid-area: title; color: var(--text, #04395E);
-  font-size: 12px; font-weight: 800; letter-spacing: 0.08em;
-  text-transform: uppercase; white-space: nowrap;
-}
-.project-ask-title::before { content: '\\2726  '; color: ${B.yellow}; }
-.project-ask-pills {
-  grid-area: pills; min-width: 0; overflow: hidden;
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
-  mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
-}
-.project-ask-track { display: flex; gap: 8px; width: max-content; animation: projectPillMarquee 56s linear infinite; }
-.project-ask-pills:hover .project-ask-track, .project-ask-track:focus-within { animation-play-state: paused; }
-@keyframes projectPillMarquee { from { transform: translateX(0); } to { transform: translateX(calc(-50% - 4px)); } }
-@media (prefers-reduced-motion: reduce) { .project-ask-track { animation: none; } }
-.project-ask-pill {
-  flex: 0 0 auto; border: 1px solid var(--line, #E2E8F0); border-radius: 999px;
-  background: #fff; color: var(--text, #04395E); font: inherit; font-size: 14px;
-  line-height: 1; font-weight: 700; padding: 9px 12px; cursor: pointer; white-space: nowrap;
-}
-.project-ask-form { grid-area: form; display: flex; gap: 8px; min-width: 0; }
-.project-ask-form input {
-  flex: 1; min-width: 0; border: 1px solid var(--line, #E2E8F0); border-radius: 999px;
-  padding: 9px 14px; color: var(--text, #04395E); font: inherit; font-size: 14px;
-  outline: none; background: #fff;
-}
-.project-ask-form button {
-  border: 1px solid ${B.glassNavy}; border-radius: 999px; background: ${B.yellow};
-  color: ${B.glassNavy}; font: inherit; font-size: 14px; font-weight: 800;
-  padding: 9px 16px; cursor: pointer; white-space: nowrap;
-}
-.project-ask-form button:disabled, .project-ask-pills button:disabled { opacity: .5; cursor: default; }
-.project-ask-answer {
-  position: absolute; top: calc(100% + 8px); left: 0; right: 0; z-index: 9;
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
-  border: 1px solid var(--line, #E2E8F0); border-radius: 14px; background: #fff;
-  padding: 12px 14px; font-size: 14px; line-height: 1.55; color: var(--text, #04395E);
-  box-shadow: 0 18px 44px rgba(4, 57, 94, 0.16);
-}
-.project-ask-dismiss { border: 0; background: none; cursor: pointer; font-size: 13px; color: var(--muted, #475569); }
-@media (max-width: 720px) {
-  .project-ask-bar { grid-template-areas: 'title form' 'pills pills'; grid-template-columns: auto 1fr; }
-  /* While pinned on a phone, collapse to the slim ask row — the two-row bar
-     hid a third of the screen over the report (owner screenshot 2026-07-29). */
-  .project-ask-wrap[data-stuck] .project-ask-pills { display: none; }
-  .project-ask-wrap[data-stuck] .project-ask-bar { grid-template-areas: 'title form'; }
-}
-@media print { .project-ask-wrap { display: none !important; } }
-`;
-
 export function ProjectAskWaves({ token }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
-  // 57 = the wrap's sticky `top`. Mirrors FloatingAskWaves (ReportViewPage):
-  // while pinned on a phone the bar collapses to the slim ask row.
-  const [stuck, sentinelRef] = useStickyStuck(57);
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -133,59 +63,56 @@ export function ProjectAskWaves({ token }) {
     }
   };
 
+  // The estimate's Ask Waves card (owner 2026-09-03), the same markup and
+  // glass-theme classes as the service report: eyebrow, heading, input +
+  // Ask, the prompts as stacked rows, the answer in flow. The sticky
+  // marquee bar this replaced is gone with its CSS.
   return (
-    <>
-      <div ref={sentinelRef} className="project-ask-sentinel" aria-hidden="true" />
-      <div className="project-ask-wrap" data-stuck={stuck ? '' : undefined}>
-      <style>{ASK_CSS}</style>
-      <section data-glass="card" className="project-ask-bar" aria-label="Waves AI — ask about this report">
-        <span className="project-ask-title">Waves AI</span>
-        <div className="project-ask-pills" aria-label="Example questions">
-          <div className="project-ask-track">
-            {[...PROMPTS, ...PROMPTS].map((prompt, i) => (
-              <button
-                data-glass="chip"
-                type="button"
-                key={`${prompt}-${i}`}
-                className="project-ask-pill"
-                onClick={() => ask(prompt)}
-                disabled={asking}
-                tabIndex={i < PROMPTS.length ? 0 : -1}
-                aria-hidden={i >= PROMPTS.length}
-              >
-                {prompt}
-              </button>
-            ))}
+    <section className="waves-ask-card" data-glass="card" aria-label="Waves AI — ask about this report">
+      <div className="waves-ask-eyebrow" data-gt="eyebrow">Ask Waves</div>
+      <h2 className="waves-ask-title">Questions about this project?</h2>
+      <p className="waves-ask-intro">What we found, what was treated, what to do next, or when the next visit is.</p>
+      <form
+        className="waves-ask-form"
+        onSubmit={(event) => { event.preventDefault(); ask(); }}
+      >
+        <input
+          id="project-report-question"
+          name="project_report_question"
+          value={question}
+          onChange={(event) => setQuestion(event.target.value)}
+          placeholder="Ask about this project"
+          aria-label="Ask Waves about this project report"
+        />
+        <button data-glass-accent="" type="submit" disabled={asking || !question.trim()}>
+          {asking ? 'Checking…' : 'Ask'}
+        </button>
+      </form>
+      <div className="waves-ask-list" data-glass="soft" role="list">
+        {PROMPTS.map((prompt, i) => (
+          <div role="listitem" key={prompt}>
+            <button
+              type="button"
+              className="waves-ask-row"
+              data-first={i === 0 ? '' : undefined}
+              onClick={() => ask(prompt)}
+              disabled={asking}
+            >
+              <span>{prompt}</span>
+              <span aria-hidden="true" className="waves-ask-go">Ask ›</span>
+            </button>
           </div>
-        </div>
-        <div className="project-ask-form">
-          <input
-            id="project-report-question"
-            name="project_report_question"
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                ask();
-              }
-            }}
-            placeholder="Ask Waves"
-            aria-label="Ask Waves about this project report"
-          />
-          <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
-            {asking ? 'Checking…' : 'Ask'}
+        ))}
+      </div>
+      {answer && (
+        <div className="waves-ask-answer" role="status">
+          <span>{answer}</span>
+          <button type="button" className="waves-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">
+            <Icon name="close" size={16} strokeWidth={2} />
           </button>
         </div>
-        {answer && (
-          <div className="project-ask-answer" role="status">
-            <span>{answer}</span>
-            <button type="button" className="project-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">{'✕'}</button>
-          </div>
-        )}
-      </section>
-      </div>
-    </>
+      )}
+    </section>
   );
 }
 
@@ -221,7 +148,7 @@ export function ProjectReviewAsk({ data }) {
         style={{
           display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           minHeight: 44, padding: '0 18px', borderRadius: 999,
-          background: B.yellow, color: B.glassNavy, fontWeight: 800,
+          background: B.yellow, color: B.glassNavy, fontWeight: 700,
           fontSize: 14, textDecoration: 'none', border: `1px solid ${B.glassNavy}`,
         }}
       >

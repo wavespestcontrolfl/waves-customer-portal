@@ -1232,7 +1232,18 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     // An adapter with no static quote reads the vendor's total at the point of
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
-    const placeArgs = adapter.quotesAtPlace ? { ...base, beforeSubmit: (cents) => reserveUnderCaps(conn, ledger.id, cents, { env }) } : base;
+    // An adapter that gates more than once (SiteOne: cart total, checkout
+    // total, the total at the click) keeps the FIRST reservation's accounting
+    // month: later gates pass that stamp as accountingAt, so a checkout that
+    // crosses a month boundary is neither moved into the new month nor frees
+    // old-month headroom (Codex #3876 r3 P1).
+    let accountingAt = null;
+    const beforeSubmit = async (cents) => {
+      const verdict = await reserveUnderCaps(conn, ledger.id, cents, { env, accountingAt });
+      if (verdict.ok === true && !accountingAt) accountingAt = (await ledgerReservation(conn, ledger)).createdAt;
+      return verdict;
+    };
+    const placeArgs = adapter.quotesAtPlace ? { ...base, beforeSubmit } : base;
     const stopHeartbeat = startClaimHeartbeat(conn, ledger.id);
     try {
       placed = await adapter.place(placeArgs);

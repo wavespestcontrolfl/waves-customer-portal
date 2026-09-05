@@ -2015,13 +2015,11 @@ class RelayConversation {
         try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
         return;
       }
-      if (text) {
-        if (hasPendingWrite) logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
-        else {
-          const entry = this.say(text);
-          if (entry) entry.historyMessage = assistantMessage;
-        }
-      }
+      const spokenText = hasPendingWrite ? '' : text;
+      if (spokenText) {
+        const entry = this.say(spokenText);
+        if (entry) entry.historyMessage = assistantMessage;
+      } else if (text) logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
 
       if (msg.stop_reason === 'tool_use') {
         const results = [];
@@ -2358,7 +2356,9 @@ class RelayConversation {
             status: 'completed',
             answered_by: 'ai_agent',
             call_outcome: 'ai_handled',
-            duration_seconds: Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
+            duration_seconds: recoveryOn
+              ? db.raw('GREATEST(COALESCE(duration_seconds, 0), ?)', [Math.max(0, Math.round((Date.now() - this._startedAt) / 1000))])
+              : Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
             updated_at: new Date(),
             ...(transcriptUpdate || {}),
             ...(composedTranscription ? { transcription: composedTranscription } : {}),
@@ -2503,10 +2503,18 @@ class RelayConversation {
     if (!this.callSid) return false;
     const recovery = require('./relay-recovery');
     const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
-    if (!callerTurns.length) return false;
     try {
+      const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
+      const starts = legs.map((leg) => Date.parse(leg.started_at)).filter(Number.isFinite);
+      const ends = legs.map((leg) => Date.parse(leg.ended_at)).filter(Number.isFinite);
+      if (ends.length) await withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid).update({
+          duration_seconds: db.raw("GREATEST(COALESCE(duration_seconds, 0), FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - COALESCE(?::timestamptz, created_at))))::integer, 0)",
+            [new Date(Math.max(...ends)), starts.length ? new Date(Math.min(...starts)) : null]),
+        }), WRITE_DRAIN_TIMEOUT_MS, 0,
+      );
+      if (!callerTurns.length) return false;
       const { buildCallSummary } = require('./relay-transcript');
-      const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
       const leadCaptured = Boolean(meta.relay_lead_id) || legs.some((seg) => seg && seg.lead_captured === true);
       const summary = buildCallSummary({ turns: callerTurns.map((text) => ({ role: 'caller', text })), leadCaptured });
       const rows = await withTimeout(

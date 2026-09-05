@@ -55,7 +55,7 @@ function BlockRenderer({ blocks }) {
         );
       case 'heading':
         return (
-          <h2 key={i} style={{
+          <h2 key={i} className="waves-print-h2" style={{
             fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.semibold,
             color: SURFACE.text, margin: `28px 0 ${SP.md}px`, lineHeight: LH.heading,
           }}>
@@ -217,7 +217,7 @@ function NotFound() {
 
 export default function PrepGuidePage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null); // null | notfound | temporary
   const [loading, setLoading] = useState(true);
@@ -270,7 +270,7 @@ export default function PrepGuidePage() {
             <div data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: SURFACE.muted, marginBottom: SP.xs }}>
               Prep guide{data.projectTypeLabel ? ` · ${data.projectTypeLabel}` : ''}
             </div>
-            <h1 style={{
+            <h1 className="waves-print-h2" style={{
               fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
               color: SURFACE.text, margin: `0 0 ${SP.xxs}px`, lineHeight: LH.heading,
             }}>

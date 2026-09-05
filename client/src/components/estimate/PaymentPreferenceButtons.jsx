@@ -224,7 +224,7 @@ export default function PaymentPreferenceButtons({
     gap: 12,
     alignItems: 'baseline',
     fontSize: 14,
-    fontWeight: 800,
+    fontWeight: 700,
     color: W.blueDeeper,
   };
   const hasFirstVisitInvoice = Number(firstVisit || 0) > 0;

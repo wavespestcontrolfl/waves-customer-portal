@@ -22,8 +22,8 @@ const primaryActionStyle = {
   borderRadius: 10,
   background: COLORS.glassNavy,
   color: COLORS.white,
-  fontSize: 15,
-  fontWeight: 800,
+  fontSize: 16,
+  fontWeight: 700,
   cursor: 'pointer',
   display: 'inline-flex',
   alignItems: 'center',
@@ -79,7 +79,7 @@ function getServiceSelection(serviceType) {
 
 export default function RatePage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null); // null | notfound | temporary
@@ -360,9 +360,9 @@ export default function RatePage() {
 
   if (error === 'notfound') return (
     <Page>
-      <div role="alert" style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 15, lineHeight: 1.5 }}>
+      <div role="alert" style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 16, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>
-        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.glassNavy, fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
+        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.glassNavy, fontWeight: 700, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
       </div>
     </Page>
   );
@@ -381,7 +381,7 @@ export default function RatePage() {
                 style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', margin: '0 auto 12px', display: 'block', boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}
               />
             ) : (
-              <div style={{ width: 80, height: 80, borderRadius: '50%', background: INPUT_BG, border: `1px solid ${INPUT_BORDER}`, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.glassNavy, fontFamily: FONTS.body, boxShadow: 'none' }}>
+              <div style={{ width: 80, height: 80, borderRadius: '50%', background: INPUT_BG, border: `1px solid ${INPUT_BORDER}`, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 700, color: COLORS.glassNavy, fontFamily: FONTS.body, boxShadow: 'none' }}>
                 {(techName || 'W')[0].toUpperCase()}
               </div>
             )}
@@ -393,8 +393,8 @@ export default function RatePage() {
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, padding: '0 2px' }}>
-            <span style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0, color: MUTED }}>Not Great</span>
-            <span style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0, color: MUTED }}>Amazing!</span>
+            <span style={{ fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0, color: MUTED }}>Not Great</span>
+            <span style={{ fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0, color: MUTED }}>Amazing!</span>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10, minmax(0, 1fr))', gap: 4 }}>
             {[1,2,3,4,5,6,7,8,9,10].map(n => {
@@ -414,7 +414,7 @@ export default function RatePage() {
                   onClick={() => handleScore(n)}
                   style={{
                     minHeight: 40, minWidth: 0, border: 'none', borderRadius: 8,
-                    background: isActive ? color : INPUT_BG, fontFamily: FONTS.body, fontSize: 16, fontWeight: 800,
+                    background: isActive ? color : INPUT_BG, fontFamily: FONTS.body, fontSize: 16, fontWeight: 700,
                     color: isActive ? COLORS.white : MUTED, cursor: 'pointer', display: 'flex',
                     alignItems: 'center', justifyContent: 'center', padding: 0,
                     boxShadow: shadow,
@@ -425,7 +425,7 @@ export default function RatePage() {
           </div>
           {score >= 8 ? (
             <div style={{ marginTop: 18 }}>
-              <div style={{ fontSize: 14, fontWeight: 800, color: TEXT, marginBottom: 8, textAlign: 'center' }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: TEXT, marginBottom: 8, textAlign: 'center' }}>
                 What stood out? <span style={{ fontWeight: 500, color: MUTED }}>(optional)</span>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
@@ -436,7 +436,7 @@ export default function RatePage() {
                     <button key={s} onClick={() => toggleStandout(s)} disabled={disabled} style={{
                       minHeight: 40, border: `1px solid ${selected ? COLORS.green : CARD_BORDER}`,
                       borderRadius: 8, background: selected ? COLORS.green : COLORS.white,
-                      color: selected ? COLORS.white : BODY, fontSize: 14, fontWeight: 800,
+                      color: selected ? COLORS.white : BODY, fontSize: 14, fontWeight: 700,
                       cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.45 : 1,
                       boxShadow: selected ? '0 6px 14px rgba(22,163,74,0.22)' : '0 2px 8px rgba(15,23,42,0.08)',
                     }}>{s}</button>
@@ -466,7 +466,7 @@ export default function RatePage() {
             <Icon name="party" size={30} strokeWidth={2} />
           </div>
           <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Awesome, thank you!</div>
-          <div style={{ fontSize: 15, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
+          <div style={{ fontSize: 16, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>What stood out about your experience?</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
             {HIGHLIGHTS.map(h => (
               <button key={h} onClick={() => toggleHighlight(h)} style={{
@@ -524,7 +524,7 @@ export default function RatePage() {
               {/* Standout selection */}
               <div style={{ marginBottom: 18 }}>
                 <div style={{ fontSize: 14, fontWeight: 700, color: TEXT, marginBottom: 4 }}>What stood out?</div>
-                <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>Pick up to 3</div>
+                <div style={{ fontSize: 14, color: MUTED, marginBottom: 8 }}>Pick up to 3</div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   {STANDOUT_OPTIONS.map(s => (
                     <button key={s} onClick={() => toggleStandout(s)} style={{
@@ -564,7 +564,7 @@ export default function RatePage() {
           )}
 
           {generating && (
-            <div style={{ textAlign: 'center', padding: '20px 0 8px', color: BODY, fontSize: 15, fontWeight: 700 }}>
+            <div style={{ textAlign: 'center', padding: '20px 0 8px', color: BODY, fontSize: 16, fontWeight: 700 }}>
               Writing your review...
             </div>
           )}
@@ -589,7 +589,7 @@ export default function RatePage() {
           {generatedReview && (
             <div style={{ marginTop: 4 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: TEXT, textTransform: 'uppercase', letterSpacing: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: TEXT, textTransform: 'uppercase', letterSpacing: 0 }}>
                   Your Review <span style={{ fontWeight: 400, color: MUTED, textTransform: 'none', letterSpacing: 0 }}>— edit if you want</span>
                 </div>
               </div>
@@ -601,7 +601,7 @@ export default function RatePage() {
                 className="waves-focus-ring"
                 style={{
                   ...inputBaseStyle,
-                  minHeight: 150, fontSize: 15, lineHeight: 1.6, marginBottom: 12,
+                  minHeight: 150, fontSize: 16, lineHeight: 1.6, marginBottom: 12,
                   fontFamily: FONTS.body, resize: 'vertical', boxSizing: 'border-box',
                 }}
               />
@@ -615,7 +615,7 @@ export default function RatePage() {
                 Copy & Open Google
               </Button>
               {postHint && (
-                <div style={{ marginTop: 8, textAlign: 'center', fontSize: 14, color: COLORS.green, fontWeight: 800 }}>
+                <div style={{ marginTop: 8, textAlign: 'center', fontSize: 14, color: COLORS.green, fontWeight: 700 }}>
                   {postHint}
                 </div>
               )}
@@ -654,18 +654,18 @@ export default function RatePage() {
           <div style={{ width: 64, height: 64, borderRadius: '50%', background: score <= 3 ? '#FEE2E2' : '#FFF8E8', color: score <= 3 ? COLORS.red : COLORS.orange, margin: '0 auto 16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Icon name={score <= 3 ? 'frown' : 'message'} size={30} strokeWidth={2} />
           </div>
-          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: COLORS.red, fontSize: 14, fontWeight: 800, padding: '6px 14px', borderRadius: 8, marginBottom: 12 }}>We want to make this right</div>}
+          {score <= 3 && <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: '#FEE2E2', color: COLORS.red, fontSize: 14, fontWeight: 700, padding: '6px 14px', borderRadius: 8, marginBottom: 12 }}>We want to make this right</div>}
           <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>
             {score <= 3 ? "We're sorry to hear that." : "Thanks for the feedback."}
           </div>
-          <div style={{ fontSize: 15, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>
+          <div style={{ fontSize: 16, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>
             {score <= 3 ? "What went wrong? We'll personally follow up." : "What could we have done better?"}
           </div>
           <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} aria-label="Tell us what happened" className="waves-focus-ring" style={{
             ...inputBaseStyle,
             minHeight: 100,
             padding: 14,
-            fontSize: 15,
+            fontSize: 16,
             resize: 'vertical',
           }} />
           {submitError && (
@@ -692,7 +692,7 @@ export default function RatePage() {
             <Icon name="party" size={30} strokeWidth={2} />
           </div>
           <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Taking you to Google...</div>
-          <div style={{ fontSize: 15, color: BODY }}>Your review means the world to our small team!</div>
+          <div style={{ fontSize: 16, color: BODY }}>Your review means the world to our small team!</div>
         </div>
       )}
 
@@ -703,7 +703,7 @@ export default function RatePage() {
             <Icon name="checkCircle" size={30} strokeWidth={2} />
           </div>
           <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Thank you!</div>
-          <div style={{ fontSize: 15, color: BODY, lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
+          <div style={{ fontSize: 16, color: BODY, lineHeight: 1.55 }}>Your feedback helps us serve you better.</div>
         </div>
       )}
     </Page>

@@ -36,7 +36,7 @@ export default function ActionQueuePane() {
   }
 
   return (
-    <aside className="w-full md:w-80 md:flex-shrink-0 bg-white md:border-l border-hairline border-zinc-200 flex flex-col">
+    <aside className="w-full xl:w-80 xl:flex-shrink-0 bg-white xl:border-l border-hairline border-zinc-200 flex flex-col">
       <div className="px-4 py-3 border-b border-hairline border-zinc-200 flex items-center justify-between">
         <h2 className="text-12 uppercase tracking-label font-medium text-ink-secondary">
           Action Queue

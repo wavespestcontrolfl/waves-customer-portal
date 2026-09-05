@@ -547,7 +547,7 @@ describe('the conversation side', () => {
     convo._recordTurn('caller', 'still here');
     await convo.end('ws_close');
     const reconcile = updates.find((u) => u.call_outcome === 'ai_handled');
-    expect(reconcile.duration_seconds).toBeGreaterThanOrEqual(600);
+    expect(reconcile.duration_seconds.bindings[0]).toBeGreaterThanOrEqual(600);
     const seg = JSON.parse(updates[0].metadata.bindings[1].bindings[0])[0];
     expect(seg.started_at).toBe(new Date(t0).toISOString()); // this leg's segment carries the CALL's start forward
   });

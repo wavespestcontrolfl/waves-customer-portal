@@ -279,7 +279,7 @@ function AnnualPrepayInvoicePanel({ term }) {
           {annualPrepayStatusLabel(term)}
         </div>
         {term.prepayAmount != null && (
-          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.heavy, color: DOC.ink }}>
+          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.bold, color: DOC.ink }}>
             {fmtCurrency(term.prepayAmount)}
           </div>
         )}
@@ -331,12 +331,12 @@ function CoverageVisitsList({ visits, status }) {
               {v.amount != null && (
                 <span style={{ fontFamily: DOC_FONT, color: DOC.muted }}>{fmtCurrency(v.amount)}</span>
               )}
-              <span style={{ ...eyebrow, fontSize: FS.micro, color: prepaid ? DOC.success : '#9A6200' }}>{tag}</span>
+              <span style={{ ...eyebrow, fontSize: FS.body, color: prepaid ? DOC.success : '#9A6200' }}>{tag}</span>
             </span>
           </li>
         ))}
       </ul>
-      <div style={{ marginTop: SP.xs, fontSize: FS.caption, lineHeight: LH.snug, color: DOC.muted }}>
+      <div style={{ marginTop: SP.xs, fontSize: FS.body, lineHeight: LH.snug, color: DOC.muted }}>
         Target dates — your actual visits follow your regular service route.
       </div>
     </>
@@ -365,14 +365,14 @@ function SummaryRow({ label, value, strong, muted }) {
       borderTop: strong ? `1px solid ${DOC.border}` : 'none',
       color: strong ? DOC.ink : DOC.muted,
       fontSize: strong ? FS.lead : FS.body,
-      fontWeight: strong ? FW.heavy : FW.medium,
+      fontWeight: strong ? FW.bold : FW.medium,
       fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
         color: muted ? DOC.muted : DOC.ink,
         fontFamily: DOC_FONT,
-        fontWeight: strong ? FW.heavy : FW.semibold,
+        fontWeight: strong ? FW.bold : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -432,7 +432,7 @@ const goldChipButton = {
   ...docButton('chip'),
   minHeight: 40,
   padding: '0 10px',
-  fontSize: FS.caption,
+  fontSize: FS.body,
   fontWeight: FW.semibold,
   border: '1px solid rgba(255,238,180,0.92)',
   background: 'rgba(240,165,0,0.38)',
@@ -650,7 +650,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
                 <div style={{ display: 'flex', alignItems: 'center', gap: SP.xs, fontSize: FS.body, fontWeight: FW.semibold, color: DOC.ink }}>
                   Zelle
                   <span style={{
-                    fontSize: FS.micro,
+                    fontSize: FS.body,
                     fontWeight: FW.bold,
                     letterSpacing: '0.08em',
                     textTransform: 'uppercase',
@@ -680,9 +680,9 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
             <CopyValueButton value={value} label="Zelle address" disabled={validating} />
           </div>
           {staleNotice && (
-            <p role="status" style={{ margin: `0 0 ${SP.sm}px`, fontSize: FS.caption, color: DOC.danger, lineHeight: LH.body }}>{staleNotice}</p>
+            <p role="status" style={{ margin: `0 0 ${SP.sm}px`, fontSize: FS.body, color: DOC.danger, lineHeight: LH.body }}>{staleNotice}</p>
           )}
-          <p style={{ margin: 0, paddingTop: SP.sm, borderTop: '1px solid rgba(4,57,94,0.12)', fontSize: FS.caption, color: DOC.muted, lineHeight: LH.body }}>
+          <p style={{ margin: 0, paddingTop: SP.sm, borderTop: '1px solid rgba(4,57,94,0.12)', fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
             Put invoice <span style={{ color: DOC.ink, fontWeight: FW.semibold }}>{invoiceNumber}</span> in the memo.
             We mark the invoice paid once the money reaches our account — until then it stays open here.
           </p>
@@ -1838,7 +1838,7 @@ export default function PayPageV2() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
   // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -2713,7 +2713,7 @@ export default function PayPageV2() {
               <DetailBlock label="Billed to">
                 {payer ? (
                   <>
-                    <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
+                    <div style={{ fontWeight: FW.bold }}>{payer.name}</div>
                     {payer.address && <div>{payer.address}</div>}
                     {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                       <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
@@ -2722,7 +2722,7 @@ export default function PayPageV2() {
                   </>
                 ) : (
                   <>
-                    <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                    <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                     {customer.address && <div>{customer.address}</div>}
                     {locationLine && <div>{locationLine}</div>}
                   </>
@@ -2730,13 +2730,13 @@ export default function PayPageV2() {
               </DetailBlock>
               {payer && (
                 <DetailBlock label="Service address">
-                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
                 </DetailBlock>
               )}
               <DetailBlock label="Service">
-                <div style={{ fontWeight: FW.heavy }}>{serviceLabel}</div>
+                <div style={{ fontWeight: FW.bold }}>{serviceLabel}</div>
                 {serviceDateLabel && <div>{serviceDateLabel}</div>}
                 {service.techName && <div style={{ color: DOC.muted }}>Technician: {service.techName}</div>}
               </DetailBlock>
@@ -2823,7 +2823,7 @@ export default function PayPageV2() {
                         }}>
                           {attachment.fileName}
                         </span>
-                        <span style={{ display: 'block', fontSize: FS.caption, color: DOC.muted, marginTop: 2 }}>
+                        <span style={{ display: 'block', fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>
                           {fmtFileSize(attachment.fileSizeBytes)}
                         </span>
                       </span>

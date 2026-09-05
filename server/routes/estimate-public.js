@@ -5469,9 +5469,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong>${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">${est.depositPolicy?.required
-          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
-          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
+        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -6308,9 +6306,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .pay-pref-note{font-size:13px;color:#475569;line-height:1.45;padding:0 2px;text-align:center}
   .pay-pref-choice[hidden]{display:none}
   .pay-pref-btn[hidden]+.pay-pref-note{display:none}
-  #deposit-overlay{position:fixed;inset:0;background:rgba(27,44,91,.55);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
-  #deposit-overlay .deposit-card{background:#fff;border:1px solid #E7E2D7;border-radius:14px;max-width:440px;width:100%;padding:22px;box-shadow:0 18px 50px rgba(0,0,0,.25);max-height:90vh;overflow:auto}
-  #deposit-overlay .deposit-error{color:#C8312F;font-size:14px;line-height:1.45;margin-top:10px}
   .pay-pref-btn[aria-pressed="true"]{box-shadow:0 0 0 3px rgba(27,44,91,.16)}
   .pay-pref-btn .pay-pref-sub{font-size:12px;color:#475569;line-height:1.45}
   .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
@@ -6444,7 +6439,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   /* Print parity with the React estimate (estimate audit 2026-07-07): no
      fixed chrome over the pages, solid white background, cards kept whole. */
   @media print{
-    .q-bar,#toast,#deposit-overlay,.top-bar{display:none!important}
+    .q-bar,#toast,.top-bar{display:none!important}
     body{background:#fff;padding-bottom:0}
     .card,.service-price-card,.supplemental-service-row{break-inside:avoid;box-shadow:none}
   }
@@ -6616,7 +6611,6 @@ ${shellTopBar()}
         <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${existingAppointment ? '' : escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">${existingAppointment ? '' : 'You will be taken to a secure Stripe page to add your card.'}</span></button>
         ${existingAppointment ? '' : '<button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>'}
       </div>
-      <div class="pay-pref-note" id="deposit-due-note" style="display:none" aria-live="polite"></div>
     </div>
   </section>
   `}
@@ -6742,7 +6736,6 @@ ${shellQuestionsBar()}
 <script>
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
-  const DEPOSIT_POLICY = ${JSON.stringify(est.depositPolicy || { enforced: false, required: false })};
   const ESTIMATE_ASK_TOKEN = ${JSON.stringify(estimateAskToken)};
   const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
   const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
@@ -7077,9 +7070,7 @@ ${shellQuestionsBar()}
     if (pref === 'prepay_annual') {
       if (bookingSubhead) bookingSubhead.textContent = 'Annual prepay is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Annual prepay invoice';
-      if (body) body.textContent = DEPOSIT_POLICY.required
-        ? 'A ' + fmt(DEPOSIT_POLICY.recurringAmount) + ' deposit is due at confirmation and is credited toward your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ', sent automatically after confirmation; choose a service window to continue.'
-        : 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
+      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
     } else {
       if (bookingSubhead) bookingSubhead.textContent = 'Pay per application is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Pay per application';
@@ -7587,7 +7578,6 @@ ${shellQuestionsBar()}
         if (title) title.textContent = 'Confirm and book';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
       }
-      updateDepositNote();
       startReservationCountdown(body.expiresAt);
       reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (e) {
@@ -7633,7 +7623,6 @@ ${shellQuestionsBar()}
       if (sub) sub.textContent = 'Your existing appointment stays scheduled. ' + CARD_CONFIRM_SUB;
       if (summary) summary.textContent = 'Selected invoice option: Pay per application.';
     }
-    updateDepositNote();
     if (reviewArea) reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
@@ -7755,326 +7744,6 @@ ${shellQuestionsBar()}
     toast('Booked! Payment is optional right now.');
   }
 
-  // ----- Acceptance deposit (flat $49 recurring / $99 one-time) -----
-  // DEPOSIT_POLICY.required gates the whole block: while the
-  // ESTIMATE_DEPOSIT_REQUIRED flag is dark, or this customer is exempt
-  // (existing plan customer), none of this runs and accept behaves as before.
-  let depositStripeJsPromise = null;
-  function loadStripeJs() {
-    if (window.Stripe) return Promise.resolve(window.Stripe);
-    if (depositStripeJsPromise) return depositStripeJsPromise;
-    depositStripeJsPromise = new Promise(function (resolve, reject) {
-      const s = document.createElement('script');
-      s.src = 'https://js.stripe.com/v3/';
-      s.async = true;
-      s.onload = function () { resolve(window.Stripe); };
-      s.onerror = function () { depositStripeJsPromise = null; reject(new Error('stripe.js failed to load')); };
-      document.head.appendChild(s);
-    });
-    return depositStripeJsPromise;
-  }
-
-  function depositAmountForMode() {
-    return bookingState.serviceMode === 'one_time'
-      ? DEPOSIT_POLICY.oneTimeAmount
-      : DEPOSIT_POLICY.recurringAmount;
-  }
-
-  function updateDepositNote() {
-    const note = document.getElementById('deposit-due-note');
-    if (!note) return;
-    if (!DEPOSIT_POLICY.required) {
-      note.style.display = 'none';
-      return;
-    }
-    // Prepay-annual owes the deposit too — it credits against the annual
-    // invoice minted at accept rather than a later first-visit invoice.
-    const creditTarget = bookingState.pickedPref === 'prepay_annual'
-      ? 'your annual prepay invoice'
-      : 'your first invoice';
-    note.textContent = bookingState.depositPaymentIntentId
-      ? 'Deposit received — it will be applied to ' + creditTarget + '.'
-      : 'A ' + fmt(depositAmountForMode()) + ' deposit is due today to hold your spot — it is applied to ' + creditTarget + '.';
-    note.style.display = '';
-  }
-
-  function closeDepositOverlay() {
-    const o = document.getElementById('deposit-overlay');
-    if (o && o.parentNode) o.parentNode.removeChild(o);
-  }
-
-  function showDepositOverlay(intent) {
-    return new Promise(function (resolve) {
-      closeDepositOverlay();
-      // Prepay-annual deposits credit the annual invoice minted at accept,
-      // not a later first-visit invoice — keep the modal copy honest.
-      const depositCreditTarget = bookingState.pickedPref === 'prepay_annual'
-        ? 'your annual prepay invoice'
-        : 'your first invoice';
-      const overlay = document.createElement('div');
-      overlay.id = 'deposit-overlay';
-      overlay.innerHTML = '<div class="deposit-card">'
-        + '<h3 style="margin:0 0 6px">Reserve your appointment</h3>'
-        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to ' + depositCreditTarget + '.'
-        + (Number(intent.receivedTotal) > 0 ? ' (' + fmt(intent.receivedTotal) + ' already received.)' : '')
-        + '</p>'
-        + '<div id="deposit-express-checkout"></div>'
-        + '<div id="deposit-express-divider" style="display:none;text-align:center;color:#8A97A5;font-size:13px;margin:10px 0">or pay by card</div>'
-        + '<div id="deposit-payment-element"></div>'
-        + '<div id="deposit-fee-note" class="card-sub" aria-live="polite" style="display:none;margin-top:8px"></div>'
-        + '<div id="deposit-error" class="deposit-error" role="alert" style="display:none"></div>'
-        + '<div class="pay-pref-grid" style="margin-top:14px">'
-        + '<button type="button" class="pay-pref-btn primary" id="deposit-pay-btn" disabled><span class="pay-pref-title">Pay ' + fmt(intent.amount) + ' deposit</span></button>'
-        + '<button type="button" class="pay-pref-btn" id="deposit-cancel-btn"><span class="pay-pref-title">Not now</span></button>'
-        + '</div>'
-        + '</div>';
-      document.body.appendChild(overlay);
-      const errEl = overlay.querySelector('#deposit-error');
-      const payBtn = overlay.querySelector('#deposit-pay-btn');
-      const payBtnTitle = payBtn.querySelector('.pay-pref-title');
-      const feeNote = overlay.querySelector('#deposit-fee-note');
-      const showError = function (message) {
-        if (errEl) { errEl.textContent = message; errEl.style.display = ''; }
-        if (payBtn) payBtn.disabled = false;
-      };
-      overlay.querySelector('#deposit-cancel-btn').addEventListener('click', function () {
-        closeDepositOverlay();
-        resolve({ ok: false, cancelled: true });
-      });
-      loadStripeJs().then(function (StripeCtor) {
-        const stripe = StripeCtor(intent.publishableKey);
-        const elements = stripe.elements({
-          clientSecret: intent.clientSecret,
-          // Required for the two-step card flow's createPaymentMethod (same
-          // as PayPageV2) — without it Stripe won't reliably create the PM
-          // before /deposit-quote (Codex #2705 P1).
-          paymentMethodCreation: 'manual',
-          appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: 'Inter, system-ui, sans-serif' } },
-        });
-        // Accept-gate contract: ensureDepositSatisfied live-verifies the PI
-        // and only honors status === 'succeeded' — a processing PI would 402
-        // at accept. So only succeeded advances; processing shows a pending
-        // message, and re-taps re-check the PI status instead of
-        // re-confirming an in-flight intent.
-        const succeedWith = function (pi) {
-          if (!pi || pi.status !== 'succeeded') return false;
-          bookingState.depositPaymentIntentId = pi.id;
-          updateDepositNote();
-          closeDepositOverlay();
-          resolve({ ok: true });
-          return true;
-        };
-        const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
-        const proceedExempt = function () {
-          // Deposit gates changed mid-modal (kill switch off / already
-          // accepted) — nothing owed; close and continue to accept (the
-          // server accept gate re-verifies).
-          closeDepositOverlay();
-          resolve({ ok: true });
-        };
-
-        // ── Express Checkout — Apple Pay / Google Pay / Link one-tap.
-        // Wallets confirm the PI at FACE value: Phase-1 (same rule as the
-        // invoice pay page) puts no surcharge on Express Checkout, so the
-        // wallet sheet shows exactly the quoted deposit. Card surcharge
-        // applies only to the manual-entry path below.
-        const express = elements.create('expressCheckout', {
-          buttonTheme: { applePay: 'black', googlePay: 'black' },
-          buttonType: { applePay: 'buy', googlePay: 'buy' },
-          buttonHeight: 48,
-          paymentMethodOrder: ['applePay', 'googlePay', 'link'],
-          // 'auto' — let Stripe gate each wallet on real device/browser
-          // eligibility. Forcing googlePay 'always' renders its button on
-          // iOS where the popup flow is blocked and the tap dead-ends
-          // (same trap PayPageV2 hit — OR_BIBED_15).
-          paymentMethods: { googlePay: 'auto' },
-        });
-        express.on('ready', function (ev) {
-          // Only show the divider when a wallet button actually rendered —
-          // an empty ECE with a lone "or pay by card" divider reads broken.
-          if (ev && ev.availablePaymentMethods) {
-            overlay.querySelector('#deposit-express-divider').style.display = '';
-          }
-        });
-        express.on('confirm', function () {
-          if (errEl) errEl.style.display = 'none';
-          // Wallet PREFLIGHT (Codex #2705 r4) — obey the verdict: it
-          // re-checks the live deposit gates AND verifies the PI is at
-          // face value (a failed manual-card finalize can leave it at the
-          // surcharged total; wallets pay face). ok !== true = do NOT
-          // confirm.
-          fetch('/api/public/estimates/' + TOKEN + '/deposit-reset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ paymentIntentId: intent.paymentIntentId }),
-          }).then(function (pre) {
-            return pre.json().catch(function () { return {}; }).then(function (preData) {
-              if (pre.status === 409 && preData.exemptReason) { proceedExempt(); return null; }
-              if (!pre.ok || preData.ok !== true) {
-                showError(preData.error || 'A card verification is still pending on this deposit — finish it, or wait a moment and try again.');
-                return null;
-              }
-              return stripe.confirmPayment({
-                elements: elements,
-                confirmParams: { return_url: window.location.href },
-                redirect: 'if_required',
-              }).then(function (result) {
-                if (result.error) {
-                  showError(result.error.message || 'Payment did not go through. Try another card.');
-                  return;
-                }
-                if (succeedWith(result.paymentIntent)) return;
-                showError(result.paymentIntent && result.paymentIntent.status === 'processing'
-                  ? PROCESSING_MSG
-                  : 'Payment is still pending. Try again in a moment.');
-              });
-            });
-          }).catch(function () {
-            showError('Payment did not go through. Try again.');
-          });
-        });
-        express.mount('#deposit-express-checkout');
-
-        // ── Manual card entry — two-step surcharge disclosure (owner ruling
-        // 2026-07-13: deposits are surcharged like invoices, credit funding
-        // only). First tap prices the entered card via /deposit-quote; when
-        // a fee applies the button relabels to the disclosed total and the
-        // SECOND tap confirms via /deposit-finalize (server-side confirm,
-        // never trusting client numbers). Debit/prepaid quote $0 and
-        // finalize on the same tap — nothing to disclose. Wallets are
-        // hidden here (they live in Express Checkout above).
-        const paymentElement = elements.create('payment', {
-          wallets: { applePay: 'never', googlePay: 'never' },
-        });
-        paymentElement.mount('#deposit-payment-element');
-        paymentElement.on('ready', function () { payBtn.disabled = false; });
-        let depositQuote = null;
-        const resetQuote = function () {
-          depositQuote = null;
-          if (feeNote) feeNote.style.display = 'none';
-          if (payBtnTitle) payBtnTitle.textContent = 'Pay ' + fmt(intent.amount) + ' deposit';
-        };
-        // Any edit invalidates the quote — the priced PaymentMethod is stale.
-        paymentElement.on('change', function () { resetQuote(); });
-
-        const finalizeQuoted = function (quote) {
-          return fetch('/api/public/estimates/' + TOKEN + '/deposit-finalize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ quoteToken: quote.quoteToken }),
-          }).then(function (res) {
-            return res.json().catch(function () { return {}; }).then(function (data) {
-              if (res.status === 409 && data.exemptReason) { proceedExempt(); return; }
-              if (!res.ok) throw new Error(data.error || 'Payment did not go through. Try another card.');
-              if (data.requiresAction && data.clientSecret) {
-                return stripe.handleNextAction({ clientSecret: data.clientSecret }).then(function (action) {
-                  if (action.error) throw new Error(action.error.message || 'Card verification failed. Try another card.');
-                  if (succeedWith(action.paymentIntent)) return;
-                  throw new Error(action.paymentIntent && action.paymentIntent.status === 'processing'
-                    ? PROCESSING_MSG
-                    : 'Payment is still pending. Try again in a moment.');
-                });
-              }
-              if (succeedWith({ id: data.paymentIntentId, status: data.status })) return;
-              throw new Error(data.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
-            });
-          });
-        };
-
-        payBtn.addEventListener('click', function () {
-          payBtn.disabled = true;
-          if (errEl) errEl.style.display = 'none';
-          stripe.retrievePaymentIntent(intent.clientSecret).then(function (existing) {
-            if (existing && succeedWith(existing.paymentIntent)) return null;
-            if (existing && existing.paymentIntent && existing.paymentIntent.status === 'processing') {
-              showError(PROCESSING_MSG);
-              return null;
-            }
-            if (depositQuote) {
-              return finalizeQuoted(depositQuote).catch(function (err) {
-                resetQuote();
-                showError(err.message || 'Payment did not go through. Try again.');
-              });
-            }
-            // elements.submit() validates + collects the form BEFORE the PM
-            // is created — required for the manual-creation flow (PayPageV2
-            // parity).
-            return elements.submit().then(function (submitResult) {
-              if (submitResult && submitResult.error) {
-                showError(submitResult.error.message || 'Check your card details and try again.');
-                return null;
-              }
-              return stripe.createPaymentMethod({ elements: elements });
-            }).then(function (pmResult) {
-              if (!pmResult) return null;
-              if (pmResult.error) {
-                showError(pmResult.error.message || 'Check your card details and try again.');
-                return null;
-              }
-              return fetch('/api/public/estimates/' + TOKEN + '/deposit-quote', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ paymentIntentId: intent.paymentIntentId, paymentMethodId: pmResult.paymentMethod.id }),
-              }).then(function (res) {
-                return res.json().catch(function () { return {}; }).then(function (quote) {
-                  if (res.status === 409 && quote.exemptReason) { proceedExempt(); return null; }
-                  if (!res.ok) throw new Error(quote.error || 'Could not price the deposit payment. Please try again.');
-                  if (Number(quote.surcharge) > 0) {
-                    // Disclose, then require the second tap on the total.
-                    depositQuote = quote;
-                    if (feeNote) {
-                      feeNote.textContent = 'Credit card payments include a ' + fmt(quote.surcharge) + ' processing fee — total ' + fmt(quote.total) + '. Debit cards pay ' + fmt(quote.base) + '.';
-                      feeNote.style.display = '';
-                    }
-                    if (payBtnTitle) payBtnTitle.textContent = 'Pay ' + fmt(quote.total);
-                    payBtn.disabled = false;
-                    return null;
-                  }
-                  // No fee (debit/prepaid/unknown funding) — same amount the
-                  // button already shows; finalize on this tap.
-                  return finalizeQuoted(quote).catch(function (err) {
-                    resetQuote();
-                    showError(err.message || 'Payment did not go through. Try again.');
-                  });
-                });
-              });
-            });
-          }).catch(function (err) {
-            showError((err && err.message) || 'Payment did not go through. Try again.');
-          });
-        });
-      }).catch(function () {
-        showError('Could not load the secure payment form. Check your connection and try again.');
-      });
-    });
-  }
-
-  async function collectDepositIfNeeded() {
-    if (!DEPOSIT_POLICY.required) return { ok: true };
-    // Prepay-annual owes the deposit too (credited to the annual invoice at
-    // accept) — no preference skips the modal; the server gate re-verifies.
-    if (bookingState.depositPaymentIntentId) return { ok: true }; // collected this session or via 3DS return
-    let r;
-    let data = {};
-    try {
-      r = await fetch('/api/public/estimates/' + TOKEN + '/deposit-intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serviceMode: bookingState.serviceMode,
-          paymentMethodPreference: bookingState.pickedPref,
-        }),
-      });
-      data = await r.json().catch(function () { return {}; });
-    } catch (e) {
-      return { ok: false, message: 'Could not start the deposit. Check your connection and try again.' };
-    }
-    if (r.status === 409 && data.exemptReason) return { ok: true }; // policy says nothing owed
-    if (!r.ok) return { ok: false, message: data.error || 'Could not start the deposit. Please try again.' };
-    if (data.alreadySatisfied) return { ok: true }; // ledger already covers the policy amount
-    return showDepositOverlay(data);
-  }
-
   // 3DS redirect return: Stripe sends the customer back with
   // ?payment_intent=...&redirect_status=succeeded after a challenge. The
   // accept gate live-verifies the PI server-side (metadata pinned to this
@@ -8100,13 +7769,6 @@ ${shellQuestionsBar()}
     if (btn) btn.disabled = true;
     setBookingChoiceControlsDisabled(true);
     try {
-      const deposit = await collectDepositIfNeeded();
-      if (!deposit.ok) {
-        if (deposit.message) toast(deposit.message);
-        if (btn) btn.disabled = false;
-        setBookingChoiceControlsDisabled(false);
-        return;
-      }
       const payload = {
         slotId: bookingState.selectedSlotId,
         paymentMethodPreference: bookingState.pickedPref,
@@ -8129,10 +7791,9 @@ ${shellQuestionsBar()}
       });
       const data = await r.json();
       if (r.status === 402 && data.code === 'DEPOSIT_REQUIRED') {
-        // Ledger disagrees with what we collected (refund or partial under
-        // us) — drop the cached PI so the next confirm mints a fresh top-up.
+        // Retain the explicit error for an older accept server during deploy
+        // overlap; new pages never start another deposit collection.
         bookingState.depositPaymentIntentId = null;
-        updateDepositNote();
         toast(data.error || 'A deposit is required to confirm your booking.');
         if (btn) btn.disabled = false;
         setBookingChoiceControlsDisabled(false);

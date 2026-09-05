@@ -1115,6 +1115,9 @@ export default function DispatchPageV2({
     (rainProbability != null && rainProbability > 50) ||
     (windSpeed != null && windSpeed > 15);
 
+  const sprayStatus = sprayHold ? "HOLD"
+    : rainProbability == null || windSpeed == null ? "UNKNOWN" : "GO";
+
   const dateHeader =
     viewMode === "day"
       ? formatDateDisplay(date)
@@ -1654,7 +1657,7 @@ export default function DispatchPageV2({
                   {weatherIcon}
                 </span>{" "}
                 <span className="u-nums font-medium text-zinc-900">
-                  {weatherTemp ?? 82}°F
+                  {weatherTemp == null ? "Weather unavailable" : `${weatherTemp}°F`}
                 </span>
                 {windSpeed != null && (
                   <>
@@ -1683,7 +1686,7 @@ export default function DispatchPageV2({
                     sprayHold ? "text-alert-fg" : "text-zinc-900",
                   )}
                 >
-                  SPRAY: {sprayHold ? "HOLD" : "GO"}
+                  SPRAY: {sprayStatus}
                 </span>
                 {/* Per-zone rain chips — only zones at ≥40% render. */}
                 {zoneRainAlerts.map(([zone, chance]) => (
