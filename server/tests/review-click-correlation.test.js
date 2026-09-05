@@ -474,4 +474,21 @@ describe('findConfidentClickMatch — click_near rung (owner ruling 2026-09-03)'
     expect(match.evidence).toBe('the nearest click at this location before the review; no other clicker at this location tapped before it in the window; 1 other clicker at this location tapped only after it posted');
     expect(match.evidence).not.toMatch(/earlier|hours/);
   });
+
+  test("an admitted UNSTAMPED competitor is named as unlocated, never promoted to \"at this location\" (GH codex r10 P2)", async () => {
+    // First pair stamped elsewhere out of window; latest tap in-window, unlocated.
+    const unlocated = (last_redirected_at) => far({
+      google_location: 'parrish', redirected_at: '2026-08-01T12:00:00.000Z',
+      last_google_location: null, last_redirected_at,
+    });
+    // 39h before → the next-nearest competitor, with no location recorded.
+    const beforeMatch = await findConfidentClickMatch(REVIEW, { conn: makeConn({ clickRows: [near(), unlocated('2026-08-06T03:00:00.000Z')] }) });
+    expect(beforeMatch?.rung).toBe('click_near');
+    expect(beforeMatch.evidence).toBe('the nearest click at this location before the review; the next-nearest clicker with no location recorded tapped 1d 15h before');
+    // Tapped only after the review → counted apart from located after-taps.
+    const conn = makeConn({ clickRows: [near(), unlocated('2026-08-07T18:05:00.000Z'), clickRow({ customer_id: 'cust-late', last_name: 'Late', redirected_at: '2026-08-07T18:06:00.000Z' })] });
+    const afterMatch = await findConfidentClickMatch(REVIEW, { conn });
+    expect(afterMatch?.rung).toBe('click_near');
+    expect(afterMatch.evidence).toBe('the nearest click at this location before the review; no other clicker at this location tapped before it in the window; 1 other clicker at this location tapped only after it posted; 1 other clicker with no location recorded tapped only after it posted');
+  });
 });

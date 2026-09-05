@@ -430,16 +430,22 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     const crowded = all.some((c) => c.customerId !== near.customerId
       && c.clickOffsetMs >= 0 && c.clickOffsetMs < AUTO_LINK_FAR_MS);
     if (crowded) return null;
-    // `before` is one entry per clicker at this location, nearest first:
-    // [1] is the next-nearest clicker's pre-review click (≥6h earlier, or
-    // none). A clicker whose only in-window tap came AFTER the review is
-    // not competition but is reported rather than denied. The copy counts
-    // clickers at this location — the scan measured nothing else (GH codex
-    // r3 P2).
-    const after = all.filter((c) => c.clickOffsetMs < 0).length;
+    // `before` is one entry per clicker, nearest first: [1] is the
+    // next-nearest clicker's pre-review click (≥6h earlier, or none). A
+    // clicker whose only in-window tap came AFTER the review is not
+    // competition but is reported rather than denied. The copy states only
+    // what the scan measured (GH codex r3 P2): a competitor is "at this
+    // location" only when its pair was stamped here — an admitted
+    // unstamped tap (locationMatch null) is named as such, never promoted
+    // to this location (GH codex r10 P2).
+    const where = (c) => (c.locationMatch === true ? 'at this location' : 'with no location recorded');
+    const after = all.filter((c) => c.clickOffsetMs < 0);
+    const afterHere = after.filter((c) => c.locationMatch === true).length;
+    const afterUnlocated = after.length - afterHere;
     return decision(near, 'click_near', `the nearest click at this location before the review; ${
-      before[1] ? `the next-nearest clicker at this location tapped ${before[1].clickOffsetLabel}` : 'no other clicker at this location tapped before it in the window'}${
-      after ? `; ${plural(after, 'clicker')} at this location tapped only after it posted` : ''}`);
+      before[1] ? `the next-nearest clicker ${where(before[1])} tapped ${before[1].clickOffsetLabel}` : 'no other clicker at this location tapped before it in the window'}${
+      afterHere ? `; ${plural(afterHere, 'clicker')} at this location tapped only after it posted` : ''}${
+      afterUnlocated ? `; ${plural(afterUnlocated, 'clicker')} with no location recorded tapped only after it posted` : ''}`);
   } catch (err) {
     logger.warn(`[review-click-correlation] confident-match lookup failed: ${err.message}`);
     return null;
