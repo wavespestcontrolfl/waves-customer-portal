@@ -1,0 +1,283 @@
+/**
+ * Run index (S3): the legacy adapters project their ledgers onto the
+ * canonical shape deterministically; listRuns merges canonical rows first
+ * and dedupes mirrored legacy rows, derives health, buckets status, pages
+ * with a keyset cursor and rejects bad params with 400; getRun folds a
+ * legacy row with its canonical mirror; the routes 404 while the read
+ * gate is off. No real DB: the adapters are mocked at the module seam
+ * and fromRow is tested pure.
+ */
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+jest.mock('../models/db', () => {
+  const fixtures = {};
+  const make = (table) => {
+    const chain = new Proxy({}, {
+      get(_t, prop) {
+        if (prop === 'then') {
+          const rows = fixtures[table];
+          return (resolve, reject) => (rows instanceof Error ? reject(rows) : resolve(rows || []));
+        }
+        return () => chain;
+      },
+    });
+    return chain;
+  };
+  const db = jest.fn((table) => make(table));
+  db.raw = jest.fn((sql) => ({ sql }));
+  db.__fixtures = fixtures;
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/llm-dispatch-metrics', () => ({ RETENTION_DAYS: 30 }));
+
+const fixtures = require('../models/db').__fixtures;
+const { canonicalRun } = require('../services/agent-control/sources/shape');
+const autonomousRuns = require('../services/agent-control/sources/autonomous-runs');
+const messageDrafts = require('../services/agent-control/sources/message-drafts');
+const agentDecisions = require('../services/agent-control/sources/agent-decisions');
+const callLog = require('../services/agent-control/sources/call-log');
+const jobHealth = require('../services/agent-control/sources/job-health');
+const managedSessions = require('../services/agent-control/sources/managed-sessions');
+const agentRuns = require('../services/agent-control/sources/agent-runs');
+const runIndex = require('../services/agent-control/run-index');
+
+const NOW = new Date('2026-09-05T12:00:00Z');
+const ago = (ms) => new Date(NOW.getTime() - ms);
+
+beforeEach(() => {
+  for (const k of Object.keys(fixtures)) delete fixtures[k];
+  delete process.env.GATE_AGENT_CONTROL_READ;
+  delete process.env.GATE_AGENT_RUNS;
+});
+
+describe('adapters project onto the canonical shape', () => {
+  test('canonicalRun fills area, risk tier, step counts and rejects vocabulary drift', () => {
+    // an unknown lifecycle reads as terminal (the stated result stands); an unknown verification as unjudged
+    const r = canonicalRun({ source: 's', id: 1, laneId: 'blog_draft', lifecycle: 'bogus', result: 'succeeded', verification: 'nope', steps: [{ status: 'done' }, { status: 'failed' }] });
+    expect(r).toMatchObject({ key: 's:1', area: 'content', lifecycle: 'terminal', result: 'succeeded', verification: 'unjudged', stepsDone: 1, stepsTotal: 2, riskTier: expect.any(Number) });
+    expect(canonicalRun({ source: 's', id: 3, workflowId: 'nightly' })).toMatchObject({ laneId: null, area: 'office', title: 'nightly', sideEffectClass: null, riskTier: null, attempts: 1 });
+    expect(canonicalRun({ source: 's', id: 2, lifecycle: 'running', result: 'succeeded' }).result).toBeNull();
+  });
+
+  test('autonomous_runs: outcome → lifecycle / result / disposition, stages → steps, shadow subtitle', () => {
+    const base = { id: 'a', action_type: 'new_post', page_type: 'blog', claim_ms: 5, brief_ms: 7, created_at: ago(60e3), claimed_at: ago(50e3) };
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_published', completed_at: ago(1e3), published_url: 'https://x/y' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', link: 'https://x/y', laneId: 'blog_draft' });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review' })).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted', link: '/admin/blog?tab=autopilot' });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'skipped_gate_fail', quality_gate_result: { ok: false } })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'instruction' });
+    const running = autonomousRuns.fromRow({ ...base, outcome: null, shadow_mode: true });
+    expect(running.lifecycle).toBe('running');
+    expect(running.subtitle).toBe('new post · blog · shadow');
+    expect(running.steps.map((s) => s.status)).toEqual(['done', 'done', 'running', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped', 'skipped']);
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'failed_publish', failure_message: 'boom' })).toMatchObject({ result: 'errored', errorCode: 'failed_publish', detail: 'boom' });
+  });
+
+  test('message_drafts: pending waits on the owner; approved / rejected close with a verification', () => {
+    const base = { id: 'd', created_at: ago(5e3), draft_ms: 900, customer_name: 'Pat Lee', intent: 'reschedule' };
+    const pending = messageDrafts.fromRow({ ...base, status: 'pending' });
+    expect(pending).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted', title: 'Reply draft for Pat Lee', laneId: 'sms_draft', durationMs: 900 });
+    expect(pending.steps[2].status).toBe('running');
+    expect(messageDrafts.fromRow({ ...base, status: 'rejected' })).toMatchObject({ lifecycle: 'terminal', disposition: 'rejected', verification: 'failed' });
+    expect(messageDrafts.fromRow({ ...base, status: 'sent', sent_at: ago(1e3), campaign_type: 'winback' })).toMatchObject({ disposition: 'applied', title: 'Draft for Pat Lee', subtitle: 'winback campaign' });
+  });
+
+  test('agent_decisions: verdict → verification + disposition, lane from workflow, safety flags step', () => {
+    const base = { id: 'x', workflow: 'sms_suggest', detected_intent: 'book', confidence: 0.82, mode: 'suggest', created_at: ago(3e3) };
+    expect(agentDecisions.fromRow({ ...base, status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human', laneId: 'sms_draft', area: 'sms', subtitle: 'suggest mode · confidence 82 %', workflowId: 'sms_suggest' });
+    const reviewed = agentDecisions.fromRow({ ...base, status: 'reviewed', human_verdict: 'corrected', reviewed_at: ago(1e3), safety_flags: ['pricing_claim'] });
+    expect(reviewed).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', verification: 'warning', disposition: 'applied' });
+    expect(reviewed.steps.map((s) => s.key)).toEqual(['decide', 'safety', 'review']);
+    expect(agentDecisions.fromRow({ ...base, workflow: 'referral_reward', status: 'match' })).toMatchObject({ laneId: null, area: 'office', lifecycle: 'terminal', disposition: null });
+  });
+
+  test('call_log: processing_status → lifecycle with the processor heartbeat as the run heartbeat', () => {
+    const base = { id: 'c', direction: 'inbound', duration_seconds: 125, created_at: ago(9e5), processing_started_at: ago(8e5), processing_heartbeat_at: ago(10e3), extraction_attempts: 2 };
+    const live = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed' });
+    expect(live).toMatchObject({ lifecycle: 'running', lastHeartbeatAt: ago(10e3).toISOString(), attempts: 2, laneId: 'call_extraction', title: 'inbound · 2 min' });
+    expect(live.steps.map((s) => s.status)).toEqual(['done', 'running', 'skipped']);
+    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
+    expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
+    expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
+  });
+
+  test('job_health: a running job is live, a failing job is errored, a lane comes from its policy workflow_id', () => {
+    const running = jobHealth.fromRow({ job_name: 'nightly_sweep', last_status: 'running', last_started_at: ago(5e3), last_finished_at: ago(3600e3), last_duration_ms: 400 });
+    expect(running).toMatchObject({ lifecycle: 'running', finishedAt: null, durationMs: null, workflowId: 'nightly_sweep', title: 'nightly sweep' });
+    expect(jobHealth.fromRow({ job_name: 'j', last_status: 'failed', consecutive_failures: 3, last_error: 'ENOTFOUND', last_started_at: ago(5e3), last_finished_at: ago(4e3) })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', subtitle: '3 consecutive failures', detail: 'ENOTFOUND', attempts: 3 });
+    const { LANE_RUNTIME } = require('../services/agent-control/lane-policies');
+    const [laneId, policy] = Object.entries(LANE_RUNTIME).find(([, p]) => p.workflow_id) || [];
+    if (laneId) expect(jobHealth.laneForJob(policy.workflow_id)).toBe(laneId);
+    expect(jobHealth.laneForJob('no_such_job')).toBeNull();
+  });
+
+  test('managed_sessions: a session row is a finished run keyed by its provider ref; turns are the steps', () => {
+    const ok = managedSessions.fromRow({ provider_ref: 'sess_1', lane_id: 'agent_bi', ok: true, served_model: 'claude-x', latency_ms: 5000, created_at: ago(9e3), turns: 3 });
+    expect(ok).toMatchObject({ key: 'managed_sessions:sess_1', lifecycle: 'terminal', result: 'succeeded', durationMs: 5000, stepsDone: 3, subtitle: 'claude-x · 3 turns', area: 'agents' });
+    expect(ok.finishedAt).toBe(ago(4e3).toISOString());
+    expect(managedSessions.fromRow({ provider_ref: 's2', lane_id: 'agent_bi', ok: false, error_code: 'anthropic_529', created_at: ago(1e3) })).toMatchObject({ result: 'errored', failureClass: 'provider', errorCode: 'anthropic_529' });
+  });
+
+  test('agent_runs: columns map straight through; counts from the subqueries; work-item entity', () => {
+    const r = agentRuns.fromRow({ id: 'r1', source_system: 'call_log', source_run_id: 'c9', lane_id: 'call_extraction', lifecycle: 'running', verification: 'unjudged', attempts: 2, max_attempts: 3, steps_done: '2', steps_total: '3', tool_calls: '1', created_at: ago(5e3), started_at: ago(4e3), last_heartbeat_at: ago(1e3), summary: { title: 'Call 9' }, entity_type: 'call_log', entity_id: 'c9', trace_id: 'a'.repeat(32), side_effect_class: 'internal_write' });
+    expect(r).toMatchObject({ canonical: true, key: 'agent_runs:r1', sourceSystem: 'call_log', sourceRunId: 'c9', title: 'Call 9', subtitle: 'attempt 2', stepsDone: 2, stepsTotal: 3, toolCalls: 1, entity: { type: 'call_log', id: 'c9' }, riskTier: 1 });
+  });
+
+  test('a missing table degrades to unavailable; any other DB error throws', async () => {
+    fixtures['message_drafts as d'] = Object.assign(new Error('relation does not exist'), { code: '42P01' });
+    expect(await messageDrafts.list({ from: ago(1e6) })).toEqual({ runs: [], unavailable: true });
+    fixtures['message_drafts as d'] = Object.assign(new Error('permission denied'), { code: '42501' });
+    await expect(messageDrafts.list({ from: ago(1e6) })).rejects.toThrow('permission denied');
+    fixtures.autonomous_runs = Object.assign(new Error('no column'), { code: '42703' });
+    expect(await autonomousRuns.get('x')).toBeNull();
+  });
+});
+
+describe('listRuns', () => {
+  const laneRun = (over) => canonicalRun({ source: 'autonomous_runs', laneId: 'blog_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(60e3), ...over });
+  let spies;
+  beforeEach(() => {
+    spies = {
+      agentRuns: jest.spyOn(agentRuns, 'list').mockResolvedValue({ runs: [], unavailable: false }),
+      autonomousRuns: jest.spyOn(autonomousRuns, 'list').mockResolvedValue({ runs: [], unavailable: false }),
+      messageDrafts: jest.spyOn(messageDrafts, 'list').mockResolvedValue({ runs: [], unavailable: false }),
+      agentDecisions: jest.spyOn(agentDecisions, 'list').mockResolvedValue({ runs: [], unavailable: false }),
+      callLog: jest.spyOn(callLog, 'list').mockResolvedValue({ runs: [], unavailable: false }),
+      jobHealth: jest.spyOn(jobHealth, 'list').mockResolvedValue({ runs: [], unavailable: true }),
+      managedSessions: jest.spyOn(managedSessions, 'list').mockResolvedValue({ runs: [], unavailable: false }),
+    };
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('merges canonical first, dedupes a mirrored legacy row, derives health, buckets and counts', async () => {
+    spies.agentRuns.mockResolvedValue({ runs: [canonicalRun({ source: 'agent_runs', id: 'r1', sourceSystem: 'autonomous_runs', sourceRunId: 'a1', laneId: 'blog_draft', lifecycle: 'running', createdAt: ago(40 * 60e3), startedAt: ago(40 * 60e3), lastHeartbeatAt: ago(20 * 60e3), lastProgressAt: ago(20 * 60e3), canonical: true })], unavailable: false });
+    spies.autonomousRuns.mockResolvedValue({ runs: [laneRun({ id: 'a1' }), laneRun({ id: 'a2', createdAt: ago(30e3) }), laneRun({ id: 'a3', result: 'errored', createdAt: ago(45e3) })], unavailable: false });
+    spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: 'd1', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(3 * 864e5), lastProgressAt: ago(3 * 864e5) })], unavailable: false });
+    const out = await runIndex.listRuns({ window: '7d', now: NOW });
+    // newest start first; the canonical row took precedence over its mirror a1
+    expect(out.runs.map((r) => r.key)).toEqual(['autonomous_runs:a2', 'autonomous_runs:a3', 'agent_runs:r1', 'message_drafts:d1']);
+    expect(out.runs[2]).toMatchObject({ health: 'stalled', healthReason: 'no_heartbeat' });
+    expect(out.runs[3]).toMatchObject({ health: 'healthy', attention: 'human_wait' });
+    expect(out.counts).toEqual({ all: 4, active: 1, waiting: 1, attention: 3, done: 1, failed: 1 });
+    expect(out.unavailableSources).toEqual(['job_health']);
+    expect(out.phases.runs).toBe(false);
+    expect(out.nextCursor).toBeNull();
+    expect(spies.autonomousRuns).toHaveBeenCalledWith(expect.objectContaining({ from: expect.any(Date), laneId: null }));
+  });
+
+  test('status / area / lane filters; a lane filter skips single-lane adapters that cannot match', async () => {
+    spies.autonomousRuns.mockResolvedValue({ runs: [laneRun({ id: 'a1' }), laneRun({ id: 'a2', result: 'errored' })], unavailable: false });
+    spies.messageDrafts.mockResolvedValue({ runs: [canonicalRun({ source: 'message_drafts', id: 'd1', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) })], unavailable: false });
+    expect((await runIndex.listRuns({ status: 'failed', now: NOW })).runs.map((r) => r.key)).toEqual(['autonomous_runs:a2']);
+    expect((await runIndex.listRuns({ status: 'done', now: NOW })).runs.map((r) => r.key)).toEqual(['autonomous_runs:a1']);
+    expect((await runIndex.listRuns({ area: 'sms', now: NOW })).runs.map((r) => r.key)).toEqual(['message_drafts:d1']);
+    jest.clearAllMocks();
+    const byLane = await runIndex.listRuns({ lane: 'blog_draft', now: NOW });
+    // equal start times: key desc keeps the order deterministic
+    expect(byLane.runs.map((r) => r.key)).toEqual(['autonomous_runs:a2', 'autonomous_runs:a1']);
+    expect(spies.messageDrafts).not.toHaveBeenCalled();
+    expect(spies.callLog).not.toHaveBeenCalled();
+    expect(spies.agentDecisions).toHaveBeenCalled();
+  });
+
+  test('keyset cursor pages in (startedAt desc, key) order and a bad cursor / window / status / area / lane is a 400', async () => {
+    spies.autonomousRuns.mockResolvedValue({ runs: [1, 2, 3, 4, 5].map((i) => laneRun({ id: `a${i}`, createdAt: ago(i * 1000) })), unavailable: false });
+    const p1 = await runIndex.listRuns({ limit: 2, now: NOW });
+    expect(p1.runs.map((r) => r.id)).toEqual(['a1', 'a2']);
+    const p2 = await runIndex.listRuns({ limit: 2, cursor: p1.nextCursor, now: NOW });
+    expect(p2.runs.map((r) => r.id)).toEqual(['a3', 'a4']);
+    const p3 = await runIndex.listRuns({ limit: 2, cursor: p2.nextCursor, now: NOW });
+    expect(p3.runs.map((r) => r.id)).toEqual(['a5']);
+    expect(p3.nextCursor).toBeNull();
+    for (const bad of [{ cursor: '!!' }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }]) {
+      await expect(runIndex.listRuns({ ...bad, now: NOW })).rejects.toMatchObject({ status: 400 });
+    }
+  });
+});
+
+describe('getRun', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  test('a legacy row folds with its canonical mirror: canonical run + legacy steps when the mirror has none; calls by run id', async () => {
+    jest.spyOn(callLog, 'get').mockResolvedValue({ run: canonicalRun({ source: 'call_log', id: 'c1', laneId: 'call_extraction', lifecycle: 'running', createdAt: ago(1e3), steps: [{ key: 'transcribe', status: 'done' }] }) });
+    jest.spyOn(agentRuns, 'findMirror').mockResolvedValue('r9');
+    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: 'r9', sourceSystem: 'call_log', sourceRunId: 'c1', laneId: 'call_extraction', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [{ attempt_no: 1 }], artifacts: [], events: [{ event_type: 'finished' }], workItem: { id: 'w' } });
+    fixtures.llm_dispatch_log = [{ id: 1, row_kind: 'call' }];
+    const d = await runIndex.getRun('call_log', 'c1', { now: NOW });
+    expect(d.run).toMatchObject({ key: 'agent_runs:r9', canonical: true, stepsDone: 1, health: 'healthy' });
+    expect(d.steps).toEqual([{ key: 'transcribe', status: 'done' }]);
+    expect(d.attempts).toHaveLength(1);
+    expect(d.calls).toHaveLength(1);
+    expect(d.legacy).toEqual({ source: 'call_log', id: 'c1' });
+    expect(d.trace).toEqual({ id: null, calls: 1 });
+  });
+
+  test('unknown source → 400; unknown id → null; a legacy row without a mirror is returned as-is', async () => {
+    await expect(runIndex.getRun('nope', '1')).rejects.toMatchObject({ status: 400 });
+    jest.spyOn(jobHealth, 'get').mockResolvedValue(null);
+    expect(await runIndex.getRun('job_health', 'missing')).toBeNull();
+    jest.spyOn(messageDrafts, 'get').mockResolvedValue({ run: canonicalRun({ source: 'message_drafts', id: 'd', laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) }) });
+    jest.spyOn(agentRuns, 'findMirror').mockResolvedValue(null);
+    const d = await runIndex.getRun('message_drafts', 'd', { now: NOW });
+    expect(d.run.canonical).toBe(false);
+    expect(d.events).toEqual([]);
+    expect(d.calls).toEqual([]);
+    expect(d.legacy).toBeNull();
+  });
+});
+
+describe('routes', () => {
+  jest.mock('../middleware/admin-auth', () => ({
+    adminAuthenticate: (req, res, next) => {
+      const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const users = { admin: { id: 'admin-1', role: 'admin' }, tech: { id: 'tech-1', role: 'technician' } };
+      const user = users[token];
+      if (!user) return res.status(401).json({ error: 'auth' });
+      req.technician = user; req.technicianId = user.id; req.techRole = user.role;
+      return next();
+    },
+    requireTechOrAdmin: (req, res, next) => (['admin', 'technician'].includes(req.techRole) ? next() : res.status(403).json({ error: 'staff' })),
+    requireAdmin: (req, res, next) => (req.techRole === 'admin' ? next() : res.status(403).json({ error: 'admin' })),
+  }));
+
+  async function withServer(fn) {
+    const express = require('express');
+    const router = require('../routes/admin-agents');
+    const app = express();
+    app.use('/api/admin/agents', router);
+    app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
+    const server = app.listen(0);
+    try { return await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((r) => server.close(r)); }
+  }
+
+  test('reads 404 while the read gate is off; on, list + detail answer, tech is 403, bad params 400, probe reports the write gate', async () => {
+    jest.spyOn(runIndex, 'listRuns');
+    jest.spyOn(agentRuns, 'list').mockResolvedValue({ runs: [], unavailable: false });
+    for (const s of [autonomousRuns, messageDrafts, agentDecisions, callLog, jobHealth, managedSessions]) jest.spyOn(s, 'list').mockResolvedValue({ runs: [], unavailable: false });
+    jest.spyOn(jobHealth, 'get').mockImplementation(async (id) => (id === 'j' ? { run: canonicalRun({ source: 'job_health', id: 'j', workflowId: 'j', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3) }) } : null));
+    jest.spyOn(agentRuns, 'findMirror').mockResolvedValue(null);
+    await withServer(async (base) => {
+      const admin = { headers: { Authorization: 'Bearer admin' } };
+      expect((await fetch(`${base}/api/admin/agents/control/runs`, admin)).status).toBe(404);
+      expect((await fetch(`${base}/api/admin/agents/control/runs/job_health/j`, admin)).status).toBe(404);
+      expect((await (await fetch(`${base}/api/admin/agents/control/hub`, admin)).json()).features.runs).toBe(false);
+
+      process.env.GATE_AGENT_CONTROL_READ = 'true';
+      process.env.GATE_AGENT_RUNS = 'true';
+      expect((await (await fetch(`${base}/api/admin/agents/control/hub`, admin)).json()).features.runs).toBe(true);
+      expect((await fetch(`${base}/api/admin/agents/control/runs`, { headers: { Authorization: 'Bearer tech' } })).status).toBe(403);
+      expect((await fetch(`${base}/api/admin/agents/control/runs?window=90d`, admin)).status).toBe(400);
+      expect((await fetch(`${base}/api/admin/agents/control/runs?status=constructor`, admin)).status).toBe(400);
+      const list = await fetch(`${base}/api/admin/agents/control/runs?area=content&status=active&window=today&limit=10`, admin);
+      expect(list.status).toBe(200);
+      const body = await list.json();
+      expect(body).toMatchObject({ runs: [], counts: expect.any(Object), phases: { runs: true }, window: { key: 'today' } });
+      expect(runIndex.listRuns).toHaveBeenCalledWith(expect.objectContaining({ area: 'content', status: 'active', window: 'today', limit: '10', cursor: null, lane: null }));
+      const detail = await fetch(`${base}/api/admin/agents/control/runs/job_health/j`, admin);
+      expect(detail.status).toBe(200);
+      expect((await detail.json()).run.key).toBe('job_health:j');
+      expect((await fetch(`${base}/api/admin/agents/control/runs/nope/1`, admin)).status).toBe(400);
+      expect((await fetch(`${base}/api/admin/agents/control/runs/job_health/missing`, admin)).status).toBe(404);
+    });
+  });
+});

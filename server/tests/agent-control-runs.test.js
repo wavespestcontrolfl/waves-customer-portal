@@ -1,0 +1,270 @@
+/**
+ * Agent runs write API (S3). Invariants: the gate off (or a DB failure)
+ * yields an inert handle and the wrapped work still runs; on, one work
+ * item / run / attempt per (source_system, source_run_id) with a restart
+ * joining the run as a new attempt; steps are timed, scoped and re-throw
+ * the caller's error; finish / fail write the taxonomy vocabulary; retry
+ * only when retryable ∧ attempts < max ∧ idempotency_key ∧ class ∉
+ * {money, irreversible_external}; quality failures raise an eval
+ * candidate; the ledger never throws into the business path.
+ * No real DB: an in-memory knex fake with the conflict semantics used.
+ */
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
+
+jest.mock('../models/db', () => {
+  const UNIQUE = {
+    work_items: ['source_system', 'source_ref'],
+    agent_runs: ['source_system', 'source_run_id'],
+    agent_attempts: ['run_id', 'attempt_no'],
+  };
+  const store = {};
+  const state = { failNext: null, idSeq: 0 }; // failNext: table whose next op throws
+  const uuid = () => `00000000-0000-4000-8000-${String(++state.idSeq).padStart(12, '0')}`;
+  const matches = (row, where) => Object.entries(where).every(([k, v]) => String(row[k]) === String(v));
+  const db = (table) => {
+    if (!store[table]) store[table] = [];
+    const st = { where: {}, op: null, payload: null, returning: null, ignore: false, first: false };
+    const chain = {
+      insert(rows) { st.op = 'insert'; st.payload = rows; return chain; },
+      onConflict() { return chain; },
+      ignore() { st.ignore = true; return chain; },
+      returning(col) { st.returning = col; return chain; },
+      where(obj) { if (typeof obj === 'object') Object.assign(st.where, obj); return chain; },
+      first() { st.first = true; return chain; },
+      update(patch) { st.op = 'update'; st.payload = patch; return chain; },
+      then(resolve, reject) {
+        try {
+          if (state.failNext === table) { state.failNext = null; throw new Error(`fake ${table} down`); }
+          const rows = store[table];
+          let out;
+          if (st.op === 'insert') {
+            const list = Array.isArray(st.payload) ? st.payload : [st.payload];
+            out = [];
+            for (const r of list) {
+              const key = UNIQUE[table];
+              if (key && rows.some((x) => key.every((k) => String(x[k]) === String(r[k])))) continue;
+              const row = { id: r.id || uuid(), created_at: new Date(), ...r };
+              if (typeof row.summary === 'string') row.summary = JSON.parse(row.summary);
+              rows.push(row);
+              out.push(st.returning ? { [st.returning]: row[st.returning] } : row);
+            }
+          } else if (st.op === 'update') {
+            out = 0;
+            for (const r of rows) {
+              if (!matches(r, st.where)) continue;
+              for (const [k, v] of Object.entries(st.payload)) {
+                r[k] = v && typeof v === 'object' && v.__merge ? { ...(r[k] || {}), ...v.__merge } : v;
+              }
+              out += 1;
+            }
+          } else {
+            const found = rows.filter((r) => matches(r, st.where));
+            out = st.first ? found[0] || null : found;
+          }
+          resolve(out);
+        } catch (err) { reject(err); }
+      },
+    };
+    return chain;
+  };
+  // summary || ?::jsonb → a merge marker the fake update applies
+  db.raw = (sql, binds) => (/\|\|/.test(sql) ? { __merge: JSON.parse(binds[0]) } : { sql, binds });
+  db.__store = store;
+  db.__state = state;
+  return db;
+});
+const mockWarn = jest.fn();
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: (...a) => mockWarn(...a), error: jest.fn(), debug: jest.fn() }));
+const mockToolEvent = jest.fn();
+jest.mock('../services/intelligence-bar/tool-events', () => ({ recordToolEvent: (...a) => mockToolEvent(...a) }));
+
+const fakeDb = require('../models/db');
+const store = fakeDb.__store;
+const state = fakeDb.__state;
+const runs = require('../services/agent-control/runs');
+const context = require('../services/agent-control/context');
+const { policyFor } = require('../services/agent-control/lane-policies');
+
+const SRC = 'test_src';
+const base = { laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'r1', idempotencyKey: 'k1' };
+const events = (runId) => store.run_events.filter((e) => e.run_id === runId).map((e) => e.event_type);
+const runRow = () => store.agent_runs[0];
+
+beforeEach(() => {
+  for (const k of Object.keys(store)) delete store[k];
+  state.failNext = null;
+  state.idSeq = 0;
+  mockWarn.mockClear();
+  mockToolEvent.mockClear();
+  process.env.GATE_AGENT_RUNS = 'true';
+});
+afterAll(() => { delete process.env.GATE_AGENT_RUNS; });
+
+describe('gate and failure isolation', () => {
+  test('gate off → inert handle: nothing written, step still runs its fn inside a step scope', async () => {
+    delete process.env.GATE_AGENT_RUNS;
+    const h = await runs.startRun(base);
+    expect(h.inert).toBe(true);
+    expect(h.id).toBeNull();
+    const seen = await h.step({ key: 's' }, async () => context.current().stepId);
+    expect(seen).toEqual(expect.any(String));
+    await h.heartbeat({ progress: true });
+    await h.finish({});
+    expect(await h.fail({ error: new Error('x') })).toEqual({ retry: false });
+    expect(store.agent_runs).toBeUndefined();
+  });
+
+  test('missing identity → inert with one warning; DB refusing the start → inert, never a throw', async () => {
+    expect((await runs.startRun({ laneId: 'blog_draft' })).inert).toBe(true);
+    expect(mockWarn).toHaveBeenCalledTimes(1);
+    state.failNext = 'agent_runs';
+    const h = await runs.startRun(base);
+    expect(h.inert).toBe(true);
+  });
+
+  test('a write failing mid-run is swallowed (rate-limited warn) and the handle keeps working', async () => {
+    const h = await runs.startRun(base);
+    state.failNext = 'agent_run_steps';
+    await expect(h.step({ key: 's' }, async () => 'ok')).resolves.toBe('ok');
+    await h.finish({});
+    expect(runRow().lifecycle).toBe('terminal');
+  });
+});
+
+describe('start / step / finish', () => {
+  test('startRun writes work item + run + attempt + started event with policy lease and risk tier', async () => {
+    const h = await runs.startRun({ ...base, workItem: { sourceRef: 'opp-1', entityType: 'opportunity', entityId: '9', title: 'T' }, summary: { title: 'Run' } });
+    expect(h.inert).toBe(false);
+    const wi = store.work_items[0];
+    expect(wi).toMatchObject({ source_system: SRC, source_ref: 'opp-1', lane_id: 'blog_draft', entity_type: 'opportunity' });
+    const r = runRow();
+    const policy = policyFor('blog_draft');
+    expect(r).toMatchObject({ lifecycle: 'running', attempts: 1, work_item_id: wi.id, side_effect_class: policy.side_effect_class, idempotency_key: 'k1' });
+    expect(r.lease_expires_at.getTime() - r.leased_at.getTime()).toBe(policy.stall_after_ms);
+    expect(r.max_attempts).toBe(1 + policy.budget.max_retries);
+    expect(store.agent_attempts).toHaveLength(1);
+    expect(events(r.id)).toEqual(['started']);
+    expect(h.traceId).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  test('a second startRun on the same source key joins the run as attempt 2 (resumed)', async () => {
+    const a = await runs.startRun(base);
+    await a.finish({});
+    const b = await runs.startRun(base);
+    expect(b.id).toBe(a.id);
+    expect(b.attemptNo).toBe(2);
+    expect(store.agent_attempts.map((x) => x.attempt_no)).toEqual([1, 2]);
+    expect(events(a.id)).toEqual(['started', 'finished', 'resumed']);
+  });
+
+  test('step: timed row, step scope with a span, done + progress on success; failed + rethrow on error; tool steps hit the tool ledger', async () => {
+    const h = await runs.startRun(base);
+    const scope = await h.step({ key: 'brief', label: 'Brief' }, async () => context.current());
+    expect(scope.stepId).toBe(store.agent_run_steps[0].id);
+    expect(scope.spanId).toBe(store.agent_run_steps[0].span_id);
+    expect(store.agent_run_steps[0]).toMatchObject({ seq: 1, status: 'done', step_key: 'brief', attempt_id: h.attemptId });
+    expect(runRow().progress_sequence).toBe(1);
+
+    const boom = Object.assign(new Error('call 941-555-0100 failed'), { code: 'x' });
+    await expect(h.step({ key: 'search', toolName: 'web_search' }, async () => { throw boom; })).rejects.toBe(boom);
+    expect(store.agent_run_steps[1]).toMatchObject({ status: 'failed', tool_name: 'web_search', detail: 'call [redacted-number] failed' });
+    expect(mockToolEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'agent_run', toolName: 'web_search', success: false, metadata: { run_id: h.id, step_id: store.agent_run_steps[1].id } }));
+  });
+
+  test('wait / resume / checkpoint move the lifecycle and merge the summary', async () => {
+    const h = await runs.startRun(base);
+    await h.wait('human', 'owner reply');
+    expect(runRow().lifecycle).toBe('waiting_human');
+    await h.resume();
+    expect(runRow().lifecycle).toBe('running');
+    await h.checkpoint({ words: 5 });
+    expect(runRow().summary).toEqual({ words: 5 });
+    expect(events(h.id)).toEqual(['started', 'waiting', 'resumed', 'checkpoint']);
+  });
+
+  test('finish: terminal + result + disposition, artifacts, attempt closed, work item done, unknown values fall back', async () => {
+    const h = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    await h.finish({ result: 'bogus', disposition: 'drafted', summary: { detail: 'd' }, artifacts: [{ kind: 'draft', label: 'Draft', content: 'x' }, { kind: 'nope' }, null] });
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'drafted', summary: { detail: 'd' } });
+    expect(runRow().lease_expires_at).toBeNull();
+    expect(store.run_artifacts).toHaveLength(2);
+    expect(store.agent_attempts[0]).toMatchObject({ result: 'succeeded' });
+    expect(store.work_items[0].status).toBe('done');
+    expect(events(h.id)).toEqual(['started', 'finished', 'disposition']);
+  });
+
+  test('budget: a step past max_steps records ONE budget_exceeded event and stamps the summary, never stops the caller', async () => {
+    const h = await runs.startRun(base);
+    const max = policyFor('blog_draft').budget.max_steps;
+    for (let i = 0; i < max + 2; i += 1) await h.step({ key: `s${i}` }, async () => i);
+    expect(events(h.id).filter((e) => e === 'budget_exceeded')).toHaveLength(1);
+    expect(runRow().summary).toEqual({ budget_exceeded: 'steps' });
+    expect(store.agent_run_steps).toHaveLength(max + 2);
+  });
+});
+
+describe('fail and retry', () => {
+  test('retryable + idempotency + attempts left → queued for retry; the last attempt → terminal errored', async () => {
+    const a = await runs.startRun({ ...base, maxAttempts: 2 });
+    expect(await a.fail({ error: new Error('down'), errorCode: 'openai_500', retryable: true })).toEqual({ retry: true, failureClass: 'provider', result: null });
+    expect(runRow()).toMatchObject({ lifecycle: 'queued', result: null, failure_class: 'provider', error_code: 'openai_500' });
+    expect(events(a.id)).toEqual(['started', 'retry_scheduled']);
+    const b = await runs.startRun(base);
+    expect(b.attemptNo).toBe(2);
+    expect(await b.fail({ error: new Error('still'), errorCode: 'openai_500', retryable: true })).toMatchObject({ retry: false, result: 'errored' });
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'errored', attempts: 2 });
+    expect(store.agent_attempts[1]).toMatchObject({ result: 'errored', error_code: 'openai_500' });
+  });
+
+  test('no retry without an idempotency key, on a money / irreversible lane, or when not retryable', async () => {
+    const noKey = await runs.startRun({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'nk', maxAttempts: 3 });
+    expect((await noKey.fail({ error: new Error('x'), retryable: true })).retry).toBe(false);
+    const money = Object.entries(require('../services/agent-control/lane-policies').LANE_RUNTIME).find(([, p]) => runs.NO_RETRY_CLASSES.has(p.side_effect_class));
+    expect(money).toBeDefined();
+    const m = await runs.startRun({ laneId: money[0], sourceSystem: SRC, sourceRunId: 'm', idempotencyKey: 'km', maxAttempts: 3 });
+    expect((await m.fail({ error: new Error('x'), retryable: true })).retry).toBe(false);
+    const nr = await runs.startRun({ ...base, sourceRunId: 'nr', maxAttempts: 3 });
+    expect((await nr.fail({ error: new Error('x'), retryable: false })).retry).toBe(false);
+  });
+
+  test('result follows the class: timeout → timed_out, budget_exhausted code → budget_exhausted; quality classes raise an eval candidate; messages are sanitized', async () => {
+    const t = await runs.startRun({ ...base, sourceRunId: 't' });
+    expect((await t.fail({ error: new Error('slow'), errorCode: 'timeout_budget_exhausted' })).result).toBe('timed_out');
+    const b = await runs.startRun({ ...base, sourceRunId: 'b' });
+    expect((await b.fail({ errorCode: 'budget_exhausted' })).result).toBe('budget_exhausted');
+    const q = await runs.startRun({ ...base, sourceRunId: 'q' });
+    await q.fail({ error: new Error('bad 941-555-0100'), failureClass: 'incorrect' });
+    expect(events(q.id)).toEqual(['started', 'failed', 'eval_candidate']);
+    expect(store.agent_runs.find((r) => r.source_run_id === 'q').error_message).toBe('bad [redacted-number]');
+  });
+});
+
+describe('runManaged', () => {
+  test('runs fn inside the run + lane scope, finishes from a shaped return, returns the value', async () => {
+    const out = await runs.runManaged(base, async (h) => {
+      const c = context.current();
+      expect(c.runId).toBe(h.id);
+      expect(c.laneId).toBe('blog_draft');
+      expect(c.traceId).toBe(h.traceId);
+      return { result: 'succeeded', disposition: 'applied', summary: { n: 1 } };
+    });
+    expect(out.disposition).toBe('applied');
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', summary: { n: 1 } });
+    expect(context.current().runId).toBeNull();
+  });
+
+  test('a plain return finishes succeeded; a throw fails the run (retryable flag honoured) and re-throws unchanged', async () => {
+    expect(await runs.runManaged({ ...base, sourceRunId: 'p' }, async () => 42)).toBe(42);
+    const err = Object.assign(new Error('nope'), { code: 'openai_429', retryable: true });
+    await expect(runs.runManaged({ ...base, sourceRunId: 'e', maxAttempts: 2 }, async () => { throw err; })).rejects.toBe(err);
+    expect(store.agent_runs.find((r) => r.source_run_id === 'e')).toMatchObject({ lifecycle: 'queued', failure_class: 'provider', error_code: 'openai_429' });
+  });
+
+  test('gate off: runManaged still runs fn and returns / rethrows with nothing written', async () => {
+    delete process.env.GATE_AGENT_RUNS;
+    expect(await runs.runManaged(base, async (h) => h.inert)).toBe(true);
+    await expect(runs.runManaged(base, async () => { throw new Error('x'); })).rejects.toThrow('x');
+    expect(store.agent_runs).toBeUndefined();
+  });
+});

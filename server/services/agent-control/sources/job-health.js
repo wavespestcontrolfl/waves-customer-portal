@@ -1,0 +1,98 @@
+/**
+ * Read adapter: job_health (one row per cron, utils/cron-lock.js) → the
+ * latest run of every job as a canonical run keyed by job name. A cron
+ * whose lane policy names it as `workflow_id` carries that lane; the rest
+ * are workflow-only runs in the office area.
+ */
+
+const db = require('../../../models/db');
+const { LANE_RUNTIME } = require('../lane-policies');
+const { canonicalRun, humanize, isMissingSchema } = require('./shape');
+
+const SOURCE = 'job_health';
+const COLUMNS = ['job_name', 'last_started_at', 'last_finished_at', 'last_success_at', 'last_status', 'last_error', 'last_duration_ms', 'consecutive_failures', 'updated_at'];
+
+let workflowLane = null;
+function laneForJob(jobName) {
+  if (!workflowLane) {
+    workflowLane = new Map();
+    for (const [laneId, policy] of Object.entries(LANE_RUNTIME)) {
+      if (policy && policy.workflow_id) workflowLane.set(policy.workflow_id, laneId);
+    }
+  }
+  return workflowLane.get(jobName) || null;
+}
+
+// One state per job: running | errored | ok.
+const STATE = Object.freeze({
+  running: { lifecycle: 'running', result: null, failureClass: null, step: 'running' },
+  errored: { lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', step: 'failed' },
+  ok: { lifecycle: 'terminal', result: 'succeeded', failureClass: null, step: 'done' },
+});
+
+function stateOf(job) {
+  if (job.last_status === 'running') return STATE.running;
+  if (job.last_status === 'failed' || Number(job.consecutive_failures || 0) > 0) return STATE.errored;
+  return STATE.ok;
+}
+
+function fromRow(job) {
+  const state = stateOf(job);
+  const running = state === STATE.running;
+  const failures = Number(job.consecutive_failures || 0);
+  // recordJobStart rewrites only last_started_at / last_status: while a job
+  // runs, the finish, error and duration columns belong to its previous run
+  const finishedAt = running ? null : job.last_finished_at;
+  const error = state === STATE.errored ? job.last_error : null;
+  const durationMs = running || job.last_duration_ms == null ? null : Number(job.last_duration_ms);
+  return canonicalRun({
+    source: SOURCE,
+    id: job.job_name,
+    laneId: laneForJob(job.job_name),
+    workflowId: job.job_name,
+    title: humanize(job.job_name),
+    subtitle: failures > 1 ? `${failures} consecutive failures` : 'scheduled job',
+    lifecycle: state.lifecycle,
+    result: state.result,
+    failureClass: state.failureClass,
+    errorMessage: error,
+    createdAt: job.last_started_at,
+    startedAt: job.last_started_at,
+    finishedAt,
+    lastHeartbeatAt: finishedAt ?? job.last_started_at,
+    lastProgressAt: finishedAt ?? job.last_started_at,
+    durationMs,
+    attempts: Math.max(1, failures),
+    steps: [{ key: 'tick', label: 'Run', status: state.step, detail: error, ms: durationMs, toolName: null }],
+    detail: error,
+  });
+}
+
+async function list({ from, to, limit = 200 } = {}) {
+  try {
+    const rows = await db('job_health')
+      .select(COLUMNS)
+      .where((q) => {
+        q.where('last_status', 'running').orWhere('last_status', 'failed').orWhere('consecutive_failures', '>', 0);
+        q.orWhere((w) => { w.where('last_started_at', '>=', from); if (to) w.andWhere('last_started_at', '<=', to); });
+      })
+      .orderBy('last_started_at', 'desc')
+      .limit(limit);
+    return { runs: rows.map(fromRow), unavailable: false };
+  } catch (err) {
+    if (isMissingSchema(err)) return { runs: [], unavailable: true };
+    throw err;
+  }
+}
+
+async function get(jobName) {
+  try {
+    const row = await db('job_health').select(COLUMNS).where({ job_name: jobName }).first();
+    return row ? { run: fromRow(row) } : null;
+  } catch (err) {
+    if (isMissingSchema(err)) return null;
+    throw err;
+  }
+}
+
+module.exports = { SOURCE, list, get, fromRow, laneForJob };

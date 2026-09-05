@@ -43,6 +43,7 @@
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
  *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
+ *   GATE_AGENT_RUNS=true      (agent run ledger WRITES — services/agent-control/runs.js records work_items / agent_runs / steps / events for lanes that call it; off = every handle is inert; the /control/runs reads stay on GATE_AGENT_CONTROL_READ; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -2349,6 +2350,16 @@ const gates = {
   // new. Read-only either way. Kill switch: unset. This entry is for
   // logGateStatus; the route reads gateEnvValue at CALL time.
   agentControlRead: gateEnvValue('GATE_AGENT_CONTROL_READ'),
+
+  // Agent run ledger writes — services/agent-control/runs.js. ON: startRun /
+  // runManaged record work_items, agent_runs, agent_attempts, agent_run_steps,
+  // run_artifacts and run_events (migration 20260905000010) for every lane
+  // that calls them, and the hub probe reports features.runs = true. OFF
+  // (default, dev AND prod): every handle is inert — the wrapped work runs
+  // exactly as before and nothing is written. The /control/runs reads are
+  // gated by GATE_AGENT_CONTROL_READ, not this. Kill switch: unset. This
+  // entry is for logGateStatus; the writer reads gateEnvValue at CALL time.
+  agentRuns: gateEnvValue('GATE_AGENT_RUNS'),
 
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
