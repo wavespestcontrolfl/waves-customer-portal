@@ -14,15 +14,25 @@ function parseETDateTime(input) {
   if (!naive) return new Date(input);
   const [, y, mo, d, h, mi, s] = naive;
   const utcGuess = Date.UTC(+y, +mo - 1, +d, +h, +mi, +(s || 0));
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).formatToParts(new Date(utcGuess));
-  const p = (t) => parseInt(parts.find(x => x.type === t).value, 10);
-  let etH = p('hour'); if (etH === 24) etH = 0;
-  const etAsUtc = Date.UTC(p('year'), p('month') - 1, p('day'), etH, p('minute'), p('second'));
-  const offsetMs = utcGuess - etAsUtc;
-  return new Date(utcGuess + offsetMs);
+  // The ET offset in force at `instant`, in ms.
+  const offsetAt = (instant) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(new Date(instant));
+    const p = (t) => parseInt(parts.find(x => x.type === t).value, 10);
+    let etH = p('hour'); if (etH === 24) etH = 0;
+    return instant - Date.UTC(p('year'), p('month') - 1, p('day'), etH, p('minute'), p('second'));
+  };
+  // Two passes: the offset at the naive-as-UTC guess is the offset 4-5 h
+  // BEFORE the wall clock we want — the wrong one on a transition morning
+  // (spring: 04:30 the day after resolved an hour late; fall: an hour
+  // early). Re-read the offset at the first candidate and, if it differs,
+  // apply that one — the offset in force at the target instant.
+  const guessOffset = offsetAt(utcGuess);
+  const first = utcGuess + guessOffset;
+  const settled = offsetAt(first);
+  return new Date(settled === guessOffset ? first : utcGuess + settled);
 }
 
 function formatETDay(dt) {

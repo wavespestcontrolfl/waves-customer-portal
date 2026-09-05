@@ -91,6 +91,13 @@ describe('resolveWindow', () => {
     expect(w.buckets).toHaveLength(7);
   });
 
+  test('the prior window keeps its wall clock the morning after spring-forward', () => {
+    // Mon 2026-03-09 04:30 EDT; yesterday 04:30 was EDT too (the jump was 02:00 Sunday)
+    const w = hubRead.resolveWindow('today', new Date('2026-03-09T08:30:00Z'));
+    expect(w.prior.to.toISOString()).toBe('2026-03-08T08:30:00.000Z');
+    expect(w.prior.from.toISOString()).toBe('2026-03-08T05:00:00.000Z'); // Sunday 00:00 was still EST
+  });
+
   test('unknown preset → null (inherited names included); default is 7d', () => {
     expect(hubRead.resolveWindow('yesterday', NOW)).toBeNull();
     expect(hubRead.resolveWindow('constructor', NOW)).toBeNull();
