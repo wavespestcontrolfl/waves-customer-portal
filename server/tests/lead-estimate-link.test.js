@@ -1550,8 +1550,17 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
       expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
       expect(stampLeadFunnelRow).not.toHaveBeenCalled();
-      // ...judged under the lock on the root as won.
+      // ...judged under the lock on the root as won, with the claimed read.
       expect(database._locks[1]).toEqual({ table: 'leads', where: { id: 'root', customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'won' } });
+      expect(database._claims).toHaveLength(2); // the claimed read + the customer stamp
+    });
+
+    test('a row the repeat rebuilt while its root was LOST is dropped once staff mark that root won and its row carries the win — never two booked rows for one deal (pre-push P1 on 795fcc3)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'won', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'booked', rep: 'booked' }, { funnelOwners: { root: 'c1' } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+      expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: "funnel_stage IS DISTINCT FROM 'completed'" }]);
     });
 
     test.each([

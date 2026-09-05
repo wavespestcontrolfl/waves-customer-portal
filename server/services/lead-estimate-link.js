@@ -104,12 +104,6 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // judged first; an unlinked repeat carries none of its own, and reading only
 // the repeat's link let root A take the funnel row of a deposit on estimate
 // B (pre-push P1 on 1ea5d47).
-async function wonRootCarriesWin(trx, rootId, customerId) {
-  const row = await trx('ad_service_attribution').where({ lead_id: rootId }).first('funnel_stage', 'customer_id');
-  return !!row && FUNNEL_STAGE_RANK[row.funnel_stage] >= FUNNEL_STAGE_RANK.booked
-    && (!row.customer_id || !customerId || String(row.customer_id) === String(customerId));
-}
-
 async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCustomerId = null, estimateId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
   if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
@@ -128,8 +122,9 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
   // A root of this opportunity that staff has since marked WON is the deal
   // closed: when its funnel row already carries the win (booked or beyond,
   // this customer's or unowned), a replayed conversion of the repeat is
-  // settled — nothing is rebuilt beside it (the r33 replay residual, fixed).
-  // Judged under the lock on the root as won.
+  // settled — nothing is rebuilt beside it, and a row the repeat kept is
+  // dropped (the r33 replay residual, fixed). Judged under the lock on the
+  // root as won.
   const rootWon = sameOpportunity && root.status === 'won';
   const onlyIfLead = rootOurs || rootWon ? { ...identityOf(root), status: root.status } : null;
   // Every read or write on the root's row below carries the lead claim the
@@ -170,7 +165,7 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
     if (!rootOurs && !rootWon) return rebuild(trx);
     const rootHeld = await trx('leads').where({ id: root.id, ...onlyIfLead }).whereNull('deleted_at').forUpdate().first('id');
     if (!rootHeld) return rebuild(trx);
-    if (rootWon) return (await wonRootCarriesWin(trx, root.id, customerId)) ? null : rebuild(trx);
+
     const own = await trx('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
     if (own && own.funnel_stage === 'completed') return null;
     // A root row still owned by ANOTHER customer (staff re-assigned the lead
@@ -180,7 +175,12 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
     // is dropped. The repeat's own row carries the deal (codex #3834 r36 P1).
     const rootOwner = await trx('ad_service_attribution').where({ lead_id: root.id }).first('customer_id');
     if (customerId && rootOwner?.customer_id && String(rootOwner.customer_id) !== String(customerId)) return rebuild(trx);
-    const bridged = await bridgeLeadFunnelStage(root.id, 'won', trx, { onlyIfLead });
+    // A won root is never advanced (its lead is closed); it is settled only
+    // when its row already carries the win — the claimed read below — and
+    // then the same customer stamp and retained-row drop apply, so a row the
+    // repeat rebuilt while the root was lost never stands beside the root's
+    // (pre-push P1 on 795fcc3).
+    const bridged = rootWon ? { updated: 0 } : await bridgeLeadFunnelStage(root.id, 'won', trx, { onlyIfLead });
     // A root row already at booked / completed counts as settled only under
     // the SAME lead claim the advance carried — the fallback read must not
     // accept an old stage on a root staff re-identified since (codex r30 P1).
