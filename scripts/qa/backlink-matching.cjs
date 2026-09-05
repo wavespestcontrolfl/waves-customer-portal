@@ -68,7 +68,7 @@ stub('models/db', proxy);
     assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).follow_up_status, 'skipped');
     assert.equal((await trx('seo_link_prospects').where({ id: first }).first()).status, 'contacted');
     await trx('seo_link_prospects').where({ id: first }).update({ status: 'rejected' });
-    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', follow_up_status: 'drafted' });
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', follow_up_status: 'drafted', indexing_status: 'indexed' });
     await trx('seo_backlinks').where({ id: backlink }).update({ status: 'lost' });
     const replacement = randomUUID();
     await trx('seo_backlinks').insert({ id: replacement, source_domain: publisher, source_url: `https://${publisher}/new-resources`, target_url: target, status: 'active', discovery_source: 'dataforseo', first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date()) });
@@ -76,6 +76,7 @@ stub('models/db', proxy);
     const restored = await trx('seo_link_prospects').where({ id: second }).first();
     assert.equal(restored.backlink_id, replacement);
     assert.equal(restored.follow_up_status, 'skipped');
+    assert.equal(restored.indexing_status, 'not_checked');
     console.log('PASS recovered historical and moved backlinks settle only their own placement and retire follow-ups');
   } finally { await trx.rollback(); }
 })().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(() => db.destroy());

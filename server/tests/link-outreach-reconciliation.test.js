@@ -28,6 +28,14 @@ test('a unique expected publisher page disambiguates unsatisfied sibling placeme
   const first = placement({ target_url: 'https://publisher.example/elsewhere' });
   const second = placement({ id: 'second', target_url: 'https://www.publisher.example/Post/' });
   expect(outreachMatch(link(), [first, second]).placement).toBe(second);
+  expect(outreachMatch(link({ first_seen: '2020-01-01' }), [first, second]).placement).toBeNull();
+});
+test('historical exact evidence requires prior attribution or a recovery', () => {
+  const p = placement({ live_url: link().source_url });
+  const historic = link({ first_seen: '2020-01-01' });
+  expect(outreachMatch(historic, [p]).placement).toBeNull();
+  const attributed = { ...p, backlink_id: historic.id };
+  expect(outreachMatch(historic, [attributed]).placement).toBe(attributed);
 });
 test.each([
   ['2026-03-08T04:30:00Z', '2026-03-08'],

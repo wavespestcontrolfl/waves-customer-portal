@@ -244,7 +244,12 @@ function outreachMatch(link, placements) {
   if (!['http:', 'https:'].includes(source.protocol) || source.username || source.password || comparableDomain(source.hostname) !== comparableDomain(link.source_domain)) return { placement: null, ambiguous: [] };
   const matches = placements.filter((p) => outreachTargetMatches(link, p));
   const exact = matches.filter((p) => canonicalLinkUrl(p.live_url || p.target_url) === canonicalLinkUrl(link.source_url));
-  if (exact.length === 1) return { placement: exact[0], ambiguous: [] };
+  if (exact.length === 1) {
+    const p = exact[0];
+    const prior = p.live_url && (p.backlink_id || parseQuality(p.quality_signals).lost_recovery);
+    const floor = placementFloorEt(p.outreach_sent_at);
+    return { placement: prior || (floor && firstSeenOnOrAfter(link, floor)) ? p : null, ambiguous: [] };
+  }
   if (matches.length !== 1) return { placement: null, ambiguous: matches.filter((p) => { const floor = placementFloorEt(p.outreach_sent_at); return floor && firstSeenOnOrAfter(link, floor); }) };
   const p = matches[0];
   // A different known profile cannot be replaced by a generic domain match.
@@ -312,6 +317,7 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
         const quality = parseQuality(p.quality_signals);
         delete quality.outreach_match_ambiguous;
         const patch = { status: 'placed', live_url: link.source_url, backlink_id: link.id, parked_from_status: null, quality_signals: quality, updated_at: now };
+        if (p.live_url !== link.source_url) patch.indexing_status = 'not_checked';
         await trx('seo_link_prospects').where({ id: p.id }).update(patch);
         // The link supersedes an unsent follow-up, not an outstanding payment or execution obligation.
         const followups = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'communication', instance_kind: 'followup' }).whereNull('ended_at').whereNull('satisfied_at');
