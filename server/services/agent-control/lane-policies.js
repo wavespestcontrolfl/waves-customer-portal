@@ -200,6 +200,7 @@ const LANE_RUNTIME = {
   // route (or a day with no eligible visits) makes no model call.
   // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
   previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
+  job_card_paragraph: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M1' },
   // M2 (Codex r20): notes / email copy land in the editable invoice fields, never saved or sent directly.
   invoice_summary: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   // M3 (Codex r21): appointment-tagger generates and persists the brief the moment the appointment is tagged.

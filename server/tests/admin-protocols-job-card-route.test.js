@@ -10,8 +10,14 @@
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
+// db is only touched by the technician ownership check: the chain resolves
+// fn.ownedRow (a row = the tech owns the visit; null = not theirs).
 jest.mock('../models/db', () => {
-  const fn = () => ({});
+  const chain = {};
+  for (const m of ['where', 'whereNotIn', 'select']) chain[m] = () => chain;
+  chain.first = async () => fn.ownedRow;
+  function fn() { return chain; }
+  fn.ownedRow = null;
   fn.raw = () => ({});
   fn.schema = { hasTable: async () => true };
   return fn;
@@ -39,9 +45,10 @@ async function run(path, query = {}) {
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
   const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
   const params = path.includes(':serviceId') ? { serviceId: query.serviceId } : {};
-  await handler({ params, query }, res, (err) => { throw err; });
+  await handler({ params, query, ...(query.__tech ? { techRole: 'technician', technicianId: 'tech-1' } : {}) }, res, (err) => { throw err; });
   return res;
 }
+const db = require('../models/db');
 
 describe('job-card routes', () => {
   beforeEach(() => {
@@ -80,6 +87,25 @@ describe('job-card routes', () => {
     const bad = await run('/job-card/:serviceId', { serviceId: 'nope' });
     expect(bad.statusCode).toBe(400);
     expect(jobCard.buildJobCard).toHaveBeenCalledTimes(1);
+  });
+
+  test('a technician token reads only its current assignment; admins are unscoped (PR r2 P1)', async () => {
+    process.env.GATE_JOB_CARD = 'true';
+    jobCard.buildJobCard.mockResolvedValue({ enabled: true, strip: { access: { codes: [] } } });
+    jobCard.mixForProduct.mockResolvedValue({ amount: 1 });
+    db.ownedRow = null;
+    expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID, __tech: true })).statusCode).toBe(404);
+    expect((await run('/job-card/mix', { serviceId: SERVICE_ID, productId: SERVICE_ID, gallons: '1', __tech: true })).statusCode).toBe(404);
+    expect(jobCard.buildJobCard).not.toHaveBeenCalled();
+    expect(jobCard.mixForProduct).not.toHaveBeenCalled();
+    db.ownedRow = { id: SERVICE_ID };
+    expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID, __tech: true })).statusCode).toBe(200);
+    // Ownership lost between the build and the answer → withheld.
+    jobCard.buildJobCard.mockImplementation(async () => { db.ownedRow = null; return { enabled: true, strip: { access: { codes: [{ code: '4545#' }] } } }; });
+    expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID, __tech: true })).statusCode).toBe(404);
+    // Admin: no db touch, straight through.
+    jobCard.buildJobCard.mockResolvedValue({ enabled: true, strip: { access: { codes: [] } } });
+    expect((await run('/job-card/:serviceId', { serviceId: SERVICE_ID })).statusCode).toBe(200);
   });
 
   test('mix validates gallons and productId', async () => {

@@ -376,6 +376,13 @@ describe('per-gallon label rates (PR r1 P2)', () => {
 });
 
 describe('loadLastVisit picks the most severe finding, not the alphabetically last (Codex r13 P1)', () => {
+  test('a failed history lookup is "unavailable", never "first visit" (PR r2 P2)', async () => {
+    const dbh = () => { const chain = {}; for (const m of ['where', 'modify', 'orderBy', 'select']) chain[m] = () => chain; chain.first = () => ({ catch: (fn) => Promise.resolve(fn(new Error('db down'))) }); return chain; };
+    expect(await jobCard._test.loadLastVisit(dbh, 'c1', 'lawn')).toEqual({ unavailable: true });
+    expect(jobCard.buildTemplateParagraph({ ...baseFacts(), lastVisit: { unavailable: true } })).toContain('Visit history unavailable right now');
+    expect(jobCard.buildTemplateParagraph({ ...baseFacts(), lastVisit: { unavailable: true } })).not.toContain('First visit');
+  });
+
   test('critical beats medium and low', async () => {
     const tables = {
       service_records: [{ id: 'r1', service_date: '2026-08-20', service_type: 'Lawn', technician_notes: 'notes', is_callback: false }],
@@ -412,6 +419,8 @@ describe('access codes never enter the model-safe facts', () => {
     });
     // Codes carrying regex metacharacters are matched literally (pre-push P0).
     expect(jobCard._test.scrubKnownCodes({ entry: 'Try 12*34 or 1234+ or (77)' }, [{ code: '12*34' }, { code: '1234+' }, { code: '(77)' }])).toEqual({ entry: 'Try [code] or [code] or [code]' });
+    // Short codes are scrubbed as whole tokens (PR r2 P1): 12 on file hits "12" but not the 12 in 2026-08-12.
+    expect(jobCard._test.scrubKnownCodes({ entry: 'code 12, last visit 2026-08-12, box A1' }, [{ code: '12' }, { code: 'A1' }])).toEqual({ entry: 'code [code], last visit 2026-08-12, box [code]' });
     // Case-insensitive: BLUE on file, blue in the note (PR r1 P1).
     expect(jobCard._test.scrubKnownCodes({ entry: 'say blue at the gate' }, [{ code: 'BLUE' }])).toEqual({ entry: 'say [code] at the gate' });
     expect(jobCard.validateParagraph('Say blue at the gate.', 'say blue at the gate', [{ code: 'BLUE' }])).toBe('code_leak');
@@ -481,7 +490,7 @@ describe('mixForProduct', () => {
     chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
     return chain;
   };
-  const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: null };
+  const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
 
   const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', assigned_equipment_system_id: null, assigned_calibration_id: null };
   const lawnVisit = { ...visit, service_type: 'WaveGuard Lawn Care' };
@@ -574,6 +583,13 @@ describe('mixForProduct', () => {
     expect(out).toMatchObject({ amount: null, tankMixable: false, reason: 'Not a tank mix — apply as labeled', tank: { calibrated: true } });
   });
 
+  test('an unverified label rate gets no dose on either basis (PR r2 P1)', async () => {
+    const dbh = makeDb({ scheduled_services: [visit], products_catalog: [{ ...product, label_verified_at: null }], equipment_calibrations: [live] });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, ...at })).toMatchObject({ amount: null, reason: 'Label rate not yet verified', rateVerified: false });
+    const gal = makeDb({ scheduled_services: [visit], products_catalog: [{ id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: null }], equipment_calibrations: [] });
+    expect((await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh: gal, ...at })).amount).toBeNull();
+  });
+
   test('live calibration → amount for 110 gal', async () => {
     const dbh = makeDb({
       scheduled_services: [visit],
@@ -581,6 +597,6 @@ describe('mixForProduct', () => {
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, now: new Date('2026-09-04T12:00:00Z') });
-    expect(out).toMatchObject({ amount: 6.215, unit: 'oz', gallons: 110, rateVerified: false, tankMixable: true });
+    expect(out).toMatchObject({ amount: 6.215, unit: 'oz', gallons: 110, rateVerified: true, tankMixable: true });
   });
 });

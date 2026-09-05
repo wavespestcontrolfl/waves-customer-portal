@@ -4783,10 +4783,9 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
           <div>
             Next {sprayCheck.windowHours} h: {range || "temp n/a"}, wind {f.windMph} mph, rain {f.rainPct}%
             {f.shortForecast ? `, ${f.shortForecast.toLowerCase()}` : ""}
-            {sprayCheck.coordsSource === "office" ? " (office forecast, no property pin)" : ""}
           </div>
         ) : (
-          <div style={{ color: D.muted }}>No forecast right now.</div>
+          <div style={{ color: D.muted }}>{sprayCheck.coordsSource === "none" ? "No property pin on file — no forecast, every product unknown." : "No forecast right now."}</div>
         )}
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>

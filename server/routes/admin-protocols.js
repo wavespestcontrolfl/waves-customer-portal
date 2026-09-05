@@ -2503,6 +2503,24 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // the Tank section's search helper: amount of one product for that much
 // water on the visit's rig (the appointment's assigned equipment). Same gate; pure read. Registered BEFORE /:serviceId so the
 // literal segment never falls into the id param.
+// A technician token reads only its CURRENT assignment — the same contract
+// as admin-schedule's technicianCurrentVisitFilter (assigned tech, not a
+// dead status, inside the 7-day access window); admins are unscoped. The
+// card carries gate / garage / lockbox codes, so the card route checks
+// before the build AND after it: a dispatch reassignment during the reads
+// must not hand them to the former technician.
+const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
+const TECH_ACCESS_WINDOW_DAYS = 7;
+async function techOwnsVisit(req, serviceId) {
+  if (req.techRole !== 'technician') return true;
+  const row = await db('scheduled_services')
+    .where({ id: serviceId, technician_id: req.technicianId })
+    .whereNotIn('status', TECH_DEAD_ASSIGNMENT_STATUSES)
+    .where('scheduled_date', '>=', etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS)))
+    .first('id');
+  return Boolean(row);
+}
+
 router.get('/job-card/mix', async (req, res, next) => {
   try {
     if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
@@ -2511,6 +2529,7 @@ router.get('/job-card/mix', async (req, res, next) => {
     if (!UUID_RE.test(String(serviceId || ''))) return res.status(400).json({ error: 'serviceId required' });
     const gallons = Number(req.query.gallons);
     if (![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
+    if (!(await techOwnsVisit(req, serviceId))) return res.status(404).json({ error: 'Product or visit not found' });
     const mix = await jobCard.mixForProduct(productId, gallons, { serviceId });
     if (!mix) return res.status(404).json({ error: 'Product or visit not found' });
     res.json({ enabled: true, ...mix });
@@ -2521,8 +2540,10 @@ router.get('/job-card/:serviceId', async (req, res, next) => {
   try {
     if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
     if (!UUID_RE.test(req.params.serviceId)) return res.status(400).json({ error: 'Invalid service id' });
+    if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
     const card = await jobCard.buildJobCard(req.params.serviceId);
     if (!card) return res.status(404).json({ error: 'Service not found' });
+    if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
     res.json(card);
   } catch (err) { next(err); }
 });

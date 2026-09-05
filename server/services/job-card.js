@@ -37,13 +37,12 @@ const {
 } = require('./waveguard-plan-engine');
 const { stampedDivergesSql } = require('./stamped-address');
 const { convertInventoryQuantity } = require('./inventory-units');
+const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 
 const PROMPT_VERSION = 'job_card_paragraph_v1';
-const LANE_ID = 'job_card_paragraph';
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
-const OFFICE_COORDS = { lat: 27.40, lng: -82.40 };
 const SPRAY_WINDOW_HOURS = 4;
 const RAIN_HOLD_PCT = 50;
 const TANK_GALLONS = [110, 1];
@@ -76,10 +75,14 @@ function clean(value, max = 240) {
  * into a note, but the loader knows the exact values it must never ground.
  */
 function scrubKnownCodes(value, codes) {
-  const known = codes.map((c) => String(c.code || '').trim()).filter((c) => c.length >= 3);
+  // Every non-empty stored value (the property API sets no minimum length);
+  // a short code is matched as a whole token so "12" does not eat dates.
+  const known = codes.map((c) => String(c.code || '').trim()).filter(Boolean);
   if (!known.length) return value;
+  const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // Case-insensitive: a code stored as BLUE pasted as blue is still the code.
-  const re = new RegExp(known.map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
+  // (a date's "-12" or "08.12" is not the code "12")
+  const re = new RegExp(known.map((c) => (c.length < 4 ? `(?<![A-Za-z0-9.-])${esc(c)}(?![A-Za-z0-9.-])` : esc(c))).join('|'), 'gi');
   const walk = (v) => {
     if (typeof v === 'string') return v.replace(re, '[code]');
     if (Array.isArray(v)) return v.map(walk);
@@ -148,15 +151,11 @@ function propertyCoords(latRaw, lngRaw) {
 
 async function loadRain7d(dbh, customer) {
   if (!customer?.lawn_water_area_id) return null;
-  const since = addETDays(new Date(), -7);
-  const row = await dbh('lawn_area_weather_daily')
-    .where({ area_id: customer.lawn_water_area_id })
-    .where('date', '>=', since)
-    .sum({ total: 'rain_inches' })
-    .first()
-    .catch(() => null);
-  const total = row?.total != null ? Number(row.total) : null;
-  return Number.isFinite(total) ? Math.round(total * 100) / 100 : null;
+  // The canonical reader: null unless every day of the window is on file,
+  // so a missed sync day never reads as a dry week.
+  const today = etDateString(new Date());
+  const since = etDateString(addETDays(new Date(), -6));
+  return getAreaRainfall(customer.lawn_water_area_id, since, today, dbh);
 }
 
 async function loadLastVisit(dbh, customerId, serviceLine) {
@@ -167,7 +166,10 @@ async function loadLastVisit(dbh, customerId, serviceLine) {
     .orderBy('sr.started_at', 'desc')
     .select('sr.id', 'sr.service_date', 'sr.service_type', 'sr.technician_notes', 'sr.is_callback')
     .first()
-    .catch(() => null);
+    .catch(() => ({ unavailable: true }));
+  // A failed lookup is not "no history" — the template says so instead
+  // of claiming a first visit.
+  if (record?.unavailable) return { unavailable: true };
   if (!record) return null;
   // severity is text: rank it (critical > high > medium > low > info)
   // with the report's own ranking, never alphabetically.
@@ -270,7 +272,10 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     rig: rigAssignment(svc),
     access: { codes },
-    coords: coords ? { ...coords, source: 'property' } : { ...OFFICE_COORDS, source: 'office' },
+    // No pin (none stored, or the stamped address diverges from the primary
+    // one) → no forecast at all: an office forecast would judge a property
+    // elsewhere in the service area, and a verdict is acted on.
+    coords: coords ? { ...coords, source: 'property' } : { lat: null, lng: null, source: 'none' },
     // Model-safe facts. Nothing below carries a code or a phone number:
     // keyword redaction in clean(), then the known code values themselves.
     facts: scrubKnownCodes({
@@ -312,7 +317,9 @@ function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   if (facts.contactPreference && facts.contactPreference !== 'text') s1.push(`prefers ${facts.contactPreference}`);
 
   const s2 = [];
-  if (facts.lastVisit) {
+  if (facts.lastVisit?.unavailable) {
+    s2.push('Visit history unavailable right now');
+  } else if (facts.lastVisit) {
     s2.push(`Last visit ${facts.lastVisit.date}${facts.lastVisit.summary ? `: ${facts.lastVisit.summary}` : ''}${facts.lastVisit.callback ? ' (callback)' : ''}`);
   } else {
     s2.push('First visit on record');
@@ -403,7 +410,7 @@ async function writeParagraph(template, codes = [], deps = {}, critical = []) {
   const validate = (result) => validateParagraph(result?.text, template, codes, critical);
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.jobCardParagraph, {
-      laneId: LANE_ID,
+      laneId: 'job_card_paragraph',
       promptVersion: PROMPT_VERSION,
       jsonMode: false,
       maxTokens: 300,
@@ -897,7 +904,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
     paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
     loadRigCalibrations(dbh, facts.rig),
-    (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null),
+    facts.coords.lat != null ? (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null) : Promise.resolve(null),
   ]);
   const tank = tankFromCalibrations(calibrations, now);
   const { visit, lines, blocks } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
@@ -928,7 +935,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
  */
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date() } = {}) {
   const [product, svc] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
+    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
     serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('customer_id', 'scheduled_date', 'service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
@@ -970,6 +977,9 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   if (planWide.length) mix = { amount: null, unit: rateUnit || null, reason: 'Lawn plan blocked — amounts withheld' };
   else if (productBlocks.length) mix = { amount: null, unit: rateUnit || null, reason: clean(productBlocks[0].message, 160) };
   else if (!tankMixable) mix = { amount: null, unit: rateUnit || null, reason: 'Not a tank mix — apply as labeled' };
+  // The catalog contract: no dose from a label value whose provenance is
+  // not verified (label_verified_at), on either rate basis.
+  else if (!product.label_verified_at) mix = { amount: null, unit: rateUnit || null, reason: 'Label rate not yet verified' };
   else if (perGallon) mix = buildPerGallonAmount(perGallon, gallons);
   else mix = buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
   const packSizes = await loadPackSizes(dbh, [product.id]);
