@@ -414,3 +414,32 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
     expect(row.server_computed_price).toBe(expected.serverTotals.annualTotal);
   });
 });
+
+describe('audited pricing validation and palm replay', () => {
+  const services = { palm: { treatmentType: 'treeAge', palmCount: 3, palmSize: 'medium', dbhInches: 12 } };
+  const engineInputs = { homeSqFt: 2000, lotSqFt: 10000, stories: 1, services };
+
+  test('invalid specialty pricing cannot fall back to a client-supplied free preview', async () => {
+    const estimateData = { engineInputs: { ...engineInputs, services: { plugging: { area: 'invalid', spacing: 12 } } } };
+    await expect(resolveServerAuthoritativePricing({
+      estimateData,
+      clientPreview: { annualTotal: 0, monthlyTotal: 0, onetimeTotal: 0 },
+      quoteRequired: false,
+      now: new Date('2030-06-01T12:00:00Z'),
+      recompute: data => serverRecomputeFromEstimateData(data, { needsSync: () => false }),
+    })).rejects.toMatchObject({ code: 'PRICING_VALIDATION_ERROR', failClosed: true, statusCode: 400 });
+  });
+
+  test('fresh saves ignore client rounding claims; authoritative replay honors saved prices', async () => {
+    const data = {
+      engineInputs: { ...engineInputs, palmAnnualRounding: 'whole' },
+      result: { results: { injection: { ann: 128, perVisit: 255 } } },
+    };
+    const fresh = await serverRecomputeFromEstimateData(data, { needsSync: () => false });
+    expect(fresh.recomputed).toBe(true);
+    expect(fresh.serverTotals.annualTotal).toBe(127.5);
+    const old = await serverRecomputeFromEstimateData(data, { needsSync: () => false, replaySavedPricingKnobs: true });
+    expect(old.recomputed).toBe(true);
+    expect(old.serverTotals.annualTotal).toBe(128);
+  });
+});
