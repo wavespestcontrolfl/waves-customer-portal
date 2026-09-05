@@ -31,7 +31,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { applyAssignable } = require('./technician-eligibility');
+const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
@@ -1291,6 +1291,22 @@ async function commitReservation({
       const err = new Error('reservation expired');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
+    }
+
+    // Technician eligibility re-check at COMMIT (FOR SHARE on this txn): the
+    // office may have offboarded or de-listed the held tech between the
+    // customer's reserve and their accept. Same slot-unavailable recovery the
+    // accept flow already handles (customer re-picks a time).
+    if (row.technician_id) {
+      try {
+        await assertAssignableTechnician(row.technician_id, { conn: client });
+      } catch (eligErr) {
+        if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
+        const err = new Error('slot technician is not available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = `${dateOnly(row.scheduled_date)}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
+        throw err;
+      }
     }
 
     // Owner blackout re-check at COMMIT: the admin may have blacked the day

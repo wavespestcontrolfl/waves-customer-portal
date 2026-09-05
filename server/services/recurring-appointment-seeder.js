@@ -1209,17 +1209,23 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   };
   let rows = builtRows.map((row) => filterByColumns(row, columns));
   // Follow-ups inherit the parent's technician. If that tech is no longer
-  // assignable (offboarded, or a row that never should have held work), seed
-  // the follow-ups unassigned so auto-dispatch places them — never onto a
-  // tech who cannot take them.
-  const inheritedTechId = rows.find((r) => r.technician_id)?.technician_id || null;
-  if (inheritedTechId) {
-    const inheritedTech = await conn('technicians')
-      .where({ id: inheritedTechId })
-      .first('id', 'employment_status', 'field_dispatchable');
-    if (!isAssignable(inheritedTech)) {
-      require('./logger').warn(`[recurring-seeder] parent ${parent.id} technician ${inheritedTechId} is not assignable; seeding follow-ups unassigned`);
-      rows = rows.map((r) => (r.technician_id === inheritedTechId ? { ...r, technician_id: null } : r));
+  // assignable, seed the follow-ups unassigned so auto-dispatch places them —
+  // never onto a tech who cannot take them. Every production caller (booking
+  // wizard, estimate converter, admin-schedule) hands in its transaction, so
+  // the read is FOR SHARE on the writing trx and an offboarding's FOR UPDATE
+  // cannot commit underneath the insert below; a plain connection (tests)
+  // gets a point-in-time check. The insert lines themselves are frozen by the
+  // booking insert-site contract and stay untouched.
+  {
+    const inheritedTechId = rows.find((r) => r.technician_id)?.technician_id || null;
+    if (inheritedTechId) {
+      let techQuery = conn('technicians').where({ id: inheritedTechId });
+      if (conn.isTransaction) techQuery = techQuery.forShare();
+      const inheritedTech = await techQuery.first('id', 'employment_status', 'field_dispatchable');
+      if (!isAssignable(inheritedTech)) {
+        require('./logger').warn(`[recurring-seeder] parent ${parent.id} technician ${inheritedTechId} is not assignable; seeding follow-ups unassigned`);
+        rows = rows.map((r) => (r.technician_id === inheritedTechId ? { ...r, technician_id: null } : r));
+      }
     }
   }
 

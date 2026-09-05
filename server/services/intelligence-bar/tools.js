@@ -12,7 +12,7 @@ const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
-const { applyAssignable } = require('../technician-eligibility');
+const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -2080,6 +2080,9 @@ async function createAppointment(input) {
       err.customerNoLongerLive = true;
       throw err;
     }
+    // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
+    // ran before this transaction opened.
+    await assertAssignableTechnician(technician_id, { conn: trx });
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —

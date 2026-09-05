@@ -13,7 +13,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { applyAssignable } = require('./technician-eligibility');
+const { applyAssignable, isAssignable, assertAssignableTechnician } = require('./technician-eligibility');
 const MODELS = require('../config/models');
 const twilio = require('twilio');
 
@@ -12712,6 +12712,18 @@ const CallRecordingProcessor = {
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
                   try {
                     return await trx.transaction(async (sp) => {
+                      // The follow-up inherits the primary's tech; if that tech
+                      // is no longer assignable (offboarded since the primary
+                      // was booked) seed it unassigned rather than onto them.
+                      let followUpTechId = primaryRow.technician_id || defaultTechnicianId || null;
+                      if (followUpTechId) {
+                        const fuTech = await sp('technicians').where({ id: followUpTechId }).forShare()
+                          .first('id', 'employment_status', 'field_dispatchable');
+                        if (!isAssignable(fuTech)) {
+                          logger.warn(`[call-proc] follow-up technician ${followUpTechId} is not assignable; seeding unassigned`);
+                          followUpTechId = null;
+                        }
+                      }
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
@@ -12723,7 +12735,7 @@ const CallRecordingProcessor = {
                           // the named payer. Always matches the parent (a fresh
                           // primary already carries callBookingPayerId here).
                           payer_id: primaryRow.payer_id || null,
-                          technician_id: primaryRow.technician_id || defaultTechnicianId,
+                          technician_id: followUpTechId,
                           // Visit 2 treats the same property as visit 1 —
                           // coordinates included, or the stamped child would
                           // render the right address with no map pin.
@@ -13299,6 +13311,19 @@ const CallRecordingProcessor = {
                     addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
                   }),
                 };
+                // The default tech was resolved before this trx opened; re-check
+                // FOR SHARE here so an offboarding cannot commit in between. If
+                // it did, book unassigned — the visit is still created and the
+                // triage note already says who was auto-assigned (or nobody).
+                if (insertData.technician_id) {
+                  try {
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+                  } catch (eligErr) {
+                    if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+                    logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
+                    insertData.technician_id = null;
+                  }
+                }
                 const [created] = await trx('scheduled_services')
                   .insert(insertData)
                   .onConflict('idempotency_key')
