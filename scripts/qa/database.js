@@ -16,13 +16,13 @@ const { readContext, childEnvironment } = require('../dev/context');
   const db = require('knex')({ client: 'pg', connection: env.DATABASE_URL, pool: { min: 0, max: 1 } });
   const file = path.join(context.root, '.tmp/dev/database.env');
   const backup = path.join(context.root, '.tmp/dev/cluster.env');
-  if (fs.existsSync(backup)) throw new Error('cluster.env already exists; verify the selected cluster before provisioning again.');
   try {
+    if (fs.existsSync(backup)) throw new Error('cluster.env already exists; verify the selected cluster before provisioning again.');
     const exists = await db('pg_database').where({ datname: name }).first('datname');
     if (exists) throw new Error('QA database already exists but is not selected; verify ownership before reusing it.');
+    await db.raw('CREATE DATABASE ?? TEMPLATE template0', [name]);
     fs.copyFileSync(file, backup, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(backup, 0o600);
-    await db.raw('CREATE DATABASE ?? TEMPLATE template0', [name]);
     url.pathname = `/${name}`;
     fs.writeFileSync(file, `WAVES_DATABASE_ENVIRONMENT=test\nDATABASE_URL=${url.href}\n`, { mode: 0o600 });
     console.log(`Created ${name}; run npm run dev:migrate explicitly. The deployed preview uses its original database.`);
