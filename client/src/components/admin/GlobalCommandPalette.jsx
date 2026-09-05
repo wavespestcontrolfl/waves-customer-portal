@@ -351,9 +351,11 @@ function GlobalCommandPalette(_props, ref) {
   const paletteRef = useModalFocus(open);
 
   const onActionResolved = useCallback((action, decision, body) => {
-    if (body.success === false) return;
+    const failed = decision === 'confirm' && body.success === false;
+    const status = failed ? 'failed' : decision === 'confirm' ? 'confirmed' : 'cancelled';
+    const warning = failed ? (body.result?.error || 'The action could not be completed') : (body.result?.warning || null);
     setPendingActions(previous => previous.map(item => item.id === action.id
-      ? { ...item, resolvedStatus: decision === 'confirm' ? 'confirmed' : 'cancelled', resolvedWarning: body.result?.warning || null } : item));
+      ? { ...item, resolvedStatus: status, resolvedWarning: warning } : item));
   }, []);
   const ibPageData = useIntelligenceBarPageData();
   const context = detectContext(location.pathname, location.search);

@@ -129,3 +129,10 @@ freshness implementation rather than keeping two field sets. All 181 shared
 address/recurrence/price-scope/IB tests and all four PostgreSQL tests passed.
 The shared financial-stamp module changes address inheritance only; no pricing
 values or payment behavior were changed or exercised against production.
+
+Handled confirmation failures now persist their failed status and error across
+follow-up questions, preventing a consumed action from offering Confirm again.
+All four palette/card tests passed, including desktop/mobile integration cases.
+The production build passed. Desktop 1440px and mobile 390px browser captures
+were inspected using the real palette with synthetic responses; the failure
+remained visible and Confirm stayed absent after a follow-up.
