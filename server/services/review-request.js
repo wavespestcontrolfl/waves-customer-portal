@@ -18,9 +18,13 @@ const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
 
-// Neutral technician label for customer copy when no name resolves — never a
+// Neutral technician labels for customer copy when no name resolves — never a
 // person's name (Field Team Program: the visiting tech is whoever the row says).
+// The SMS form is 9 characters so every {tech}-bearing template stays inside
+// one GSM-7 segment at its documented worst case (12-char first name + the
+// 43-char shortened link); email has no segment budget.
 const TECH_FALLBACK = "Your technician";
+const TECH_FALLBACK_SMS = "Your tech";
 
 // First name from the technician row when an ask carries technician_id but no
 // tech_name (override callers, legacy rows). Null when unknown.
@@ -3299,7 +3303,7 @@ const ReviewService = {
       // First name only (codex #3235 r2 P2): a full technician name blows the
       // one-segment budget on the {tech}-bearing templates, and the customer
       // knows the tech by first name anyway.
-      tech: firstNameFrom(techName) || (await technicianFirstName(technicianId)) || TECH_FALLBACK,
+      tech: firstNameFrom(techName) || (await technicianFirstName(technicianId)) || TECH_FALLBACK_SMS,
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };

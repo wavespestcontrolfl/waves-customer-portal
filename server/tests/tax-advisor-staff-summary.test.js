@@ -10,35 +10,39 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const TaxAdvisor = require('../services/tax-advisor');
 
-function countChain(count) {
+function rowsChain(rows) {
   const chain = {};
   chain.where = jest.fn((filter) => { chain.filter = filter; return chain; });
-  chain.count = jest.fn(async () => [{ count }]);
+  chain.select = jest.fn(async () => rows);
   return chain;
 }
 
 beforeEach(() => jest.clearAllMocks());
 
 describe('TaxAdvisor.getStaffSummary', () => {
-  test('one active row = the owner-operator alone', async () => {
-    const chain = countChain('1');
+  test('classifies ACTIVE rows by payroll employment_type — an unclassified owner/admin login is not an employee', async () => {
+    const chain = rowsChain([{ employment_type: null }]);
     db.mockReturnValue(chain);
-    await expect(TaxAdvisor.getStaffSummary()).resolves.toBe('owner-operator, no other employees');
+    const out = await TaxAdvisor.getStaffSummary();
+    expect(out).toMatch(/^0 W-2 employees, 0 1099 contractors, 1 active staff login with no payroll classification/);
     expect(db).toHaveBeenCalledWith('technicians');
-    // prospective placeholders and offboarded rows are not employees
+    // prospective placeholders and offboarded rows are excluded up front
     expect(chain.filter).toEqual({ employment_status: 'active' });
+    expect(chain.select).toHaveBeenCalledWith('employment_type');
   });
 
-  test('several active rows report the live count, never a name', async () => {
-    db.mockReturnValue(countChain('3'));
+  test('W-2 and 1099 rows are counted separately; never a name', async () => {
+    db.mockReturnValue(rowsChain([
+      { employment_type: 'w2' }, { employment_type: 'w2' }, { employment_type: '1099' }, { employment_type: null },
+    ]));
     const out = await TaxAdvisor.getStaffSummary();
-    expect(out).toBe('3 active staff on payroll including the owner-operator');
+    expect(out).toMatch(/^2 W-2 employees, 1 1099 contractor, 1 active staff login with no payroll classification/);
     expect(out).not.toMatch(/Adam/);
   });
 
   test('a failed read degrades to a neutral line and warns', async () => {
     db.mockImplementation(() => { throw new Error('relation missing'); });
-    await expect(TaxAdvisor.getStaffSummary()).resolves.toBe('owner-operator plus staff (live count unavailable)');
+    await expect(TaxAdvisor.getStaffSummary()).resolves.toBe('owner-operator plus staff (live payroll classification unavailable)');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('staff count failed'));
   });
 });
