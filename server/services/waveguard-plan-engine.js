@@ -1085,7 +1085,9 @@ async function getProducts(knex, { strict = false } = {}) {
     ? await knex('product_aliases')
       .whereIn('product_id', productIds)
       .select('product_id', 'alias_name')
-      .catch(() => [])
+      // strict: aliases are how de-branded protocol lines find their
+      // product — a failed read would silently drop them, so it throws too.
+      .catch((err) => { if (strict) throw err; return []; })
     : [];
   const aliasesByProduct = aliases.reduce((acc, row) => {
     if (!acc[row.product_id]) acc[row.product_id] = [];
