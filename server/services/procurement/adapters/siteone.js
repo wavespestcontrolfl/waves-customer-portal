@@ -6,12 +6,12 @@
  * the product's SKU, sets the quantity (PACKAGES — the dispatcher converts
  * the inventory-unit request through the price row's pack size), verifies
  * the cart holds exactly that one line at that count, reads the CART TOTAL
- * (cap pre-check, dry-run stop). PR 3a ENDS HERE: the checkout-verification
- * and submit stages (bill-to-account proof, displayed account + ship-to,
- * the FINAL total cap check, the place-order click, the confirmation
- * number) ship in PR 3b — until then a non-dry-run call refuses
- * `checkout_not_shipped` and nothing is ever submitted. Whatever the bot
- * left in the cart (dry run, refusal) it clears again before closing.
+ * (cap pre-check, dry-run stop), then at checkout selects bill-to-account,
+ * VERIFIES it is selected, reads the FINAL total with tax + shipping and
+ * runs the dispatcher's beforeSubmit(totalCents) cap check on it immediately
+ * before the place-order click — only then, and only when SITEONE_BOT_DRY_RUN
+ * is not set, does it submit. Whatever it left in the cart without
+ * submitting (dry run, refusal) it clears again before closing.
  *
  * Hard rules (same boundary as the backlink signup runner):
  *   - the bot NEVER types payment data; a checkout that asks for a card,
@@ -83,6 +83,22 @@ const SELECTORS = Object.freeze({
   cartLineQty: 'input[name*="qty" i], input[name*="quantity" i], input.qty, input[type="number"], .qty-value, .quantity-value',
   cartRemove: 'button.remove, a.remove, button[data-action="remove"], .remove-item, button:has-text("Remove"), a:has-text("Remove")',
   cartTotal: '.cart-totals .total, .order-total .value, [data-test="cart-total"], .grand-total .price, .cart-total-value',
+  checkoutButton: 'a.checkout-button, button.checkout-button, a:has-text("Checkout"), button:has-text("Checkout")',
+  cardField: 'input[autocomplete="cc-number"], input[name*="cardNumber"], input[name*="card_number"], iframe[src*="card"]',
+  mfaField: 'input[autocomplete="one-time-code"], input[name*="otp"], input[name*="verificationCode"]',
+  termsCheckbox: 'input[type="checkbox"][name*="terms"], input[type="checkbox"][name*="Terms"]',
+  checkoutTotal: '.checkout-totals .total, .order-summary .grand-total, [data-test="order-total"], .order-total .value, .grand-total .price',
+  billToAccount: 'input[type="radio"][value*="account"], input[type="radio"][value*="ACCOUNT"], label:has-text("Bill to account")',
+  billToAccountSelected: 'input[type="radio"][value*="account"]:checked, input[type="radio"][value*="ACCOUNT"]:checked, input[type="radio"][value*="Account"]:checked',
+  // Identity readings are SCOPED to the checkout's own billing / shipping
+  // sections — never a header account menu, a footer address, or an
+  // ancestor's text — and place() requires exactly ONE match (pre-push P0).
+  checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .payment-method.selected .account-number, [data-test="bill-to-account"] .account-number',
+  checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, [data-test="shipping-address"]',
+  placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
+  // Confirmation-number element only — never a bare :has-text() that an
+  // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
+  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, h1:has-text("Order #"), h2:has-text("Order #"), h3:has-text("Order #"), p:has-text("Order #"), strong:has-text("Order #")',
 });
 
 const NAV_TIMEOUT = 45000;
@@ -129,6 +145,12 @@ function parseMoney(text) {
   return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
 }
 
+// Digit runs (3+) in a checkout label: "Account # 12345" → ['12345'].
+const digitRuns = (s) => String(s || '').match(/\d{3,}/g) || [];
+// A configured ship-to token must appear as a whole token, not inside a
+// longer run ("34205" does not match "342051").
+const hasToken = (text, token) => new RegExp(`(^|[^a-z0-9])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(text);
+
 const defaultLaunch = ({ hostResolverRules } = {}) => chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', ...(hostResolverRules ? [`--host-resolver-rules=${hostResolverRules}`] : [])],
@@ -157,6 +179,15 @@ async function matches(page, selector) {
     if (await el.isVisible({ timeout: 1500 }).catch(() => false)) shown.push(el);
   }
   return { all, shown };
+}
+
+// The ONE visible control for a click: a hidden responsive copy ahead of the
+// visible button would time out and park the one-shot claim as failed
+// (Codex #3853 r14 P2). Refuses BEFORE clicking — nothing has been sent.
+async function visibleControl(page, selector, what, evidence) {
+  const { shown } = await matches(page, selector);
+  if (shown.length !== 1) throw new RefusedError(shown.length ? `${what}_ambiguous` : `no_${what}`, `${shown.length} visible ${what.replace(/_/g, ' ')} controls — expected exactly one`, evidence);
+  return shown[0];
 }
 
 // Any visible match (the MFA / card / unavailable blockers fail closed).
@@ -409,12 +440,194 @@ async function verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload }
   return amountCents;
 }
 
+// Exactly ONE element for an identity / money reading, inside the checkout:
+// zero is unreadable, more than one is ambiguous — the text the bot would
+// compare might not be the order's (pre-push P0s). Returns { count, text,
+// visible }; the caller names the refusal.
+async function readExactlyOne(page, selector) {
+  const els = page.locator(selector);
+  const count = await els.count().catch(() => 0);
+  if (count !== 1) return { count, text: '', visible: false };
+  const text = await els.first().textContent().catch(() => '');
+  const isVisible = await els.first().isVisible({ timeout: 1500 }).catch(() => false);
+  return { count, text: String(text || ''), visible: isVisible };
+}
+
+// The bill-to selector unions radio inputs and their labels, so ordinary
+// markup (a visible radio + its visible "Bill to account" label) matches the
+// SAME control twice. Options are counted by the radio they resolve to, not by
+// locator — one labeled radio is one option (Codex #3853 r13 P1). An option
+// with no associated radio counts on its own (it will refuse as unverified).
+async function distinctBillToOptions(page, shown) {
+  const byRadio = new Map();
+  for (let i = 0; i < shown.length; i += 1) {
+    const radio = await associatedRadio(page, shown[i]);
+    const key = radio ? await radio.evaluate((el) => `${el.id}|${el.name}|${el.value}`).catch(() => null) : null;
+    const k = key || `option-${i}`;
+    if (!byRadio.has(k)) byRadio.set(k, shown[i]);
+  }
+  return [...byRadio.values()];
+}
+
+// The radio input a bill-to option resolves to: the element itself when it
+// is an input; for a label, its `for` target or the radio it wraps. Null
+// when no radio is associated (never fall back to a document-wide search).
+async function associatedRadio(page, option) {
+  const tag = await option.evaluate((el) => el.tagName.toLowerCase()).catch(() => null);
+  if (tag === 'input') return option;
+  if (tag !== 'label') return null;
+  const target = await option.getAttribute('for').catch(() => null);
+  const radio = target ? page.locator(`#${target.replace(/[^\w-]/g, '')}`).first() : option.locator('input[type="radio"]').first();
+  return (await radio.count().catch(() => 0)) ? radio : null;
+}
+
+// Checkout tender: no MFA / terms prompt (the bot never answers them),
+// bill-to-account offered AND confirmed CHECKED — the click is not proof; a
+// checkout defaulting to a saved card shows no card field (Codex r1 P1).
+// The card field is judged AFTER the bill-to option is selected: a checkout
+// that defaults to card entry shows the field until the tender is switched,
+// and only a field still demanded afterwards refuses (Codex r6 P1).
+// The blockers the bot never answers: an MFA challenge, and every terms
+// checkbox the checkout SHOWS must be accepted — a hidden checked copy ahead
+// of a visible unchecked one is not acceptance (r12 P1); with no visible copy
+// at all the hidden ones are judged (never skipped); an unreadable state fails
+// CLOSED (Codex r4 P2): unknown ≠ accepted. Scanned BEFORE and AFTER the
+// tender change — selecting bill-to-account can reveal an account-specific
+// terms box or verification step (Codex #3853 r14 P1).
+async function scanCheckoutBlockers(page, refuse) {
+  if (await visible(page, SELECTORS.mfaField)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
+  const terms = await matches(page, SELECTORS.termsCheckbox);
+  for (const box of terms.shown.length ? terms.shown : terms.all) {
+    let accepted = null;
+    try { accepted = await box.isChecked(); } catch { await refuse('terms_unreadable', 'SiteOne checkout shows a terms checkbox whose state could not be read — owner action'); }
+    if (accepted !== true) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
+  }
+}
+
+async function verifyBillToAccount(page, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  await scanCheckoutBlockers(page, refuse);
+  // The tender is the ONE visible bill-to option; a hidden responsive copy
+  // ahead of it is neither refused on nor clicked (r12 P2).
+  const billOptions = await matches(page, SELECTORS.billToAccount);
+  if (!billOptions.all.length) await refuse('no_bill_to_account', 'bill-to-account option not offered at checkout');
+  if (!billOptions.shown.length) await refuse('bill_to_account_hidden', 'the bill-to-account option at checkout is not visible — not the tender the checkout shows');
+  const options = await distinctBillToOptions(page, billOptions.shown);
+  if (options.length > 1) await refuse('bill_to_account_ambiguous', `${options.length} visible bill-to-account options at checkout — cannot tell which the order bills`);
+  const bill = options[0];
+  try { await bill.click({ timeout: 5000 }); }
+  catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
+  await page.waitForTimeout(1500);
+  await scanCheckoutBlockers(page, refuse); // the tender change may have revealed a terms box / MFA step (r14 P1)
+  if (await visible(page, SELECTORS.cardField)) await refuse('card_required', 'SiteOne checkout still asks for card entry with bill-to-account selected — bot never supplies it');
+  // Proof is on the radio ASSOCIATED with the option just clicked (the
+  // click target may be its label — Codex PR3 r1 + r3 P1): that radio's own
+  // checked state, read directly, must be true and it must be visible; and
+  // it must be the ONLY checked account radio on the page — a checked
+  // duplicate elsewhere cannot tell which tender the order bills (Codex r7 P1).
+  const radio = await associatedRadio(page, bill);
+  if (!radio) await refuse('bill_to_account_unverified', 'no radio input is associated with the bill-to-account option — the bot never submits on another tender');
+  let checked = null;
+  try { checked = await radio.isChecked(); } catch { checked = null; }
+  if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
+  if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is not visible — not the tender the checkout shows');
+  const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
+  if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at checkout — cannot tell which the order bills`);
+  evidence.billToAccountVerified = true;
+}
+
+// WHICH account, and WHERE to: the displayed values, compared to what the
+// owner configured — a saved default that drifted (another branch account,
+// an old address) is exactly the unattended order this refuses. The account
+// must be the ONE whole digit run equal to the vendor row's number (12345 is
+// not 912345); every approved ship-to token must appear whole.
+async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  // Both readings must be VISIBLE (pre-push P0): a single hidden responsive
+  // or stale node carrying the approved values is not what the checkout shows.
+  const account = await readExactlyOne(page, SELECTORS.checkoutAccount);
+  if (account.count > 1) await refuse('account_ambiguous', `${account.count} billing-account readings at checkout — cannot tell which the order bills`);
+  const accountText = normalizeText(account.text);
+  if (!accountText) await refuse('account_unverified', 'could not read the billing account shown at checkout');
+  if (!account.visible) await refuse('account_hidden', 'the billing-account element at checkout is not visible — not what the order bills');
+  const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
+  const accountRuns = digitRuns(accountText);
+  if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { evidence.checkoutAccount = accountText.slice(0, 60); await refuse('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`); }
+  const shipTo = await readExactlyOne(page, SELECTORS.checkoutShipTo);
+  if (shipTo.count > 1) await refuse('ship_to_ambiguous', `${shipTo.count} ship-to readings at checkout — cannot tell which the order ships to`);
+  const shipToText = normalizeText(shipTo.text);
+  if (!shipToText) await refuse('ship_to_unverified', 'could not read the ship-to address shown at checkout');
+  if (!shipTo.visible) await refuse('ship_to_hidden', 'the ship-to element at checkout is not visible — not where the order ships');
+  const missing = shipToTokens.filter((t) => !hasToken(shipToText, t));
+  if (missing.length) { evidence.checkoutShipTo = shipToText.slice(0, 120); await refuse('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`); }
+  evidence.accountVerified = true;
+  evidence.shipToVerified = shipToText.slice(0, 120);
+}
+
+// The CHECKOUT total (tax + shipping applied) is the binding amount: exactly
+// one VISIBLE element (responsive checkouts keep hidden desktop/mobile
+// copies; a stale hidden node is not the figure the vendor charges), parsed
+// as exactly one $ amount. Returns cents.
+async function readCheckoutTotal(page, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  const total = await readExactlyOne(page, SELECTORS.checkoutTotal);
+  if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
+  if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
+  const finalCents = parseMoney(total.text);
+  await shot(page, 'pre-submit', evidence, upload);
+  if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${total.text.trim().slice(0, 40)}")`, evidence);
+  evidence.checkoutTotalCents = finalCents;
+  return finalCents;
+}
+
+// The click and its confirmation number. Anything thrown after the click is
+// `ambiguous`: the order may exist — the dispatcher parks, never re-submits.
+// Returns the order number; calls markSubmitted() at the click boundary — the
+// caller's cart cleanup guard flips only when the click actually happened
+// (a pre-click refusal here still cleans the cart — Codex #3853 r15 P2).
+async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted }) {
+  const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
+  markSubmitted();
+  try {
+    await placeOrder.click();
+    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+    await page.waitForTimeout(2500);
+  } catch (e) {
+    const err = new Error(`siteone submit outcome unknown: ${String(e.message).slice(0, 120)}`);
+    err.ambiguous = true; err.evidence = evidence;
+    throw err;
+  }
+  await shot(page, 'confirmation', evidence, upload);
+  // The ONE visible confirmation-number node — a hidden or stale responsive
+  // copy must not record the wrong number or force the ambiguous path (r15 P2).
+  const numNodes = (await matches(page, SELECTORS.orderNumber).catch(() => ({ shown: [] }))).shown;
+  const numText = (numNodes.length === 1 ? (await numNodes[0].textContent().catch(() => '') || '') : '').replace(/\s+/g, ' ');
+  const number = orderNumberIn(numText);
+  if (!number) {
+    const err = new Error('siteone: order submitted but no confirmation number was found');
+    err.ambiguous = true; err.evidence = evidence;
+    throw err;
+  }
+  return number;
+}
+
+// The confirmation number: the token adjacent to the "Order #/number" label
+// when it is an identifier, else the first identifier-shaped token. An
+// identifier carries at least one DIGIT — a label word ("Confirmation",
+// "order") never becomes the recorded order number (Codex PR3 r1 P2).
+function orderNumberIn(text) {
+  const isId = (t) => !!t && /\d/.test(t);
+  const adjacent = String(text).match(/order\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/i);
+  if (adjacent && isId(adjacent[1])) return adjacent[1];
+  return (String(text).match(/[A-Z0-9-]{5,}/gi) || []).find(isId) || null;
+}
+
 async function place(
   { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
   { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
 ) {
   if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
-  const { qty } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
+  const { qty, shipToTokens } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
   const evidence = { blockedHosts: {}, dryRun };
   // A cap verdict of { ok: false } is an ordinary refusal (parks). The cap
   // check THROWING (the reservation transaction hit a transient DB error) is
@@ -429,6 +642,7 @@ async function place(
   };
   let browser = null;
   let page = null;
+  let submitted = false; // the place-order click happened: the cart is the vendor's now
   try {
     ({ browser, page } = await openLockedBrowser({ launchBrowser, resolveHostIps, evidence }));
     await login(page, credentials);
@@ -440,15 +654,29 @@ async function place(
     const amountCents = await verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload });
     await gate(amountCents, 'order');
     if (dryRun) return { dryRun: true, amountCents, externalOrderNumber: null, evidence };
-    // PR 3a ends at the cart: the checkout-verification + submit stages
-    // (bill-to-account proof, identity + final-total readings, the
-    // Place Order click, the confirmation number) ship in PR 3b. Until then a
-    // real placement is refused — parked with a bell, nothing submitted.
-    throw new RefusedError('checkout_not_shipped', 'SiteOne checkout + submit are not shipped yet (PR 3b) — run with SITEONE_BOT_DRY_RUN=true or order by hand', evidence, amountCents);
+
+    await (await visibleControl(page, SELECTORS.checkoutButton, 'checkout_button', evidence)).click();
+    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+    await page.waitForTimeout(2000);
+    if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
+    await verifyBillToAccount(page, { evidence, upload });
+    await verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
+    const finalCents = await readCheckoutTotal(page, { evidence, upload });
+    await gate(finalCents, 'checkout total');
+    let externalOrderNumber;
+    try { externalOrderNumber = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted: () => { submitted = true; } }); }
+    catch (e) {
+      // The click happened at THIS total: an ambiguous outcome parks with it
+      // (a null amount on a placed_at row would count $0 against the
+      // monthly cap — pre-push P0).
+      if (e.ambiguous && e.cents == null) e.cents = finalCents;
+      throw e;
+    }
+    return { externalOrderNumber, amountCents: finalCents, evidence, dryRun: false };
   } finally {
     // Nothing was submitted (dry run, refusal, error): leave no cart behind
     // for the next run to find. Best effort — the next run clears it anyway.
-    if (page) {
+    if (page && !submitted) {
       try { await Promise.race([clearCart(page), new Promise((resolve) => setTimeout(resolve, 20000))]); }
       catch (e) { logger.warn(`[siteone-bot] post-run cart cleanup failed: ${String(e.message).slice(0, 120)}`); }
     }
@@ -462,9 +690,9 @@ module.exports = {
   loginConfigured,
   quotesAtPlace: true,
   packagedQuantity: true, // cart quantity = packages (pack size from the price row)
-  preSubmitTotal: 'vendor', // the vendor's own total is read live (the cart total here; the checkout total from PR 3b)
+  preSubmitTotal: 'vendor', // the checkout total is read live, immediately before the click
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, fillLoginForm, EVIDENCE_PREFIX },
+  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, fillLoginForm, EVIDENCE_PREFIX },
 };
