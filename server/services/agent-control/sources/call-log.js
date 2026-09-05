@@ -35,10 +35,11 @@ const STATUS_MAP = Object.freeze({
   extraction_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure' },
   voicemail: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   spam: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
-  // transcription never landed: the processor returns success:false, its
-  // retry sweep re-runs the call and its stats count it as failed — a
-  // failure awaiting retry, never a finished no-op (Codex r2)
-  no_transcription: { lifecycle: 'terminal', result: 'errored', failureClass: 'provider' },
+  // transcription never landed: the processor's sweep reclaims this state on
+  // EVERY tick with no age gate or cap (processAllPending), so it is queued
+  // work — never a finished no-op (Codex r2), never terminal either (r10);
+  // the last failure stays as the run's code (fromRow)
+  no_transcription: { lifecycle: 'queued' },
   // extraction landed but the customer / lead write did not (the processor
   // stamps these instead of processed; the sweep retries them)
   customer_creation_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'tool' },
@@ -128,7 +129,7 @@ function stepsFor(c, status, map) {
 
 function fromRow(c) {
   const status = c.processing_status || 'pending';
-  const retry = retryEligible(c, status);
+  const retry = retryEligible(c, status) || status === TRANSCRIBE_FAILED;
   const map = retry ? QUEUED_RETRY : STATUS_MAP[status] || UNKNOWN_STATUS;
   const beat = c.processing_heartbeat_at || c.processing_started_at;
   return canonicalRun({
@@ -167,8 +168,8 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       // a voice-agent sandbox call is not a run anyone supervises
       .modify((qb) => whereNotSandboxCall(qb))
       .where((q) => {
-        // queued (NULL / pending) and in-flight calls stay listed however old (a stuck queue is the point)
-        q.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
+        // queued (NULL / pending / no_transcription) and in-flight calls stay listed however old (a stuck queue is the point)
+        q.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing', TRANSCRIBE_FAILED]);
         // … and so does an extraction failure the sweep will retry (its limits)
         q.orWhere((r) => r.where('processing_status', 'extraction_failed')
           .whereRaw('COALESCE(extraction_attempts, 0) < ?', [Number(CALL_EXTRACTION_MAX_ATTEMPTS)])

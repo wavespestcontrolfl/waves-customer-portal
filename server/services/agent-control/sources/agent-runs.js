@@ -111,7 +111,8 @@ async function get(id) {
         .where('s.run_id', id).orderBy([{ column: 'a.attempt_no', order: 'asc' }, { column: 's.seq', order: 'asc' }, { column: 's.started_at', order: 'asc' }]),
       db('agent_attempts').where({ run_id: id }).orderBy('attempt_no', 'asc'),
       db('run_artifacts').where({ run_id: id }).orderBy('created_at', 'asc'),
-      db('run_events').where({ run_id: id }).orderBy('created_at', 'asc'),
+      // seq = insertion order: a transition's events share one transaction timestamp
+      db('run_events').where({ run_id: id }).orderBy([{ column: 'seq', order: 'asc' }, { column: 'created_at', order: 'asc' }]),
       run.work_item_id ? db('work_items').where({ id: run.work_item_id }).first() : null,
     ]);
     return { run: fromRow(run, steps), attempts, artifacts, events, workItem: workItem || null };

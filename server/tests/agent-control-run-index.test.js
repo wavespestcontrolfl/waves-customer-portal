@@ -234,11 +234,11 @@ describe('adapters project onto the canonical shape', () => {
     expect(linkFailed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'failed']);
     expect(linkFailed.steps[3].detail).toBe('lead creation failed');
     expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
-    // no transcription = the processor's known-failed retry state (its sweep re-runs it, its stats count it failed): errored, the transcribe step failed, nothing after it attempted
+    // no transcription = the processor's known-failed retry state, reclaimed by every sweep with no cap: QUEUED (never a done no-op, never terminal), the last failure as the code, the transcribe step failed, nothing after it attempted
     const noTranscript = callLog.fromRow({ ...base, processing_status: 'no_transcription', transcription_status: 'failed' });
-    expect(noTranscript).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider', errorCode: 'no_transcription' });
+    expect(noTranscript).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'no_transcription' });
     expect(noTranscript.steps.map((s) => s.status)).toEqual(['failed', 'skipped', 'skipped', 'skipped']);
-    expect(runIndex.bucketsOf({ ...noTranscript, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
+    expect(runIndex.bucketsOf({ ...noTranscript, health: 'healthy', attention: null })).toMatchObject({ active: true, failed: false, done: false });
     expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
     // a fresh, never-claimed call (NULL status) is queued work too
     expect(callLog.fromRow({ ...base, processing_status: null }).lifecycle).toBe('queued');
