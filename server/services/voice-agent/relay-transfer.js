@@ -79,7 +79,10 @@ const TRANSFER_TOOLS = [
 
 /** Spoken-name sanitizer — same character class as the screen announcement. */
 function sanitizeSpokenName(value) {
-  return String(value == null ? '' : value)
+  // PAN-scrubbed first (hook P0): the model can put anything in this field,
+  // and it is persisted and spoken like the summary.
+  const { scrubForStorage } = require('./relay-transcript');
+  return String(scrubForStorage(String(value == null ? '' : value)) || '')
     .replace(/[^\p{L}\p{N}\s.'’-]/gu, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -165,10 +168,14 @@ async function writeHandoffPacket(db, { callSid, packet, fence = (q) => q, termi
   // packet as it is (the fallback then confirms the earlier write instead
   // of refusing it). The returned context_available says which landed.
   const attempt = String(packet && packet.attempt ? packet.attempt : '');
+  // A CLOSED call is never a transfer target either (hook P1): ai_handled is
+  // what the close reconcile / /call-complete backstop write, so a queued
+  // UPDATE that executes after the caller hung up matches 0 rows.
+  const notTransferable = [...new Set([...terminal, 'ai_handled'])];
   const q = db('call_log')
     .where('twilio_call_sid', callSid)
     .where((w) => w
-      .where((n) => n.whereNull('call_outcome').orWhereNotIn('call_outcome', terminal))
+      .where((n) => n.whereNull('call_outcome').orWhereNotIn('call_outcome', notTransferable))
       // …restricted to a row still in the transfer's own state: a later
       // terminal outcome (voicemail after an unconfirmed ring) is preserved
       // even when the timed-out full write executes after it (hook P1).
@@ -271,7 +278,14 @@ async function revertHandoffPacket(db, { callSid, attempt, fence = (q) => q }) {
     .where('call_outcome', 'ai_transferred')
     .whereRaw("(metadata->'relay_handoff'->>'attempt') = ?", [String(attempt || '')])
     .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''"))
-    .update({ call_outcome: null, metadata: db.raw("metadata - 'relay_handoff'"), updated_at: new Date() });
+    .update({
+      // A call that closed in the meantime (status completed by /call-status)
+      // gets the AI-handled outcome the close would have written; a live
+      // call returns to NULL for the close reconcile to settle.
+      call_outcome: db.raw("CASE WHEN status = 'completed' THEN 'ai_handled' ELSE NULL END"),
+      metadata: db.raw("metadata - 'relay_handoff'"),
+      updated_at: new Date(),
+    });
   return Number(rows) || 0;
 }
 

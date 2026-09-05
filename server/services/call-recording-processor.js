@@ -29,6 +29,19 @@ const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { resolveLocation } = require('../config/locations');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
+const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
+
+/**
+ * PR 2A: the RECORDED part of a stored transcript. A composite a prior pass
+ * wrote is "[AI segment]\n…\n\n[Staff|Voicemail segment]\n<recorded>"; a
+ * bare AI segment (no recorded part) is not a recording transcript at all.
+ */
+function recordedPartOfComposite(text) {
+  const t = String(text || '');
+  if (!t.startsWith('[AI segment]')) return t || null;
+  const m = t.match(/\n\n\[(?:Staff|Voicemail) segment\]\n([\s\S]*)$/);
+  return m && m[1].trim() ? m[1] : null;
+}
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
@@ -6711,6 +6724,24 @@ const CallRecordingProcessor = {
     let primaryTranscriptRejected = false;
     let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
     let recordedSegmentText = null; // PR 2A: the recorded leg of a composite (AI + recorded) transcript
+    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
+    // PR 2A, provider-aware (hook P1): a transferred call's cached column
+    // may be the relay's OWN played-text transcript (provider
+    // conversation_relay — never the recording's), or a composite a prior
+    // pass stored. Only the RECORDED part is a usable fallback for the
+    // recording; the AI segment is re-attached from the row by composeRelay.
+    const recordedFallbackOf = (row) => {
+      if (!row || !isUsableFallback(row.transcription)) return null;
+      if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;
+      return recordedPartOfComposite(row.transcription);
+    };
+    const composeRelay = (text, provenance) => {
+      const relaySegment = composeRelaySegment(call);
+      if (!relaySegment) return text;
+      recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
+      provenance.metadata.relay = relaySegment.metadata;
+      return `${relaySegment.text}\n\n[${call.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${text}`;
+    };
     // Twilio CDN hasn't finished propagating the MP3 (404 or truncated
     // buffer for the known duration) — release the claim untouched instead
     // of stamping no_transcription, so the next timer/cron attempt retries
@@ -6781,12 +6812,8 @@ const CallRecordingProcessor = {
         // keep it ahead of the recorded segment and its provenance under
         // transcription_metadata.relay, instead of letting the recording's
         // transcript replace it. Qualified on the persisted handoff packet.
-        const relaySegment = composeRelaySegment(call);
-        if (relaySegment) {
-          recordedSegmentText = transcription; // the hallucination guard below measures THIS against the recording, never the composite
-          transcription = `${relaySegment.text}\n\n[${call.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${transcription}`;
-          transcriptionProvenance.metadata.relay = relaySegment.metadata;
-        }
+        transcription = composeRelay(transcription, transcriptionProvenance);
+        const relaySegment = Boolean(recordedSegmentText);
         const transcriptUpdate = {
           transcription,
           transcription_status: 'completed',
@@ -6874,16 +6901,16 @@ const CallRecordingProcessor = {
     // The rejection sentinel is NOT a usable transcript — on an admin
     // force-reprocess of an already-rejected call it's what's stored in
     // call_log.transcription, so treat it (and cached copies of it) as no fallback.
-    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
     if (!transcription) {
-      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription', 'transcript_structured').first();
-      if (isUsableFallback(freshCall?.transcription)) {
+      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription', 'transcript_structured', 'transcription_provider').first();
+      const freshRecorded = recordedFallbackOf(freshCall);
+      if (freshRecorded) {
         // Rows written before the PAN guard deployed (or by an unscrubbed
         // legacy path) re-enter the live pipeline here — scrub on read so
         // the LLM consumers downstream never see a stored PAN, and heal the
         // sibling transcript_structured artifact in the same touch (its
         // segments/contact-pass may carry the same pre-guard PAN).
-        const fallbackScrub = scrubPansDetailed(freshCall.transcription);
+        const fallbackScrub = scrubPansDetailed(freshRecorded);
         const structuredScrub = scrubStructuredTranscript(freshCall.transcript_structured);
         transcription = fallbackScrub.text;
         transcriptionProvenance = {
@@ -6896,6 +6923,7 @@ const CallRecordingProcessor = {
             source: 'fresh_call_log',
           },
         };
+        transcription = composeRelay(transcription, transcriptionProvenance);
         // Token-fenced (post-transcription awaits): the pass that now owns
         // the call scrubs, stamps and quarantines for itself.
         const fallbackStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
@@ -6906,7 +6934,8 @@ const CallRecordingProcessor = {
           // quarantine below must not leave a masked transcript with no
           // durable signal that the audio still needs deleting.
           transcription,
-          ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
+          // A composite has no structured form (see the primary path).
+          ...(recordedSegmentText ? { transcript_structured: null } : (structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {})),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: transcriptionMetadataWrite({
@@ -6923,8 +6952,8 @@ const CallRecordingProcessor = {
           call.recording_url = null;
         }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
-      } else if (isUsableFallback(call.transcription)) {
-        const cachedScrub = scrubPansDetailed(call.transcription);
+      } else if (recordedFallbackOf(call)) {
+        const cachedScrub = scrubPansDetailed(recordedFallbackOf(call));
         const cachedStructuredScrub = scrubStructuredTranscript(call.transcript_structured);
         transcription = cachedScrub.text;
         transcriptionProvenance = {
@@ -6937,9 +6966,10 @@ const CallRecordingProcessor = {
             source: 'cached_call_log',
           },
         };
+        transcription = composeRelay(transcription, transcriptionProvenance);
         const cachedStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
           transcription, // scrubbed — see the fresh-row twin above
-          ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
+          ...(recordedSegmentText ? { transcript_structured: null } : (cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {})),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: transcriptionMetadataWrite({
@@ -16442,6 +16472,7 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,
   leadFirstContactAt,

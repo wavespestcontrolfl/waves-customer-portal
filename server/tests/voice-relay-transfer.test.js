@@ -208,7 +208,7 @@ describe('the session side (relay-conversation tool ctx)', () => {
     const res = await convo._buildToolCtx().writeHandoff({ intent: 'x', context_available: true, attempt: 'att-1' });
     expect(res).toEqual({ rows: 1, contextAvailable: true });
     expect(builder.where).toHaveBeenCalledWith('twilio_call_sid', 'CA-w');
-    expect(termQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']); // one transfer per CallSid, enforced by the row
+    expect(termQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred', 'ai_handled']); // one transfer per CallSid, enforced by the row — and never a CLOSED call (a queued write executing after the hangup)
     // …OR the row is STILL ai_transferred and holds this attempt's packet (a timed-out write that landed):
     // matched, left as-is — a later voicemail outcome is never flipped back (hook P1).
     expect(attemptQ.where).toHaveBeenCalledWith('call_outcome', 'ai_transferred');
@@ -341,7 +341,8 @@ describe('codex r2 follow-ups', () => {
 
 describe('pre-push hook round 9', () => {
   test('a card number in the model\'s summary never reaches the packet or the whisper (P0)', () => {
-    const packet = transfer.buildHandoffPacket({ intent: 'pay by card 4111 1111 1111 1111 please', summary: 'card 4242424242424242 exp 12/28', unresolved_question: 'charge 5555 5555 5555 4444 now' }, { verificationTier: 'full' });
+    const packet = transfer.buildHandoffPacket({ intent: 'pay by card 4111 1111 1111 1111 please', summary: 'card 4242424242424242 exp 12/28', unresolved_question: 'charge 5555 5555 5555 4444 now', caller_name: 'Pat 4111 1111 1111 1111' }, { verificationTier: 'full' });
+    expect(packet.caller_name).not.toMatch(/\d(?:[ -]?\d){11,}/); // hook round 11 P0: the name field is model text too
     const PAN = /\d(?:[ -]?\d){11,}/; // the scrubber keeps "card ending 4242" — only the full number must be gone
     for (const field of ['intent', 'summary', 'unresolved_question']) {
       expect(packet[field]).not.toMatch(PAN);
@@ -383,14 +384,28 @@ describe('pre-push hook round 9', () => {
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff'->>'attempt'"), ['att-9']);
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_transfer_ring_at'));
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-1']);
-    expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: null, metadata: expect.objectContaining({ sql: "metadata - 'relay_handoff'" }) }));
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: expect.objectContaining({ sql: expect.stringMatching(/CASE WHEN status = 'completed' THEN 'ai_handled' ELSE NULL END/) }), metadata: expect.objectContaining({ sql: "metadata - 'relay_handoff'" }) }));
   });
 
   test('the recording processor gates the RECORDED segment of a composite against the recording length, never the AI segment too (P1)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain('recordedSegmentText = transcription; // the hallucination guard below measures THIS against the recording, never the composite');
+    expect(src).toContain('recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite');
     expect(src).toContain('const gateText = recordedSegmentText || transcription;');
     expect(src).toContain('const fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);');
+    // Every fallback path composes through the same closure and reads only the recorded part (hook round 11 P1).
+    expect(src.match(/transcription = composeRelay\(transcription, transcriptionProvenance\);/g)).toHaveLength(3);
+    expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
+    expect(src).toContain("} else if (recordedFallbackOf(call)) {");
+    expect(src).toContain("if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;");
+  });
+
+  test('recordedPartOfComposite: the relay\'s own transcript and a bare AI segment are not recording transcripts; a stored composite yields its recorded part', () => {
+    const { recordedPartOfComposite } = require('../services/call-recording-processor')._test;
+    expect(recordedPartOfComposite('Hello, this is Sandy.')).toBe('Hello, this is Sandy.');
+    expect(recordedPartOfComposite('[AI segment]\nSandy: hi\nCaller: transfer me')).toBeNull();
+    expect(recordedPartOfComposite('[AI segment]\nSandy: hi\n\n[Staff segment]\nAdam: Waves, this is Adam.')).toBe('Adam: Waves, this is Adam.');
+    expect(recordedPartOfComposite('[AI segment]\nSandy: hi\n\n[Voicemail segment]\nPlease call me back.')).toBe('Please call me back.');
+    expect(recordedPartOfComposite('')).toBeNull();
   });
 
   test('voicemail won the close race: the AI segment is stashed metadata-only on the transfer-marked voicemail row (P1)', async () => {
