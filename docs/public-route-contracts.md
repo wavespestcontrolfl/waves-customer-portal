@@ -742,6 +742,20 @@ external agent watchdog a counts-only health snapshot — no customer data,
 no item titles, no error text (job_health.last_error is only digit-masked),
 no sub-read error messages; adding any free-text field is P0. `reasons` are
 count-free stable keys — a count inside a key re-pages one incident.
+`commitments-worker` (GET `/open`, key `hermes_commitments`, capability
+`commitments_read`, gate `GATE_HERMES_COMMITMENTS`) reads existing open Waves
+call commitments. HMAC only; backlink/watchdog keys and legacy bearer cannot
+read it. Dark gate precedes the 30/minute IP limiter and auth/audit. Privacy
+headers cover every response. Strict offset/limit-only query, max 100 rows
+plus a has-more probe. Response includes obligation description, bounded
+verbatim evidence with source anchors, identifiers, deadlines, record version,
+and selected fulfillment hints; no contact fields, raw transcript, recording
+URL, full customer row, or unrestricted JSON. Quotes may themselves contain
+customer information: private case evidence only, never a shared wiki/log.
+Reads never refresh/extract/fulfill or send; existing HMAC nonce/audit writes
+remain. Failed audit finalization returns 503, not data. Coverage is stored
+open call commitments, not SMS/email completeness or freshly verified state.
+Offset pages are not a snapshot; absence cannot establish completion.
 Customer authentication (`server/routes/auth.js`, mounted at `/api/auth`):
 `POST /send-code`, `/verify-code`, `/refresh`, `/logout` are unauthenticated
 by definition. send-code and verify-code sit behind the `server/index.js`
