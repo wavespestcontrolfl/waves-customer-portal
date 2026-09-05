@@ -547,15 +547,17 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
  */
 async function runManaged(startArgs, fn) {
   const handle = await startRun(startArgs);
+  // the scope carries the handle's RESOLVED identity (a reopen keeps the
+  // persisted lane / workflow, which may differ from what was asked)
   const scoped = () => context.runInRun({
     runId: handle.id,
     workItemId: handle.workItemId,
     attemptId: handle.attemptId,
     traceId: handle.traceId,
     agentVersionId: startArgs.agentVersionId || null,
-    workflowId: startArgs.workflowId || null,
+    workflowId: handle.workflowId,
   }, () => fn(handle));
-  const body = () => (startArgs.laneId ? context.runInLane(startArgs.laneId, scoped) : scoped());
+  const body = () => (handle.laneId ? context.runInLane(handle.laneId, scoped) : scoped());
   try {
     const value = await body();
     const shaped = value && typeof value === 'object' && !Array.isArray(value) && ('result' in value || 'disposition' in value || 'summary' in value || 'artifacts' in value);

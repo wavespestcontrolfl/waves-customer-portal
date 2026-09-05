@@ -396,6 +396,13 @@ describe('runManaged', () => {
     expect(context.current().runId).toBeNull();
   });
 
+  test('a reopened managed run scopes its work under the persisted lane, not the requested one', async () => {
+    const a = await runs.startRun({ laneId: 'lead_triage', sourceSystem: SRC, sourceRunId: 'rm' });
+    await a.finish({});
+    const seen = await runs.runManaged({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'rm' }, async (h) => ({ lane: context.current().laneId, handleLane: h.laneId }));
+    expect(seen).toEqual({ lane: 'lead_triage', handleLane: 'lead_triage' });
+  });
+
   test('a plain return finishes succeeded; a throw fails the run (retryable flag honoured) and re-throws unchanged', async () => {
     expect(await runs.runManaged({ ...base, sourceRunId: 'p' }, async () => 42)).toBe(42);
     const err = Object.assign(new Error('nope'), { code: 'openai_429', retryable: true });
