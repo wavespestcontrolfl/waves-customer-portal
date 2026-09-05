@@ -711,7 +711,10 @@ describe('admin communications SMS route', () => {
     // this text is in flight (GH Codex #3856 r22 P0).
     describe('prep guide link in the body', () => {
       const PREP_BODY = `Your prep guide: portal.wavespestcontrol.com/prep/${'a'.repeat(32)}`;
-      const PREPS = [{ customerId: 'cust-A', pestType: 'flea' }];
+      const PREPS = [{ customerId: 'cust-A', pestType: 'flea', templateKey: 'prep.flea' }];
+      // What the same page renders once the lock is ours (a released
+      // provisional page re-claimed for another guide keeps its token).
+      const FRESH_PREPS = [{ customerId: 'cust-A', pestType: 'bed_bug', templateKey: 'prep.bed_bug' }];
       const ccl = () => require('../services/composer-customer-links');
       const { runExclusive } = require('../utils/cron-lock');
       let bearerSpy;
@@ -720,7 +723,7 @@ describe('admin communications SMS route', () => {
       beforeEach(() => {
         bearerSpy = jest.spyOn(ccl(), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, preps: PREPS });
         markSpy = jest.spyOn(ccl(), 'markPrepGuidesSent').mockResolvedValue(undefined);
-        recheckSpy = jest.spyOn(ccl(), 'recheckPrepLinks').mockResolvedValue({ ok: true });
+        recheckSpy = jest.spyOn(ccl(), 'recheckPrepLinks').mockResolvedValue({ ok: true, preps: FRESH_PREPS });
         db.mockImplementation((table) => {
           const first = jest.fn();
           if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
@@ -748,7 +751,10 @@ describe('admin communications SMS route', () => {
           expect(runExclusive).toHaveBeenCalledWith('prep-send:cust-A', expect.any(Function), { recordHealth: false, waitForSlot: false });
           const lockTaken = runExclusive.mock.invocationCallOrder[runExclusive.mock.calls.findIndex(([key]) => key === 'prep-send:cust-A')];
           expect(lockTaken).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
-          expect(markSpy).toHaveBeenCalledWith(PREPS, expect.anything());
+          // …and the marker uses the entries the in-lock recheck resolved,
+          // not the pre-lock ones (pre-push Codex P1 on e8b68e9cc).
+          expect(markSpy).toHaveBeenCalledWith(FRESH_PREPS, expect.anything());
+          expect(markSpy).not.toHaveBeenCalledWith(PREPS, expect.anything());
           expect(markSpy.mock.invocationCallOrder[0]).toBeLessThan(lockReleased.mock.invocationCallOrder[0]);
           // The prep links are re-validated INSIDE the lock, before the provider.
           expect(recheckSpy).toHaveBeenCalledWith(PREP_BODY, '5551234567', { trustedCustomerId: 'cust-A', usDestination: true });
@@ -784,7 +790,7 @@ describe('admin communications SMS route', () => {
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
           expect(res.status).toBe(500);
-          expect(markSpy).toHaveBeenCalledWith(PREPS, expect.anything());
+          expect(markSpy).toHaveBeenCalledWith(FRESH_PREPS, expect.anything());
         });
         markSpy.mockClear();
         sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));

@@ -1237,8 +1237,14 @@ async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestinati
     bearers: 0,
     contractId: null,
   };
-  const refusal = await checkPrepLinks(ctx, []);
-  return refusal || { ok: true };
+  // The entries resolved HERE are the ones the post-send bookkeeping must
+  // use: a provisional page released and re-claimed for another guide
+  // between the checks renders a different key now, and stamping / settling
+  // the pre-lock guide would record the wrong pest as delivered (pre-push
+  // Codex P1 on e8b68e9cc).
+  const preps = [];
+  const refusal = await checkPrepLinks(ctx, preps);
+  return refusal || { ok: true, preps };
 }
 
 /**

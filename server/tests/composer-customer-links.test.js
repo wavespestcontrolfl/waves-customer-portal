@@ -1376,6 +1376,11 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(true);
     });
 
+    test('the in-lock recheck returns the entries it resolved NOW — the post-send bookkeeping uses these, not the pre-lock ones (pre-push Codex P1 on e8b68e9cc)', async () => {
+      const { recheckPrepLinks } = require('../services/composer-customer-links');
+      expect(await recheckPrepLinks(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea', serviceId: null, templateKey: 'prep.flea' }] });
+    });
+
     test('a resolving token whose guide has an active version, owned by the recipient, passes — its customer + pest ride back for the dedupe marker', async () => {
       expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea', serviceId: null, templateKey: 'prep.flea' }] });
       expect(resolvePrepSource).toHaveBeenCalledWith(PREP);

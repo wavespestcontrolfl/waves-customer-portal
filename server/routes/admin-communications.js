@@ -213,9 +213,13 @@ async function resolveSmsLogCustomerFallbacks(rows) {
 // before propagating; a lost marker never fails a text that already left.
 async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
   const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+  // The bookkeeping uses the entries the in-lock recheck resolved — the
+  // guide each page renders NOW — never the pre-lock ones (pre-push Codex
+  // P1 on e8b68e9cc).
+  let live = preps;
   const mark = async (label) => {
     try {
-      await require('../services/composer-customer-links').markPrepGuidesSent(preps, actorId);
+      await require('../services/composer-customer-links').markPrepGuidesSent(live, actorId);
     } catch (stampErr) {
       logger.warn(`[communications] prep sent marker failed ${label}: ${stampErr.message}`);
     }
@@ -227,6 +231,7 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
     }
     const fresh = await recheck();
     if (!fresh.ok) return { sent: false, blocked: false, reason: fresh.error };
+    if (fresh.preps) live = fresh.preps;
     let result;
     try {
       result = await dispatch();
