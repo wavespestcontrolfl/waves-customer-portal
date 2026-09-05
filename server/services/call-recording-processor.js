@@ -6766,7 +6766,7 @@ const CallRecordingProcessor = {
     // appended its segment). Composed inside the UPDATE, never from a read.
     const relayTextSql = () => db.raw(
       "COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?)",
-      [require('./voice-agent/relay-recovery').composeSegmentsSql(db)],
+      [require('./voice-agent/relay-segments').composeSegmentsSql(db)],
     );
     const STASH_SQL = '? IS NOT NULL';
     const composeInSql = (text) => db.raw(

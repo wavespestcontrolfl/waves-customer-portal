@@ -459,7 +459,7 @@ function composeRelaySegment(call) {
   // failed before any turn wrote no stash and the recording swap cleared the
   // columns, but every earlier socket appended its segment.
   if (!text && Array.isArray(meta.relay_segments)) {
-    text = String(require('./relay-recovery').segmentsText(meta.relay_segments) || '').trim();
+    text = String(require('./relay-segments').segmentsText(meta.relay_segments) || '').trim();
     tmeta = null;
   }
   if (!text) return null;

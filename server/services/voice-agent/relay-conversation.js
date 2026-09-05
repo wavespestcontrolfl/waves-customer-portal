@@ -20,6 +20,7 @@ const crypto = require('crypto');
 const { performance } = require('perf_hooks');
 const MODELS = require('../../config/models');
 const db = require('../../models/db');
+const segmentStore = require('./relay-segments');
 const logger = require('../logger');
 const { maskSid } = require('../twilio-failure-alerts');
 const { toE164, isLikelyE164 } = require('../../utils/phone');
@@ -2092,7 +2093,7 @@ class RelayConversation {
     if (recoveryOn && this.callSid && this._transcript.length && this._callerVerified === true) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
-        segment = recovery.buildSegment({
+        segment = segmentStore.buildSegment({
           generation: this.sessionGeneration,
           sessionKey: this.sessionKey,
           reason,
@@ -2117,7 +2118,7 @@ class RelayConversation {
             .where((q) => q
               .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [this.sessionKey || ''])
               .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [this.sessionGeneration || 0]))
-            .update(recovery.appendSegmentPatch(db, segment)),
+            .update(segmentStore.appendSegmentPatch(db, segment)),
           WRITE_DRAIN_TIMEOUT_MS,
           0,
         );
@@ -2150,7 +2151,7 @@ class RelayConversation {
             // The ROW's latest promise per kind (the just-appended segment
             // included) — never this superseded socket's own map, which
             // could overwrite a deadline the resumed leg gave (hook P1).
-            const promises = new Map(require('./relay-recovery').latestPromises(meta.relay_segments)
+            const promises = new Map(segmentStore.latestPromises(meta.relay_segments)
               .map((p) => [p.kind, { verdict: p.verdict, expectation: p.expectation, at: p.at ? new Date(p.at) : null }]));
             await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });
           }
@@ -2249,7 +2250,7 @@ class RelayConversation {
         // a socket older than the row's latest reconnect stamp writes no
         // columns (its segment is already appended); the resumed socket's
         // generation is ≥ the stamp and composes the whole call.
-        const fenceOwner = (q) => (recoveryOn ? recovery.generationFenceSql(this._fenceOwner(q), this.sessionGeneration) : this._fenceOwner(q));
+        const fenceOwner = (q) => (recoveryOn ? segmentStore.generationFenceSql(this._fenceOwner(q), this.sessionGeneration) : this._fenceOwner(q));
         // …and the transcript column is composed from ALL segments (in
         // generation order, `[Reconnected]` between them) when this socket's
         // segment landed; a call with one segment reads exactly as before.
@@ -2262,7 +2263,7 @@ class RelayConversation {
         // deduplicated by session key should the append land after all —
         // never this socket's text alone over a reconnected call (hook r27 P1).
         if (recoveryOn && segment && hasTranscript) {
-          composedTranscription = db.raw('COALESCE(?, ?)', [recovery.composeSegmentsSql(db, segmentAppended ? null : segment), transcriptUpdate.transcription]);
+          composedTranscription = db.raw('COALESCE(?, ?)', [segmentStore.composeSegmentsSql(db, segmentAppended ? null : segment), transcriptUpdate.transcription]);
           try {
             const tm = JSON.parse(transcriptUpdate.transcription_metadata);
             tm.segments = { this_generation: this.sessionGeneration, appended: segmentAppended };
@@ -2277,9 +2278,9 @@ class RelayConversation {
           composedFromRowOnly = {
             // …and its summary (the superseded first socket never wrote one).
             ...(priorCallerTurns.length ? { call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason, leadCaptured: capturedLead }) } : {}),
-            transcription: db.raw('COALESCE(?, transcription)', [recovery.composeSegmentsSql(db)]),
-            transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [recovery.composeSegmentsSql(db), RELAY_PROVIDER]),
-            transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [recovery.composeSegmentsSql(db)]),
+            transcription: db.raw('COALESCE(?, transcription)', [segmentStore.composeSegmentsSql(db)]),
+            transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [segmentStore.composeSegmentsSql(db), RELAY_PROVIDER]),
+            transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [segmentStore.composeSegmentsSql(db)]),
           };
         }
         fenceOwner(reconcileQuery);
@@ -2432,8 +2433,7 @@ class RelayConversation {
    */
   async _refreshCallSummary(meta) {
     if (!this.callSid) return false;
-    const recovery = require('./relay-recovery');
-    const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
+    const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta && meta.relay_segments));
     try {
       const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
       const starts = legs.map((leg) => Date.parse(leg.started_at)).filter(Number.isFinite);
@@ -2474,8 +2474,7 @@ class RelayConversation {
    */
   async _refreshFloorLeadSummary(meta) {
     if (this.sandbox || !this.callSid) return false;
-    const recovery = require('./relay-recovery');
-    const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
+    const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta && meta.relay_segments));
     if (!callerTurns.length) return false;
     try {
       const { scrubForStorage } = require('./relay-transcript');

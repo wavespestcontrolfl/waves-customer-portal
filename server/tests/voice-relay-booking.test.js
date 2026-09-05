@@ -397,7 +397,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       const ref = first._buildToolCtx().rememberSlot(SLOT, {
         lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true,
       });
-      const segment = JSON.parse(JSON.stringify(recovery.buildSegment({ generation: 1, slotRefs: [...first._slotRefs] })));
+      const segment = JSON.parse(JSON.stringify(require('../services/voice-agent/relay-segments').buildSegment({ generation: 1, slotRefs: [...first._slotRefs] })));
       const fixtureDb = () => ({ where: () => ({ first: async () => ({ metadata: {
         relay_session_claim_owner: 'resumed', relay_reconnects: 1, relay_segments: [segment],
       } }) }) });

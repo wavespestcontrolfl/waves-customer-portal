@@ -11,14 +11,10 @@
  * at call time so unsetting it is the live kill switch.
  */
 const logger = require('../logger');
+const { segmentsText, callerTurnsFromText, nonEmptyFields, latestPromises } = require('./relay-segments');
 
 const RECONNECT_LIMIT = 1;
 const RESUME_STATE_TIMEOUT_MS = 2000;
-const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
-// A segment keeps everything the transcript store keeps (relay-transcript's
-// own cap) — the composition must never be shorter than today's transcript.
-// The smaller cap applies ONLY to the model-history seed on a resumed leg.
-const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
 const RESUME_SEED_MAX_CHARS = 20000;
 
 function isRecoveryGateOn() {
@@ -100,174 +96,11 @@ function resumeGreeting(language) {
   return require('./relay-language').copy('resumed', language);
 }
 
-/** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [] }) {
-  return {
-    slot_refs: slotRefs,
-    lookup_refs: lookupRefs,
-    lookup_results: lookupResults,
-    // Customer-book lookups consumed on this leg — the per-call anti-fishing
-    // budget continues across the reconnect (codex r4 P2).
-    lookups_used: Number(lookupsUsed) || 0,
-    // When this leg's session started (the first leg's is the CALL's start —
-    // restored on the resumed leg so duration_seconds covers the whole call,
-    // hook r25 P1).
-    started_at: Number.isFinite(Number(startedAt)) && Number(startedAt) > 0 ? new Date(Number(startedAt)).toISOString() : null,
-    // An INCOMPLETE estimate capture at this leg's close: the call was being
-    // held open for the missing fields, and these are the fields already
-    // given — both restored on the resumed leg (codex r2 P1).
-    hold_open: holdOpen === true,
-    estimate_fields: nonEmptyFields(estimateFields),
-    // This leg's capture state: a filed re-service deliberately creates NO
-    // lead, and the resumed leg must not route it through lead capture again.
-    reservice_filed: reserviceFiled === true,
-    no_lead_created: noLeadCreated === true,
-    // Sandy's promises on this leg (kind, verdict, spoken expectation, when
-    // spoken) — restored on the resumed leg so the commitments pass keeps
-    // the original deadline instead of deriving a bare promise (hook P1).
-    promises: (Array.isArray(promises) ? promises : []).map((p) => ({
-      kind: String(p.kind || ''),
-      verdict: p.verdict === true,
-      expectation: p.expectation || null,
-      at: p.at instanceof Date ? p.at.toISOString() : (p.at || null),
-    })).filter((p) => p.kind),
-    generation: Number(generation) || 0,
-    session_key: sessionKey || null,
-    reason: reason || null,
-    text: String(text || '').slice(0, MAX_SEGMENT_TEXT_CHARS),
-    turns: Number(turns) || 0,
-    latency: latency || null,
-    versions: versions || null,
-    lead_captured: leadCaptured === true,
-    ended_at: new Date().toISOString(),
-  };
-}
-
-/** The non-empty string entries of a fields object; null when there are none. */
-function nonEmptyFields(fields) {
-  if (!fields || typeof fields !== 'object') return null;
-  const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== '').map(([k, v]) => [k, String(v).trim()]));
-  return Object.keys(kept).length ? kept : null;
-}
-
-/** metadata := metadata || { relay_segments: existing || [segment] } — an append, never an overwrite. */
-function appendSegmentSql(db, segment) {
-  return db.raw(
-    "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segments', COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb)",
-    [JSON.stringify([segment])],
-  );
-}
-
-/**
- * The whole call's transcript composed from EVERY segment on the row (the
- * closing socket appends its own segment FIRST, in its own statement) in
- * generation order, separated by [Reconnected]. NULL when the row has no
- * segments — callers COALESCE to their local text.
- */
-function composeSegmentsSql(db, segment = null) {
-  // With `segment`, the not-yet-appended segment is unioned in (the UPDATE
-  // reads the old row) — the append statement composes this way, and so
-  // does a close whose append was UNCONFIRMED (hook r27 P1): the row's copy
-  // of this socket's segment, if the append landed after all, is dropped by
-  // session key so the text never appears twice.
-  const rowSegments = "COALESCE(metadata->'relay_segments', '[]'::jsonb)";
-  const keyed = segment && segment.session_key;
-  const source = segment
-    ? `${keyed ? `(SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(${rowSegments}) e WHERE COALESCE(e->>'session_key', '') <> ?)` : rowSegments} || ?::jsonb`
-    : rowSegments;
-  return db.raw(
-    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
-    segment ? [SEGMENT_SEPARATOR, ...(keyed ? [String(segment.session_key)] : []), JSON.stringify([segment])] : [SEGMENT_SEPARATOR],
-  );
-}
-
-/**
- * The append that also RECOMPOSES a call the other socket already finalized
- * (hook P1): the old socket can still be draining when the resumed socket
- * closes and composes; when its segment then lands, supersession skips every
- * column write it would do — so the append itself refreshes the columns
- * Sandy owns (transcription_provider = conversation_relay; a recording's
- * transcript is never touched) and the relay_transcript stash when present.
- * Deterministic whichever socket runs it: all segments, generation order.
- */
-function appendSegmentPatch(db, segment) {
-  const compose = () => composeSegmentsSql(db, segment);
-  const appended = appendSegmentSql(db, segment);
-  return {
-    metadata: db.raw(
-      "CASE WHEN (metadata->'relay_transcript') IS NOT NULL AND ? IS NOT NULL THEN jsonb_set(?, '{relay_transcript,text}', to_jsonb(?::text), false) ELSE ? END",
-      [compose(), appended, compose(), appended],
-    ),
-    transcription: db.raw(
-      // Sandy-owned column ⇒ the whole composed call. An EMPTY, unowned
-      // column on a RECONNECTED row (the resumed socket closed silently
-      // before this segment landed) ⇒ filled — never on a call that never
-      // reconnected (a failed claim's voicemail row keeps its columns for
-      // the recording's transcript, hook r28 P1). A COMPOSITE the recording processor already wrote
-      // ("[AI segment]…[Staff|Voicemail segment]…") ⇒ only its AI portion is
-      // refreshed; the recorded portion is preserved verbatim
-      // (substring(from) with a NON-capturing group returns the whole
-      // match — a capturing group would return just the word, hook P0).
-      // A recording's own transcript is never touched.
-      `CASE
-         WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ?
-         WHEN ${FILL_EMPTY_SQL} AND ? IS NOT NULL THEN ?
-         WHEN transcription LIKE '[AI segment]%' AND transcription ~ ? AND ? IS NOT NULL
-           THEN '[AI segment]' || E'\\n' || ? || substring(transcription from ?)
-         WHEN ${RECORDED_ONLY_SQL} AND ? IS NOT NULL
-           THEN '[AI segment]' || E'\\n' || ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || transcription
-         ELSE transcription
-       END`,
-      [RELAY_PROVIDER, compose(), compose(), compose(), compose(), COMPOSITE_RECORDED_RE, compose(), compose(), COMPOSITE_RECORDED_RE, RELAY_PROVIDER, compose(), compose()],
-    ),
-    // The fill above also claims provider/status for the row; every other
-    // branch leaves them as they are.
-    transcription_provider: db.raw(
-      `CASE WHEN ${FILL_EMPTY_SQL} AND ? IS NOT NULL THEN ? ELSE transcription_provider END`,
-      [compose(), RELAY_PROVIDER],
-    ),
-    transcription_status: db.raw(
-      `CASE WHEN ${FILL_EMPTY_SQL} AND ? IS NOT NULL THEN 'completed' ELSE transcription_status END`,
-      [compose()],
-    ),
-    // A composite has no structured form: the recorded-only branch clears it.
-    transcript_structured: db.raw(
-      `CASE WHEN ${RECORDED_ONLY_SQL} AND ? IS NOT NULL THEN NULL ELSE transcript_structured END`,
-      [RELAY_PROVIDER, compose()],
-    ),
-    updated_at: new Date(),
-  };
-}
-// An EMPTY, unowned transcript column on a row that RECONNECTED — the only
-// empty column a late segment may fill (hook r28 P1).
-const FILL_EMPTY_SQL = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
-// A RECORDING's own transcript, alone, on a row that reconnected: the
-// processor finished before this segment landed (a silent resumed leg wrote
-// no stash). The recording is preserved; the AI segment goes ahead of it.
-const RECORDED_ONLY_SQL = "(transcription_provider IS NOT NULL AND transcription_provider <> ? AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
-const RELAY_PROVIDER = require('./relay-transcript').TRANSCRIPTION_PROVIDER;
-// The recorded half of a processor composite, from its segment header to the end (non-capturing!).
-const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
-
-/** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
-function generationFenceSql(q, generation) {
-  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0]);
-}
-
 /** A failure callback may finalize only the generation it proved. */
 function fallbackFence(q, { generation, callbackGeneration }) {
   return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [generation])
     .whereRaw("(?::bigint = 0 OR ?::bigint = ?::bigint OR COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?)",
       [generation, callbackGeneration, generation, generation]);
-}
-
-/** Order segments the way the SQL does; the in-memory twin for summaries/tests. */
-function segmentsText(segments = []) {
-  return [...(Array.isArray(segments) ? segments : [])]
-    .filter((s) => s && String(s.text || '').trim())
-    .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0))
-    .map((s) => String(s.text))
-    .join(SEGMENT_SEPARATOR);
 }
 
 /**
@@ -337,26 +170,6 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
   }
 }
 
-/** The caller's lines of a played-text transcript (the capture floor's summary is built from these). */
-function callerTurnsFromText(text) {
-  const callerLabel = `${require('./relay-transcript').CALLER_LABEL}: `;
-  return String(text || '').split('\n').filter((line) => line.startsWith(callerLabel)).map((line) => line.slice(callerLabel.length).trim()).filter(Boolean);
-}
-
-/** The latest promise per kind across a row's segments, in generation order. */
-function latestPromises(segments) {
-  const ordered = [...(Array.isArray(segments) ? segments : [])]
-    .filter((seg) => seg && typeof seg === 'object')
-    .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0));
-  const byKind = new Map();
-  for (const seg of ordered) {
-    for (const p of (Array.isArray(seg.promises) ? seg.promises : [])) {
-      if (p && p.kind) byKind.set(String(p.kind), { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at || null });
-    }
-  }
-  return [...byKind.entries()].map(([kind, v]) => ({ kind, ...v }));
-}
-
 /**
  * The row's reconnect marks (bounded, fail-soft null) — /relay-complete's
  * discriminator between a Twilio RETRY of the first failure (no `gen`, or a
@@ -395,22 +208,13 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
 
 module.exports = {
   RECONNECT_LIMIT,
-  SEGMENT_SEPARATOR,
   isRecoveryGateOn,
   claimReconnect,
   undoLateReconnect,
   reissueReconnect,
   resumeGreeting,
-  buildSegment,
-  appendSegmentSql,
-  appendSegmentPatch,
-  composeSegmentsSql,
-  generationFenceSql,
   fallbackFence,
-  segmentsText,
   loadResumeState,
   readReconnectState,
-  latestPromises,
-  callerTurnsFromText,
   RESUME_SEED_MAX_CHARS,
 };
