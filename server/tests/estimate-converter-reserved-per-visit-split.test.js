@@ -28,11 +28,11 @@ describe('reservedAcceptPerVisitSplit', () => {
     })).toEqual({ reserved: 91.8, promoted: [60] });
   });
 
-  test('pest bills at the ACCEPTED cadence, not the line\'s stale quote-time count', () => {
-    const stalePest = { ...pestLine, visitsPerYear: 12 };
+  test('a pest line with no visit count of its own bills at the ACCEPTED cadence', () => {
+    const countlessPest = { service: 'pest_control', name: 'Pest Control', annualAfterDiscount: 367.2 };
     expect(reservedAcceptPerVisitSplit({
       reservedPrice: 151.8,
-      reservedService: stalePest,
+      reservedService: countlessPest,
       promotedServices: [lawnLine],
       acceptedPlanFrequency: 'quarterly',
     })).toEqual({ reserved: 91.8, promoted: [60] });
@@ -100,5 +100,38 @@ describe('seeded follow-ups take an explicit per-visit price over the parent cop
     const rows = buildRecurringFollowUpRows(parent, { pattern: 'quarterly', estimatedPrice: undefined });
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) expect(row.estimated_price).toBe(151.8);
+  });
+});
+
+describe('reservedAcceptPerVisitSplit — codex #3938 r1', () => {
+  test('a pest line priced at one cadence and ACCEPTED at another declines (its annual is quote-time)', () => {
+    const quarterlyBuiltPest = { service: 'pest_control', name: 'Pest Control', annualAfterDiscount: 367.2, visitsPerYear: 4 };
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 90.6,
+      reservedService: quarterlyBuiltPest,
+      promotedServices: [lawnLine],
+      acceptedPlanFrequency: 'monthly',
+    })).toBeNull();
+  });
+
+  test('per-visit amounts follow the per-application rule (annual / visits, rounded) — parity with single-program children', () => {
+    // 46/mo lawn, 9 visits: 552 / 9 = 61.33 — the same figure a single-program
+    // accept stamps on every child via perApplicationChargeAmount.
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 153.13,
+      reservedService: pestLine,
+      promotedServices: [{ service: 'lawn_care', name: 'Every 6 Weeks Lawn Care Service', mo: 46, visitsPerYear: 9 }],
+      acceptedPlanFrequency: 'quarterly',
+    })).toEqual({ reserved: 91.8, promoted: [61.33] });
+  });
+
+  test('a termite line beside a reserved pest accept prices from its own annual', () => {
+    const bait = { service: 'termite_bait', name: 'Termite Bait Stations', annualAfterDiscount: 480, visitsPerYear: 4 };
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 211.8,
+      reservedService: pestLine,
+      promotedServices: [bait],
+      acceptedPlanFrequency: 'quarterly',
+    })).toEqual({ reserved: 91.8, promoted: [120] });
   });
 });

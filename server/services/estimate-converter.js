@@ -2586,11 +2586,18 @@ function reservedAcceptPerVisitSplit({
   if (!(target > 0) || !reservedService || !promotedServices.length) return null;
   const perVisit = (svc) => {
     const annual = recurringLineAnnualAmount(svc);
-    // Pest bills at the ACCEPTED cadence, not the line's quote-time count
-    // (acceptedPestSelectionVisits doctrine).
-    const visits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency)
-      ?? visitsPerYearForRecurringService(svc);
+    // Pest bills at the ACCEPTED cadence (acceptedPestSelectionVisits
+    // doctrine) — but the line's annual was priced at ITS cadence, so an
+    // accept that CHANGED the pest cadence leaves no per-service figure to
+    // split from (codex #3938 r1 P1): decline rather than divide a
+    // quote-time annual by the accepted count.
+    const lineVisits = visitsPerYearForRecurringService(svc);
+    const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
+    if (acceptedVisits && lineVisits && acceptedVisits !== lineVisits) return 0;
+    const visits = acceptedVisits ?? lineVisits;
     if (!(annual > 0) || !(visits > 0)) return 0;
+    // Same per-visit rule as perApplicationChargeAmount (billing-cadence.js):
+    // the plan annual over its visits, rounded to cents.
     return roundMoney(annual / visits);
   };
   const reserved = perVisit(reservedService);
@@ -5119,6 +5126,9 @@ const EstimateConverter = {
               // billing-rider completion profile); bait resolves the station
               // service.
               catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
+              // The scheduling shape above is name/cadence only; the split
+              // below prices from the accepted LINE (codex #3938 r1 P1).
+              pricingLine: line,
             };
           });
         // Mosquito promotion (codex r16 P1): a recurring mosquito line beside
@@ -5316,44 +5326,7 @@ const EstimateConverter = {
                 : fam === 'tree_shrub' ? 'tree & shrub program' : 'lawn program',
             };
           });
-        const promotedUnits = [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits];
-        // One reserved row, no combo rewrite pending on it, a stamped price:
-        // the row stands for exactly one accepted line and its price is the
-        // route's same-day total. Split it back into per-line per-visit
-        // amounts for the CHILDREN of every series seeded below. A unit that
-        // shares the reserved line's family IS the reserved program
-        // (alreadyReserved skips its insert) and is not a second line.
-        if (reservedStart && reservedRows.length === 1 && comboRewritePairs.length === 0
-          && Number(reservedStart.estimated_price) > 0 && promotedUnits.length) {
-          const reservedLineForSplit = recurringServiceForScheduledRow(
-            recurringServicesForConversion,
-            reservedStart,
-            process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
-              ? seedFamilyForReservedIdentity(
-                reservedServiceKeyById.get(reservedStart.service_id)
-                  || String(reservedStart.service_key_snapshot || '') || null,
-              )
-              : null,
-          );
-          const reservedLineKey = reservedLineForSplit ? recurringServiceKey(reservedLineForSplit) : null;
-          const splitUnits = reservedLineForSplit
-            ? promotedUnits.filter((unit) => recurringServiceKey(unit.service) !== reservedLineKey)
-            : [];
-          const split = reservedAcceptPerVisitSplit({
-            reservedPrice: reservedStart.estimated_price,
-            reservedService: reservedLineForSplit,
-            promotedServices: splitUnits.map((unit) => unit.service),
-            acceptedPlanFrequency,
-          });
-          if (split) {
-            reservedPerVisitSplit = {
-              reserved: split.reserved,
-              byUnit: new Map(splitUnits.map((unit, index) => [unit, split.promoted[index]])),
-            };
-          }
-        }
-        for (const unit of promotedUnits) {
-          if (!reservedStart?.scheduled_date) break;
+        const unitAlreadyReserved = (unit) => {
           // A reserved row already covering this program means nothing to
           // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
           // or snapshot), codex r20 P1.
@@ -5366,7 +5339,7 @@ const EstimateConverter = {
           // match by CATALOG IDENTITY only; every other family keeps
           // label-or-identity.
           const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';
-          const alreadyReserved = reservedRows.some((row) => {
+          return reservedRows.some((row) => {
             // POST-rewrite identity under the gate: a row the rider route
             // is about to rewrite covers what it will BECOME (audit P0).
             const reservedKey = (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
@@ -5430,7 +5403,53 @@ const EstimateConverter = {
             }
             return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
           });
-          if (alreadyReserved) continue;
+        };
+        const promotedUnits = [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits];
+        // One reserved row, no combo rewrite pending on it, a stamped price:
+        // the row stands for exactly one accepted line and its price is the
+        // route's same-day total. Split it back into per-line per-visit
+        // amounts for the CHILDREN of every series seeded below. A unit that
+        // shares the reserved line's family IS the reserved program
+        // (alreadyReserved skips its insert) and is not a second line.
+        if (reservedStart && reservedRows.length === 1 && comboRewritePairs.length === 0
+          && Number(reservedStart.estimated_price) > 0 && promotedUnits.length) {
+          const reservedLineForSplit = recurringServiceForScheduledRow(
+            recurringServicesForConversion,
+            reservedStart,
+            process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+              ? seedFamilyForReservedIdentity(
+                reservedServiceKeyById.get(reservedStart.service_id)
+                  || String(reservedStart.service_key_snapshot || '') || null,
+              )
+              : null,
+          );
+          // The units that will insert below — the same verdict the loop
+          // takes, so a promotion the reserved row already covers never
+          // counts as a second line (codex #3938 r1 P1: a family heuristic
+          // dropped the recurring palm program beside a reserved ONE-TIME
+          // palm row). With a one-time palm item sold, a palm-family
+          // reserved row may be THAT item's visit (the binding below
+          // decides) — no split then.
+          const splitUnits = (reservedLineForSplit
+            && !(estimateHasOneTimePalmItem && isPalmInjectionFamily(reservedLineForSplit, reservedStart)))
+            ? promotedUnits.filter((unit) => !unitAlreadyReserved(unit))
+            : [];
+          const split = reservedAcceptPerVisitSplit({
+            reservedPrice: reservedStart.estimated_price,
+            reservedService: reservedLineForSplit,
+            promotedServices: splitUnits.map((unit) => unit.pricingLine || unit.service),
+            acceptedPlanFrequency,
+          });
+          if (split) {
+            reservedPerVisitSplit = {
+              reserved: split.reserved,
+              byUnit: new Map(splitUnits.map((unit, index) => [unit, split.promoted[index]])),
+            };
+          }
+        }
+        for (const unit of promotedUnits) {
+          if (!reservedStart?.scheduled_date) break;
+          if (unitAlreadyReserved(unit)) continue;
           try {
             // Copy the customer's picked slot onto the added row (Codex r2):
             // same trip, same window, same tech/zone — otherwise dispatch
