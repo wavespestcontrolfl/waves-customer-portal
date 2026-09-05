@@ -134,8 +134,8 @@ describe('ReservicePage states', () => {
     });
     renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
-    fireEvent.click(screen.getByRole('button', { name: /Book Sunday, July 12, 1:00 PM — free/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
 
     await waitFor(() => {
       expect(screen.getByText("You're all set")).toBeInTheDocument();
@@ -176,8 +176,8 @@ describe('ReservicePage states', () => {
     }));
     renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
-    fireEvent.click(screen.getByRole('button', { name: /Book Sunday, July 12/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Book .* free/ }));
 
     expect(await screen.findByText(/you're covered/)).toBeInTheDocument();
   });

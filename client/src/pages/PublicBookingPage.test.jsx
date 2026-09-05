@@ -192,8 +192,8 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
 
     // Contact step is EMPTY — the ambient customer was not prefilled in.
@@ -231,8 +231,8 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
 
     const firstName = await screen.findByLabelText('First name');
@@ -257,8 +257,8 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
 
     const firstName = await screen.findByLabelText('First name');
@@ -279,8 +279,8 @@ describe('PublicBookingPage contact phone normalization', () => {
     render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
     fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Pat' } });
     fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lee' } });
