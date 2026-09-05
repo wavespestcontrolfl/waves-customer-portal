@@ -12854,10 +12854,23 @@ const CallRecordingProcessor = {
                         { techId: defaultTechnicianId, date: dayRow.day },
                       ]);
                     }
-                    const [updatedExisting] = await trx('scheduled_services')
-                      .where({ id: existing.id })
-                      .update({ technician_id: defaultTechnicianId, route_order: null, updated_at: new Date() })
-                      .returning('*');
+                    // Re-checked FOR SHARE on the writing trx: the default tech was
+                    // resolved before this transaction opened. If eligibility
+                    // changed, leave the reused row unassigned rather than assign.
+                    let reuseTechId = defaultTechnicianId;
+                    try {
+                      await assertAssignableTechnician(reuseTechId, { conn: trx });
+                    } catch (eligErr) {
+                      if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+                      logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
+                      reuseTechId = null;
+                    }
+                    const [updatedExisting] = reuseTechId
+                      ? await trx('scheduled_services')
+                        .where({ id: existing.id })
+                        .update({ technician_id: reuseTechId, route_order: null, updated_at: new Date() })
+                        .returning('*')
+                      : [existing];
                     primaryRow = updatedExisting || existing;
                     // Visit-group seam (visit-group-scope.md §2; codex #3590
                     // r12): this direct assignment bypasses assignDispatchJob,

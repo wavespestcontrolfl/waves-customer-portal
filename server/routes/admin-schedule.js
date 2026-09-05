@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
+const { applyAssignable, assertAssignableTechnician, isAssignable } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
@@ -1466,6 +1466,22 @@ function dateOnly(value) {
 function recurringTemplateTechnicianId(parent) {
   if (parent?.recurring_technician_override) return parent.recurring_technician_id || null;
   return parent?.recurring_technician_id || parent?.technician_id || null;
+}
+
+// The template tech for a NEW series child, fenced on the writing trx: if
+// the parent's tech is no longer assignable (offboarded, or field eligibility
+// removed) the child is seeded unassigned so auto-dispatch places it — never
+// onto a tech who cannot take it. FOR SHARE conflicts with the Team tab's
+// FOR UPDATE, so the change cannot commit underneath the insert.
+async function assignableRecurringTemplateTechnicianId(conn, parent) {
+  const techId = recurringTemplateTechnicianId(parent);
+  if (!techId) return null;
+  let q = conn('technicians').where({ id: techId });
+  if (conn.isTransaction) q = q.forShare();
+  const tech = await q.first('id', 'employment_status', 'field_dispatchable');
+  if (isAssignable(tech)) return techId;
+  logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
+  return null;
 }
 
 // Statuses that mean a series visit is still ahead of us. Confirmed counts:
@@ -9935,7 +9951,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const childIdentity = await resolveSeriesChildIdentity(trx, parent);
             const childData = {
               customer_id: parent.customer_id,
-              technician_id: recurringTemplateTechnicianId(parent),
+              technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
@@ -11797,7 +11813,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
       customer_id: parent.customer_id,
-      technician_id: recurringTemplateTechnicianId(parent),
+      technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
       scheduled_date: nd,
       window_start: parent.window_start,
       window_end: parent.window_end,
@@ -12104,7 +12120,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           const childIdentity = await resolveSeriesChildIdentity(conn, parent);
           const nextData = {
             customer_id: parent.customer_id,
-            technician_id: recurringTemplateTechnicianId(parent),
+            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent),
             scheduled_date: nextStr,
             window_start: parent.window_start, window_end: parent.window_end,
             service_type: childIdentity.service_type, status: 'pending',
@@ -16907,7 +16923,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
@@ -16997,7 +17013,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
