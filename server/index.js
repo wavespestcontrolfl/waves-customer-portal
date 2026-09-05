@@ -1012,6 +1012,14 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
   logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET'}`);
 
   (async () => {
+    // Register production schedulers before the potentially slow pricing read.
+    if (process.env.WAVES_LOCAL_DEV !== '1' && config.nodeEnv !== 'test') {
+      initScheduledJobs();
+      // Banking sync stays ungated so passive payout backfill keeps working
+      // when GATE_CRON_JOBS is off. See scheduler.js for the rationale.
+      initBankingSync();
+    }
+
     // This read-only configuration refresh is needed in managed dev too.
     try {
       const { syncConstantsFromDB } = require('./services/pricing-engine');
@@ -1023,13 +1031,6 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
     // The managed launcher uses isolated fixtures; recovery workers must not
     // mutate those fixtures between assertions. Production recovery is unchanged.
     if (process.env.WAVES_LOCAL_DEV === '1') return;
-    if (config.nodeEnv !== 'test') {
-      initScheduledJobs();
-      // Banking sync runs ungated (passive Stripe→DB mirror, no customer
-      // side effects) so payout backfill keeps working when GATE_CRON_JOBS
-      // is off. See scheduler.js for the full rationale.
-      initBankingSync();
-    }
 
     // Terminal Tap to Pay: surface missing/short TERMINAL_HANDOFF_SECRET in
     // the deploy log immediately. Not a hard boot failure — the portal is
