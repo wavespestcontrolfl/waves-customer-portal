@@ -104,7 +104,6 @@ const SELECTORS = Object.freeze({
   billToAccount: 'input[type="radio"][value*="account"], input[type="radio"][value*="ACCOUNT"], label:has-text("Bill to account")',
   // Only the fallback for an UNNAMED radio: a named one is counted in its own
   // group (Codex #3876 r16 P2 — an opaque value="12345" is a valid tender).
-  billToAccountSelected: 'input[type="radio"][value*="account"]:checked, input[type="radio"][value*="ACCOUNT"]:checked, input[type="radio"][value*="Account"]:checked',
   // Identity readings are SCOPED to the checkout's own billing / shipping
   // sections — never a header account menu, a footer address, or an
   // ancestor's text — and place() requires exactly ONE match (pre-push P0).
@@ -289,8 +288,16 @@ async function cartLines(page, lineSelector = SELECTORS.cartLine) {
     const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
     out.push({ sku, qty: !stillShown || qtyText == null || qtyText === '' ? NaN : qty });
   }
-  const after = await page.locator(lineSelector).count().catch(() => -1);
-  if (after !== all.length) return null;
+  // The rows read must still be the rows shown: the count AND the
+  // visibility of every match are re-read after the scan — a row that was
+  // hidden at the scan and is visible now (or the reverse) is churn the
+  // snapshot missed, not a proof; the count alone would pass it (Codex #3876
+  // r18 P1, extending the r13 count check). Unreadable = fails closed.
+  const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
+  let again;
+  try { again = await matches(page, lineSelector, { strict: true }); }
+  catch { return null; }
+  if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return null;
   return out;
 }
 
@@ -654,10 +661,15 @@ async function distinctBillToOptions(page, shown) {
 // (`name`), so a label-associated radio with an opaque value counts (Codex
 // #3876 r16 P2); an unnamed radio falls back to the account-value selector.
 // Null = unreadable (the caller refuses).
+// The count of checked radios in the verified radio's OWN group (its
+// `name`). An UNNAMED radio has no group: unnamed radios are not mutually
+// exclusive, so a checked saved-card radio beside it would go uncounted and
+// the tender would be ambiguous — null, which the callers refuse (Codex
+// #3876 r18 P1; replaces the r16 account-value fallback).
 async function selectedTenderCount(page, radio) {
   const name = await radio.getAttribute('name').catch(() => null);
-  const selector = name ? `input[type="radio"][name="${name.replace(/["\\]/g, '\\$&')}"]:checked` : SELECTORS.billToAccountSelected;
-  return page.locator(selector).count().catch(() => null);
+  if (!name) return null;
+  return page.locator(`input[type="radio"][name="${name.replace(/["\\]/g, '\\$&')}"]:checked`).count().catch(() => null);
 }
 
 // The radio input a bill-to option resolves to: the element itself when it
@@ -730,7 +742,8 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
   if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is not visible — not the tender the checkout shows');
   const checkedCount = await selectedTenderCount(page, radio);
-  if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at checkout — cannot tell which the order bills`);
+  if (checkedCount == null) await refuse('bill_to_account_unverified', 'the selected radio\'s tender group cannot be counted (unnamed radio, or an unreadable count) — the bot never submits on an unverifiable tender');
+  if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount} tenders read as selected in the bill-to-account radio's group at checkout — cannot tell which the order bills`);
   evidence.billToAccountVerified = true;
   return radio;
 }
