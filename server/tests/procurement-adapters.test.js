@@ -207,7 +207,7 @@ describe('siteone internals', () => {
 
   test('every selector lives in the frozen SELECTORS map', () => {
     expect(Object.isFrozen(SELECTORS)).toBe(true);
-    for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'checkoutLine', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');
+    for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'checkoutLine', 'placeOrder']) expect(typeof SELECTORS[k]).toBe('string');
   });
 });
 
@@ -249,7 +249,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const swapping = (l) => st.checkoutRowSwapAtClick && st.atClick && l.sku === 'S1-77';
     // l.detachedDuringScan: this row's visibility read throws (it detached between the count and the scan) (r13 P1)
     // l.hiddenUntilRead: this row is hidden when the scan enumerates visibility and becomes visible once another row's SKU is read (r18 P1)
-    const line = (l) => el({ count: 1, isVisibleThrows: !!l.detachedDuringScan, get visible() { return !(swapping(l) && st.rowSwapped) && !(l.hiddenUntilRead && !st.rowRead); }, detachedWhen: () => swapping(l) && st.rowSwapped, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: swapping(l) && st.rowSwapped ? 'S1-99' : l.sku, onRead: () => { if (swapping(l)) st.rowSwapped = true; st.rowRead = true; } }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
+    // checkoutRowSwapAfterScan: the checkout row is replaced by a different visible row (S1-99) after the scan read it — same count, same visibility mask (r20 P2)
+    const swappedAfterScan = (l, atCheckout) => atCheckout && st.checkoutRowSwapAfterScan && (st.checkoutSkuReads || 0) >= 1;
+    const line = (l, atCheckout = false) => el({ count: 1, isVisibleThrows: !!l.detachedDuringScan, get visible() { return !(swapping(l) && st.rowSwapped) && !(l.hiddenUntilRead && !st.rowRead); }, detachedWhen: () => swapping(l) && st.rowSwapped, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: swapping(l) && st.rowSwapped ? 'S1-99' : swappedAfterScan(l, atCheckout) ? 'S1-99' : l.sku, onRead: () => { if (swapping(l)) st.rowSwapped = true; st.rowRead = true; if (atCheckout) st.checkoutSkuReads = (st.checkoutSkuReads || 0) + 1; } }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
     const resolve = (sel) => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
@@ -283,7 +285,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.addToCart) return st.productControlsHiddenFirst ? hiddenCopy(addToCart) : addToCart;
       // The checkout order summary mirrors the cart unless checkoutLines overrides it, or checkoutLinesAtClick once the Place Order stage has begun (r7 P1)
       // checkoutLineAppears(AtClick): a second row appears between the scan's count and the re-count (r13 P1)
-      if (sel === S.checkoutLine) { const ls = st.checkoutLines || (st.checkoutLinesAtClick && st.atClick ? st.checkoutLinesAtClick : st.cart); st.lineCounts = (st.lineCounts || 0) + 1; const grow = (st.checkoutLineAppears || (st.checkoutLineAppearsAtClick && st.atClick)) && st.lineCounts % 2 === 0 ? 1 : 0; return el({ count: ls.length + grow, nth: (i) => (i < ls.length ? line(ls[i]) : line({ sku: 'S1-99', qty: 1 })) }); }
+      if (sel === S.checkoutLine) { const ls = st.checkoutLines || (st.checkoutLinesAtClick && st.atClick ? st.checkoutLinesAtClick : st.cart); st.lineCounts = (st.lineCounts || 0) + 1; const grow = (st.checkoutLineAppears || (st.checkoutLineAppearsAtClick && st.atClick)) && st.lineCounts % 2 === 0 ? 1 : 0; return el({ count: ls.length + grow, nth: (i) => (i < ls.length ? line(ls[i], true) : line({ sku: 'S1-99', qty: 1 }, true)) }); }
       // cartLinesResponsive: every cart line is rendered twice — a hidden mobile copy after the visible row
       if (sel === S.cartLine) return st.cartLinesResponsive
         ? el({ count: st.cart.length * 2, nth: (i) => (i % 2 ? el({ count: 1, visible: false }) : line(st.cart[i / 2])) })
@@ -834,6 +836,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       expect(unnamed.st.trialDone).toBeUndefined();
       expect(unnamed.st.cart).toEqual([]);
     }
+  });
+
+  test('a checkout row replaced AFTER the scan by a different visible row (same count, same visibility mask) is churn — the rows are read again and must match (r20 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutRowSwapAfterScan: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
+    expect(st.trialDone).toBeUndefined();
+    expect(st.cart).toEqual([]);
   });
 
   test('a checkout row hidden at the scan that becomes visible DURING it (same match count) is churn — refused, never a proof of exactly one line (r18 P1)', async () => {

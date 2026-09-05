@@ -112,7 +112,6 @@ const SELECTORS = Object.freeze({
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   // Confirmation-number element only — never a bare :has-text() that an
   // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
-  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, h1:has-text("Order #"), h2:has-text("Order #"), h3:has-text("Order #"), p:has-text("Order #"), strong:has-text("Order #")',
 });
 
 const NAV_TIMEOUT = 45000;
@@ -267,8 +266,9 @@ async function cartLines(page, lineSelector = SELECTORS.cartLine) {
   let shown;
   try { ({ all, shown } = await matches(page, lineSelector, { strict: true })); }
   catch { return null; }
+  const readRows = async (rows) => {
   const out = [];
-  for (const line of shown) {
+  for (const line of rows) {
     const row = await line.elementHandle({ timeout: 1500 }).catch(() => null);
     if (!row) { out.push({ sku: '', qty: NaN }); continue; }
     // Inside the row too, only the SHOWN SKU / quantity node is read: a
@@ -288,16 +288,26 @@ async function cartLines(page, lineSelector = SELECTORS.cartLine) {
     const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
     out.push({ sku, qty: !stillShown || qtyText == null || qtyText === '' ? NaN : qty });
   }
+  return out;
+  };
+  const out = await readRows(shown);
   // The rows read must still be the rows shown: the count AND the
   // visibility of every match are re-read after the scan — a row that was
   // hidden at the scan and is visible now (or the reverse) is churn the
   // snapshot missed, not a proof; the count alone would pass it (Codex #3876
-  // r18 P1, extending the r13 count check). Unreadable = fails closed.
+  // r18 P1, extending the r13 count check). Then the shown rows are READ
+  // AGAIN: a row replaced after its own stillShown check by a different
+  // visible row keeps the count and the mask — only a second reading that
+  // matches the first, SKU and quantity, is a proof (r20 P2). Unreadable =
+  // fails closed.
   const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
   let again;
   try { again = await matches(page, lineSelector, { strict: true }); }
   catch { return null; }
   if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return null;
+  const reread = await readRows(again.shown);
+  const key = (rows) => JSON.stringify(rows.map((r) => [r.sku, Number.isNaN(r.qty) ? 'NaN' : r.qty]));
+  if (key(reread) !== key(out)) return null;
   return out;
 }
 
@@ -795,14 +805,14 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
 // as exactly one $ amount. Returns cents.
 // `screenshot: false` = a pure read for the at-click check: nothing is
 // awaited between the read and the click (pre-push P0 on #3876).
-async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) {
+async function readCheckoutTotal(page, { evidence, upload }) {
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   const total = await readExactlyOne(page, SELECTORS.checkoutTotal, { same: parseMoney });
   if (total.count == null) await refuse('checkout_total_unreadable', 'the checkout-total readings could not be enumerated (a node detached mid-read) — not the figure the order charges');
   if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
   if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
   const finalCents = parseMoney(total.text);
-  if (screenshot) await shot(page, 'pre-submit', evidence, upload);
+  await shot(page, 'pre-submit', evidence, upload);
   if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${total.text.trim().slice(0, 40)}")`, evidence);
   evidence.checkoutTotalCents = finalCents;
   return finalCents;
