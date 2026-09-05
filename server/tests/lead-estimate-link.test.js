@@ -563,6 +563,20 @@ describe('lead-estimate link service', () => {
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['re-assigned to another customer', { customer_id: 'customer-OTHER', phone: '9415550142' }],
+    ['re-contacted (unlinked, contact no longer matches the estimate)', { customer_id: null, phone: '9415559999', email: 'other@example.com' }],
+  ])('a named repeat %s since its run is not this opportunity: the fallback converts nothing (pre-push P1 on d3edd30)', async (_label, change) => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2r', estimate_data: { lead_id: 'lead-rep' }, customer_phone: '9415550142', customer_email: 'a@example.com' },
+      leadsById: { 'lead-rep': { id: 'lead-rep', status: 'duplicate', estimate_id: null, extracted_data: { duplicate_of_lead_id: 'lead-missing' }, ...change } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2r', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toEqual([]);
+  });
+
   test('a named duplicate row with NO server marker (staff closed it by hand) is a deliberate closure: its old wizard estimate accepting reopens nothing (pre-push P1 on 67dd818)', async () => {
     const database = makeAcceptDb({
       linked: [],

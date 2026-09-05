@@ -824,7 +824,14 @@ async function acceptWizardNamedLead(database, { dataLeadId, estimate, estimateI
   // the duplicate marker: a 'duplicate' row staff closed by hand carries
   // none and is a deliberate closure, never reopened by its old estimate
   // (the customer-link resolver's r13 rule; pre-push P1 on 67dd818).
-  if (named.status === 'duplicate' && duplicateMarkerOf(named) && !named.deleted_at && !named.estimate_id && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
+  // ...and only while the named row is still THIS customer's — linked to
+  // them, or unlinked with a contact that matches the accepted estimate —
+  // the rule the root is held to, so an old estimate never undoes a staff
+  // reassignment (pre-push P1 on d3edd30).
+  const namedOurs = () => (named.customer_id
+    ? !customerId || String(named.customer_id) === String(customerId)
+    : leadMatchesEstimateContact(named, estimate));
+  if (named.status === 'duplicate' && duplicateMarkerOf(named) && !named.deleted_at && !named.estimate_id && !creditedOnOriginal && namedOurs()) await convert(named, DUPLICATE_LEAD_CLAIM);
 }
 
 // Status sets the accept path's conditional stamps claim against (see
