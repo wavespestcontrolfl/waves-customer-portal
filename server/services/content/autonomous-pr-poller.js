@@ -1208,7 +1208,8 @@ async function maybeAutoMerge(run, pr) {
   // 1. Cloudflare preview build for the PR branch must be green.
   const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
   const deploy = await latestDeploymentForBranch(branch);
-  if (!deploy) return { pending: true, reason: 'preview_build_pending' };
+  // The bounded deployment search may miss an older successful preview.
+  if (!deploy) return { pending: true, transient: true, reason: 'preview_build_pending' };
   const { status } = extractStatus(deploy);
   if (status !== 'success') return { pending: true, reason: `preview_build_${status || 'pending'}` };
 

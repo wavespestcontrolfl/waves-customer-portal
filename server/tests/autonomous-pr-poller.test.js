@@ -809,8 +809,10 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('a blog blocked for 48 hours is retired automatically without merging', async () => {
-    const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const run = makeRun({ poll_pending_reason: 'preview_build_failed', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     setupDb({ pending: [run] });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'failed-deploy' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'failed' });
     gh.getPr.mockResolvedValue(openPr());
     const result = await poller.pollPending();
     expect(gh.closePr).toHaveBeenCalledWith(42);
@@ -819,8 +821,10 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('retirement preserves the blocker across closure and branch-deletion retries', async () => {
-    const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const run = makeRun({ poll_pending_reason: 'preview_build_failed', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     let updates = setupDb({ pending: [run] });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'failed-deploy' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'failed' });
     gh.getPr.mockResolvedValue(openPr());
     await poller.pollPending();
     expect(updates.some(u => u.updates.poll_pending_reason === 'automatic_retirement_pending')).toBe(false);
@@ -837,7 +841,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const done = await poller.pollPending();
     expect(gh.retireBranch).toHaveBeenCalledWith('content/autonomous-test');
     expect(done.results[0].closed).toBe(true);
-    expect(runUpdates(updates)[0].updates.failure_message).toContain('Last blocker: preview_build_pending.');
+    expect(runUpdates(updates)[0].updates.failure_message).toContain('Last blocker: preview_build_failed.');
   });
 
   test('a merge observed after branch cleanup wins over retirement', async () => {
@@ -859,15 +863,17 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('retirement never closes a PR that merged while its queue lock was acquired', async () => {
-    const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
+    const run = makeRun({ poll_pending_reason: 'preview_build_failed', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     setupDb({ pending: [run] });
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'failed-deploy' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'failed' });
     gh.getPr.mockResolvedValueOnce(openPr()).mockResolvedValue({ ...openPr(), state: 'closed', merged: true });
     const result = await poller.pollPending();
     expect(gh.closePr).not.toHaveBeenCalled();
     expect(result.results[0]).toMatchObject({ pending: true, reason: 'retirement_state_changed' });
   });
 
-  test('a changed current blocker resets the wait instead of retiring from stale evidence', async () => {
+  test('a missing preview remains transient instead of retiring from stale evidence', async () => {
     const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     setupDb({ pending: [run] });
     gh.getPr.mockResolvedValue(openPr());
