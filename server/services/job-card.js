@@ -494,11 +494,6 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   // three words of the same token in the grounding (a "20" moved from
   // "runs 20 min" to "20 dogs" is an invented fact, not a rephrase).
   if (numbersOutOfContext(body, grounding)) return 'ungrounded_number';
-  // Every sentence must share a content word with the grounding: a sentence
-  // the notes never mention ("No pets are present." over "First visit on
-  // record.", or an instruction lifted from a visit note) is an invented
-  // fact, not a rephrase.
-  if (ungroundedSentence(body, grounding)) return 'ungrounded_sentence';
   // A rewrite that drops a safety-critical fact is not a rewrite — and one
   // that restates it under a negation ("No chemical sensitivity is
   // reported.") reverses it. Every fact's own words are removed before the
@@ -510,6 +505,11 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
     if (!needles.some((needle) => said.includes(needle))) continue;
     if (NEGATION_RE.test(needles.reduce((rest, needle) => rest.split(needle).join(' '), said))) return 'critical_fact_negated';
   }
+  // Every sentence must be made of the grounding's words (one connective
+  // allowed): a sentence the notes never mention ("No pets are present."
+  // over "First visit on record.", an instruction lifted from a visit note,
+  // or one shared word carrying invented guidance) is not a rephrase.
+  if (ungroundedSentence(body, grounding)) return 'ungrounded_sentence';
   return null;
 }
 
@@ -530,11 +530,15 @@ function criticalFacts(facts) {
   return out;
 }
 
-const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next', 'no', 'not', 'there', 'you', 'your', 'can', 'will', 'any', 'all', 'so', 'if', 'but', 'also', 'then', 'they', 'them', 'their', 'one']);
+const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next', 'no', 'not', 'there', 'you', 'your', 'can', 'will', 'any', 'all', 'so', 'if', 'but', 'also', 'then', 'they', 'them', 'their', 'one',
+  // Function words a rewrite adds freely; never a fact on their own.
+  'over', 'under', 'here', 'into', 'onto', 'after', 'before', 'during', 'while', 'when', 'where', 'which', 'who', 'what', 'how', 'than', 'still', 'just', 'now', 'only', 'very', 'much', 'more', 'most', 'some', 'such', 'each', 'every', 'other', 'same', 'both', 'too', 'again', 'ever', 'already', 'yet', 'once', 'out', 'up', 'down', 'off', 'back', 'please', 'today', 'we', 'our', 'he', 'she', 'his', 'her', 'i', 'my', 'do', 'does', 'did', 'done', 'been', 'being', 'am', 'may', 'might', 'should', 'would', 'could', 'must', 'shall',
+  "isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't", "hasn't", "haven't", "won't", "can't", "cannot"]);
 // Loose stem so "dogs" grounds "dog" and "sprayed" grounds "spray".
 const stem = (w) => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w).slice(0, 6);
 function contextWords(text) {
-  return String(text || '').toLowerCase().split(/\s+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
+  // "Mon/Thu" is two words.
+  return String(text || '').toLowerCase().split(/[\s/]+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
 }
 function neighbours(words, i) {
   return words.slice(Math.max(0, i - 3), i).concat(words.slice(i + 1, i + 4)).filter((w) => !/\d/.test(w) && !CONTEXT_STOPWORDS.has(w));
@@ -544,9 +548,16 @@ function neighbours(words, i) {
 function sentenceWords(text) {
   return String(text || '').split(/(?<=[.!?])\s+/).map(contextWords).filter((w) => w.length);
 }
+// A sentence may carry at most ONE content word the grounding lacks (a
+// connective like "found" or "runs"): "The dog is secured, so enter the
+// yard." shares "dog" and invents three — a securing plan and an entry
+// instruction — so one shared word must never carry a sentence.
 function ungroundedSentence(body, grounding) {
   const src = new Set(sentenceWords(grounding).flat().filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem));
-  return sentenceWords(body).some((words) => !words.some((w) => !CONTEXT_STOPWORDS.has(w) && src.has(stem(w))));
+  return sentenceWords(body).some((words) => {
+    const content = words.filter((w) => !CONTEXT_STOPWORDS.has(w));
+    return !content.length || content.filter((w) => !src.has(stem(w))).length > 1;
+  });
 }
 function numbersOutOfContext(body, grounding) {
   const src = sentenceWords(grounding);

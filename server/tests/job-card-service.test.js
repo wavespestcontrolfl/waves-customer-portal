@@ -72,7 +72,10 @@ describe('validateParagraph', () => {
     // An instruction lifted from a visit note is not in the grounding either.
     expect(jobCard.validateParagraph('Skip the back yard today.', 'Pets: dog. First visit on record.', [])).toBe('ungrounded_sentence');
     expect(jobCard.validateParagraph('This is the first visit on record.', 'First visit on record.', [])).toBeNull();
-    expect(jobCard.validateParagraph('Two dogs on site.', 'Pets: 2 dogs.', [])).toBeNull();
+    expect(jobCard.validateParagraph('There are two dogs.', 'Pets: 2 dogs.', [])).toBeNull();
+    // One shared word never carries a sentence (hook P1): "dog" is grounded, the securing plan and the entry instruction are not.
+    expect(jobCard.validateParagraph('The dog is secured, so enter the yard. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_sentence');
+    expect(jobCard.validateParagraph('A dog is on the property. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBeNull();
   });
 
   test('accepts a faithful 1–3 sentence rewrite', () => {
