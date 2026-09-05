@@ -386,6 +386,7 @@ class CompetitorGapMiner {
          ON CONFLICT (dedupe_key) DO UPDATE
            SET score = EXCLUDED.score,
                score_breakdown = EXCLUDED.score_breakdown,
+               claim_id = CASE WHEN opportunity_queue.status = 'expired' THEN NULL ELSE opportunity_queue.claim_id END,
                signal_metadata = EXCLUDED.signal_metadata,
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
