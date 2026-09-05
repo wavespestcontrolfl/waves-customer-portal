@@ -1082,9 +1082,12 @@ bounded, fenced UPDATE claims the reconnect on the call_log row
 NULL / status in-progress; a voicemail / transferred / relay_failed row is
 never resumed; an unconfirmed claim never re-renders, a late-landing one is
 put back) and the handler renders the same `<Connect><ConversationRelay>`
-the call started with (same action incl. `?lang=es` / `?sandbox=1`, a
-resumed welcome greeting, `<Parameter resumed="1">`, a token minted AFTER
-the stamp so the new socket's generation is ≥ the fence). The session
+the call started with (same action incl. `?lang=es` / `?sandbox=1`, plus
+`gen=<the row's relay_reconnect_ms>` so the resumed leg's own failure is
+told apart from a Twilio retry of the first leg's — a retry on a row that
+already reconnected gets a bare `<Response/>` and never ends the healthy
+session; a resumed welcome greeting, `<Parameter resumed="1">`, a token
+minted AFTER the stamp so the new socket's generation is ≥ the fence). The session
 treats `resumed` as a hint and re-proves it from the row before seeding the
 earlier turns or skipping its capture floor. A second failure: office open
 AND `GATE_VOICE_RELAY_TRANSFER` ⇒ the staff ring above (owner-bound to the

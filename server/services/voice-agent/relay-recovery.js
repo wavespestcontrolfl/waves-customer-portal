@@ -16,7 +16,11 @@ const RECONNECT_LIMIT = 1;
 const RESUME_STATE_TIMEOUT_MS = 2000;
 const PROVIDER_FAILURE_LIMIT = 2;
 const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
-const MAX_SEGMENT_TEXT_CHARS = 20000;
+// A segment keeps everything the transcript store keeps (relay-transcript's
+// own cap) — the composition must never be shorter than today's transcript.
+// The smaller cap applies ONLY to the model-history seed on a resumed leg.
+const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
+const RESUME_SEED_MAX_CHARS = 20000;
 
 function isRecoveryGateOn() {
   return process.env.GATE_VOICE_RELAY_RECOVERY === 'true';
@@ -193,9 +197,12 @@ async function loadResumeState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_M
       if (!meta || typeof meta !== 'object') return null;
       const reconnects = Number(meta.relay_reconnects) || 0;
       if (reconnects <= 0) return null;
+      const full = segmentsText(meta.relay_segments);
       return {
         reconnects,
-        segmentsText: segmentsText(meta.relay_segments),
+        reconnectMs: Number(meta.relay_reconnect_ms) || null,
+        // The seed keeps the TAIL (the most recent turns matter most).
+        segmentsText: full.length > RESUME_SEED_MAX_CHARS ? `[…]${full.slice(-RESUME_SEED_MAX_CHARS)}` : full,
         relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : null,
       };
     });
@@ -208,6 +215,26 @@ async function loadResumeState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_M
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * The row's reconnect marks (bounded, fail-soft null) — /relay-complete's
+ * discriminator between a Twilio RETRY of the first failure (no `gen`, or a
+ * stale one, on a row already reconnected) and the resumed leg's own
+ * failure (its action URL carries `gen` = the row's relay_reconnect_ms).
+ */
+async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_MS } = {}) {
+  if (!callSid) return null;
+  let timer;
+  const read = db('call_log').where('twilio_call_sid', callSid).first('metadata').then((row) => {
+    if (!row) return null;
+    let meta = row.metadata;
+    if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+    if (!meta || typeof meta !== 'object') return { reconnects: 0, reconnectMs: null };
+    return { reconnects: Number(meta.relay_reconnects) || 0, reconnectMs: Number(meta.relay_reconnect_ms) || null };
+  });
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); timer.unref?.(); });
+  try { return await Promise.race([read, timeout]); } catch { return null; } finally { clearTimeout(timer); }
 }
 
 /** 'handoff' once either counter reaches the limit; null otherwise. */
@@ -230,5 +257,7 @@ module.exports = {
   generationFenceSql,
   segmentsText,
   loadResumeState,
+  readReconnectState,
   providerFailurePolicy,
+  RESUME_SEED_MAX_CHARS,
 };

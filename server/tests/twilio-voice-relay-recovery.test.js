@@ -39,6 +39,7 @@ function mockRes() {
   res.send = jest.fn((body) => { res.body = body; return res; });
   return res;
 }
+const RECONNECTED_ROW = { metadata: { relay_session_claim_owner: 'nonce-1', relay_reconnects: 1, relay_reconnect_ms: 777 } };
 function primeDb({ claimRows = 1, firstRow = { metadata: { relay_session_claim_owner: 'nonce-1' } } } = {}) {
   const updates = [];
   const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis() };
@@ -100,8 +101,8 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(guardQ.orWhere).toHaveBeenCalledWith('call_outcome', 'ai_handled');
     // no voicemail stamp on this path
     expect(updates.some((u) => u.call_outcome === 'voicemail')).toBe(false);
-    // the render
-    expect(res.body).toContain('<Connect action="/api/webhooks/twilio/relay-complete" method="POST">');
+    // the render — the action carries the reconnect generation (= the claim's stamp)
+    expect(res.body).toContain(`<Connect action="/api/webhooks/twilio/relay-complete?gen=${claim.metadata.bindings[0]}" method="POST">`);
     expect(res.body).toContain('<ConversationRelay url="wss://portal.wavespestcontrol.com/ws/voice-agent?callSid=CA-rc-1&amp;t=v1.');
     expect(res.body).toContain('welcomeGreeting="Sorry, I lost you for a second — where were we?"');
     expect(res.body).toContain('<Parameter name="resumed" value="1" />');
@@ -114,7 +115,7 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     primeDb();
     const res = mockRes();
     await handlerFor('/relay-complete')({ body: FAILED, query: { lang: 'es' } }, res);
-    expect(res.body).toContain('<Connect action="/api/webhooks/twilio/relay-complete?lang=es" method="POST">');
+    expect(res.body).toMatch(/<Connect action="\/api\/webhooks\/twilio\/relay-complete\?lang=es&amp;gen=\d+" method="POST">/);
     expect(res.body).toContain('language="es-US"');
     expect(res.body).toContain('voice="es-voice-1"');
     expect(res.body).toContain('welcomeGreeting="Disculpe, se cortó por un segundo. ¿En qué estábamos?"');
@@ -129,7 +130,7 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     const res = mockRes();
     await handlerFor('/relay-complete')({ body: FAILED, query: { sandbox: '1' } }, res);
     delete process.env.SERVER_DOMAIN;
-    expect(res.body).toContain('<Connect action="/api/webhooks/twilio/relay-complete?sandbox=1" method="POST">');
+    expect(res.body).toMatch(/<Connect action="\/api\/webhooks\/twilio\/relay-complete\?sandbox=1&amp;gen=\d+" method="POST">/);
     expect(res.body).toContain('url="wss://preview.example.test/ws/voice-agent?callSid=CA-rc-1');
     expect(res.body).not.toContain('<Record');
     expect(res.body).not.toContain('<Hangup');
@@ -174,9 +175,9 @@ describe('/relay-complete — the second failure', () => {
   test('office open + transfer gate on ⇒ the 2A staff ring, owner-bound to the row\'s current claim owner, no voicemail', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
-    const { builder, updates } = primeDb({ claimRows: 0 });
+    const { builder, updates } = primeDb({ claimRows: 0, firstRow: RECONNECTED_ROW });
     const res = mockRes();
-    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    await handlerFor('/relay-complete')({ body: FAILED, query: { gen: '777' } }, res);
     expect(res.body).toContain('<Dial');
     expect(res.body).not.toContain('<Record');
     expect(res.body).not.toContain('ConversationRelay');
@@ -188,16 +189,16 @@ describe('/relay-complete — the second failure', () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     isOfficeOpenAt.mockReturnValue(false);
-    primeDb({ claimRows: 0 });
+    primeDb({ claimRows: 0, firstRow: RECONNECTED_ROW });
     const res = mockRes();
-    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    await handlerFor('/relay-complete')({ body: FAILED, query: { gen: '777' } }, res);
     expect(res.body).toContain('<Record');
     expect(res.body).not.toContain('<Dial');
     isOfficeOpenAt.mockReturnValue(true);
     delete process.env.GATE_VOICE_RELAY_TRANSFER;
-    primeDb({ claimRows: 0 });
+    primeDb({ claimRows: 0, firstRow: RECONNECTED_ROW });
     const res2 = mockRes();
-    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res2);
+    await handlerFor('/relay-complete')({ body: FAILED, query: { gen: '777' } }, res2);
     expect(res2.body).toContain('<Record');
     expect(res2.body).not.toContain('<Dial');
   });
@@ -205,12 +206,29 @@ describe('/relay-complete — the second failure', () => {
   test('a sandbox second failure ⇒ today\'s relay_failed stamp + hangup (never staff)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
-    const { updates } = primeDb({ claimRows: 0 });
+    const { updates } = primeDb({ claimRows: 0, firstRow: RECONNECTED_ROW });
     const res = mockRes();
-    await handlerFor('/relay-complete')({ body: FAILED, query: { sandbox: '1' } }, res);
+    await handlerFor('/relay-complete')({ body: FAILED, query: { sandbox: '1', gen: '777' } }, res);
     expect(res.body).toContain('<Hangup/>');
     expect(res.body).not.toContain('<Dial');
     expect(updates.some((u) => u.call_outcome === 'relay_failed')).toBe(true);
+  });
+
+  test('a Twilio RETRY of the first leg\'s failure (no gen / stale gen) on a row that already reconnected is IGNORED — the healthy resumed session is never ended (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    for (const query of [{}, { gen: '1' }, { lang: 'es' }]) {
+      const { updates } = primeDb({ claimRows: 0, firstRow: RECONNECTED_ROW });
+      const res = mockRes();
+      await handlerFor('/relay-complete')({ body: FAILED, query }, res);
+      expect(res.body).toMatch(/^<\?xml[^>]*\?><Response\/>$/);
+      expect(updates.filter((u) => u.call_outcome === 'voicemail' || (u.metadata && String(u.metadata.sql).includes('relay_transfer_ring_at')))).toHaveLength(0);
+    }
+    // …whereas a never-reconnected row that is simply not resumable (0 rows, reconnects 0) takes today's path.
+    primeDb({ claimRows: 0, firstRow: { metadata: { relay_reconnects: 0 } } });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    expect(res.body).toContain('<Record');
   });
 
   test('a failed session carrying a transfer frame still takes the recovery path (the frame is not trusted on a failure)', async () => {

@@ -117,7 +117,7 @@ describe('relay-recovery module', () => {
 
   test('loadResumeState proves the hint from the row: reconnects > 0 ⇒ state; otherwise null; bounded and fail-soft', async () => {
     const { db } = primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
-    expect(await recovery.loadResumeState(db, 'CA-1')).toEqual({ reconnects: 1, segmentsText: 'Caller: ants', relayLeadId: 'L1' });
+    expect(await recovery.loadResumeState(db, 'CA-1')).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1' });
     primeDb({ firstRow: { metadata: JSON.stringify({ relay_segments: [{ generation: 1, text: 'x' }] }) } });
     expect(await recovery.loadResumeState(db, 'CA-1')).toBeNull(); // no reconnect stamp ⇒ a forged <Parameter resumed> proves nothing
     primeDb({ firstRow: null });
@@ -126,6 +126,18 @@ describe('relay-recovery module', () => {
     builder.first = jest.fn(() => new Promise(() => {}));
     expect(await recovery.loadResumeState(db, 'CA-1', { timeoutMs: 20 })).toBeNull();
     expect(await recovery.loadResumeState(db, '')).toBeNull();
+  });
+
+  test('a segment keeps everything the transcript store keeps; only the resume SEED is capped (tail) (hook P1)', async () => {
+    const { MAX_TRANSCRIPT_CHARS } = require('../services/voice-agent/relay-transcript');
+    const long = 'x'.repeat(MAX_TRANSCRIPT_CHARS + 10);
+    expect(recovery.buildSegment({ generation: 1, text: long }).text).toHaveLength(MAX_TRANSCRIPT_CHARS);
+    const { db } = primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_reconnect_ms: 5, relay_segments: [{ generation: 1, text: 'a'.repeat(recovery.RESUME_SEED_MAX_CHARS + 50) }] } } });
+    const state = await recovery.loadResumeState(db, 'CA-1');
+    expect(state.segmentsText).toHaveLength(recovery.RESUME_SEED_MAX_CHARS + 3);
+    expect(state.segmentsText.startsWith('[…]')).toBe(true);
+    expect(state.reconnectMs).toBe(5);
+    expect(await recovery.readReconnectState(db, 'CA-1')).toEqual({ reconnects: 1, reconnectMs: 5 });
   });
 
   test('providerFailurePolicy hands off at the limit on either counter', () => {
@@ -252,7 +264,7 @@ describe('the conversation side', () => {
     primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
     const convo = new RelayConversation({ callSid: 'CA-res', sessionKey: 'nonce-2', sessionGeneration: 2, from: '+19415551234', send: jest.fn(), resumed: true });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1' });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1' });
     await convo._runLoop('where were we').catch(() => {}); // no Anthropic client in tests: the seeding half runs
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call, before the line dropped'));
     expect(seeded).toHaveLength(1);
@@ -269,7 +281,7 @@ describe('the conversation side', () => {
     const { builder } = primeDb({ firstRow: { metadata: { relay_reconnects: 1 } } }); // proven, but no segment yet
     const convo = new RelayConversation({ callSid: 'CA-race', from: '+19415551234', send: jest.fn(), resumed: true });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, segmentsText: '', relayLeadId: null });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
     builder.first = jest.fn(async () => ({ metadata: { relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back' }] } })); // the old socket's append landed

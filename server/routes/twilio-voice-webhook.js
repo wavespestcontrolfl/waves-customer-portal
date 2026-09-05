@@ -1716,9 +1716,18 @@ router.post('/relay-complete', async (req, res) => {
   // open) or falls to today's paths below. Gate off ⇒ this block is skipped
   // and everything below is byte-identical to today.
   if (failed && callSid && require('../services/voice-agent/relay-recovery').isRecoveryGateOn()) {
-    const reconnectXml = await attemptRelayReconnect(req, callSid, failure);
-    if (reconnectXml) return res.type('text/xml').send(reconnectXml);
-    if ((req.query || {}).sandbox !== '1' && await appendSecondFailureTransfer(req, twiml, callSid)) {
+    const reconnect = await attemptRelayReconnect(req, callSid, failure);
+    if (reconnect.xml) return res.type('text/xml').send(reconnect.xml);
+    // A Twilio RETRY of the first leg's failure callback (no `gen`, or a
+    // stale one) on a row that already reconnected must not end the healthy
+    // resumed session — nothing to do (hook P1). The resumed leg's own
+    // failure carries `gen` = the row's reconnect stamp and takes the
+    // second-failure path.
+    if (reconnect.duplicate) {
+      logger.warn(`[relay-complete] duplicate failure callback for ${maskSid(callSid)} after a reconnect — ignored`);
+      return res.type('text/xml').send(twiml.toString());
+    }
+    if (reconnect.secondFailure && (req.query || {}).sandbox !== '1' && await appendSecondFailureTransfer(req, twiml, callSid)) {
       return res.type('text/xml').send(twiml.toString());
     }
   }
@@ -1774,8 +1783,11 @@ router.post('/relay-complete', async (req, res) => {
  * deadline cannot cancel a queued UPDATE). Then the relay renders again for
  * the same CallSid — same action (language / sandbox), resumed greeting,
  * `resumed=1` parameter — with a token minted AFTER the stamp, so the new
- * socket's generation is ≥ the row's reconnect fence. Returns the TwiML
- * string, or null when nothing was rendered.
+ * socket's generation is ≥ the row's reconnect fence. Returns
+ * { xml, duplicate, secondFailure }: xml when the relay re-rendered;
+ * duplicate when this is a retry of the first leg's callback on a row that
+ * already reconnected (ignore it); secondFailure when the resumed leg
+ * itself failed (its action carried `gen`).
  */
 async function attemptRelayReconnect(req, callSid, failure) {
   const recovery = require('../services/voice-agent/relay-recovery');
@@ -1790,8 +1802,20 @@ async function attemptRelayReconnect(req, callSid, failure) {
       .catch((err) => logger.warn(`[relay-complete] late reconnect compensation failed for ${maskSid(callSid)}: ${err.message}`));
   }
   if (!(Number(claimed) > 0)) {
-    logger.info(`[relay-complete] no reconnect for ${maskSid(callSid)} (${claimed === 0 ? 'already reconnected or not resumable' : claimed}) after ${failure}`);
-    return null;
+    // 0 rows = already reconnected (retry of leg 1, or leg 2's own failure)
+    // or not resumable; unconfirmed = today's path. The row says which.
+    let duplicate = false;
+    let secondFailure = false;
+    if (claimed === 0) {
+      const state = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
+      if (state && state.reconnects >= 1) {
+        const gen = Number((req.query || {}).gen) || null;
+        secondFailure = gen !== null && gen === state.reconnectMs;
+        duplicate = !secondFailure;
+      }
+    }
+    logger.info(`[relay-complete] no reconnect for ${maskSid(callSid)} (${claimed === 0 ? (duplicate ? 'duplicate callback' : secondFailure ? 'second failure' : 'not resumable') : claimed}) after ${failure}`);
+    return { xml: null, duplicate, secondFailure };
   }
   const sandbox = (req.query || {}).sandbox === '1';
   const language = relayCompleteLanguage(req);
@@ -1820,21 +1844,26 @@ async function attemptRelayReconnect(req, callSid, failure) {
         .catch((err) => logger.warn(`[relay-complete] reconnect undo failed for ${maskSid(callSid)}: ${err.message}`)),
       STAMP_DEADLINE_MS,
     );
-    return null;
+    return { xml: null, duplicate: false, secondFailure: false };
   }
   const spanish = language === 'es';
   const relayOpts = activeRelayTwiMLOptions(spanish ? { language: SPANISH_LANGUAGE } : {});
   await withDeadline(stampRelayProfile(callSid, relayOpts));
   logger.info(`[relay-complete] reconnecting ${maskSid(callSid)} after ${failure} (${sandbox ? 'sandbox' : 'prod'}${spanish ? ', es' : ''})`);
-  return buildRelayTwiML({
+  // The resumed leg's action carries the reconnect generation, so its own
+  // failure callback is told apart from a retry of the first leg's.
+  const baseAction = sandbox ? RELAY_COMPLETE_ACTION_SANDBOX : (spanish ? RELAY_COMPLETE_ACTION_ES : RELAY_COMPLETE_ACTION);
+  const action = `${baseAction}${baseAction.includes('?') ? '&' : '?'}gen=${nowMs}`;
+  const xml = buildRelayTwiML({
     wsUrl,
     callSid,
-    action: sandbox ? RELAY_COMPLETE_ACTION_SANDBOX : (spanish ? RELAY_COMPLETE_ACTION_ES : RELAY_COMPLETE_ACTION),
+    action,
     ...(spanish ? { language: SPANISH_LANGUAGE, ...(spanishVoice ? { voice: spanishVoice } : {}) } : {}),
     welcomeGreeting: recovery.resumeGreeting(language),
     ...relayOpts,
     parameters: { resumed: '1', ...(spanish ? { lang: 'es' } : {}) },
   });
+  return { xml, duplicate: false, secondFailure: false };
 }
 
 /**
