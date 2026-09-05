@@ -4846,12 +4846,15 @@ function JobCardOrderButton({ productId, name, order, D, compact = false }) {
     setState("confirm");
   };
   const detail = [order?.packSize, order?.lastPrice != null ? "$" + Number(order.lastPrice).toFixed(2) : null].filter(Boolean).join(" · ");
+  // No order quantity yet (mix request still pending) → nothing to submit;
+  // the fallback of 1 unit would under-order a multi-unit pack.
+  const ready = order?.quantity > 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
       <button
         type="button"
         onClick={submit}
-        disabled={state === "sending" || state === "done"}
+        disabled={!ready || state === "sending" || state === "done"}
         style={{
           minHeight: compact ? 36 : 44,
           padding: "0 12px",
@@ -4902,6 +4905,7 @@ function JobCardProduct({ p, D }) {
         {!p.short && p.onHand != null && (
           <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
         )}
+        {p.amountNote && <div style={{ color: D.muted }}>{p.amountNote}</div>}
         {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
         {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
         {(p.labelUrl || p.sdsUrl) && (
@@ -5047,7 +5051,7 @@ function JobCardTank({ tank, serviceId, D }) {
                 Label rate {mix.ratePerGallon ? `${mix.ratePerGallon.lo}${mix.ratePerGallon.hi > mix.ratePerGallon.lo ? `–${mix.ratePerGallon.hi}` : ""} ${fmtUnit(mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
               </div>
             )}
-            <JobCardOrderButton productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
+            <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
           </div>
         )}
       </div>

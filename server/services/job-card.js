@@ -169,7 +169,7 @@ async function loadLastVisit(dbh, customerId, serviceLine, beforeDate = null) {
     .modify((qb) => { if (serviceLine) qb.where('sr.service_line', serviceLine); })
     .orderBy('sr.service_date', 'desc')
     .orderBy('sr.started_at', 'desc')
-    .select('sr.id', 'sr.service_date', 'sr.service_type', 'sr.technician_notes', 'sr.is_callback')
+    .select('sr.id', 'sr.service_date', 'sr.started_at', 'sr.service_type', 'sr.technician_notes', 'sr.is_callback')
     .first()
     .catch(() => ({ unavailable: true }));
   // A failed lookup is not "no history" — the template says so instead
@@ -189,6 +189,10 @@ async function loadLastVisit(dbh, customerId, serviceLine, beforeDate = null) {
     serviceType: clean(record.service_type, 60),
     summary: clean(finding?.title || record.technician_notes, 120),
     callback: Boolean(record.is_callback),
+    // The instant "since the last visit" is measured from: the visit's
+    // start when recorded, else ET midnight of its day. Stripped from the
+    // model-safe facts by the loader.
+    startedAt: record.started_at ? new Date(record.started_at) : parseETDateTime(`${etCalendarDayOf(record.service_date)}T00:00`),
   };
 }
 
@@ -234,11 +238,11 @@ async function loadOpenIssues(dbh, customerId) {
  * into the briefing. Its 60-day / 4-call window bounds the read. Null when
  * the lookup failed: the template says so instead of "no calls".
  */
-async function loadCallsSince(customerId, sinceDate, deps = {}) {
+async function loadCallsSince(customerId, sinceInstant, deps = {}) {
   const read = deps.getRecentCalls || ((id, opts) => contextAggregator.getRecentCalls(id, opts));
   const rows = await read(customerId, { sentinelOnError: true });
   if (!Array.isArray(rows)) return null;
-  const since = sinceDate ? parseETDateTime(`${sinceDate}T00:00`).getTime() : 0;
+  const since = sinceInstant ? new Date(sinceInstant).getTime() : 0;
   return rows
     .filter((r) => new Date(r.created_at).getTime() > since)
     .slice(0, 3)
@@ -284,11 +288,12 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     loadOpenIssues(dbh, svc.customer_id),
   ]);
   const [calls, rain7d] = await Promise.all([
-    loadCallsSince(svc.customer_id, lastVisit?.date || null, deps),
+    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps),
     serviceLine === 'lawn' ? loadRain7d(dbh, svc) : Promise.resolve(null),
   ]);
 
   const codes = accessCodes(prefs);
+  const lastVisitFact = lastVisit ? (({ startedAt, ...rest }) => rest)(lastVisit) : null;
   const name = clean(`${svc.first_name || ''} ${svc.last_name || ''}`, 80);
   const program = clean(svc.waveguard_tier ? `${svc.service_type} · WaveGuard ${svc.waveguard_tier}` : svc.service_type, 80);
   const coords = propertyCoords(svc.latitude, svc.longitude);
@@ -320,7 +325,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       chemicalSensitivity: prefs?.chemical_sensitivities ? clean(prefs.chemical_sensitivity_details, 80) || 'yes' : '',
       awayUntil: prefs?.away_mode_until ? etCalendarDayOf(prefs.away_mode_until) : null,
       visitNotes: clean(svc.notes, 140),
-      lastVisit,
+      lastVisit: lastVisitFact,
       issues,
       recentComplaints,
       calls,
@@ -870,7 +875,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
   }
   const match = matchServiceProtocol(protocols, facts.serviceType);
-  const visit = match?.matchedVisit || match?.program?.visits?.[0] || null;
+  const visit = seasonalVisit(match?.program, facts.scheduledDate) || match?.matchedVisit || match?.program?.visits?.[0] || null;
   if (!visit) return { visit: null, lines: [], blocks: [] };
   const lines = linesFromLineMeta(visit, catalog);
   // Protocol visits without lineMeta (tree & shrub, termite …) name their
@@ -880,6 +885,20 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
   return { visit, lines, blocks: [] };
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/**
+ * A month-keyed program (tree & shrub: visit 1 = Jan … 12 = Dec) resolves
+ * by the appointment's ET month — the matcher's service-name fallback would
+ * hand every recurring visit January's products. Programs whose visits are
+ * "Any" (pest, termite …) return null and keep the matcher's pick.
+ */
+function seasonalVisit(program, scheduledDate) {
+  const visits = program?.visits || [];
+  const month = MONTHS[Number(String(scheduledDate || '').slice(5, 7)) - 1];
+  if (!month || !visits.some((v) => MONTHS.includes(String(v?.month || '')))) return null;
+  return visits.find((v) => v?.month === month) || null;
 }
 
 /**
@@ -934,7 +953,10 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     const p = line.product;
     const verdict = verdicts.find((v) => v.productId === p.id) || { verdict: 'unknown', reason: 'No limit on file' };
     // The appointment plan's own mix (lawn only) — never recomputed here.
-    const plannedMix = !blocked && line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
+    // The catalog contract holds on this path too: a rate whose label
+    // provenance is unverified is not shown as an actionable amount.
+    const unverified = line.planMix?.amount > 0 && !p.label_verified_at;
+    const plannedMix = !blocked && line.selected !== false && line.planMix?.amount > 0 && !unverified ? line.planMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
     const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
@@ -955,6 +977,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
+      amountNote: unverified ? 'Label rate not yet verified — amount withheld' : null,
       short,
       stockNote,
       onHand,
@@ -998,7 +1021,9 @@ function orderFor(product, packSize, shortage, { includePricing = false } = {}) 
 }
 
 async function rotationNote(dbh, facts, product) {
-  const group = ['frac', 'irac', 'hrac'].find((g) => product[`${g}_group`]);
+  // MOA is a rotation group too (the approval engine's rule) — common
+  // insecticides carry only that one.
+  const group = ['frac', 'irac', 'hrac', 'moa'].find((g) => product[`${g}_group`]);
   if (!group) return null;
   try {
     const last = await latestComparableGroupApplication(dbh, facts.customerId, product, group, product[`${group}_group`], facts.scheduledDate);
@@ -1155,5 +1180,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote },
 };

@@ -687,9 +687,11 @@ describe('PR review r4', () => {
   test('calls come from the canonical reader, since the last visit; a failed read is said, not "no calls" (P1)', async () => {
     const getRecentCalls = jest.fn(async () => [
       { call_summary: 'Asked about ants', direction: 'inbound', created_at: new Date('2026-08-20T15:00:00Z') },
+      // Same calendar day as the visit but BEFORE its start (r5 P2): not "since".
+      { call_summary: 'Morning call', direction: 'inbound', created_at: new Date('2026-08-12T13:00:00Z') },
       { call_summary: 'Old call', direction: 'inbound', created_at: new Date('2026-08-01T15:00:00Z') },
     ]);
-    const calls = await jobCard._test.loadCallsSince('c1', '2026-08-12', { getRecentCalls });
+    const calls = await jobCard._test.loadCallsSince('c1', new Date('2026-08-12T14:30:00Z'), { getRecentCalls });
     expect(getRecentCalls).toHaveBeenCalledWith('c1', { sentinelOnError: true });
     expect(calls).toEqual([{ summary: 'Asked about ants', direction: 'inbound', date: '2026-08-20' }]);
     expect(await jobCard._test.loadCallsSince('c1', null, { getRecentCalls: async () => null })).toBeNull();
@@ -739,5 +741,44 @@ describe('PR review r4', () => {
     const product = { inventory_unit: 'gal', best_price_amount_cached: '129.5' };
     expect(jobCard._test.orderFor(product, null, null)).not.toHaveProperty('lastPrice');
     expect(jobCard._test.orderFor(product, null, null, { includePricing: true }).lastPrice).toBe(129.5);
+  });
+});
+
+describe('PR review r5', () => {
+  test('a month-keyed program resolves by the appointment month; "Any" programs keep the matcher pick (P1)', async () => {
+    const program = { visits: [{ visit: 1, month: 'Jan', primary: 'Celsius WG 1 oz' }, { visit: 9, month: 'Sep', primary: 'Speedzone Southern 1 fl oz' }] };
+    expect(jobCard._test.seasonalVisit(program, '2026-09-04').visit).toBe(9);
+    expect(jobCard._test.seasonalVisit(program, '2026-01-15').visit).toBe(1);
+    expect(jobCard._test.seasonalVisit({ visits: [{ visit: 1, month: 'Any' }] }, '2026-09-04')).toBeNull();
+    expect(jobCard._test.seasonalVisit(program, null)).toBeNull();
+    const catalog = [{ id: 'c', name: 'Celsius WG' }, { id: 's', name: 'Speedzone Southern' }];
+    const out = await jobCard.resolveVisitProducts({ facts: { isLawn: false, serviceType: 'Tree & Shrub Care', scheduledDate: '2026-09-04' }, protocols: { tree_shrub: program }, catalog, dbh: () => ({}) });
+    expect(out.visit.visit).toBe(9);
+    expect(out.lines.map((l) => l.product.id)).toEqual(['s']);
+  });
+
+  test('a lawn card withholds the plan amount for an unverified label rate (P1)', async () => {
+    const line = (product) => ({ raw: 'x', role: 'base', selected: true, product, planMix: { amount: 12.4, amountUnit: 'fl oz' } });
+    const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
+    const [unverified] = await jobCard._test.buildProductCards({ facts, lines: [line({ id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: null })], verdicts: [], packSizes: {} });
+    expect(unverified.planned).toBeNull();
+    expect(unverified.amountNote).toBe('Label rate not yet verified — amount withheld');
+    const [verified] = await jobCard._test.buildProductCards({ facts, lines: [line({ id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' })], verdicts: [], packSizes: {} });
+    expect(verified.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
+    expect(verified.amountNote).toBeNull();
+  });
+
+  test('rotation history covers MOA-only products (P2)', async () => {
+    const seen = [];
+    const dbh = (table) => {
+      seen.push(table);
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'modify', 'orderBy', 'select', 'limit']) chain[m] = () => chain;
+      chain.catch = async () => [{ service_date: '2026-06-10', product_name: 'Bifen IT' }];
+      return chain;
+    };
+    const note = await jobCard._test.rotationNote(dbh, { customerId: 'c1', scheduledDate: '2026-09-04' }, { name: 'Talstar P', moa_group: '3A' });
+    expect(note).toBe('MOA 3A last used 2026-06-10 (Bifen IT)');
+    expect(seen).toContain('service_products as sp');
   });
 });
