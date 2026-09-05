@@ -1193,6 +1193,14 @@ function orderNumbersIn(text) {
   // for the number, not record the price as the order id (Codex #3876 r10 P2).
   const moneyShaped = (t) => /^\d+\.\d{2}$/.test(t) || /^\d{1,3}(?:,\d{3})+(?:\.\d{2})?$/.test(t);
   const isId = (t) => !!t && /\d/.test(t) && !dateShaped(t) && !moneyShaped(t);
+  // A STRONG qualifier (#, number, no, ID, ref) positively identifies the
+  // value: "Order # 20260905" is that order's number even though the digits
+  // form a date — excluded, a placed order would park ambiguous on every
+  // date-shaped id (Codex #3900 r9 P2). The date exclusion stays for the
+  // weak forms ("Order confirmation 09/05/2026", "Order: 2026-09-05") and
+  // for the unlabeled dedicated-element text.
+  const strongLabel = (q) => /#|number|no\b|\bid\b|ref/i.test(q);
+  const isLabeledId = (q, t) => (strongLabel(q) ? !!t && /\d/.test(t) && !moneyShaped(t) : isId(t));
   // EVERY labeled match is tried: "Order date 2026-09-05 … Order # SO-778899"
   // must yield the number, not the date (Codex #3876 r2 P2). Labeled ONLY —
   // no unlabeled fallback: "Order # pending · Ships to 34205" must keep
@@ -1209,7 +1217,7 @@ function orderNumbersIn(text) {
   // concepts, never the confirmation (Codex #3900 P2 ×2). A bare label needs
   // a colon or "is" ("Order: SO-1", "Order is SO-1"): "Order SO-1" alone is
   // not read, so every accepted form has a selector label (Codex #3900 r7 P2).
-  for (const m of String(text).matchAll(/(?<!\b(?:purchase|back|sales|work|change|pre|re)[\s-]*)\b(?:order|confirmation)(?!\s*date)(?:(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))+(?:\s+is)?\s*:?|\s+is\s*:?|\s*:)\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1]) && !ids.some((x) => x.toUpperCase() === m[1].toUpperCase())) ids.push(m[1]);
+  for (const m of String(text).matchAll(/(?<!\b(?:purchase|back|sales|work|change|pre|re)[\s-]*)\b(?:order|confirmation)(?!\s*date)((?:(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))+(?:\s+is)?\s*:?|\s+is\s*:?|\s*:))\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isLabeledId(m[1], m[2]) && !ids.some((x) => x.toUpperCase() === m[2].toUpperCase())) ids.push(m[2]);
   if (ids.length) return ids;
   // A dedicated number element (`[data-test="order-number"]`, `.order-number`)
   // carries the bare identifier and no label: the WHOLE text, when it is one

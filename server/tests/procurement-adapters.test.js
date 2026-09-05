@@ -575,6 +575,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order date 05092026')).toBeNull(); // compact, day first
     expect(s1._internals.orderNumberIn('Order # 55501234')).toBe('55501234'); // an 8-digit id that is not a date stays an id
     expect(s1._internals.orderNumberIn('Order # 12345-67890')).toBe('12345-67890'); // separator-joined groups that cannot be a date are an id (r8 P2)
+    expect(s1._internals.orderNumberIn('Order # 20260905')).toBe('20260905'); // a STRONG label (#, number, no, ID, ref) positively identifies a date-shaped id (r9 P2 on #3900)
+    expect(s1._internals.orderNumberIn('Confirmation number 09052026')).toBe('09052026');
+    expect(s1._internals.orderNumberIn('Your order ID is 2026-09-05')).toBe('2026-09-05');
+    expect(s1._internals.orderNumberIn('Order confirmation 09/05/2026')).toBeNull(); // a weak label keeps the date exclusion
+    expect(s1._internals.orderNumberIn('Order: 2026-09-05')).toBeNull();
+    expect(s1._internals.orderNumberIn('Confirmation is 20260905')).toBeNull();
+    expect(s1._internals.orderNumberIn('20260905')).toBeNull(); // the unlabeled dedicated-element text keeps it too
+    expect(s1._internals.orderNumberIn('Order confirmation 09/05/2026 · Order # SO-778899')).toBe('SO-778899'); // the weak-label date beside the number is not a second id
     expect(s1._internals.orderNumberIn('Order # pending · Total $105.93')).toBeNull(); // a price is never an id (r10 P2)
     expect(s1._internals.orderNumberIn('Order # pending · Ships to 34205')).toBeNull(); // no unlabeled fallback: a ZIP is never an id (r16 P2)
     expect(s1._internals.orderNumberIn('Your confirmation number is 55501234')).toBe('55501234');
