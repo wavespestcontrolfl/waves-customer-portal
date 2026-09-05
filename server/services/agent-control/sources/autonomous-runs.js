@@ -46,7 +46,11 @@ const COLUMNS = () => [
   // the NEWEST emailed approval on the run decides whether the owner still owes a reply
   db.raw(`(SELECT a.status ${NEWEST_APPROVAL}) AS approval_status`),
   // the approval's latest event: a failed execution's finish is its updated_at
-  db.raw(`(SELECT COALESCE(CASE WHEN a.status = 'failed' THEN a.updated_at END, a.decided_at, a.created_at) ${NEWEST_APPROVAL}) AS approval_at`),
+  // the approval's latest event: its failure, the decision, else the
+  // DELIVERY — sendApprovalRequest fills email_sent_at when a retried send
+  // lands, and the owner's wait runs from when they got it, not from the
+  // row an outage left unsent for hours (Codex r14); unsent = raised
+  db.raw(`(SELECT COALESCE(CASE WHEN a.status = 'failed' THEN a.updated_at END, a.decided_at, a.email_sent_at, a.created_at) ${NEWEST_APPROVAL}) AS approval_at`),
   db.raw(`${EXECUTION_STARTED_AT} AS execution_started_at`),
   db.raw(`(SELECT a.last_error ${NEWEST_APPROVAL}) AS approval_error`),
   db.raw(`(SELECT a.email_sent_at ${NEWEST_APPROVAL}) AS approval_sent_at`),

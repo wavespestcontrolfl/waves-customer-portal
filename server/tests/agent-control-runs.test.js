@@ -583,10 +583,13 @@ describe('fail and retry', () => {
 
   test('no retry without an idempotency key, on a money / irreversible lane, or when not retryable', async () => {
     const noKey = await runs.startRun({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'nk', maxAttempts: 3 });
+    // a run that can never retry stores one attempt — the row never reads 1/3 (Codex r14)
+    expect(store.agent_runs.find((r) => r.source_run_id === 'nk').max_attempts).toBe(1);
     expect((await noKey.fail({ error: new Error('x'), retryable: true })).retry).toBe(false);
     const money = Object.entries(require('../services/agent-control/lane-policies').LANE_RUNTIME).find(([, p]) => runs.NO_RETRY_CLASSES.has(p.side_effect_class));
     expect(money).toBeDefined();
     const m = await runs.startRun({ laneId: money[0], sourceSystem: SRC, sourceRunId: 'm', idempotencyKey: 'km', maxAttempts: 3 });
+    expect(store.agent_runs.find((r) => r.source_run_id === 'm').max_attempts).toBe(1);
     expect((await m.fail({ error: new Error('x'), retryable: true })).retry).toBe(false);
     const nr = await runs.startRun({ ...base, sourceRunId: 'nr', maxAttempts: 3 });
     expect((await nr.fail({ error: new Error('x'), retryable: false })).retry).toBe(false);

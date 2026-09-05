@@ -20,16 +20,20 @@ const SOURCE = 'managed_sessions';
 // would move a start derived from it — and with it an already-paged row
 // behind its cursor; pre-push audit), else the session row's own.
 // Sort / page on that same start so the cursor and the rows agree. The
-// latest activity is the newest session_turn row (created_at for a
-// one-turn session): that is the finish, and the WINDOW is judged on it,
-// so a long-lived assistant conversation stays listed while it still
-// turns instead of ageing out with its first turn (Codex r1).
+// latest activity is the newest turn's FINISH — its start + latency, the
+// wall time the recorder measured before the usage GET (created_at is
+// after it, so a slow fetch would push the finish and the duration out by
+// the fetch; Codex r14) — created_at only for a row with no start: the
+// WINDOW is judged on it, so a long-lived assistant conversation stays
+// listed while it still turns instead of ageing out with its first turn
+// (Codex r1).
 const TURNS = "FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref";
 const TURN_START = 'COALESCE(t.started_at, t.created_at - make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0))';
 const FIRST_TURN_START = `(SELECT ${TURN_START} ${TURNS} ORDER BY ${TURN_START} ASC LIMIT 1)`;
 const SESSION_START = `COALESCE(started_at, ${FIRST_TURN_START}, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))`;
 const START = () => db.raw(`date_trunc('milliseconds', ${SESSION_START})`);
-const LAST_TURN = `COALESCE((SELECT max(t.created_at) ${TURNS}), created_at)`;
+const TURN_END = 'COALESCE(t.started_at + make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0), t.created_at)';
+const LAST_TURN = `COALESCE((SELECT max(${TURN_END}) ${TURNS}), started_at + make_interval(secs => COALESCE(latency_ms, 0) / 1000.0), created_at)`;
 const ID = 'provider_ref';
 const COLUMNS = () => [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',

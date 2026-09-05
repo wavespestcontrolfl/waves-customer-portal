@@ -201,6 +201,8 @@ describe('adapters project onto the canonical shape', () => {
     const live = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed' });
     // extraction_attempts counts failures: two failed + the pass in flight = 3 attempts; a row whose current state IS the failure counts just the failures; a success after one failure ran twice
     expect(live).toMatchObject({ lifecycle: 'running', lastHeartbeatAt: ago(10e3).toISOString(), attempts: 3, laneId: 'call_extraction', title: 'inbound · 2 min' });
+    // the comms page routes the tab and the focused call from the hash (the Owed tab's own deep link)
+    expect(live.link).toBe('/admin/communications#tab=calls&call=c');
     expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' }).attempts).toBe(2);
     expect(callLog.fromRow({ ...base, processing_status: 'processed', extraction_attempts: 1 }).attempts).toBe(2);
     expect(callLog.fromRow({ ...base, processing_status: 'processed', extraction_attempts: 0 }).attempts).toBe(1);

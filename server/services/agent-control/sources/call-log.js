@@ -182,7 +182,8 @@ function fromRow(c) {
     attempts: attemptsFor(c, status),
     maxAttempts: maxAttemptsFor(status),
     steps: stepsFor(c, status, map),
-    link: `/admin/communications?tab=calls&call=${c.id}`,
+    // CommunicationsPageV2 selects the tab and CallLogTabV2 the focused call from the HASH (Codex r14)
+    link: `/admin/communications#tab=calls&call=${c.id}`,
     entity: { type: 'call_log', id: c.id },
   });
 }

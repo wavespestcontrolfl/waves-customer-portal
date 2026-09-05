@@ -177,6 +177,11 @@ async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
   const sourceSystem = clip(args.sourceSystem, 60);
   const sourceRunId = clip(args.sourceRunId, 180);
   const lease = new Date(now.getTime() + policy.stall_after_ms);
+  // fail() never re-queues a run without an idempotency key or on a money /
+  // irreversible lane (a retry there could act twice), so such a run
+  // stores ONE attempt: a terminal row must not read 1/3 against a limit
+  // that was never permitted (Codex r14)
+  const retryable = !!args.idempotencyKey && !NO_RETRY_CLASSES.has(policy.side_effect_class);
   await conn('agent_runs')
     .insert({
       work_item_id: workItemId,
@@ -197,7 +202,7 @@ async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
       last_heartbeat_at: now,
       last_progress_at: now,
       attempts: 0,
-      max_attempts: Math.max(1, Number(args.maxAttempts) || 1 + Number(policy.budget?.max_retries || 0)),
+      max_attempts: retryable ? Math.max(1, Number(args.maxAttempts) || 1 + Number(policy.budget?.max_retries || 0)) : 1,
       idempotency_key: clip(args.idempotencyKey, 260),
       side_effect_class: policy.side_effect_class || null,
       risk_tier: tierFor(policy),
