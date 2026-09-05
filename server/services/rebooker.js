@@ -2,6 +2,25 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
+
+// A caller-chosen slot technician who became ineligible between availability
+// and this commit is a "pick another slot" outcome for the customer, not an
+// internal 422 naming staff: translate it to the route's SLOT_TAKEN recovery
+// (reschedule-public refreshes availability on that code).
+async function assertAssignableSlotTechnician(technicianId, trx) {
+  try {
+    await assertAssignableTechnician(technicianId, { conn: trx });
+  } catch (err) {
+    if (err.code !== NOT_ASSIGNABLE) throw err;
+    throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+      statusCode: 409,
+      status: 409,
+      isOperational: true,
+      code: 'SLOT_TAKEN',
+    });
+  }
+}
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
@@ -1392,6 +1411,12 @@ class SmartRebooker {
         }
       }
 
+      // Save-time eligibility for a tech change (422 TECH_NOT_ASSIGNABLE) on
+      // the same trx that writes it — a slot offered before the tech went
+      // prospective/inactive/office-only cannot land here.
+      if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
+        await assertAssignableSlotTechnician(updates.technician_id, trx);
+      }
       const updated = await applyTrackLifecycleCas(
         trx('scheduled_services')
           // The full observed tracker/lifecycle snapshot is in the CAS (see
@@ -2290,6 +2315,7 @@ class SmartRebooker {
             : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
         ));
         if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+          await assertAssignableSlotTechnician(options.technicianId || null, trx);
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the
           // single-reschedule path above).

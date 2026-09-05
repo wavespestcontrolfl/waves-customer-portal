@@ -257,9 +257,14 @@ function encodeHeaderUtf8(val) {
   return `=?UTF-8?B?${Buffer.from(safe, 'utf-8').toString('base64')}?=`;
 }
 
+// the ONE address this client sends as — every outbound header and every "is this message ours" check read it here
+function ownAddress() {
+  return sanitizeHeaderValue(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+}
+
 async function sendMessage(to, subject, body, threadId = null, inReplyTo = null) {
   const gmail = await getGmail();
-  const fromEmail = sanitizeHeaderValue(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  const fromEmail = ownAddress();
   const safeTo = sanitizeHeaderValue(to);
   const safeSubject = encodeHeaderUtf8(subject);
   const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
@@ -468,7 +473,8 @@ async function getThread(threadId) {
     userId: 'me',
     id: threadId,
     format: 'metadata',
-    metadataHeaders: ['From', 'Date'],
+    // Message-ID: a reply into the thread names the message it answers (In-Reply-To), so a recipient's client threads it
+    metadataHeaders: ['From', 'Date', 'Message-ID'],
   });
   return res.data;
 }
@@ -485,6 +491,7 @@ module.exports = {
   createDraft,
   ensureLabel,
   getThread,
+  ownAddress,
   getMessageLabels,
   listAllMessages,
   modifyLabels,

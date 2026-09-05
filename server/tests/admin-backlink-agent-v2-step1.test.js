@@ -40,7 +40,7 @@ describe('status contract (plan §3.3)', () => {
     expect(IN_FLIGHT_STATUSES).toContain('watching');
     // claim() leases only status='prospect' — pinned in source so a widened claim predicate is a deliberate change
     const worker = fs.readFileSync(path.join(__dirname, '..', 'services/seo/link-prospect-worker.js'), 'utf8');
-    const claimBlock = worker.slice(worker.indexOf('async function claim('), worker.indexOf('async function claim(') + 1200);
+    const claimBlock = worker.slice(worker.indexOf('async function claim('), worker.indexOf('async function claim(') + 2000); // the §6.4 follow-up branch precedes the candidate query
     expect(claimBlock).toMatch(/\.where\(\{ status: 'prospect' \}\)/);
     expect(claimBlock).not.toMatch(/awaiting_owner|watching/);
   });
@@ -66,12 +66,14 @@ describe('rolling-deploy compatibility of the board unique key', () => {
     const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
     expect(s).toContain("if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;"); // a status edit or a lane entry (link_type alone) reopens; an unrelated edit never clears it
     // … and an edit whose RESULT is an open conversation (a reopened row with its pitch out included) runs the inbox guard
-    expect(s).toContain('const opensConversation = Outreach.conversationOpen({ ...current, ...patch }) && !Outreach.conversationOpen(current);');
+    expect(s).toContain('const opensConversation = Outreach.conversationOpen({ ...current, ...patch }, currentPath) && !Outreach.conversationOpen(current, currentPath);');
+    // … and a CLOSED conversation the edit reopens on an already-active status re-enters the per-domain admission probe (a later placement may hold the domain)
+    expect(s).toContain('if (patch.conversation_closed_at === null && current.conversation_closed_at && !entersOutreach) {');
   });
   test('the PATCH page-move probe is scoped to the row\'s OWN location_key (step 2 dropped the legacy 2-column key: identity is (domain, page, location))', () => {
     const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
     expect(s).toMatch(/findPlacementRow\(trx, current\.target_domain, patch\.target_page, \{ excludeId: current\.id, location: current\.location_key \}\)/);
-    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'conversation_closed_at'\)/);
+    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id'\)/);
   });
 });
 

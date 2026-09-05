@@ -1,0 +1,223 @@
+// @vitest-environment jsdom
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import ScheduleListView from './ScheduleListView';
+
+const BASE_ROWS = [
+  { id: 'svc-plan', customerName: 'Pat Plan', serviceType: 'Pest Control', scheduledDate: '2026-09-10', status: 'confirmed', isRecurring: true },
+  { id: 'svc-once', customerName: 'Sam Once', serviceType: 'Flea Treatment', scheduledDate: '2026-09-11', status: 'confirmed', isRecurring: false },
+  // A booster: stored is_recurring=false but linked to its plan.
+  { id: 'svc-boost', customerName: 'Bo Booster', serviceType: 'Mosquito Booster', scheduledDate: '2026-09-12', status: 'confirmed', isRecurring: false, recurringParentId: 'svc-plan' },
+  // A legacy series row: recurring_pattern only, no is_recurring flag.
+  { id: 'svc-legacy', customerName: 'Lee Legacy', serviceType: 'Lawn Care', scheduledDate: '2026-09-13', status: 'confirmed', isRecurring: null, recurringPattern: 'monthly' },
+];
+let ROWS = BASE_ROWS;
+
+function mockFetch() {
+  global.fetch = vi.fn((url) => {
+    if (String(url).includes('/admin/schedule/list')) {
+      const services = ROWS;
+      return Promise.resolve({ ok: true, json: async () => ({ services, total: services.length }) });
+    }
+    return Promise.resolve({ ok: true, json: async () => ({ updatedCount: 1, failed: [] }) });
+  });
+}
+
+async function renderWithRows(props = {}) {
+  const view = render(<ScheduleListView technicians={[]} {...props} />);
+  await screen.findByText('Pat Plan');
+  return view;
+}
+
+function chooseCancel() {
+  fireEvent.change(screen.getByDisplayValue('Choose action…'), { target: { value: 'cancel' } });
+}
+
+beforeEach(() => {
+  ROWS = BASE_ROWS;
+  localStorage.setItem('waves_admin_token', 'test-token');
+  mockFetch();
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe('ScheduleListView bulk cancel — recurring plan notice', () => {
+  it('names the recurring visits and says the plan continues when one is selected', async () => {
+    await renderWithRows();
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[1]); // svc-plan (boxes[0] is select-all)
+    fireEvent.click(boxes[2]); // svc-once
+    chooseCancel();
+    expect(screen.getByText(/belong to a recurring plan: 1\./)).toBeInTheDocument();
+    expect(screen.getByText(/each plan continues/)).toBeInTheDocument();
+  });
+
+  it('counts a plan-linked booster even though it is not itself recurring', async () => {
+    await renderWithRows();
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[2]); // svc-once
+    fireEvent.click(boxes[3]); // svc-boost
+    chooseCancel();
+    expect(screen.getByText(/belong to a recurring plan: 1\./)).toBeInTheDocument();
+  });
+
+  it('counts a legacy recurring-pattern row with no isRecurring flag', async () => {
+    await renderWithRows();
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[2]); // svc-once
+    fireEvent.click(boxes[4]); // svc-legacy
+    chooseCancel();
+    expect(screen.getByText(/belong to a recurring plan: 1\./)).toBeInTheDocument();
+  });
+
+  it('disables Apply while the list is refreshing', async () => {
+    const view = await renderWithRows({ refreshKey: 0 });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]);
+    chooseCancel();
+    expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled();
+    let release;
+    global.fetch = vi.fn(() => new Promise((resolve) => { release = () => resolve({ ok: true, json: async () => ({ services: ROWS, total: ROWS.length }) }); }));
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} />);
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled());
+  });
+
+  it('ignores a slower earlier fetch that lands after the save-driven refresh', async () => {
+    const view = await renderWithRows({ refreshKey: 0 });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once, one-time
+    chooseCancel();
+    const pending = [];
+    global.fetch = vi.fn(() => new Promise((resolve) => { pending.push(resolve); }));
+    // A filter fetch starts first (will answer with the pre-edit row)…
+    fireEvent.change(screen.getByPlaceholderText('Name or service…'), { target: { value: 'Sam' } });
+    await waitFor(() => expect(pending.length).toBe(1));
+    // …then the Edit modal saves it as recurring and the host bumps the key.
+    const fresh = BASE_ROWS.map((r) => (r.id === 'svc-once' ? { ...r, isRecurring: true } : r));
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} />);
+    await waitFor(() => expect(pending.length).toBe(2));
+    pending[1]({ ok: true, json: async () => ({ services: fresh, total: fresh.length }) });
+    await screen.findByText(/belong to a recurring plan: 1\./);
+    pending[0]({ ok: true, json: async () => ({ services: BASE_ROWS, total: BASE_ROWS.length }) });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply' })).not.toBeDisabled());
+    expect(screen.getByText(/belong to a recurring plan: 1\./)).toBeInTheDocument();
+  });
+
+  it('re-reads a selected row when the host bumps refreshKey after an edit', async () => {
+    const view = await renderWithRows({ refreshKey: 0 });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once, one-time at select time
+    chooseCancel();
+    expect(screen.queryByText(/recurring plan/)).not.toBeInTheDocument();
+    // The Edit modal made it recurring; the host page bumps the key.
+    ROWS = ROWS.map((r) => (r.id === 'svc-once' ? { ...r, isRecurring: true } : r));
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} />);
+    await screen.findByText(/belong to a recurring plan: 1\./);
+  });
+
+  it('drops the saved row from the selection when the save-driven refresh no longer returns it', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[1]); // svc-plan stays selected (other-page semantics)
+    fireEvent.click(boxes[2]); // svc-once, then saved out of the window
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={{ id: 'svc-once' }} />);
+    await screen.findByText('1 selected');
+    expect(screen.queryByText('Sam Once')).not.toBeInTheDocument();
+  });
+
+  it('keeps a selected row absent from a generic refresh (no save signal)', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
+    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once
+    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={null} />);
+    await waitFor(() => expect(screen.queryByText('Sam Once')).not.toBeInTheDocument());
+    expect(screen.getByText('1 selected')).toBeInTheDocument();
+  });
+
+  it('re-verifies the saved row on each save, not only the first', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[1]); // svc-plan
+    fireEvent.click(boxes[2]); // svc-once
+    // Mark prepaid saves inside the modal: row still on the page → kept.
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={{ id: 'svc-once' }} />);
+    await waitFor(() => expect(fetch.mock.calls.filter(([u]) => String(u).includes('/admin/schedule/list')).length).toBe(2));
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+    // The real edit then moves it out of the filtered window.
+    ROWS = ROWS.filter((r) => r.id !== 'svc-once');
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={2} lastSave={{ id: 'svc-once' }} />);
+    await screen.findByText('1 selected');
+  });
+
+  it('still verifies the saved row when a filter fetch supersedes the save-driven refresh', async () => {
+    const view = await renderWithRows({ refreshKey: 0, lastSave: null });
+    const boxes = screen.getAllByRole('checkbox');
+    fireEvent.click(boxes[1]); // svc-plan
+    fireEvent.click(boxes[2]); // svc-once, saved out of the window
+    const pending = [];
+    global.fetch = vi.fn(() => new Promise((resolve) => { pending.push(resolve); }));
+    view.rerender(<ScheduleListView technicians={[]} refreshKey={1} lastSave={{ id: 'svc-once' }} />);
+    await waitFor(() => expect(pending.length).toBe(1));
+    // A filter change while that refresh is in flight starts a newer request…
+    fireEvent.change(screen.getByPlaceholderText('Name or service…'), { target: { value: 'Pat' } });
+    await waitFor(() => expect(pending.length).toBe(2));
+    const without = BASE_ROWS.filter((r) => r.id !== 'svc-once');
+    // …which commits first; the superseded save-driven response is dropped.
+    pending[1]({ ok: true, json: async () => ({ services: without, total: without.length }) });
+    await screen.findByText('1 selected');
+    pending[0]({ ok: true, json: async () => ({ services: without, total: without.length }) });
+    await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+  });
+
+  it('shows nothing for a selection with no recurring visit', async () => {
+    await renderWithRows();
+    fireEvent.click(screen.getAllByRole('checkbox')[2]); // svc-once only
+    chooseCancel();
+    expect(screen.queryByText(/recurring plan/)).not.toBeInTheDocument();
+  });
+
+  it('asks before posting when a recurring visit is in the batch, and posts nothing on decline', async () => {
+    await renderWithRows();
+    fireEvent.click(screen.getAllByRole('checkbox')[1]);
+    chooseCancel();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/plan continues[\s\S]*Cancel 1 selected\?/));
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/bulk-action'))).toBe(false);
+  });
+
+  it('posts a plain (one-row-per-id) cancel when confirmed', async () => {
+    await renderWithRows();
+    fireEvent.click(screen.getAllByRole('checkbox')[1]);
+    chooseCancel();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => {
+      const call = fetch.mock.calls.find(([url]) => String(url).includes('/bulk-action'));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(call[1].body)).toEqual({
+        action: 'cancel',
+        serviceIds: ['svc-plan'],
+        payload: { waiveCardHoldFee: false, notifyCustomer: true },
+      });
+    });
+  });
+
+  it('does not ask when no recurring visit is selected', async () => {
+    await renderWithRows();
+    fireEvent.click(screen.getAllByRole('checkbox')[2]);
+    chooseCancel();
+    const confirm = vi.spyOn(window, 'confirm');
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('/bulk-action'))).toBe(true));
+    expect(confirm).not.toHaveBeenCalled();
+  });
+});

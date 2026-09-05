@@ -45,7 +45,10 @@ const VOICE_RELAY_SANDBOX_SOURCE = 'voice_relay_sandbox';
 // lands last. 'voicemail' = the production failover recorded a message;
 // 'relay_failed' = a sandbox session failed (no voicemail on the sandbox).
 const RELAY_FAILED_OUTCOME = 'relay_failed';
-const RELAY_TERMINAL_OUTCOMES = Object.freeze(['voicemail', RELAY_FAILED_OUTCOME]);
+// 'ai_transferred' (PR 2A): the transfer tool stamped the handoff; a socket
+// close must not rewrite it as ai_handled (the transcript still lands
+// through end()'s salvage leg).
+const RELAY_TERMINAL_OUTCOMES = Object.freeze(['voicemail', RELAY_FAILED_OUTCOME, 'ai_transferred']);
 
 /**
  * Is the ConversationRelay WebSocket server enabled? Single source of truth for

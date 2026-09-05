@@ -49,7 +49,12 @@ const PARKABLE = 'prospect';
 // renewal, or a paid outreach placement's INITIAL fee the §8 reconciliation promoted while the fee still awaits the owner
 const CHECKOUT = 'ready_for_payment';
 const PLACED_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
-const CARD_STATUSES = Object.freeze([PARKED, CHECKOUT, ...PLACED_STATUSES]);
+// …and the §6.4 FOLLOW-UP: an owner-level communication/followup row on a contacted conversation (or a Judge-owned one
+// on a submit-first path — the sender narrows it) is the owner's send from here, without any park (a contacted row
+// is never parked: its lifecycle is the conversation's)
+const CONTACTED = 'contacted';
+const CARD_STATUSES = Object.freeze([PARKED, CHECKOUT, CONTACTED, ...PLACED_STATUSES]);
+const isFollowUp = (row) => row.dimension === 'communication' && row.instance_kind === 'followup';
 const isOwner = (level) => typeof level === 'string' && level.startsWith('OWNER_');
 const noop = () => {};
 
@@ -81,7 +86,8 @@ function actionFor(row) {
 function whyNotHere(placement, row) {
   if (placement.status === PARKED) return placement.parked_from_status === PARKABLE ? null : `parked from ${placement.parked_from_status} — not the queue's to decide`;
   if (placement.status === CHECKOUT) return row.dimension === 'payment' ? null : 'the placement is at the publisher\'s checkout — only its payment is decided here';
-  if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' ? null : `the placement is ${placement.status} — only its payment is decided here`;
+  if (placement.status === CONTACTED) return isFollowUp(row) ? null : 'the placement is contacted — only its follow-up is decided here';
+  if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' || isFollowUp(row) ? null : `the placement is ${placement.status} — only its payment or follow-up is decided here`;
   return `the placement is ${placement.status} — not awaiting your decision`;
 }
 
@@ -94,9 +100,9 @@ function whyNotApprovable(row, path = null) {
   if (row.level.startsWith('AUTO_')) return 'automatic under the current policy — no approval needed';
   if (row.level === P.LEVELS.DENY) return 'fails a quality floor — use Acquire anyway on the registry row';
   if (row.level === P.LEVELS.INVALID) return 'not actionable until re-investigated';
-  // a send is approved by SENDING it (the sender writes the approval bound to the draft hash) — only the initial
-  // instance from the queue; a follow-up is its own lane (§6.4, not built yet)
-  if (row.dimension === 'communication' && row.instance_kind !== '-') return 'the follow-up send is not available from the queue yet';
+  // a send is approved by SENDING it (the sender writes the approval bound to the draft hash): the initial pitch, or
+  // the follow-up (§6.4) — the queue's Send action carries the row's kind to the sender
+  if (row.dimension === 'communication' && !['-', 'followup'].includes(row.instance_kind)) return `${row.instance_kind}: not a send the queue offers`;
   if (row.level === P.LEVELS.OWNER_HUMAN_STEP) return 'a human performs this step; the runner checkpoint records it';
   // the bridge parks a fee-scope change after payment activity as OWNER_INPUT_REQUIRED with its regroup reason: that is
   // not a quote to enter — the owner's regroup (step 5) is required, and the nightly does not select the domain until then
@@ -124,7 +130,9 @@ function stalenessOf(row, ctx, waiver, held = false) {
   // a HELD domain (a payment-input change under a purchase — plan §3.3) is suppressed by the nightly selection: the
   // stale stamp is not re-decided by any nightly run, the owner's regroup / shape review is what moves it
   if (hash !== row.decision_inputs_hash || Number(row.path_revision) !== pathRevision) return { reason: held ? REGROUP_HELD : 'inputs changed since the card — the nightly bridge re-decides it; refresh the queue', hash, pathRevision };
-  const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: ctx.draftClean === true, waiver });
+  // the follow-up instance is decided on the FOLLOW-UP's draft (ctx.followUpClean), the initial on the pitch's
+  const followUp = isFollowUp(row);
+  const decided = P.decideAuthority({ ...ctx, monthSpendCents: 0, d30Confidence: null, draftClean: (followUp ? ctx.followUpClean : ctx.draftClean) === true, followUp, waiver });
   const renewal = row.dimension === 'payment' && R.RENEWAL_KIND_RE.test(String(row.instance_kind));
   const inst = decided.instances.find((i) => i.dimension === row.dimension && i.instance_kind === (renewal ? '-' : row.instance_kind));
   if (!inst || inst.level !== row.level) return { reason: `the policy now yields ${inst ? inst.level : 'no instance'} for this step, not ${row.level} — the nightly bridge re-decides it`, hash, pathRevision };
@@ -213,7 +221,7 @@ const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v))
 async function listOwnerQueue(db) {
   const { policy } = await P.loadPolicy(db);
   const candidates = await db('seo_link_prospects').whereIn('status', [...CARD_STATUSES]).whereNotNull('domain_id')
-    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'claimed_at', 'updated_at');
+    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
   const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
   // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
   // here exists — otherwise every placed link would be a card with nothing to click
@@ -284,7 +292,9 @@ async function listOwnerQueue(db) {
   // §13 — the recipient review the owner sees before a send click; best-effort here (the click re-runs it under the
   // lock and fails closed on an error), computed once per drafted card with a sendable communication row
   const reviewFor = new Map();
-  const sendable = cardsFor.filter((p) => p.outreach_status === 'drafted' && p.outreach_to_email && rows.some((r) => r.prospect_id === p.id && r.dimension === 'communication' && r.instance_kind === '-' && !r.satisfied_at && isOwner(r.level)));
+  // the draft each communication row would send: the pitch, or the follow-up (§6.4)
+  const draftReady = (p, r) => (isFollowUp(r) ? p.follow_up_status : p.outreach_status) === 'drafted';
+  const sendable = cardsFor.filter((p) => p.outreach_to_email && rows.some((r) => r.prospect_id === p.id && r.dimension === 'communication' && !r.satisfied_at && isOwner(r.level) && draftReady(p, r)));
   if (sendable.length) {
     try {
       const byEmail = await M.reviewByEmail(db, sendable.map((p) => p.outreach_to_email)); // one batch, not a query per card
@@ -293,13 +303,29 @@ async function listOwnerQueue(db) {
       for (const p of sendable) reviewFor.set(p.id, { kind: 'error', recipient: p.outreach_to_email, matched: [], lookup_hash: null, error: err.message });
     }
   }
+  // §13 on a FOLLOW-UP whose thread recipient is a customer contact: there is no other address to take (the pitch's
+  // counterpart is re-addressed on the board), so the sender's terminal settlement applies here too — skipped now,
+  // instead of an unusable card holding the conversation and the domain open forever; the nightly ends the instance
+  // (followUpPending excludes a skipped follow-up). CAS on the drafted state, inside the sender's helper.
+  for (const p of sendable) {
+    if ((reviewFor.get(p.id) || {}).kind !== 'customer' || p.follow_up_status !== 'drafted') continue;
+    if (!rows.some((r) => r.prospect_id === p.id && isFollowUp(r) && !r.satisfied_at && isOwner(r.level))) continue;
+    if (await require('./link-prospect-outreach').closeCustomerRecipientFollowUp(db, p.id)) Object.assign(p, { follow_up_status: 'skipped', follow_up_skipped_reason: 'customer_recipient' });
+  }
+  // the send click's inputs (§6.4 / §13) on a communication row: the draft the click sends — the pitch, or the
+  // follow-up — its review, the recipient match to acknowledge; `hash` travels back with the click: the claim sends
+  // only the text the card displayed (§3.6b)
+  const draftBlock = (p, r, reviews) => (isFollowUp(r)
+    ? { to: p.outreach_to_email || null, subject: p.follow_up_subject || null, body: p.follow_up_body || null, hash: M.followUpHash(p), review: reviews.followUp, recipient_review: reviewFor.get(p.id) || null, follow_up: true }
+    : { to: p.outreach_to_email || null, subject: p.outreach_subject || null, body: p.outreach_body || null, hash: M.draftHash(p), review: reviews.draft, recipient_review: reviewFor.get(p.id) || null });
+  const noDraftYet = (r) => (isFollowUp(r) ? 'no follow-up draft to send — the drafter composes it once it is due' : 'no draft to send — draft the pitch on the Link Building board first');
   const cards = cardsFor.map((p) => {
     const d = domainById.get(p.domain_id);
     const path = pathById.get(p.path_id) || null;
     const onBestPath = Boolean(path && path.id === d.best_path_id);
     const shared = Boolean(path && path.fee_scope === 'account_wide' && p.payment_group_id);
-    const draftReview = M.draftReview(p);
-    const ctx = onBestPath ? { path, domain: d, policy, score: d.score, draftClean: draftReview.clean } : null;
+    const reviews = { draft: M.draftReview(p), followUp: M.followUpReview(p) };
+    const ctx = onBestPath ? { path, domain: d, policy, score: d.score, draftClean: reviews.draft.clean, followUpClean: reviews.followUp.clean } : null;
     const mine = rows.filter((r) => r.prospect_id === p.id).map((r) => {
       // the lease is the click's first refusal — a leased card never shows a button that can only 409
       // a row decided on a PRIOR path (the placement moved to the best path, its instances not yet rotated) is judged
@@ -307,9 +333,11 @@ async function listOwnerQueue(db) {
       let whyNot = !onBestPath ? 'placement is not on the domain\'s current best path — the nightly bridge rotates it'
         : r.path_id !== path.id ? 'the step was decided on a prior path — the nightly bridge rotates it'
           : (whyNotApprovable(r, path) || whyNotHere(p, r) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
+      // a follow-up closed above (or by the sender) for a customer recipient says so, not "no draft"
+      if (!whyNot && isFollowUp(r) && p.follow_up_status === 'skipped' && p.follow_up_skipped_reason === 'customer_recipient') whyNot = 'the recipient is a customer contact — the follow-up is closed (the thread\'s recipient cannot change)';
       // a send needs a draft to send (the bridge parks the row only once one exists; a re-draft in flight clears it)
-      if (!whyNot && r.dimension === 'communication' && p.outreach_status !== 'drafted') whyNot = 'no draft to send — draft the pitch on the Link Building board first';
-      if (!whyNot && r.dimension === 'communication' && (reviewFor.get(p.id) || {}).kind === 'customer') whyNot = 'the recipient is a customer contact — outreach never goes to a customer; re-draft to another address';
+      if (!whyNot && r.dimension === 'communication' && !draftReady(p, r)) whyNot = noDraftYet(r);
+      if (!whyNot && r.dimension === 'communication' && (reviewFor.get(p.id) || {}).kind === 'customer') whyNot = isFollowUp(r) ? 'the recipient is a customer contact — the follow-up is closed (the thread\'s recipient cannot change)' : 'the recipient is a customer contact — outreach never goes to a customer; re-draft to another address';
       // the same freshness test the click applies — a stale stamp never shows a button that can only 409, and an
       // APPROVED row whose inputs moved since (price, policy, revision) is shown as awaiting the bridge's re-decision
       // rather than as live spending authority (the bridge invalidates it on its next pass)
@@ -326,13 +354,11 @@ async function listOwnerQueue(db) {
         approvable: whyNot === null && primary,
         why_not: whyNot || (primary ? null : `one approval covers the ${coveredByGroup.get(p.payment_group_id)} locations sharing this fee — approve it on the first card`),
         shared_fee: sharedFee ? { group_id: p.payment_group_id, placements: coveredByGroup.get(p.payment_group_id) } : null,
-        // the send click's inputs (§6.4 / §13): the draft the click sends, its review, the recipient match to acknowledge
-        // `hash` travels back with the click: the claim sends only the text the card displayed (§3.6b)
-        draft: r.dimension === 'communication' ? { to: p.outreach_to_email || null, subject: p.outreach_subject || null, body: p.outreach_body || null, hash: M.draftHash(p), review: draftReview, recipient_review: reviewFor.get(p.id) || null } : undefined,
+        draft: r.dimension === 'communication' ? draftBlock(p, r, reviews) : undefined,
       };
     });
     return {
-      placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
+      placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {
         id: path.id, on_best_path: onBestPath, acquisition_type: path.acquisition_type, link_type: path.link_type, submission_url: path.submission_url,
@@ -481,11 +507,13 @@ async function decideDomain(db, { domainId, decision, actor, note = null, now = 
     if (R.LANE_OWNED_STATES.includes(domain.agent_state)) refuse(409, `agent_state '${domain.agent_state}' is lane-owned: a placement is already approved or in flight — reject or watch it from the board first`);
     // every other state is decidable here — the Registry table's Reject / Watch is THIS decision too, and a domain that
     // left the queue (Reopen → investigating) can still carry approved rows a plain state flip would leave live
-    const placements = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'path_id', 'status', 'outreach_status');
-    // a pitch whose outcome is not settled (the claim committed `sending` and Gmail is being called outside any lock, or
-    // it errored and may still have been delivered): deciding the domain now would invalidate the approval that send
-    // stands on and land a `contacted` placement under a rejected / watching domain — it finalizes or reconciles first
-    if (placements.some((p) => require('./link-outreach-mandate').AMBIGUOUS_SEND_STATUSES.includes(p.outreach_status))) refuse(409, 'a pitch for this domain is being sent or awaits reconciliation — let it finish (or reconcile it from the Link Building board) before deciding the domain');
+    const placements = await trx('seo_link_prospects').where({ domain_id: domain.id }).select('id', 'path_id', 'status', 'outreach_status', 'follow_up_status');
+    // a send whose outcome is not settled — the pitch's, or the follow-up's (§6.4: its own claim commits `sending` and
+    // errors to `send_error` on its own columns) — the claim committed `sending` and Gmail is being called outside any
+    // lock, or it errored and may still have been delivered: deciding the domain now would invalidate the approval that
+    // send stands on and land a `contacted` placement under a rejected / watching domain — it finalizes or reconciles first
+    const { AMBIGUOUS_SEND_STATUSES } = require('./link-outreach-mandate');
+    if (placements.some((p) => AMBIGUOUS_SEND_STATUSES.includes(p.outreach_status) || AMBIGUOUS_SEND_STATUSES.includes(p.follow_up_status))) refuse(409, 'a pitch or follow-up for this domain is being sent or awaits reconciliation — let it finish (or reconcile it from the Link Building board) before deciding the domain');
     const ids = placements.map((p) => p.id);
     const open = ids.length ? await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', ids).whereNull('ended_at').whereNull('satisfied_at')) : [];
     // every owner-level row is audited, the already-approved ones included: a Reject / Watch is the owner's LATER word
@@ -607,6 +635,7 @@ const SEND_CODE_STATUS = Object.freeze({
   not_authorized: 409, customer_recipient: 409, recipient_review_required: 409, recipient_lookup_failed: 503,
   path_moved: 409, path_unlinked: 409, no_draft: 409, incomplete_draft: 409, invalid_recipient: 409, not_outreach: 409,
   inbox_in_flight: 409, recipient_changed: 409, draft_changed: 409,
+  no_initial_send: 409, reply_received: 409, bounced: 409, reply_check_failed: 503,
   send_failed: 502, finalize_failed: 500,
 });
 async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, draftHash = null, send = null }) {
@@ -615,14 +644,14 @@ async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, draf
   if (typeof draftHash !== 'string' || !draftHash) refuse(400, 'the hash of the draft the card displayed is required — refresh the queue and send again');
   const row = await db(AUTH).where({ id: authorityId }).first('id', 'prospect_id', 'dimension', 'instance_kind', 'ended_at', 'satisfied_at');
   if (!row) refuse(404, 'authority row not found');
-  if (row.dimension !== 'communication' || row.instance_kind !== '-') refuse(409, 'only the initial send is sent from the queue');
+  if (row.dimension !== 'communication' || !['-', 'followup'].includes(row.instance_kind)) refuse(409, 'only the initial send and the follow-up are sent from the queue');
   if (row.ended_at || row.satisfied_at) refuse(409, 'the send instance is no longer open — refresh the queue');
   const placement = await db('seo_link_prospects').where({ id: row.prospect_id }).first('id', 'status', 'parked_from_status', 'claimed_at');
   if (!placement) refuse(404, 'placement not found');
   const notHere = placement.claimed_at ? `leased at ${placement.status}` : whyNotHere(placement, row);
   if (notHere) refuse(409, `the placement is no longer awaiting your decision (${notHere}) — refresh the queue`);
   const sendOutreach = send || require('./link-prospect-outreach').sendOutreach;
-  const r = await sendOutreach({ prospectId: placement.id, approvedBy: actor, mode: 'owner', reviewedLookupHash, draftHash });
+  const r = await sendOutreach({ prospectId: placement.id, approvedBy: actor, mode: 'owner', reviewedLookupHash, draftHash, followUp: isFollowUp(row) });
   if (!r.ok) {
     const err = new OwnerQueueError(SEND_CODE_STATUS[r.code] || 400, r.error || `send refused: ${r.code}`);
     err.code = r.code;

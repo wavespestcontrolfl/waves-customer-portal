@@ -852,7 +852,7 @@ describe('call recording appointment guardrails', () => {
             return this;
           }
           queries.push(['where', arg]);
-          if (arg && Object.prototype.hasOwnProperty.call(arg, 'id')) state.mode = 'id';
+          if (arg && typeof arg === 'object' && (Object.prototype.hasOwnProperty.call(arg, 'id') || Object.prototype.hasOwnProperty.call(arg, 'technicians.id'))) state.mode = 'id';
           return this;
         },
         whereRaw(sql, params) {
@@ -863,6 +863,9 @@ describe('call recording appointment guardrails', () => {
         orWhereNull(column) {
           queries.push(['orWhereNull', column]);
           return this;
+        },
+        select() {
+          return Promise.resolve([]);
         },
         first() {
           return Promise.resolve(state.mode === 'id' ? rows.id : rows.name);
@@ -877,7 +880,7 @@ describe('call recording appointment guardrails', () => {
         id: { id: 'should-not-query', name: 'Wrong Tech' },
         name: { id: 'adam-id', name: 'Adam B.' },
       }, invalidQueries))).resolves.toEqual({ id: 'adam-id', name: 'Adam B.' });
-      expect(invalidQueries).not.toContainEqual(['where', { id: 'not-a-uuid' }]);
+      expect(invalidQueries).not.toContainEqual(['where', { 'technicians.id': 'not-a-uuid' }]);
 
       const configuredId = '11111111-1111-1111-1111-111111111111';
       const validQueries = [];
@@ -886,7 +889,10 @@ describe('call recording appointment guardrails', () => {
         id: { id: configuredId, name: 'Carlos' },
         name: { id: 'adam-id', name: 'Adam B.' },
       }, validQueries))).resolves.toEqual({ id: configuredId, name: 'Carlos' });
-      expect(validQueries).toContainEqual(['where', { id: configuredId }]);
+      expect(validQueries).toContainEqual(['where', { 'technicians.id': configuredId }]);
+      // Assignability filters (technician-eligibility.js) ride on every resolver query.
+      expect(validQueries).toContainEqual(['where', 'technicians.employment_status']);
+      expect(validQueries).toContainEqual(['where', 'technicians.field_dispatchable']);
     } finally {
       if (previousConfiguredId === undefined) delete process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID;
       else process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID = previousConfiguredId;

@@ -12,6 +12,7 @@ const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
+const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -1944,9 +1945,7 @@ async function getRecentCompletions(input = {}) {
 // string is persisted in tool-health telemetry, so it carries no typed name;
 // the candidates array holds the detail and only reaches the operator.
 async function resolveTechnicianByName(name) {
-  const matches = await db('technicians')
-    .whereILike('name', `%${name}%`)
-    .where('active', true)
+  const matches = await applyAssignable(db('technicians').whereILike('technicians.name', `%${name}%`))
     .limit(2);
   if (matches.length > 1) {
     return {
@@ -2009,8 +2008,8 @@ async function createAppointment(input) {
   if (input.technician_id) {
     // Same active bar as name resolution — a model-provided id, or a tech
     // deactivated during the confirmation window, must not take new visits.
-    const tech = await db('technicians').where('id', input.technician_id).where('active', true).first();
-    if (!tech) return { error: 'Technician not found or no longer active' };
+    const tech = await resolveActiveTechnicianById(input.technician_id);
+    if (!tech) return { error: 'Technician not found or no longer assignable' };
     technician_id = tech.id;
     resolvedTechnicianName = tech.name;
   } else if (technician_name) {
@@ -2081,6 +2080,9 @@ async function createAppointment(input) {
       err.customerNoLongerLive = true;
       throw err;
     }
+    // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
+    // ran before this transaction opened.
+    await assertAssignableTechnician(technician_id, { conn: trx });
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —
@@ -2894,7 +2896,7 @@ async function searchFieldIntelligence(input) {
 // proposal-time pinning so a model-provided uuid still yields a NAMED tech
 // on the confirmation card.
 async function resolveActiveTechnicianById(id) {
-  return db('technicians').where('id', id).where('active', true).first();
+  return applyAssignable(db('technicians').where('technicians.id', id)).first();
 }
 
 module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS };
