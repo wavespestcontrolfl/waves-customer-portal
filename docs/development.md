@@ -76,3 +76,22 @@ checkout. State and test artifacts belong under `.tmp/`, outside the public root
 
 A frontend build or fixture preview is not end-to-end database evidence. Record
 which checks ran and explicitly state when migrations/DB flows were not run.
+
+## Browser preview QA
+
+`npm run qa:previews` exercises the real portal, secure appointment, service report
+and completion components with fictional fixtures at desktop and mobile widths.
+`npm run audit:estimate-previews` retains the estimate interaction/PDF checks.
+Both verify the Vite checkout stamp before using a running server. A server from
+another checkout or commit is an error; restart it from the intended worktree.
+
+Each audit starts and stops its own Vite process when needed. To use an existing
+one, set QA_BASE_URL (general previews) or ESTIMATE_PREVIEW_BASE_URL (estimates)
+to its local origin. The general preview audit blocks external requests and API
+fallbacks. It writes screenshots, Playwright traces and commit/scenario metadata
+under .tmp/qa/previews. Traces contain only the synthetic preview session; keep
+real sessions out of this harness. Open a trace with `npx playwright show-trace`
+and its zip path. CI retains evidence for seven days, including failed runs.
+
+Browser previews are fixture-based UI evidence. They do not exercise the backend,
+provider APIs or database and must not be described as full end-to-end QA.
