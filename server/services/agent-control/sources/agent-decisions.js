@@ -9,12 +9,21 @@ const db = require('../../../models/db');
 const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'agent_decisions';
-const START = () => db.raw("date_trunc('milliseconds', created_at)");
+// A scheduled send (admin-communications queues an sms_log row with
+// status 'scheduled' and metadata.agent_decision_id) is waiting normally
+// until it is due: the decision's active span starts at the scheduling
+// transition (updated_at — markSuggestionScheduled writes it) or at the
+// send's scheduled_for when that is later, never at the original decision
+// (Codex r3). Sort / page key = that start, so the cursor and rows agree.
+const SCHEDULED_SEND = "(SELECT s.scheduled_for FROM sms_log s WHERE s.status = 'scheduled' AND (s.metadata::jsonb ->> 'agent_decision_id') = agent_decisions.id::text ORDER BY s.scheduled_for DESC LIMIT 1)";
+const ACTIVE_FROM = `CASE WHEN status = 'scheduled' THEN GREATEST(updated_at, COALESCE(${SCHEDULED_SEND}, updated_at)) ELSE created_at END`;
+const START = () => db.raw(`date_trunc('milliseconds', ${ACTIVE_FROM})`);
 const ID = 'id';
-const COLUMNS = [
+const COLUMNS = () => [
   'id', 'workflow', 'agent_name', 'mode', 'status', 'entity_type', 'entity_id', 'customer_id', 'lead_id',
   'detected_intent', 'confidence', 'confidence_label', 'safety_flags', 'model', 'prompt_version',
   'human_verdict', 'reviewed_at', 'created_at', 'updated_at',
+  db.raw(`${ACTIVE_FROM} AS active_from`),
 ];
 
 // agent_decisions.status → lifecycle. The vocabulary is the producers' own
@@ -84,13 +93,17 @@ function flagNames(flags) {
   return flags.map((f) => (typeof f === 'string' ? f : f?.code || f?.name)).filter(Boolean);
 }
 
+function confidenceLabel(d) {
+  return d.confidence == null ? d.confidence_label : `confidence ${Math.round(Number(d.confidence) * 100)} %`;
+}
+
 function fromRow(d) {
   const map = STATUS_MAP[d.status] || UNKNOWN_STATUS;
   const lane = WORKFLOW_MAP[d.workflow] || NO_WORKFLOW;
   const verdict = VERDICT[d.human_verdict] || NO_VERDICT;
   const flags = flagNames(d.safety_flags);
   const workflow = d.workflow || d.agent_name;
-  const confidence = d.confidence == null ? d.confidence_label : `confidence ${Math.round(Number(d.confidence) * 100)} %`;
+  const confidence = confidenceLabel(d);
   const decidedAt = d.reviewed_at || d.updated_at || d.created_at;
   const waiting = map.lifecycle === 'waiting_human';
   return canonicalRun({
@@ -105,7 +118,7 @@ function fromRow(d) {
     verification: verdict.verification,
     disposition: verdict.disposition ?? map.disposition ?? null,
     createdAt: d.created_at,
-    startedAt: d.created_at,
+    startedAt: d.active_from || d.created_at,
     finishedAt: map.lifecycle === 'terminal' ? decidedAt : null,
     lastProgressAt: decidedAt,
     steps: [
@@ -121,7 +134,7 @@ function fromRow(d) {
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(db('agent_decisions')
-      .select(COLUMNS)
+      .select(COLUMNS())
       .where((q) => {
         q.whereIn('status', LIVE_STATUSES);
         q.orWhere(START(), '>=', from);
@@ -135,7 +148,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
 
 async function get(id) {
   try {
-    const row = await db('agent_decisions').select(COLUMNS).where({ id }).first();
+    const row = await db('agent_decisions').select(COLUMNS()).where({ id }).first();
     return row ? { run: fromRow(row) } : null;
   } catch (err) {
     if (isMissingSchema(err)) return null;

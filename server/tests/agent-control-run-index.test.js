@@ -118,6 +118,15 @@ describe('adapters project onto the canonical shape', () => {
     expect(pending.steps[2].status).toBe('running');
     expect(messageDrafts.fromRow({ ...base, status: 'rejected' })).toMatchObject({ lifecycle: 'terminal', disposition: 'rejected', verification: 'failed' });
     expect(messageDrafts.fromRow({ ...base, status: 'sent', sent_at: ago(1e3), campaign_type: 'winback' })).toMatchObject({ disposition: 'applied', title: 'Draft for Pat Lee', subtitle: 'winback campaign' });
+    // a suggested draft stays 'suggested' after the owner acts (the judge needs it): the linked decision closes the run
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human' });
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'scheduled' })).toMatchObject({ lifecycle: 'waiting_human' });
+    const sentAsIs = messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'accepted', decision_verdict: 'accepted', decision_at: ago(1e3) });
+    expect(sentAsIs).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'passed', finishedAt: ago(1e3).toISOString(), lastProgressAt: ago(1e3).toISOString() });
+    expect(sentAsIs.steps[2]).toMatchObject({ status: 'done', detail: 'accepted' });
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'corrected', decision_verdict: 'corrected' })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', verification: 'warning' });
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'ignored', decision_verdict: 'ignored' })).toMatchObject({ lifecycle: 'terminal', disposition: 'no_action', verification: 'overridden' });
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'superseded' })).toMatchObject({ lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' });
   });
 
   test('agent_decisions: the producers\' workflows map to lanes / the SMS area, every written status is mapped, unknown ones surface', () => {
@@ -146,7 +155,9 @@ describe('adapters project onto the canonical shape', () => {
     expect(agentDecisions.LIVE_STATUSES).toEqual(expect.arrayContaining(['pending_review', 'sending', 'scheduled']));
 
     const base = { id: 'x', workflow: 'sms_house_voice_suggest', detected_intent: 'book', confidence: 0.82, mode: 'suggest', created_at: ago(3e3) };
-    expect(agentDecisions.fromRow({ ...base, status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human', laneId: 'sms_suggest', area: 'sms', subtitle: 'suggest mode · confidence 82 %', workflowId: 'sms_house_voice_suggest' });
+    expect(agentDecisions.fromRow({ ...base, status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human', laneId: 'sms_suggest', area: 'sms', subtitle: 'suggest mode · confidence 82 %', workflowId: 'sms_house_voice_suggest', startedAt: ago(3e3).toISOString() });
+    // a scheduled send waits from the scheduling transition / its due time (active_from, computed in SQL), not from the original decision
+    expect(agentDecisions.fromRow({ ...base, status: 'scheduled', created_at: ago(3600e3), updated_at: ago(60e3), active_from: ago(-1800e3) })).toMatchObject({ lifecycle: 'waiting_external', startedAt: ago(-1800e3).toISOString(), createdAt: ago(3600e3).toISOString() });
     const reviewed = agentDecisions.fromRow({ ...base, status: 'reviewed', human_verdict: 'corrected', reviewed_at: ago(1e3), safety_flags: ['pricing_claim'] });
     expect(reviewed).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', verification: 'warning', disposition: 'applied' });
     expect(reviewed.steps.map((s) => s.key)).toEqual(['decide', 'safety', 'review']);
@@ -220,9 +231,18 @@ describe('adapters project onto the canonical shape', () => {
     const running = jobHealth.fromRow({ job_name: 'nightly_sweep', last_status: 'running', last_started_at: ago(5e3), last_finished_at: ago(3600e3), last_duration_ms: 400 });
     expect(running).toMatchObject({ lifecycle: 'running', finishedAt: null, durationMs: null, workflowId: 'nightly_sweep', title: 'nightly sweep' });
     expect(jobHealth.fromRow({ job_name: 'j', last_status: 'failed', consecutive_failures: 3, last_error: 'ENOTFOUND', last_started_at: ago(5e3), last_finished_at: ago(4e3) })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', subtitle: '3 consecutive failures', detail: 'ENOTFOUND', attempts: 3 });
-    const { LANE_RUNTIME } = require('../services/agent-control/lane-policies');
-    const [laneId, policy] = Object.entries(LANE_RUNTIME).find(([, p]) => p.workflow_id) || [];
-    if (laneId) expect(jobHealth.laneForJob(policy.workflow_id)).toBe(laneId);
+    const { LANE_RUNTIME, policyFor } = require('../services/agent-control/lane-policies');
+    // every lane that names its cron: the job exists in the scheduler under that name, and the job reads with the lane's policy
+    const scheduler = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+    const mapped = Object.entries(LANE_RUNTIME).filter(([, p]) => p.workflow_id);
+    expect(mapped.map(([l]) => l).sort()).toEqual(['call_research', 'call_self_audit', 'shadow_judge', 'voice_profile']);
+    for (const [laneId, policy] of mapped) {
+      expect(scheduler).toContain(`runExclusive('${policy.workflow_id}'`);
+      expect(jobHealth.laneForJob(policy.workflow_id)).toBe(laneId);
+    }
+    const miner = jobHealth.fromRow({ job_name: 'call-research-miner', last_status: 'running', last_started_at: ago(7 * 60e3) });
+    expect(miner.laneId).toBe('call_research');
+    expect(policyFor(miner.laneId).stall_after_ms).toBe(900_000);
     expect(jobHealth.laneForJob('no_such_job')).toBeNull();
   });
 

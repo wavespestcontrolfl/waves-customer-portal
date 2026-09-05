@@ -131,6 +131,7 @@ function inertHandle(args = {}) {
     traceId: args.traceId || context.current().traceId || context.newTraceId(),
     laneId,
     workflowId: args.workflowId || null,
+    agentVersionId: args.agentVersionId || null,
     heartbeat: noop,
     wait: noop,
     resume: noop,
@@ -280,6 +281,13 @@ async function startRun(args = {}) {
       await trx('agent_runs').where({ id: run.id }).update({ work_item_id: workItemId, updated_at: now });
       run.work_item_id = workItemId;
     }
+    // likewise the agent version: the persisted one is the run's (its calls
+    // stamp the same id through the context), a later start's binds only
+    // when the row has none (Codex r3)
+    if (!run.agent_version_id && args.agentVersionId) {
+      await trx('agent_runs').where({ id: run.id }).update({ agent_version_id: args.agentVersionId, updated_at: now });
+      run.agent_version_id = args.agentVersionId;
+    }
     // A reopened run keeps ITS lane and policy: the persisted row decides
     // (a money lane cannot be reopened under a read-only one and gain a
     // retry — Codex r1). A mismatch is logged, never honoured.
@@ -294,12 +302,12 @@ async function startRun(args = {}) {
   }));
   if (!opened) return inertHandle(args);
   // a reopened run keeps the trace its ledger rows already carry
-  return liveHandle({ ...opened, traceId: opened.run.trace_id || traceId, workflowId: opened.run.workflow_id || args.workflowId || null });
+  return liveHandle({ ...opened, traceId: opened.run.trace_id || traceId, workflowId: opened.run.workflow_id || args.workflowId || null, agentVersionId: opened.run.agent_version_id || null });
 }
 
 // ── Live handle ──────────────────────────────────────────────────────
 
-function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, traceId, workflowId }) {
+function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, traceId, workflowId, agentVersionId = null }) {
   const runId = run.id;
   const budget = policy.budget || {};
   let seq = Number(run.max_seq || 0); // timeline numbering, continues across attempts (openAttempt reads the max)
@@ -339,11 +347,14 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   async function flagBudget(kind) {
     if (budgetFlagged) return;
     budgetFlagged = true;
-    await guarded('budget', () => fenced().update({
+    // the event only when the fenced stamp moved the run: a stale handle
+    // (a newer attempt opened) must not narrate a budget transition the
+    // current attempt never made (Codex r3)
+    const moved = await guarded('budget', () => fenced().update({
       summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]),
       updated_at: new Date(),
     }));
-    await insertEvent(runId, 'budget_exceeded', null, { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls });
+    if (Number(moved)) await insertEvent(runId, 'budget_exceeded', null, { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls });
   }
 
   async function step({ key, label = null, toolName = null } = {}, fn) {
@@ -535,6 +546,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     traceId,
     laneId,
     workflowId,
+    agentVersionId,
     heartbeat,
     step,
     wait,
@@ -561,7 +573,7 @@ async function runManaged(startArgs, fn) {
     workItemId: handle.workItemId,
     attemptId: handle.attemptId,
     traceId: handle.traceId,
-    agentVersionId: startArgs.agentVersionId || null,
+    agentVersionId: handle.agentVersionId,
     workflowId: handle.workflowId,
   }, () => fn(handle));
   const body = () => (handle.laneId ? context.runInLane(handle.laneId, scoped) : scoped());

@@ -321,6 +321,34 @@ describe('a spent handle', () => {
     expect(runRow().progress_sequence).toBe(1);
   });
 
+  test('a stale handle stepping past the budget stamps nothing and writes no budget event on the newer attempt', async () => {
+    const a = await runs.startRun(base);
+    const b = await runs.startRun(base); // attempt 2: a is stale
+    const max = policyFor('blog_draft').budget.max_steps;
+    for (let i = 0; i <= max; i += 1) await a.step({ key: `a${i}` }, async () => i);
+    expect(events(b.id)).not.toContain('budget_exceeded');
+    expect(runRow().summary?.budget_exceeded).toBeUndefined();
+    for (let i = 0; i <= max; i += 1) await b.step({ key: `b${i}` }, async () => i);
+    expect(events(b.id).filter((e) => e === 'budget_exceeded')).toHaveLength(1);
+    expect(runRow().summary.budget_exceeded).toBe('steps');
+  });
+
+  test('the agent version is the persisted run\'s: a reopen under another version keeps it (and scopes calls to it); a row without one binds a later start\'s', async () => {
+    const a = await runs.startRun({ ...base, agentVersionId: 'ver-1' });
+    expect(a.agentVersionId).toBe('ver-1');
+    await a.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
+    let seen = null;
+    await runs.runManaged({ ...base, agentVersionId: 'ver-2' }, async (h) => { seen = { ctx: context.current().agentVersionId, handle: h.agentVersionId }; });
+    expect(seen).toEqual({ ctx: 'ver-1', handle: 'ver-1' });
+    expect(runRow().agent_version_id).toBe('ver-1');
+    const c = await runs.startRun({ ...base, sourceRunId: 'r2' });
+    expect(c.agentVersionId).toBeNull();
+    await c.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: false });
+    const d = await runs.startRun({ ...base, sourceRunId: 'r2', agentVersionId: 'ver-3' });
+    expect(d.agentVersionId).toBe('ver-3');
+    expect(store.agent_runs.find((r) => r.source_run_id === 'r2').agent_version_id).toBe('ver-3');
+  });
+
   test('a work item supplied by a later start binds on the run row, not only the handle', async () => {
     const a = await runs.startRun(base);
     expect(a.workItemId).toBeNull();
