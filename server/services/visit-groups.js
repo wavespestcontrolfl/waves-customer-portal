@@ -2827,12 +2827,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         && (options.technicianId || null) !== (target.expect.technician_id || null)
         && target.expect.technician_id) {
         const win = targetTuple(target);
+        // The snapshot asserts only what the plan knows (pre-push audit P1):
+        // an object-shaped window carries no end, and a row without one had
+        // none to plan from — the rebooker derives the end from the duration
+        // either way — and asserting `null` there made the write-time check
+        // drop this card against the committed end, leaving the holder
+        // silent. The card's own text reads the committed row.
+        const snapshot = { date: newDateStr, windowStart: win.window_start ?? null };
+        if (win.window_end) snapshot.windowEnd = win.window_end;
         void require('./tech-visit-notifications').notifyVisitRescheduled({
           visitId: target.id,
           technicianId: target.expect.technician_id,
           actorId: options.actorId || initiatedBy || null,
           previous: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
-          snapshot: { date: newDateStr, windowStart: win.window_start ?? null, windowEnd: win.window_end ?? null },
+          snapshot,
         });
       }
       await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`, { movedButUnassigned: true });

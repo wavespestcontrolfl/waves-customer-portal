@@ -55,6 +55,7 @@ jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mock
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]), acquireOccupancyLock: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/dispatch-assignment', () => ({ assignDispatchJob: jest.fn().mockResolvedValue({ changed: true }) }));
+jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitRescheduled: jest.fn(), notifyTechVisitChange: jest.fn(), notifyAssignmentChange: jest.fn() }));
 
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -587,6 +588,26 @@ describe('moveVisitAsUnit — codex #3609 r13', () => {
     const staleTech = await moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
     expect(staleTech.visitMove.moved).toEqual(['a', 'b']);
     expect(staleTech.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'ASSIGNMENT_STALE' })]);
+    // The holder's fallback "visit moved" card (its rebooker card was suppressed for the pair): the plan
+    // asserts date + start; a member with no end time gets an object-shaped window whose end the rebooker
+    // derives, so the snapshot must NOT assert `windowEnd: null` or the write-time check drops the card.
+    const { notifyVisitRescheduled } = require('../services/tech-visit-notifications');
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    const fallback = notifyVisitRescheduled.mock.calls[0][0];
+    expect(fallback).toMatchObject({ visitId: 'a', technicianId: 't1', snapshot: { date: '2026-09-02', windowStart: '09:00', windowEnd: '10:00' } });
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a', { window_end: null }), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+    ] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    const openEndedOut = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { technicianId: 't9' } });
+    expect(openEndedOut.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'ASSIGNMENT_STALE', movedButUnassigned: true })]);
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    const openEnded = notifyVisitRescheduled.mock.calls[0][0];
+    expect(openEnded.actorId).toBe('admin');
+    expect(openEnded.snapshot).toEqual({ date: '2026-09-02', windowStart: '09:00' });
+    expect('windowEnd' in openEnded.snapshot).toBe(false);
     jest.clearAllMocks(); db.__calls.length = 0;
     db.__script = script({ members: [member('a'), member('b')], landedRows: { b: landedRow() } });
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
