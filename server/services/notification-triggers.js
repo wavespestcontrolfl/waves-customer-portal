@@ -280,7 +280,7 @@ const TRIGGER_REGISTRY = {
       return {
         // Banner-first: the WHO leads so a truncated phone banner still
         // identifies the caller (owner ruling 2026-07-30).
-        title: `Voicemail — ${who}`,
+        title: `${p.reason === 'sandy_provider_failure' ? 'AI call callback' : 'Voicemail'} — ${who}`,
         body: bodyParts.join(' - '),
         // Voicemail recordings render under the Calls tab (hash-routed);
         // ?thread= would open the SMS view instead. CallLogTabV2 has no

@@ -745,7 +745,9 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     const throwing = makeBuilder([]);
     throwing.first = jest.fn(() => Promise.reject(new Error('connection terminated')));
     db.mockImplementation((table) => (table === 'call_log' ? throwing : builders[table] || makeBuilder([])));
-    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    const ctx = slotCtx();
+    const out = await executeTool('request_booking', GOOD_INPUT, ctx);
+    expect(ctx.toolFailed).toBe(true);
     expect(out).toMatch(/NOTHING was booked/);
     expect(out).toMatch(/Do NOT say anything is booked/i);
     assertNoCreateWrites();

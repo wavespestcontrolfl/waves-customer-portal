@@ -543,6 +543,8 @@ class RelayConversation {
     this._resumeSeeded = false;
     this._modelFailures = 0; // consecutive model timeouts / errors
     this._toolFailures = 0; // consecutive failed tools
+    this._inheritedFailures = { model: 0, tool: 0 };
+    this._clearedFailures = { model: false, tool: false };
     this._handoffForFailure = false; // the provider-failure handoff ran (once per call)
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
@@ -1710,11 +1712,14 @@ class RelayConversation {
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
-    // …but never over a streak THIS leg already owns (codex r3 P2): a late
-    // reload after a round ran here must not resurrect a cleared counter.
-    if (!this._providerRoundSeen) {
-      this._modelFailures = Math.max(this._modelFailures, Number(state.modelFailures) || 0);
-      this._toolFailures = Math.max(this._toolFailures, Number(state.toolFailures) || 0);
+    // Restore each provider independently. Add only newly observed inherited
+    // failures, preserving failures here without counting repeated reloads twice.
+    // A success clears only its own provider's inherited streak for this leg.
+    for (const kind of ['model', 'tool']) {
+      if (this._clearedFailures[kind]) continue;
+      const inherited = Math.max(0, Number(state[`${kind}Failures`]) || 0);
+      this[`_${kind}Failures`] += Math.max(0, inherited - this._inheritedFailures[kind]);
+      this._inheritedFailures[kind] = Math.max(this._inheritedFailures[kind], inherited);
     }
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
@@ -1728,7 +1733,7 @@ class RelayConversation {
    * bell row was written. Never on the sandbox (a dry run files nothing).
    */
   async _fileFailureCallback() {
-    if (this.sandbox || !this.callSid) return false;
+    if (this.ended || this.sandbox || !this.callSid) return false;
     try {
       const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('id', 'customer_id', 'from_phone', 'metadata').catch(() => null), 2000, null);
       if (!row) return false;
@@ -1744,6 +1749,7 @@ class RelayConversation {
       // failed/aborted delivery, and takeover waits until that write finishes.
       let resolveBell;
       const bell = new Promise((resolve) => { resolveBell = resolve; });
+      const deadline = Date.now() + 3000;
       const delivery = triggerNotification('customer_voicemail_callback', {
         name: this._estimateFields?.first_name || null,
         phone,
@@ -1752,7 +1758,10 @@ class RelayConversation {
         callLogId: row.id,
         reason: 'sandy_provider_failure',
       }, {
-        relayFailureCall: { callSid: this.callSid, owner: verified ? this.sessionKey : null },
+        relayFailureCall: {
+          callSid: this.callSid, owner: verified ? this.sessionKey : null,
+          isActive: () => !this.ended && Date.now() < deadline,
+        },
         onBell: resolveBell,
         beforePush: async () => !(await this._sessionSuperseded()),
       });
@@ -1964,7 +1973,6 @@ class RelayConversation {
       const modelStartAt = now();
       stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
       try {
-        this._providerRoundSeen = true; // from here on the failure streak is this leg's own
         const stream = anthropic.messages.stream(
           {
             model: MODEL,
@@ -1990,6 +1998,7 @@ class RelayConversation {
         stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
         this._modelFailures = 0; // a completed round resets the streak
+        this._clearedFailures.model = true;
       } catch (err) {
         if (!streamTimedOut && this._controller.signal.aborted) return; // barge-in
         stat.timedOut = streamTimedOut;
@@ -2070,6 +2079,7 @@ class RelayConversation {
           if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
           this._toolOutcomes.push({ name: block.name, ok: toolOk });
           this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
+          this._clearedFailures.tool ||= toolOk;
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
           const failureHandoff = require('./relay-recovery').providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) === 'handoff';
           if (failureHandoff || this._ending || this.ended) {

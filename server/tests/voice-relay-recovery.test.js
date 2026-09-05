@@ -574,7 +574,7 @@ describe('the conversation side', () => {
     expect(await convo._fileFailureCallback()).toBe(true);
     expect(require('../services/notification-triggers').triggerNotification).toHaveBeenCalledWith(
       'customer_voicemail_callback', expect.any(Object),
-      expect.objectContaining({ relayFailureCall: { callSid: 'CA-old', owner: 'old' }, beforePush: expect.any(Function) }),
+      expect.objectContaining({ relayFailureCall: { callSid: 'CA-old', owner: 'old', isActive: expect.any(Function) }, beforePush: expect.any(Function) }),
     );
   });
 
@@ -644,6 +644,27 @@ describe('the conversation side', () => {
     });
     const convo = new RelayConversation({ callSid: 'CA-cb-push', from: '+19415551234', send: jest.fn() });
     expect(await convo._fileFailureCallback()).toBe(true);
+  });
+
+  test('callback persistence observes socket close while its bell is pending', async () => {
+    primeDb({ firstRow: { id: 'cl-9', metadata: {} } });
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    let options;
+    let entered;
+    const started = new Promise((resolve) => { entered = resolve; });
+    trig.mockImplementationOnce((_key, _payload, opts) => {
+      options = opts;
+      entered();
+      return new Promise(() => {});
+    });
+    const convo = new RelayConversation({ callSid: 'CA-cb-close', from: '+19415551234', send: jest.fn() });
+    const pending = convo._fileFailureCallback();
+    await started;
+    expect(options.relayFailureCall.isActive()).toBe(true);
+    convo.ended = true; // end() marks this synchronously before any close writes.
+    expect(options.relayFailureCall.isActive()).toBe(false);
+    options.onBell(false);
+    expect(await pending).toBe(false);
   });
 
   test('an unresolved callback makes no promise and leaves no separately persisted claim', async () => {
@@ -855,6 +876,28 @@ describe('the conversation side', () => {
     expect(convo.leadCaptured).toBe(true);
   });
 
+  test('late inherited failures add to this leg once and model success leaves tool failures intact', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
+    const convo = resumedConvo({ callSid: 'CA-late-streak' });
+    await convo._resumeReady;
+    convo._modelFailures = 1;
+    convo._toolFailures = 1;
+    const late = { ...convo._resume, modelFailures: 1, toolFailures: 1 };
+    convo._applyResumeState(late);
+    convo._applyResumeState(late);
+    expect(convo._modelFailures).toBe(2);
+    expect(convo._toolFailures).toBe(2);
+    expect(require('../services/voice-agent/relay-recovery').providerFailurePolicy({ modelFailures: convo._modelFailures })).toBe('handoff');
+
+    const fresh = resumedConvo({ callSid: 'CA-independent-streak' });
+    await fresh._resumeReady;
+    fresh._clearedFailures.model = true;
+    fresh._applyResumeState(late);
+    expect(fresh._modelFailures).toBe(0);
+    expect(fresh._toolFailures).toBe(1);
+  });
+
   test('a late reload never resurrects a failure streak this leg already cleared; the earlier legs\' caller turns count toward the call turn cap (codex r3 P2 ×2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
@@ -863,7 +906,7 @@ describe('the conversation side', () => {
     const late = { ...convo._resume, modelFailures: 1, toolFailures: 1, callerTurns: Array.from({ length: 39 }, (_, i) => `turn ${i}`) };
     convo._applyResumeState(late); // before any round on this leg ⇒ the streak carries over
     expect(convo._modelFailures).toBe(1);
-    convo._providerRoundSeen = true; // a round ran here and cleared it
+    convo._clearedFailures = { model: true, tool: true }; // successful rounds cleared both providers
     convo._modelFailures = 0; convo._toolFailures = 0;
     convo._applyResumeState(late);
     expect(convo._modelFailures).toBe(0);

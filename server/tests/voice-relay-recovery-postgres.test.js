@@ -76,9 +76,9 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     } });
   });
 
-  function fileCallback(owner = 'old') {
+  function fileCallback(owner = 'old', isActive = () => true) {
     return NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
-      dedupeKey: `relay-failure:${callSid}`, relayFailureCall: { callSid, owner },
+      dedupeKey: `relay-failure:${callSid}`, relayFailureCall: { callSid, owner, isActive },
     });
   }
 
@@ -111,6 +111,50 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     expect((await fileCallback()).suppressed).toBe(true);
     expect(await mockPg('notifications')).toHaveLength(0);
     expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeNull();
+  });
+
+  test('an unverified socket may file only while the call has no owner', async () => {
+    expect((await fileCallback(null)).suppressed).toBe(true);
+    expect(await mockPg('notifications')).toHaveLength(0);
+    await mockPg('call_log').update({ metadata: {} });
+    expect((await fileCallback(null)).id).toBeTruthy();
+  });
+
+  test('closing while the insert is pending rolls back before takeover', async () => {
+    let active = true;
+    let entered;
+    let release;
+    const inCreate = new Promise((resolve) => { entered = resolve; });
+    const proceed = new Promise((resolve) => { release = resolve; });
+    const create = NotificationService.create.bind(NotificationService);
+    jest.spyOn(NotificationService, 'create').mockImplementation(async (opts) => { entered(); await proceed; return create(opts); });
+    const pending = fileCallback('old', () => active);
+    await inCreate;
+    active = false;
+    const takeover = beginRelaySessionClaim(callSid, 'new', 2);
+    release();
+    expect(await pending).toBeNull();
+    expect(await takeover).toBe(true);
+    expect(await mockPg('notifications')).toHaveLength(0);
+    const row = await mockPg('call_log').first();
+    expect(row.voicemail_callback_alerted_at).toBeNull();
+    expect(row.metadata.relay_failure_callback_filed_at).toBeUndefined();
+  });
+
+  test('closing during commit compensates only this callback before reporting delivery', async () => {
+    let active = true;
+    const transaction = mockPg.transaction.bind(mockPg);
+    jest.spyOn(require('../models/db'), 'transaction').mockImplementationOnce(async (...args) => {
+      const result = await transaction(...args);
+      active = false; // COMMIT won the race with socket close.
+      return result;
+    });
+    expect(await fileCallback('old', () => active)).toBeNull();
+    expect(await mockPg('notifications')).toHaveLength(0);
+    const row = await mockPg('call_log').first();
+    expect(row.voicemail_callback_alerted_at).toBeNull();
+    expect(row.metadata.relay_failure_callback_filed_at).toBeUndefined();
+    expect((await fileCallback()).id).toBeTruthy();
   });
 
   test('takeover waits for the callback bell transaction before changing ownership', async () => {

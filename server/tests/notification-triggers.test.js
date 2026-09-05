@@ -249,6 +249,15 @@ describe('triggerNotification bell outcome', () => {
     expect(result.bellWritten).toBe(false);
   });
 
+  test.each([
+    ['sandy_provider_failure', 'AI call callback'],
+    [undefined, 'Voicemail'],
+  ])('callback title reflects the actual call source: %s', async (reason, label) => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'bell-fixture' });
+    await triggerNotification('customer_voicemail_callback', { callLogId: 'call-fixture', reason });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('voicemail_callback', `${label} — Unknown caller`, expect.any(String), expect.any(Object));
+  });
+
   test('relay callback ownership is checked by the bell transaction and a refused bell never pushes', async () => {
     const relayFailureCall = { callSid: 'CA-fixture', owner: 'owner-fixture' };
     NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });

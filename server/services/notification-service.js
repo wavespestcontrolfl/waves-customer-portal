@@ -225,7 +225,8 @@ const NotificationService = {
     const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) });
     if (callerTrx) return shape(await dedupeAndInsert(callerTrx));
     try {
-      return shape(await db.transaction(async (trx) => {
+      let callbackStamp;
+      const persisted = await db.transaction(async (trx) => {
         if (!relayFailureCall) return dedupeAndInsert(trx);
         // Extend the existing notification transaction: shared callback claims
         // are final delivery evidence, never a durable pending lease. Holding
@@ -235,16 +236,34 @@ const NotificationService = {
         const call = await trx('call_log').where('twilio_call_sid', relayFailureCall.callSid).forUpdate().first('id', 'metadata', 'voicemail_callback_alerted_at');
         let meta = call?.metadata;
         if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-        if (!call || call.voicemail_callback_alerted_at || (relayFailureCall.owner && meta?.relay_session_claim_owner !== relayFailureCall.owner)) {
+        if (!call || call.voicemail_callback_alerted_at || ((meta?.relay_session_claim_owner ?? null) !== relayFailureCall.owner)) {
           return { notification: { suppressed: true }, deduped: true };
         }
+        if (relayFailureCall.isActive?.() === false) throw new Error('relay callback cancelled');
         const persisted = await dedupeAndInsert(trx);
-        if (!persisted.notification.suppressed) await trx('call_log').where('id', call.id).update({
-          voicemail_callback_alerted_at: trx.fn.now(),
-          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_failure_callback_filed_at', now()::text)"),
-        });
+        if (!persisted.notification.suppressed) {
+          const [stamped] = await trx('call_log').where('id', call.id).update({
+            voicemail_callback_alerted_at: trx.fn.now(),
+            metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_failure_callback_filed_at', now()::text)"),
+          }).returning('metadata');
+          callbackStamp = stamped.metadata.relay_failure_callback_filed_at;
+        }
+        if (relayFailureCall.isActive?.() === false) throw new Error('relay callback cancelled');
         return persisted;
-      }));
+      });
+      // Closing during COMMIT cannot roll that COMMIT back. Remove only this
+      // attempt's bell and stamps under the call lock before reporting delivery.
+      if (callbackStamp && relayFailureCall.isActive?.() === false) {
+        await db.transaction(async (trx) => {
+          const call = await trx('call_log').where('twilio_call_sid', relayFailureCall.callSid).forUpdate().first('id');
+          const cleared = await trx('call_log').where('id', call.id)
+            .whereRaw("metadata->>'relay_failure_callback_filed_at' = ?", [callbackStamp])
+            .update({ voicemail_callback_alerted_at: null, metadata: trx.raw("metadata - 'relay_failure_callback_filed_at'") });
+          if (cleared && !persisted.deduped) await trx('notifications').where('id', persisted.notification.id).delete();
+        });
+        return null;
+      }
+      return shape(persisted);
     } catch (err) {
       logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
       return null;
