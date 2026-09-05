@@ -2796,7 +2796,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             await alignMemberTechnician(t, target.id, options.technicianId || null, {
               skipVisitSeam: true,
               expectTechnicianId: target.expect.technician_id || null,
-              actorId: options.actorId || initiatedBy || null,
+              // Staff UUID only — assignDispatchJob's actorId also stamps
+              // dispatch_alerts.resolved_by; a system label never goes there.
+              actorId: options.actorId || null,
             });
           });
           return;
