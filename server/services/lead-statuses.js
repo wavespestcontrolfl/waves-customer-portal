@@ -49,19 +49,26 @@ const UUID_RE = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 // resolver's normalizePhone agree on (a leading country code drops away).
 const phoneDigits = (col) => `right(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10)`;
 const markerUuid = (extracted) => `(CASE WHEN ${extracted}->>'duplicate_of_lead_id' ~ '${UUID_RE}' THEN (${extracted}->>'duplicate_of_lead_id')::uuid END)`;
+// The estimate a won row's deal closed: the scope its conversion persisted
+// (extracted_data.won_estimate_id — a deposit on estimate B converts an
+// unlinked repeat), else its own link. Both walks judge "same deal" on this
+// scope from BOTH sides: a repeat won on estimate B (unlinked, scope
+// persisted) under a root won on estimate A is two deals whichever row is
+// asked, before and after the root's own win (pre-push P1s).
+const WON_SCOPE_TEXT = (r) => `COALESCE(${r}.extracted_data->>'won_estimate_id', ${r}.estimate_id::text)`;
 const secondWinSql = (t) => `(${t}.status IS DISTINCT FROM 'won' OR NOT EXISTS (
   WITH RECURSIVE chain AS (
-    SELECT o.status, o.deleted_at, o.customer_id, o.estimate_id, o.phone, o.email, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
+    SELECT o.status, o.deleted_at, o.customer_id, ${WON_SCOPE_TEXT('o')} AS won_scope, o.phone, o.email, ${markerUuid('o.extracted_data')} AS parent_id, 1 AS depth
     FROM leads o
     WHERE o.id = ${markerUuid(`${t}.extracted_data`)}
     UNION ALL
-    SELECT p.status, p.deleted_at, p.customer_id, p.estimate_id, p.phone, p.email, ${markerUuid('p.extracted_data')}, chain.depth + 1
+    SELECT p.status, p.deleted_at, p.customer_id, ${WON_SCOPE_TEXT('p')}, p.phone, p.email, ${markerUuid('p.extracted_data')}, chain.depth + 1
     FROM chain JOIN leads p ON p.id = chain.parent_id
     WHERE chain.status = 'duplicate' AND chain.deleted_at IS NULL AND chain.depth < 8
   )
   SELECT 1 FROM chain
   WHERE chain.status = 'won' AND chain.deleted_at IS NULL
-    AND NOT (chain.estimate_id IS NOT NULL AND ${t}.estimate_id IS NOT NULL AND chain.estimate_id <> ${t}.estimate_id)
+    AND NOT (chain.won_scope IS NOT NULL AND ${WON_SCOPE_TEXT(t)} IS NOT NULL AND chain.won_scope <> ${WON_SCOPE_TEXT(t)})
     AND CASE
       WHEN chain.customer_id IS NOT NULL AND ${t}.customer_id IS NOT NULL THEN chain.customer_id = ${t}.customer_id
       ELSE (${phoneDigits('chain.phone')} <> '' AND ${phoneDigits('chain.phone')} = ${phoneDigits(`${t}.phone`)})
@@ -86,11 +93,6 @@ const SECOND_WIN_SQL = secondWinSql('leads');
 // text comparison on the marker key so the expression index on it
 // (20260905000010) serves the lookup.
 const MARKER_TEXT = (extracted) => `${extracted}->>'duplicate_of_lead_id'`;
-// The estimate a won repeat's deal closed: the scope its conversion
-// persisted (extracted_data.won_estimate_id — a deposit on estimate B
-// converts an unlinked repeat), else its own link. A root linked to a
-// different estimate is a different deal and stays counted (pre-push P1).
-const WON_SCOPE_TEXT = (r) => `COALESCE(${r}.extracted_data->>'won_estimate_id', ${r}.estimate_id::text)`;
 const openStatusList = OPEN_LEAD_STATUSES.map((s) => `'${s}'`).join(', ');
 const wonDescendantSql = (t) => `(${t}.status NOT IN (${openStatusList}) OR NOT EXISTS (
   WITH RECURSIVE down AS (

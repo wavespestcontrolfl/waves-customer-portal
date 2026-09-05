@@ -102,9 +102,14 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(SECOND_WIN_SQL).toMatch(/LOWER\(TRIM\(chain\.email\)\) = LOWER\(TRIM\(leads\.email\)\)/);
     // ...and never through a DIFFERENT estimate: a root won on estimate X
     // while the repeat won on estimate Y is a different deal, exactly as the
-    // accept path promotes it (codex r17 P2).
-    expect(SECOND_WIN_SQL).toMatch(/AND NOT \(chain\.estimate_id IS NOT NULL AND leads\.estimate_id IS NOT NULL AND chain\.estimate_id <> leads\.estimate_id\)/);
-    expect(SECOND_WIN_SQL).toMatch(/SELECT o\.status, o\.deleted_at, o\.customer_id, o\.estimate_id, o\.phone, o\.email/);
+    // accept path promotes it (codex r17 P2) — judged on the scope each win
+    // persisted (won_estimate_id, else the row's own link) on BOTH sides, so
+    // an unlinked repeat that won on estimate B stays counted once its root
+    // linked to estimate A wins too (PR B pre-push P1).
+    expect(SECOND_WIN_SQL).toMatch(/AND NOT \(chain\.won_scope IS NOT NULL AND COALESCE\(leads\.extracted_data->>'won_estimate_id', leads\.estimate_id::text\) IS NOT NULL AND chain\.won_scope <> COALESCE\(leads\.extracted_data->>'won_estimate_id', leads\.estimate_id::text\)\)/);
+    expect(SECOND_WIN_SQL).toMatch(/SELECT o\.status, o\.deleted_at, o\.customer_id, COALESCE\(o\.extracted_data->>'won_estimate_id', o\.estimate_id::text\) AS won_scope, o\.phone, o\.email/);
+    expect(SECOND_WIN_SQL).toMatch(/SELECT p\.status, p\.deleted_at, p\.customer_id, COALESCE\(p\.extracted_data->>'won_estimate_id', p\.estimate_id::text\), p\.phone, p\.email/);
+    expect(SECOND_WIN_SQL).not.toMatch(/chain\.estimate_id/);
     // The sources summary counts (GET /leads/sources) splice the same scope
     // into every COUNT subquery, so the client-derived source conversion
     // rate agrees with the ROI (codex r16 P2).
