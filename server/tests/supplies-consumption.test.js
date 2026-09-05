@@ -23,7 +23,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
-function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false }) {
+function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false, openLookupBell = false }) {
   const updates = [];
   const inserts = [];
   const trx = (table) => {
@@ -56,10 +56,14 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   trx.raw = (s) => s;
   const db = (table) => {
     const q = {};
-    for (const m of ['whereNotNull', 'where', 'whereRaw', 'whereNull']) q[m] = () => q;
+    for (const m of ['whereNotNull', 'where', 'whereNull']) q[m] = () => q;
+    q.whereRaw = (sql, bindings) => { if (table === 'notifications' && bindings) q._key = bindings[0]; return q; };
     q.select = async () => products;
-    q.update = async (row) => { updates.push({ table, row }); return 1; };
-    q.first = async () => (table === 'product_inventory_movements' && settledAfterBell ? { id: 'mv-race' } : null); // the post-bell settled re-check
+    q.update = async (row) => { updates.push({ table, row, ...(q._key ? { key: q._key } : {}) }); return 1; };
+    q.first = async () => {
+      if (table === 'notifications') return openLookupBell && q._key === 'supplies-consumption-failed:lookup:svc-1' ? { id: 'bell-lookup' } : null; // retireLookupBellIfSettled's open-bell probe
+      return table === 'product_inventory_movements' && (settledAfterBell || openLookupBell) ? { id: 'mv-race' } : null; // the post-bell settled re-check / lookupSettled
+    };
     return q;
   };
   db.transaction = async (fn) => fn(trx);
@@ -346,13 +350,21 @@ test('a lookup bell STAYS when the re-run lookup fails again, whatever movements
   expect(updates).toEqual([]);
 });
 
-test('a successful deduction retires the failure bells an earlier attempt rang for this product + visit (Codex r15 P2)', async () => {
+test('a successful deduction retires the failure bell an earlier attempt rang for this product + visit — and ONLY that one: the visit-wide lookup bell stays until every kit product is proven settled (Codex r15 P2, hook r27 P1)', async () => {
   const { db, updates } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, args);
   const retired = updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(1);
+  expect(retired[0].key).toBe('supplies-consumption-failed:prod-sign:svc-1'); // never the lookup key from a product clear
   expect(retired[0].row.read_at).toBeInstanceOf(Date);
   expect(String(retired[0].row.metadata)).toContain('autoRetired'); // stamped so it never reads as a staff hand-off (Codex r26 P1)
+});
+
+test('an open lookup bell is retired at the end of a run only when every applicable kit product has a movement (hook r27 P1)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], openLookupBell: true });
+  await consumeCompletionSupplies(db, args); // sign is deducted in this run → the one applicable product is settled
+  const keys = updates.filter((u) => u.table === 'notifications').map((u) => u.key);
+  expect(keys).toEqual(['supplies-consumption-failed:prod-sign:svc-1', 'supplies-consumption-failed:lookup:svc-1']);
 });
 
 test('a lookup bell this module auto-retired (a concurrent retry deducted the kit) does NOT hand off the next kit product — it is deducted (Codex r26 P1)', async () => {

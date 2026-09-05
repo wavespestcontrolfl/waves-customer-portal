@@ -494,11 +494,15 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .whereIn('vo.status', ['needs_review', 'failed', 'placed'])
-    // A request received meanwhile settled the order, and one staff
-    // cancelled after a pre-submit park withdrew the need: either way the
-    // stored instruction is obsolete, never re-rung (Codex r24 P2, r25 P2).
-    .whereRaw("prr.status NOT IN ('received', 'cancelled')")
-    .whereRaw("vo.evidence ? 'bell'")
+    // A request received meanwhile settled the order — unless the order
+    // landed AFTER that receipt (landedAfterReceive: still to reconcile) —
+    // and one staff cancelled after a pre-submit park withdrew the need:
+    // either way the stored instruction is obsolete, never re-rung (Codex
+    // r24 P2, r25 P2, hook r27 P1). jsonb_exists, not the ? operator: Knex
+    // reads a bare ? as a binding placeholder (hook r27 P1).
+    .whereRaw("prr.status <> 'cancelled'")
+    .whereRaw(RECEIVED_SETTLES_SQL)
+    .whereRaw("jsonb_exists(vo.evidence, 'bell')")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
     .select('vo.id', 'vo.evidence', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name');
   const rung = [];
@@ -1255,6 +1259,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
 }
 
 module.exports = {
+  RECEIVED_SETTLES_SQL,
   landedAfterReceiveFor,
   settleLandedAfterReceive,
   runVendorOrderDispatch,

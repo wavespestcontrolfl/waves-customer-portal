@@ -173,15 +173,17 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
 
 // A deduction that SUCCEEDS on a retried completion (the resume path runs
 // this hook again) retires the failure bell an earlier attempt rang for
-// the same (product, visit) — and the visit-scoped lookup bell — so staff
-// do not follow a stale "adjust by hand" on top of the real deduction
-// (Codex r15 P2). The row is stamped metadata.autoRetired so settledReason
-// never mistakes it for a staff hand-off (Codex r26 P1). Best effort,
-// never throws.
+// the same (product, visit), so staff do not follow a stale "adjust by
+// hand" on top of the real deduction (Codex r15 P2). The visit-scoped
+// lookup bell (productId null) is retired ONLY once lookupSettled proved
+// every applicable product deducted — one product's deduction must not
+// strip the hand-off protection of the others (hook r27 P1). The row is
+// stamped metadata.autoRetired so settledReason never mistakes it for a
+// staff hand-off (Codex r26 P1). Best effort, never throws.
 async function clearMissedDeductionBells(db, { scheduledServiceId, productId = null }) {
-  const keys = [`supplies-consumption-failed:lookup:${scheduledServiceId}`, ...(productId ? [`supplies-consumption-failed:${productId}:${scheduledServiceId}`] : [])];
+  const key = productId ? `supplies-consumption-failed:${productId}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
-    await db('notifications').whereRaw("metadata->>'dedupeKey' = ANY(?)", [keys]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
+    await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]).whereNull('read_at').update({ read_at: new Date(), metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"autoRetired\": true}'::jsonb") });
   } catch (err) {
     logger.warn(`[supplies-consumption] could not retire the failure bell for ${productId} on visit ${scheduledServiceId}: ${err.message}`);
   }
@@ -282,7 +284,21 @@ async function consumeCompletionSupplies(db, {
       await ringMissedDeductionBell(db, result, { scheduledServiceId, product, reason: err.message });
     }
   }
+  // An open visit-wide lookup bell (an earlier attempt could not read the
+  // catalog) is retired only when every applicable product is now proven
+  // deducted — never on one product's movement (hook r27 P1).
+  await retireLookupBellIfSettled(db, { scheduledServiceId, serviceLine });
   return result;
+}
+
+async function retireLookupBellIfSettled(db, { scheduledServiceId, serviceLine }) {
+  try {
+    const open = await db('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`supplies-consumption-failed:lookup:${scheduledServiceId}`]).whereNull('read_at').first('id');
+    if (!open) return;
+    if (await lookupSettled(db, { scheduledServiceId, serviceLine })) await clearMissedDeductionBells(db, { scheduledServiceId });
+  } catch (err) {
+    logger.warn(`[supplies-consumption] lookup-bell settlement check failed for visit ${scheduledServiceId}: ${err.message}`);
+  }
 }
 
 module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE, INSPECTION_SERVICE_RE };

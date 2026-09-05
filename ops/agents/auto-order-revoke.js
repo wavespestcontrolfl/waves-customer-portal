@@ -31,6 +31,7 @@ process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
 const path = require('path');
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
 const { auditVendorOrder } = require(path.join(__dirname, '..', '..', 'server', 'services', 'audit-log'));
+const { RECEIVED_SETTLES_SQL } = require(path.join(__dirname, '..', '..', 'server', 'services', 'procurement', 'order-dispatch'));
 
 function arg(name) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -55,14 +56,17 @@ const parseEvidence = (raw) => (typeof raw === 'string' ? (() => { try { return 
 // an ET month boundary still needs its ledger id here (Codex r12 P2). A row
 // already revoked (evidence.revokedAt) is reconciled — its request is
 // cancelled, not received — and stays off the list (Codex r23 P2); a late
-// placement strips the marker and puts it back.
+// placement strips the marker and puts it back. A received request settles
+// its row unless the order landed after that receipt (evidence
+// .landedAfterReceive): that one is listed, it is what the operator must
+// reconcile (hook r27 P1).
 async function listDispatched() {
   const rows = await db('vendor_orders as vo')
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .leftJoin('product_restock_requests as prr', 'prr.id', 'vo.restock_request_id')
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
     .whereRaw("(vo.status IN ('placing', 'placed') OR (vo.status = 'needs_review' AND vo.placed_at IS NOT NULL))")
-    .whereNot('prr.status', 'received')
+    .whereRaw(RECEIVED_SETTLES_SQL)
     .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .orderBy('vo.created_at', 'desc')
     .select('vo.id', 'vo.status', 'vo.amount_cents', 'vo.external_order_number', 'vo.placed_at', 'v.name as vendor', 'pc.name as product', 'prr.status as request_status');
