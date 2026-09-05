@@ -241,8 +241,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.loginSubmit) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenSubmitClicked = (st.hiddenSubmitClicked || 0) + 1; } }) : submit) });
       if (sel === S.loginError) return el();
       if (sel === S.searchInput) return el({ count: 1, visible: true });
-      if (sel === S.productLink) return el({ count: 1 });
-      if (sel === S.productSku) return el({ count: 1, text: 'SKU: S1-77' });
+      // productLinkHiddenFirst: a hidden responsive copy of the result link precedes the visible one
+      const hitLink = el({ count: 1, visible: true, onClick: () => { st.hitClicked = (st.hitClicked || 0) + 1; } });
+      if (sel === S.productLink) return st.productLinkHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenControlClicked = (st.hiddenControlClicked || 0) + 1; } }) : hitLink) }) : hitLink;
+      if (sel === S.productSku) return el({ count: 1, visible: true, text: 'SKU: S1-77' });
       if (sel === S.unavailable) return el();
       // productControlsHiddenFirst: hidden desktop/mobile copies of the quantity + Add to Cart controls precede the visible ones
       const qtyInput = el({ count: 1, visible: true, onFill: (v) => { st.qty = Number(v); } });
@@ -254,7 +256,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.cartLine) return st.cartLinesResponsive
         ? el({ count: st.cart.length * 2, nth: (i) => (i % 2 ? el({ count: 1, visible: false }) : line(st.cart[i / 2])) })
         : el({ count: st.cart.length, nth: (i) => line(st.cart[i]) });
-      if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
+      // cartRemoveHiddenFirst: the hidden responsive cart copy's Remove precedes the visible row's (clicking it does nothing)
+      const removeBtn = el({ count: 1, visible: true, onClick: () => { st.cart.shift(); } });
+      if (sel === S.cartRemove) {
+        if (!(st.cart.length && st.removable)) return el();
+        return st.cartRemoveHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenRemoveClicked = (st.hiddenRemoveClicked || 0) + 1; } }) : removeBtn) }) : removeBtn;
+      }
       // cartTotalHiddenFirst: a hidden responsive copy carrying a stale figure precedes the visible total
       if (sel === S.cartTotal) return st.cartTotalHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: '$999.00' }) : el({ count: 1, visible: true, text: '$99.00' })) }) : el({ count: 1, visible: true, text: '$99.00' });
       // checkoutHiddenFirst: a hidden responsive copy of the checkout button precedes the visible one
@@ -574,6 +581,20 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ cartLinesResponsive: true });
     expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 }); // the total was read = the one-line proof passed
     expect(st.addClicked).toBe(1);
+  });
+
+  test('a leftover cart whose visible Remove sits behind a hidden responsive copy is still emptied — the hidden control is never clicked (r17 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ cart: [{ sku: 'OLD-1', qty: 1 }], cartLinesResponsive: true, cartRemoveHiddenFirst: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.hiddenRemoveClicked || 0).toBe(0);
+    expect(st.addClicked).toBe(1);
+  });
+
+  test('the search result clicked is the first SHOWN link — a hidden copy ahead of it is never clicked (r17 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ productLinkHiddenFirst: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.hitClicked).toBe(1);
+    expect(st.hiddenControlClicked || 0).toBe(0);
   });
 
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {

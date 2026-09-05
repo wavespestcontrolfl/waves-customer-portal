@@ -583,6 +583,12 @@ test('master gate off: the run still re-rings pending bells and recovers stale p
   expect(mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status).row).toMatchObject({ status: 'needs_review' });
 });
 
+test('canAutoOrder PROPAGATES a throwing credential lookup — an infrastructure failure is not "unconfigured" (no "order manually" bell beside a possible placement; Codex #3853 r17 P1)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  getVendorLoginCredentials.mockRejectedValueOnce(new Error('ECONNRESET'));
+  await expect(dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true } })).rejects.toThrow(/credential lookup for SiteOne failed: ECONNRESET/);
+});
+
 test('canAutoOrder mirrors gates + adapter map + loaded module + vendor active', async () => {
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
   expect(await dispatch.canAutoOrder({ vendor: { id: 'g', name: 'Gemplers', code: 24 } })).toBe(false);

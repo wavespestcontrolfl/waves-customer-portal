@@ -234,17 +234,20 @@ async function cartLines(page) {
   return out;
 }
 
-// Remove every line (bounded) and return how many are left. 0 = empty.
+// Remove every SHOWN line (bounded) and return how many are left. 0 = empty.
+// Hidden responsive copies are neither counted nor clicked: a hidden Remove
+// ahead of the visible one would swallow every click and refuse a valid
+// request as cart_not_empty (Codex #3853 r17 P2).
 async function clearCart(page) {
   await gotoCart(page);
   for (let i = 0; i < 25; i += 1) {
-    if (!(await page.locator(SELECTORS.cartLine).count())) return 0;
-    const remove = page.locator(SELECTORS.cartRemove).first();
-    if (!(await remove.count())) break;
+    if (!(await matches(page, SELECTORS.cartLine)).shown.length) return 0;
+    const remove = (await matches(page, SELECTORS.cartRemove)).shown[0];
+    if (!remove) break;
     await remove.click({ timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(1500);
   }
-  return page.locator(SELECTORS.cartLine).count();
+  return (await matches(page, SELECTORS.cartLine)).shown.length;
 }
 
 // Runs INSIDE the page (page.evaluate serializes it — no closures, browser
@@ -422,12 +425,16 @@ async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
   await search.press('Enter');
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
   await page.waitForTimeout(2000);
-  const hit = page.locator(SELECTORS.productLink).first();
-  if (!(await hit.count())) { await shot(page, 'search', evidence, upload); throw new RefusedError('sku_not_found', `SiteOne search for ${vendorSku} returned no product`, evidence); }
+  // The first SHOWN result (the product page's exact-SKU check decides
+  // whether it is the right one); a hidden copy ahead of it would time out
+  // into a failed order (Codex #3853 r17 P2).
+  const hit = (await matches(page, SELECTORS.productLink)).shown[0];
+  if (!hit) { await shot(page, 'search', evidence, upload); throw new RefusedError('sku_not_found', `SiteOne search for ${vendorSku} returned no product`, evidence); }
   await hit.click();
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
   await page.waitForTimeout(1500);
-  const pageSkuRaw = (await page.locator(SELECTORS.productSku).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+  const skuNode = (await matches(page, SELECTORS.productSku)).shown[0]; // the SKU the page SHOWS, never a hidden copy's
+  const pageSkuRaw = (skuNode ? (await skuNode.textContent().catch(() => '') || '') : '').replace(/\s+/g, ' ').trim();
   if (!pageSkuRaw) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_unreadable', `could not read the product SKU on the page for ${vendorSku} (SELECTORS.productSku)`, evidence); }
   if (normalizeSku(pageSkuRaw) !== normalizeSku(vendorSku)) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_mismatch', `product page shows "${pageSkuRaw.slice(0, 60)}", expected ${vendorSku}`, evidence); }
   if (await visible(page, SELECTORS.unavailable)) { await shot(page, 'product', evidence, upload); throw new RefusedError('unavailable', `SiteOne lists ${vendorSku} as unavailable`, evidence); }
