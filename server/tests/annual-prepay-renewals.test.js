@@ -324,7 +324,12 @@ describe('annual prepay renewal helpers', () => {
     // The row read as 'pending' was cancelled before the UPDATE ran: the
     // status predicate matches nothing and returning() is empty.
     const racedUpdate = query({ returning: [] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, racedUpdate] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, racedUpdate],
+      notifications: [query({ first: undefined })], // coverage-exception dedupe probe: none open
+    });
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
 
     const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm({
       id: 'term-1', customer_id: 'customer-1', prepay_amount: 200,
@@ -333,6 +338,15 @@ describe('annual prepay renewal helpers', () => {
     });
     expect(racedUpdate.update).toHaveBeenCalled();
     expect(result.stampedCount).toBe(0);
+    expect(result.racedRowIds).toEqual(['svc-1']);
+    // Callers discard the result, so the shortfall is filed as a durable
+    // operator exception right here (Codex #3882 r1 P1).
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      expect.any(String),
+      expect.stringMatching(/1 paid visit\(s\) were cancelled while the annual prepay was being applied.*0 of 1 sold visits/),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'stamp_raced_cancel', annual_prepay_term_id: 'term-1' }) }),
+    );
   });
 
   test('a term whose owner moved under the comms fence (merge-undo) defers every seed — no visits on the stale kept owner', async () => {

@@ -1609,6 +1609,11 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
   const now = new Date();
   let stampedCount = 0;
+  // Rows read as eligible whose stamp UPDATE then matched nothing — a
+  // cancel committed in between (#3878 r5). Surfaced below: the term stays
+  // paid with fewer stamped visits than sold, and the earlier
+  // coverage_shortfall check (target dates) cannot see this race.
+  const racedRowIds = [];
 
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
@@ -1643,15 +1648,24 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
 
     // The status skip above read a pre-transaction row; re-assert it IN the
     // UPDATE so a visit cancelled between that read and this write (a
-    // series cancel committing mid-activation, #3878 r5) is never stamped
-    // — a 0-row update here simply leaves stampedCount short, which the
-    // coverage-shortfall exception already surfaces.
+    // series cancel committing mid-activation, #3878 r5) is never stamped.
     const updated = await conn('scheduled_services')
       .where({ id: row.id })
       .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
       .update(updates)
       .returning(['id']);
     if (Array.isArray(updated) ? updated.length > 0 : updated) stampedCount++;
+    else racedRowIds.push(row.id);
+  }
+
+  if (racedRowIds.length > 0) {
+    // Durable operator exception (Codex #3882 r1 P1): callers discard this
+    // result, so the shortfall must be filed HERE. Same dedupe + bell as the
+    // other coverage exceptions; the operator schedules the replacement
+    // visit(s) — nothing is re-seeded automatically on a cancelled slot.
+    logger.warn(`[annual-prepay] term ${term.id}: ${racedRowIds.length} covered visit(s) were cancelled while the prepaid stamp ran (${racedRowIds.join(', ')}) — ${stampedCount} of ${coverageVisitCount} sold visits stamped; needs replacement scheduling`);
+    await fileCoverageException(term, 'stamp_raced_cancel',
+      `${racedRowIds.length} paid visit(s) were cancelled while the annual prepay was being applied, so only ${stampedCount} of ${coverageVisitCount} sold visits are covered on the calendar. Schedule the replacement visit(s) or adjust the term.`);
   }
 
   return {
@@ -1659,6 +1673,7 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     matchedCount: rows.length,
     expectedVisitCount: coverageVisitCount,
     perVisitAmount: slices[0] || 0,
+    racedRowIds,
   };
 }
 
