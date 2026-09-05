@@ -665,26 +665,38 @@ async function readExactlyOne(page, selector, { same } = {}) {
   let shown;
   try { ({ all, shown } = await matches(page, selector, { strict: true })); }
   catch { return { count: null, text: '', visible: false }; }
-  let target = shown[0] || (all.length === 1 ? all[0] : null);
-  if (shown.length > 1) {
+  // The target among the matches: the one shown match, else the lone
+  // hidden match; several shown matches only when `same` proves them one
+  // reading (the innermost text wins).
+  const pick = async ({ all, shown }) => {
+    if (shown.length <= 1) return { target: shown[0] || (all.length === 1 ? all[0] : null) };
     const texts = same ? await Promise.all(shown.map((el) => el.textContent().then((t) => String(t || ''), () => null))) : [];
     const values = new Set(texts.map((t) => (t == null ? null : same(t))));
-    if (values.size !== 1 || values.has(null)) return { count: shown.length, text: '', visible: false };
-    target = shown[texts.reduce((best, t, i) => (t.length < texts[best].length ? i : best), 0)];
-  }
-  if (!target) return { count: 0, text: '', visible: false };
-  const handle = await target.elementHandle({ timeout: 1500 }).catch(() => null);
+    if (values.size !== 1 || values.has(null)) return { ambiguous: shown.length };
+    return { target: shown[texts.reduce((best, t, i) => (t.length < texts[best].length ? i : best), 0)] };
+  };
+  const first = await pick({ all, shown });
+  if (first.ambiguous) return { count: first.ambiguous, text: '', visible: false };
+  if (!first.target) return { count: 0, text: '', visible: false };
+  const handle = await first.target.elementHandle({ timeout: 1500 }).catch(() => null);
   if (!handle) return { count: 1, text: '', visible: false };
   const text = await handle.textContent().catch(() => '');
   const isVisible = await handle.isVisible().catch(() => false);
-  // Re-enumerated after the reads: a replacement node appended during them
-  // (the old one not yet removed) would otherwise validate the old value
-  // while a second, conflicting reading is on the page (Codex #3876 r21 P2).
+  // Re-enumerated AND re-read after the reads: a replacement node appended
+  // during them (the old one not yet removed) would otherwise validate the
+  // old value while a second, conflicting reading is on the page (Codex
+  // #3876 r21 P2); a node replaced in place — same count, same visibility
+  // pattern — would otherwise return the old handle's text while the page
+  // shows another figure (r22 P2), so the re-enumerated target's text must
+  // equal the first reading, as `cartLines` requires of the rows.
   const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
   let again;
   try { again = await matches(page, selector, { strict: true }); }
   catch { return { count: null, text: '', visible: false }; }
   if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return { count: null, text: '', visible: false };
+  const second = await pick(again);
+  const reread = second.target ? await second.target.textContent().catch(() => null) : null;
+  if (reread == null || String(reread).replace(/\s+/g, ' ').trim() !== String(text || '').replace(/\s+/g, ' ').trim()) return { count: null, text: '', visible: false };
   return { count: 1, text: String(text || ''), visible: isVisible };
 }
 
