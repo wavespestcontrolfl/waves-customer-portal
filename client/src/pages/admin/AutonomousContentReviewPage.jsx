@@ -99,7 +99,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [decisionError, setDecisionError] = useState("");
   const [linkError, setLinkError] = useState("");
   const [impactError, setImpactError] = useState("");
-  const error = { links: linkError, impact: impactError, content: contentError, review: decisionError || contentError }[view];
+  const error = { links: linkError, impact: impactError, content: contentError, review: [decisionError, contentError].filter(Boolean).join(" · ") }[view];
   const [reviewNote, setReviewNote] = useState("");
   const [linkReviewNote, setLinkReviewNote] = useState("");
   const [actionPending, setActionPending] = useState("");
@@ -115,6 +115,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [detailVersion, setDetailVersion] = useState(0);
   const listRequest = useRef(0);
   const listInFlight = useRef(null);
+  const detailInFlight = useRef(null);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
   const actionType = view === "review" ? "other" : "new_supporting_blog";
@@ -128,7 +129,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       const next = await adminFetch(`/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=${actionType}`);
       if (request !== listRequest.current) return;
       setData(next);
-      setDetailVersion((version) => version + 1);
+      if (!detailInFlight.current) setDetailVersion((version) => version + 1);
       const retained = next.items?.some((item) => item.id === selectedIdRef.current);
       if (background && !retained) {
         setSelectedId(null);
@@ -140,9 +141,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     } catch (err) {
       if (request !== listRequest.current) return;
       setContentError(err.message);
-      setData(null);
-      setSelectedId(null);
-      setDetail(null);
+      if (!background) {
+        setData(null);
+        setSelectedId(null);
+        setDetail(null);
+      }
     } finally {
       if (listInFlight.current === request) listInFlight.current = null;
       if (request === listRequest.current) setLoading(false);
@@ -201,6 +204,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     // leaving A's draft rendered while B is highlighted (decisions were
     // already safe server-side via the run-id 409; this fixes the display).
     let stale = false;
+    const request = { id: selectedId };
+    detailInFlight.current = request;
     setDetail(null);
     setDetailLoading(true);
     adminFetch(`/admin/content/autonomous/review/${selectedId}`)
@@ -209,8 +214,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         setDetail(next.item);
       })
       .catch((err) => { if (!stale) setContentError(err.message); })
-      .finally(() => { if (!stale) setDetailLoading(false); });
-    return () => { stale = true; };
+      .finally(() => {
+        if (detailInFlight.current === request) detailInFlight.current = null;
+        if (!stale) setDetailLoading(false);
+      });
+    return () => {
+      stale = true;
+      if (detailInFlight.current === request) detailInFlight.current = null;
+    };
   }, [selectedId, detailVersion]);
 
   useEffect(() => {

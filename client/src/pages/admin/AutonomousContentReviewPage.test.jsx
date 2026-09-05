@@ -225,3 +225,54 @@ describe('background refresh boundaries', () => {
     expect(screen.getByText('Select a run to see its status.')).toBeTruthy();
   });
 });
+
+describe('slow and failed detail refresh', () => {
+  it('lets a slow selected detail finish while list polling continues', async () => {
+    vi.useFakeTimers();
+    const original = fetch.getMockImplementation();
+    let finish;
+    fetch.mockImplementation((url, opts) => url.endsWith('/review/blog-1')
+      ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ item: item() }) }); }) : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await act(async () => {});
+    await act(async () => { await vi.advanceTimersByTimeAsync(61000); });
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/review/blog-1'))).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url]) => url.includes('/review?')).length).toBeGreaterThan(1);
+    await act(async () => { finish(); });
+    expect(screen.getByText('Full draft revision 1')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith('/review/blog-1'))).toHaveLength(2);
+  });
+
+  it('preserves selected content and unsaved notes after a background list failure', async () => {
+    vi.useFakeTimers();
+    render(<AutonomousContentReviewPage embedded />);
+    await act(async () => {});
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Other content' })); });
+    fireEvent.change(screen.getByPlaceholderText('Reviewer note (optional)'), { target: { value: 'Keep this note' } });
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, opts) => url.includes('/review?')
+      ? Promise.reject(new Error('Poll failed')) : original(url, opts));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(screen.getByText('Poll failed')).toBeTruthy();
+    expect(screen.getByText('Full draft revision 1')).toBeTruthy();
+    expect(screen.getByPlaceholderText('Reviewer note (optional)').value).toBe('Keep this note');
+  });
+
+  it('shows a failed query alongside an earlier decision failure', async () => {
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    await screen.findByRole('button', { name: 'Requeue' });
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, opts) => opts?.method === 'POST'
+      ? Promise.reject(new Error('Decision failed')) : original(url, opts));
+    fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
+    await screen.findByText('Decision failed');
+    fetch.mockImplementation((url, opts) => url.includes('/review?')
+      ? Promise.reject(new Error('Query failed')) : original(url, opts));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'expired' } });
+    await screen.findByText('Decision failed · Query failed');
+    expect(screen.queryByText('Full draft revision 1')).toBeNull();
+  });
+});
