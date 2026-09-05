@@ -4,10 +4,11 @@ jest.mock('../services/visit-groups', () => ({
   dateOnly: (value) => String(value).slice(0, 10),
   stopBaseKey: ({ propertyId, customerId, scheduledDate }) => `${propertyId || customerId}:${String(scheduledDate).slice(0, 10)}`,
   lockStop: jest.fn(),
+  frozenVisitVerdict: jest.fn(async () => ({ frozen: false })),
 }));
 const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../services/appointment-address');
 const { recordAuditEvent } = require('../services/audit-log');
-const { lockStop } = require('../services/visit-groups');
+const { lockStop, frozenVisitVerdict } = require('../services/visit-groups');
 
 const row = { id: 'row-a', customer_id: 'customer-a', is_recurring: true, property_id: 'old',
   scheduled_date: '2099-01-01', technician_id: 'tech-a', status: 'en_route', visit_id: null };
@@ -43,6 +44,7 @@ function connection({ rows = [row], visits = [], selected = property } = {}) {
         query.filters.push([name, ...args]);
         if (name === 'where') predicates.push(predicate(args));
         if (name === 'whereIn') predicates.push((r) => args[1].includes(r[args[0]]));
+        if (name === 'whereNotIn') predicates.push((r) => !args[1].includes(r[args[0]]));
         return chain;
       };
     }
@@ -64,7 +66,7 @@ test.each(['pending', 'confirmed', 'en_route', 'on_site', 'completed', 'cancelle
   expect(await applyAppointmentAddress(conn, plan, 'admin-a')).toEqual([row.id]);
   const patch = conn.calls.find((call) => call.table === 'scheduled_services' && call.patch).patch;
   expect(patch).toMatchObject({ property_id: property.id, service_address_line1: property.address_line1,
-    service_address_line2: '', lat: null, lng: null, pre_service_brief: null });
+    service_address_line2: '', zone: null, lat: null, lng: null, pre_service_brief: null });
   expect(patch).not.toHaveProperty('status');
   expect(patch).not.toHaveProperty('en_route_at');
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ trx: conn, critical: true }));
@@ -126,4 +128,47 @@ test('visit scope changes the child and its grouped lines without selecting the 
   await applyAppointmentAddress(conn, plan, 'fixture-admin');
   const changed = conn.calls.find(call => call.table === 'scheduled_services' && call.patch);
   expect(changed.filters).toContainEqual(['whereIn', 'id', ['child', 'grouped']]);
+});
+
+test('does not expand a historical template to terminal grouped siblings', async () => {
+  const template = { ...row, id: 'template', status: 'completed', visit_id: 'historic' };
+  const sibling = { ...template, id: 'historic-sibling', is_recurring: false };
+  const child = { ...row, id: 'child', recurring_parent_id: 'template' };
+  const conn = connection({ rows: [child, sibling, template], visits: [{ id: 'historic', stop_base_key: 'old:2099-01-01' }] });
+  const plan = await planAppointmentAddress(conn, child.id, property.id);
+  expect(plan.rows.map((r) => r.id)).toEqual(['child', 'template']);
+  await expect(applyAppointmentAddress(conn, plan, 'admin-a')).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
+  expect(conn.calls.some((call) => call.patch)).toBe(false);
+});
+
+test.each(['issued_link', 'completion_in_flight', 'visit_not_open', 'unreadable'])('refuses frozen visit %s before any write', async (reason) => {
+  frozenVisitVerdict.mockResolvedValueOnce({ frozen: true, reason });
+  const conn = connection({ rows: [{ ...row, visit_id: 'visit-a' }], visits: [{ id: 'visit-a', stop_base_key: 'old:2099-01-01' }] });
+  const plan = await planAppointmentAddress(conn, row.id, property.id);
+  await expect(applyAppointmentAddress(conn, plan, 'admin-a')).rejects.toMatchObject({ statusCode: 409, reason });
+  expect(conn.calls.some((call) => call.patch)).toBe(false);
+});
+
+test('locks the selected property before scheduled-service rows', async () => {
+  const conn = connection();
+  const plan = await planAppointmentAddress(conn, row.id, property.id);
+  await applyAppointmentAddress(conn, plan, 'admin-a');
+  const propertyLock = conn.calls.findIndex((call) => call.table === 'customer_properties' && call.filters.some(([name]) => name === 'forShare'));
+  const rowLock = conn.calls.findIndex((call) => call.table === 'scheduled_services' && call.filters.some(([name]) => name === 'forUpdate'));
+  expect(propertyLock).toBeGreaterThanOrEqual(0);
+  expect(propertyLock).toBeLessThan(rowLock);
+});
+
+
+test('ordinary edit saves pre-acquire tech-day fences before maintenance too', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const handler = source.slice(source.indexOf("router.put('/:id/update-details'"));
+  const fence = handler.indexOf('await lockTechDays(trx, preFence)');
+  const maintenance = handler.indexOf('await acquireRecurringSeriesMaintenanceLock(trx,');
+  const conditionalStop = handler.indexOf('if (preReadVisitId)');
+  expect(fence).toBeGreaterThan(-1);
+  expect(fence).toBeLessThan(maintenance);
+  expect(fence).toBeLessThan(conditionalStop);
 });

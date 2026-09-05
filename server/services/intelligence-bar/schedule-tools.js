@@ -228,11 +228,12 @@ async function switchAppointmentProperty(input, actionContext) {
   if (!actionContext.confirmed || !input._verified_address_fingerprint) return { error: 'Use the confirmation card to approve this change.' };
   return db.transaction(async trx => {
     await require('../scheduling/occupancy').acquireOccupancyLocks(trx, plan.rows.map(row => require('../visit-groups').dateOnly(row.scheduled_date)));
+    await require('../scheduling/tech-day-lock').lockTechDays(trx, plan.rows.map(row => ({ techId: row.technician_id, date: require('../visit-groups').dateOnly(row.scheduled_date) })));
     await lockAppointmentAddress(trx, plan);
     await require('../../utils/customer-comms-lock').lockCustomerComms(trx, plan.anchor.customer_id);
     await trx('customers').where({ id: plan.anchor.customer_id }).forShare().first();
-    await trx('scheduled_services').whereIn('id', plan.rows.map(row => row.id)).orderBy('id').forUpdate();
     await trx('customer_properties').where({ id: input.property_id }).forShare().first();
+    await trx('scheduled_services').whereIn('id', plan.rows.map(row => row.id)).orderBy('id').forUpdate();
     const fresh = await planAppointmentAddress(trx, input.appointment_id, input.property_id, 'visit');
     const preview = await appointmentPropertyPreview(trx, fresh);
     if (previewFingerprint(preview) !== input._verified_address_fingerprint) return { error: 'The visit or property changed. Request a fresh confirmation card.', preview_changed: true };

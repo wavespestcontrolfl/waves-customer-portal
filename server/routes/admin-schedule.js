@@ -7543,7 +7543,7 @@ async function planCollectiveEditDateMove(req) {
 
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
-    const { propertyId } = req.body;
+    const propertyId = req.body.propertyId;
     if (propertyId !== undefined) {
       if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
       if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
@@ -8531,6 +8531,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
     const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../services/appointment-address');
     const addressPlan = propertyId !== undefined ? await planAppointmentAddress(db, req.params.id, propertyId) : null;
+    if (addressPlan) delete updates.zone; // The selected property replaces a stale modal zone echo.
     let addressUpdatedIds = [];
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
@@ -8579,50 +8580,41 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
-      if (addressPlan) await lockAppointmentAddress(trx, addressPlan, { ...updates, technician_id: requestedTechnicianId });
-      // Visit stop lock for a slot change on a row that sat in a ONE-member
-      // visit at the unlocked pre-read (local codex audit): a sibling can
-      // join that visit between the pre-read's member count and this
-      // transaction while the row's own visit_id stays unchanged, so the
-      // membership CAS below cannot see it. Taken right after rung 1 and
-      // BEFORE every row lock — the same relative position the rebooker's
-      // single-row path uses, so the two writers never invert — and the
-      // open member set is re-counted under it before any slot write.
-      if (preReadVisitId) {
-        // Lock order = the rebooker's (local gate r33): rung 1 → tech-day
-        // fence → visit stop lock → row locks. The fences this save takes
-        // later (assignment set, date-move pair) are pre-acquired here as a
-        // sorted union — reentrant, so the later calls never wait — so the
-        // stop lock can never be held while waiting on a tech-day key a
-        // rebooker holds in the opposite order.
-        {
-          const preFence = [];
-          if (assignmentShouldRun) {
-            const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
-            const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
-              .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-            for (const row of preRows) {
-              preFence.push({ techId: row.technician_id, date: row.day });
-              preFence.push({ techId: requestedTechnicianId, date: row.day });
-              if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
-                preFence.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
-                preFence.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
-              }
+      // Every save pre-acquires its complete tech-day fence before stop and
+      // maintenance locks, including same-slot assignment echoes from the modal.
+      // Otherwise an ordinary save and an address save can deadlock.
+      {
+        const preFence = addressPlan ? addressPlan.rows.flatMap((row) =>
+          [row.technician_id, requestedTechnicianId].flatMap((techId) =>
+            [row.scheduled_date, updates.scheduled_date].filter(Boolean).map((date) => ({ techId, date: dateOnly(date) })))) : [];
+        if (assignmentShouldRun) {
+          const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
+          const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
+            .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          for (const row of preRows) {
+            preFence.push({ techId: row.technician_id, date: row.day });
+            preFence.push({ techId: requestedTechnicianId, date: row.day });
+            if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
+              preFence.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
+              preFence.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
             }
-          }
-          if (updates.scheduled_date !== undefined) {
-            const prov = await trx('scheduled_services').where({ id: req.params.id })
-              .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-            if (prov) {
-              preFence.push({ techId: prov.technician_id, date: prov.day });
-              preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
-            }
-          }
-          if (preFence.length) {
-            const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-            await lockTechDays(trx, preFence);
           }
         }
+        if (updates.scheduled_date !== undefined) {
+          const prov = await trx('scheduled_services').where({ id: req.params.id })
+            .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          if (prov) {
+            preFence.push({ techId: prov.technician_id, date: prov.day });
+            preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
+          }
+        }
+        if (preFence.length) {
+          const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+          await lockTechDays(trx, preFence);
+        }
+      }
+      if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
+      if (preReadVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
         } catch (lockErr) {
@@ -8658,7 +8650,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // overrides that auto-extend / top-up / alert-extend read, so it must
       // serialize against those writers (and against a concurrent scoped
       // save merging the same override JSON) — Codex #3505 r1 P1.
-      const wantsExistingPlanMutation = !!addressPlan || wantsVisitCountReconcile
+      const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
         || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
         || wantsPriceServiceScope
         // The no-scope override-coherence refresh (and the conversion
@@ -8693,34 +8685,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
       if (assignmentShouldRun) {
-        // COMPLETE tech-day lock set, ONCE, sorted (uncapped audit r20 P1):
-        // the assignment path locks each target row's day in its own
-        // lockTechDays call and the date-move fence below locks old+new day
-        // in another — sequential sorted-within-call acquisitions break the
-        // global sort order that keeps single-call lockers (bulk board move,
-        // nightly reorder) deadlock-free, so a backward date move could hold
-        // tech:newer while waiting on tech:older. Advisory xact locks are
-        // reentrant: the inner per-step calls re-acquire already-held keys
-        // without blocking, so this up-front union is the only acquisition
-        // that can ever wait. Keys are provisional (unlocked reads) — the
-        // locked reads/CAS guards downstream still decide correctness; a row
-        // that moves concurrently aborts there, it is never mis-fenced.
-        const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-        const { targetIds: fenceTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
-        const fenceRows = await trx('scheduled_services')
-          .whereIn('id', fenceTargetIds)
-          .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-        const fencePairs = [];
-        for (const row of fenceRows) {
-          fencePairs.push({ techId: row.technician_id, date: row.day });
-          fencePairs.push({ techId: requestedTechnicianId, date: row.day });
-          if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
-            fencePairs.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
-            fencePairs.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
-          }
-        }
-        await lockTechDays(trx, fencePairs);
-
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
           technicianId: requestedTechnicianId,

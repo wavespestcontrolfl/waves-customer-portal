@@ -197,6 +197,7 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
       .whereIn('ss.id', siblings.map((m) => m.id))
       .select('ss.*', 'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
+        'c.address_line1 as customer_address_line1', 'c.city as customer_city', 'c.zip as customer_zip',
         'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
     const memberIds = (members || []).map((m) => m.id);
     const today = etDateString(new Date());
