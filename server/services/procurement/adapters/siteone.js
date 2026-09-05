@@ -100,6 +100,8 @@ const SELECTORS = Object.freeze({
   // cart-line child selectors.
   checkoutLine: '.checkout .cart-item, .checkout .entry-item, .checkout .cart-entry, .order-summary .cart-item, .order-summary .entry-item, .order-summary .item, .checkout-order-summary .item, [data-test="checkout-line"]',
   billToAccount: 'input[type="radio"][value*="account"], input[type="radio"][value*="ACCOUNT"], label:has-text("Bill to account")',
+  // Only the fallback for an UNNAMED radio: a named one is counted in its own
+  // group (Codex #3876 r16 P2 — an opaque value="12345" is a valid tender).
   billToAccountSelected: 'input[type="radio"][value*="account"]:checked, input[type="radio"][value*="ACCOUNT"]:checked, input[type="radio"][value*="Account"]:checked',
   // Identity readings are SCOPED to the checkout's own billing / shipping
   // sections — never a header account menu, a footer address, or an
@@ -638,6 +640,16 @@ async function distinctBillToOptions(page, shown) {
   return [...byRadio.values()];
 }
 
+// How many radios read as selected in the verified radio's OWN group
+// (`name`), so a label-associated radio with an opaque value counts (Codex
+// #3876 r16 P2); an unnamed radio falls back to the account-value selector.
+// Null = unreadable (the caller refuses).
+async function selectedTenderCount(page, radio) {
+  const name = await radio.getAttribute('name').catch(() => null);
+  const selector = name ? `input[type="radio"][name="${name.replace(/["\\]/g, '\\$&')}"]:checked` : SELECTORS.billToAccountSelected;
+  return page.locator(selector).count().catch(() => null);
+}
+
 // The radio input a bill-to option resolves to: the element itself when it
 // is an input; for a label, its `for` target or the radio it wraps. Null
 // when no radio is associated (never fall back to a document-wide search).
@@ -707,7 +719,7 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   try { checked = await radio.isChecked(); } catch { checked = null; }
   if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
   if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is not visible — not the tender the checkout shows');
-  const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
+  const checkedCount = await selectedTenderCount(page, radio);
   if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at checkout — cannot tell which the order bills`);
   evidence.billToAccountVerified = true;
   return radio;
@@ -728,7 +740,7 @@ async function recheckTenderAtClick(page, radio, { evidence, upload }) {
   // Visible too (Codex #3876 r4 P1): a rerender that hides the checked
   // account radio behind a saved-card tender must not submit on the card.
   if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is no longer visible at the moment of submission — not the tender the checkout shows');
-  const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
+  const checkedCount = await selectedTenderCount(page, radio);
   if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at the moment of submission`);
 }
 
@@ -982,11 +994,14 @@ function orderNumberIn(text) {
   // for the number, not record the price as the order id (Codex #3876 r10 P2).
   const moneyShaped = (t) => /^\d+\.\d{2}$/.test(t) || /^\d{1,3}(?:,\d{3})+(?:\.\d{2})?$/.test(t);
   const isId = (t) => !!t && /\d/.test(t) && !dateShaped(t) && !moneyShaped(t);
-  // EVERY labeled match is tried before any fallback: "Order date 2026-09-05
-  // … Order # SO-778899" must yield the number, not the date (Codex #3876
-  // r2 P2).
-  for (const m of String(text).matchAll(/order(?!\s*date)\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/gi)) if (isId(m[1])) return m[1];
-  return (String(text).match(/[A-Z0-9/.-]{5,}/gi) || []).find(isId) || null;
+  // EVERY labeled match is tried: "Order date 2026-09-05 … Order # SO-778899"
+  // must yield the number, not the date (Codex #3876 r2 P2). Labeled ONLY —
+  // no unlabeled fallback: "Order # pending · Ships to 34205" must keep
+  // polling, not record the ZIP (Codex #3876 r16 P2). Labels: order /
+  // confirmation, optionally followed by confirmation / number / no. / id /
+  // ref / #.
+  for (const m of String(text).matchAll(/(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9/.-]{5,})/gi)) if (isId(m[1])) return m[1];
+  return null;
 }
 
 // The checkout stage: bill-to proof, identity + final total, the cap gate on

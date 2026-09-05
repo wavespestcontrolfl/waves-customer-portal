@@ -320,22 +320,26 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // uncheckAccountAtTrial: the reset lands during the trial click's wait (r6 P1)
       const isChecked = () => st.accountChecked === true && !(st.uncheckAccountAtClick && st.atClick) && !(st.uncheckAccountAtTrial && st.trialDone);
       // hideRadioAtClick: a rerender hides the checked account radio once the Place Order stage has begun
-      const radio = (id = 'acct-radio') => el({ count: 1, id, get visible() { return (st.radioVisible ?? true) && !(st.hideRadioAtClick && st.atClick); }, get checked() { return isChecked(); } });
-      const billOption = () => el({ count: 1, get visible() { return !(st.hideRadioAtClick && st.atClick); }, tag: st.billIsLabel ? 'label' : 'input', get checked() { return isChecked(); }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
+      // Every real radio carries name="tender" (its payment group); radioUnnamed models markup without a name (the value-selector fallback)
+      const grp = () => ({ name: st.radioUnnamed ? null : 'tender' });
+      const radio = (id = 'acct-radio') => el({ count: 1, id, attrs: grp(), get visible() { return (st.radioVisible ?? true) && !(st.hideRadioAtClick && st.atClick); }, get checked() { return isChecked(); } });
+      const billOption = () => el({ count: 1, attrs: st.billIsLabel ? {} : grp(), get visible() { return !(st.hideRadioAtClick && st.atClick); }, tag: st.billIsLabel ? 'label' : 'input', get checked() { return isChecked(); }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; }, sub: (sub) => (sub === 'input[type="radio"]' ? radio() : el()) });
       // billHiddenFirst: a hidden responsive copy of the option precedes the usable visible one; billVisibleCopies: N visible copies
       if (sel === S.billToAccount) {
         if (st.billHiddenFirst) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, tag: 'input', checked: false }) : billOption()) });
         // billVisibleCopies: N visible copies, each its OWN radio (distinct ids)
-        if (st.billVisibleCopies) return el({ count: st.billVisibleCopies, nth: (i) => el({ count: 1, id: `acct-${i}`, visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) });
+        if (st.billVisibleCopies) return el({ count: st.billVisibleCopies, nth: (i) => el({ count: 1, id: `acct-${i}`, attrs: grp(), visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) });
         // billLabelAndRadio: ordinary markup — the selector union matches the visible radio AND its visible label (for=acct-radio) = ONE option
         // labelForId: the label's `for` target id (a legal id with punctuation must resolve exactly — r12 P2)
-        if (st.billLabelAndRadio) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, id: st.labelForId || 'acct-radio', visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) : el({ count: 1, visible: true, tag: 'label', attrs: { for: st.labelForId || 'acct-radio' }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } })) });
+        if (st.billLabelAndRadio) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, id: st.labelForId || 'acct-radio', attrs: grp(), visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) : el({ count: 1, visible: true, tag: 'label', attrs: { for: st.labelForId || 'acct-radio' }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } })) });
         return billOption();
       }
       if (sel === `[id="${st.labelForId || 'acct-radio'}"]`) return radio(st.labelForId || 'acct-radio');
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
-      if (sel === S.billToAccountSelected) return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      // The group count (name="tender") is what a named radio is judged by; the value-based selector only answers for an unnamed radio (r16 P2)
+      if (sel === 'input[type="radio"][name="tender"]:checked') return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      if (sel === S.billToAccountSelected) return el({ count: st.radioUnnamed ? (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) : 0 });
       // accountAtClick: a delayed rerender swaps the displayed billing account once the Place Order stage has begun (r5 P1)
       // accountAtTrial: the swap lands during the trial click's wait (r6 P1)
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountAtTrial && st.trialDone ? st.accountAtTrial : st.accountAtClick && st.atClick ? st.accountAtClick : st.accountText === undefined ? 'Account # 12345' : st.accountText });
@@ -513,6 +517,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order # 55501234')).toBe('55501234'); // an 8-digit id that is not a date stays an id
     expect(s1._internals.orderNumberIn('Order # 12345-67890')).toBe('12345-67890'); // separator-joined groups that cannot be a date are an id (r8 P2)
     expect(s1._internals.orderNumberIn('Order # pending · Total $105.93')).toBeNull(); // a price is never an id (r10 P2)
+    expect(s1._internals.orderNumberIn('Order # pending · Ships to 34205')).toBeNull(); // no unlabeled fallback: a ZIP is never an id (r16 P2)
+    expect(s1._internals.orderNumberIn('Your confirmation number is 55501234')).toBe('55501234');
+    expect(s1._internals.orderNumberIn('Order ref SO-778899')).toBe('SO-778899');
+    expect(s1._internals.orderNumberIn('Reference 55501 · Ready')).toBeNull();
     expect(s1._internals.orderNumberIn('Total 1,234.56 · Order # SO-778899')).toBe('SO-778899');
     expect(s1._internals.orderNumberIn('Subtotal 1,234 items')).toBeNull();
     expect(s1._internals.orderNumberIn('Order # 2026-778899')).toBe('2026-778899');
@@ -971,6 +979,21 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.trialDone).toBe(true);
     expect(st.placeClicked || 0).toBe(0);
     expect(st.cart).toEqual([]);
+  });
+
+  test('the selected-tender count is the radio\'s OWN group: a label-associated radio with an opaque value places; an unnamed radio still uses the account-value fallback (r16 P2)', async () => {
+    const named = fakeSiteOne({ billLabelAndRadio: true });
+    await expect(s1.place(args(), named.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    const unnamed = fakeSiteOne({ radioUnnamed: true });
+    await expect(s1.place(args(), unnamed.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    const unnamedDoubled = fakeSiteOne({ radioUnnamed: true, extraCheckedAccounts: 1 });
+    await expect(s1.place(args(), unnamedDoubled.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
+  });
+
+  test('a confirmation node that first shows an unlabeled number ("Order # pending · Ships to 34205") is polled until the labeled number renders (r16 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberLate: true, orderNumberLateText: 'Order # pending · Ships to 34205' });
+    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.confReads).toBeGreaterThan(3);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {
