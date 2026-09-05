@@ -302,6 +302,9 @@ describe('the conversation side', () => {
     const { composeRelaySegment } = require('../services/voice-agent/relay-transfer');
     expect(composeRelaySegment({ metadata: { relay_reconnects: 1, relay_transcript: { text: 'Caller: first\n\n[Reconnected]\nCaller: second' } }, call_outcome: 'voicemail' })).toEqual(expect.objectContaining({ text: '[AI segment]\nCaller: first\n\n[Reconnected]\nCaller: second' }));
     expect(composeRelaySegment({ metadata: { relay_transcript: { text: 'x' } }, call_outcome: 'voicemail' })).toBeNull(); // no transfer, no reconnect ⇒ today's overwrite
+    // …and the processor's in-UPDATE composition guard (relayPending) engages on a reconnected row too (hook P1)
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain("meta.relay_transfer_ring_at || (Number(meta.relay_reconnects) || 0) > 0)) || row.call_outcome === 'ai_transferred';");
     // the close: reconcile 0 (voicemail is terminal), terminal salvage 0, metadata-only stash 1 — on the reconnect marker, no transfer needed
     const { updates, builder } = primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: first' }] } }, updateImpl: jest.fn(async (patch) => { updates.push(patch); return updates.length === 4 ? 1 : (updates.length === 1 ? 1 : 0); }) });
     const convo = new RelayConversation({ callSid: 'CA-vm2', sessionGeneration: 2, from: '+19415551234', send: jest.fn(), resumed: true });

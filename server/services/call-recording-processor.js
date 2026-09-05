@@ -6746,7 +6746,10 @@ const CallRecordingProcessor = {
       }
       let meta = row.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || row.call_outcome === 'ai_transferred';
+      // PR 2B: a RECONNECTED row (relay_reconnects > 0) carries the same
+      // evidence problem as a transfer — its relay stash may land during
+      // this transcription — so the pending-composition guard engages too.
+      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at || (Number(meta.relay_reconnects) || 0) > 0)) || row.call_outcome === 'ai_transferred';
       return { row, segment: composeRelaySegment(row), transferred, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
     };
     // Transfer-marked row whose relay text had NOT landed at compose time:
