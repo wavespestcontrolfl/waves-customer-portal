@@ -346,7 +346,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(routeTiers.loadReminderFreeze).not.toHaveBeenCalled();
   });
 
-  test('technician reassignment: the chosen tech DEACTIVATED for a sibling category refuses; missing/qualified passes; unchanged tech never reads capabilities', async () => {
+  test('the receiving tech DEACTIVATED for a sibling category refuses; missing/qualified passes; an UNCHANGED tech is re-read too (Off can land mid-run)', async () => {
     const lawn = classifyServiceCategory('Lawn Fertilization');
     const members = [primary, { id: 's2', status: 'confirmed' }];
     const best = { ...BEST, technician_id: 't9' };
@@ -358,10 +358,15 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard({ trx, members })).resolves.toBeUndefined();
     trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: true }] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
+    // Same tech: the run's capability map is a start-of-run snapshot, so the
+    // apply fence still reads the committed row — an Off written by the Team
+    // tab during the run refuses; qualified passes.
     const same = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: false });
-    trx = fakeTrx({ siblings: [eligible()] });
+    trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: false }] });
+    await expect(same({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    expect(trx.__calls).toContain('technician_capabilities');
+    trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: true }] });
     await expect(same({ trx, members })).resolves.toBeUndefined();
-    expect(trx.__calls).not.toContain('technician_capabilities');
   });
 
   test('route tiers on: each sibling must admit best.date inside its OWN tier/drift window; unknown anchor evidence refuses (local codex audit)', async () => {

@@ -3178,7 +3178,7 @@ export function TeamTab({ showToast }) {
                       take) field work — an office-only admin never reaches
                       auto-dispatch, so the line would be noise there. */}
                   {t.capability_summary && (t.field_dispatchable || t.employment_status === "prospective") && (
-                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                       {summarizeCapabilityCounts(t.capability_summary)}
                     </div>
                   )}
@@ -3228,7 +3228,7 @@ export function TeamTab({ showToast }) {
                         border: `1px solid ${D.border}`,
                         borderRadius: 6,
                         color: D.teal,
-                        fontSize: 11,
+                        fontSize: 14,
                         cursor: "pointer",
                       }}
                     >
@@ -3335,16 +3335,16 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
   const isMobile = useIsMobile(640);
   const [rows, setRows] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
-  const showToastRef = useRef(showToast);
-  useEffect(() => {
-    showToastRef.current = showToast;
-  }, [showToast]);
+  // `attempt` re-runs the fetch for the Retry button without remounting.
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
+      setLoadError(null);
       try {
         const res = await adminFetch(
           `/admin/timetracking/technicians/${tech.id}/capabilities`,
@@ -3362,14 +3362,16 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
           );
         }
       } catch (e) {
-        if (!cancelled) showToastRef.current("Capabilities failed: " + e.message);
+        // Rendered in the modal (not just a transient toast) so the admin can
+        // see the failure and retry without closing.
+        if (!cancelled) setLoadError(e.message || "Request failed");
       }
       if (!cancelled) setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [tech.id]);
+  }, [tech.id, attempt]);
 
   const setRow = (category, patch) =>
     setRows((prev) =>
@@ -3409,11 +3411,9 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
 
   const fmtVerified = (r) => {
     if (!r.verified_at) return r.source === "system_default" ? "Default — not yet verified" : "Not verified";
-    const when = new Date(r.verified_at).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
+    // Eastern wall clock, like every other date on the portal — a verification
+    // near midnight must not shift a day on an admin's phone set elsewhere.
+    const when = formatETDate(r.verified_at, { month: "short", day: "numeric", year: "numeric" });
     return `Verified ${when}${r.verified_by_name ? ` by ${r.verified_by_name}` : ""}`;
   };
 
@@ -3428,7 +3428,10 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
         alignItems: "center",
         justifyContent: "center",
         zIndex: 200,
-        padding: 16,
+        // Standalone iOS PWA: viewport-fit=cover puts this overlay under the
+        // status bar / home indicator without the safe-area insets.
+        padding:
+          "calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px))",
       }}
     >
       <div
@@ -3456,12 +3459,34 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
             Close
           </button>
         </div>
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
+        <div style={{ fontSize: 14, color: D.muted, marginBottom: 16 }}>
           What auto-dispatch may place on this technician's route. Nothing
           here moves a visit that is already scheduled.
         </div>
 
-        {loading || !rows ? (
+        {loadError && !loading ? (
+          <div
+            role="alert"
+            style={{ padding: 20, textAlign: "center", color: D.text, fontSize: 14, display: "flex", flexDirection: "column", gap: 10, alignItems: "center" }}
+          >
+            <div>Couldn't load capabilities: {loadError}</div>
+            <button
+              type="button"
+              onClick={() => setAttempt((n) => n + 1)}
+              style={{
+                padding: "6px 14px",
+                background: "transparent",
+                border: `1px solid ${D.border}`,
+                borderRadius: 6,
+                color: D.teal,
+                fontSize: 14,
+                cursor: "pointer",
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : loading || !rows ? (
           <div style={{ padding: 24, textAlign: "center", color: D.muted, fontSize: 14 }}>
             Loading…
           </div>
@@ -3475,7 +3500,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
                   borderRadius: 8,
                   padding: 12,
                   display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "180px 1fr",
+                  gridTemplateColumns: isMobile ? "1fr" : "200px 1fr",
                   gap: 10,
                   alignItems: "start",
                 }}
@@ -3484,7 +3509,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
                   <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                     {r.label}
                   </div>
-                  <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
                     {fmtVerified(r)}
                   </div>
                 </div>
@@ -3510,7 +3535,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
                             border: `1px solid ${selected ? D.teal : D.border}`,
                             background: selected ? D.teal : "transparent",
                             color: selected ? D.white : D.text,
-                            fontSize: 13,
+                            fontSize: 14,
                             fontWeight: 500,
                             cursor: "pointer",
                           }}
@@ -3523,9 +3548,10 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
                   <input
                     value={r.notes}
                     onChange={(e) => setRow(r.service_category, { notes: e.target.value })}
+                    aria-label={`${r.label} note`}
                     placeholder="Note (optional) — e.g. ride-along completed 9/4"
                     maxLength={500}
-                    style={{ ...sInput, marginTop: 8 }}
+                    style={{ ...sInput, fontSize: 14, marginTop: 8 }}
                   />
                 </div>
               </div>
@@ -3542,7 +3568,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
               border: `1px solid ${D.border}`,
               borderRadius: 8,
               color: D.text,
-              fontSize: 13,
+              fontSize: 14,
               cursor: "pointer",
             }}
           >
@@ -3550,14 +3576,14 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
           </button>
           <button
             onClick={handleSave}
-            disabled={saving || loading || !rows}
+            disabled={saving || loading || !rows || !!loadError}
             style={{
               padding: "8px 14px",
               background: D.teal,
               border: `1px solid ${D.teal}`,
               borderRadius: 8,
               color: D.white,
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               cursor: saving ? "wait" : "pointer",
               opacity: saving || loading ? 0.6 : 1,

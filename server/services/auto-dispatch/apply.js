@@ -205,7 +205,11 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
         .first('id');
       if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
     }
-    if (techChanged && best.technician_id) {
+    // Re-read the receiving tech's capabilities at apply time even when the
+    // tech is unchanged: the run's capability map was loaded at start, and the
+    // Team tab can turn a category Off mid-run (Off is a hard constraint, so
+    // the last fence must see the committed row, not the snapshot).
+    if (best.technician_id) {
       const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
       if (categories.length) {
         const caps = await trx('technician_capabilities')
