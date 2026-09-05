@@ -7,9 +7,12 @@ export const LAWN_DEFAULT_AREAS = ['Front yard', 'Back yard', 'Side yards'];
 export function previousLawnAssessment(history, service) {
   const day = String(service.scheduledDate || service.scheduled_date || service.date || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const visitDay = (row) => String(row.service_id ? row.appointment_date || '' : row.service_date || '').slice(0, 10);
   return (history || [])
-    .filter((row) => row.confirmed_by_tech === true && String(row.service_date).slice(0, 10) < day)
-    .sort((a, b) => String(b.service_date).localeCompare(String(a.service_date)))[0] || null;
+    .filter((row) => row.confirmed_by_tech === true
+      && (!row.service_id || String(row.service_id) !== String(service.id))
+      && /^\d{4}-\d{2}-\d{2}$/.test(visitDay(row)) && visitDay(row) < day)
+    .sort((a, b) => visitDay(b).localeCompare(visitDay(a)))[0] || null;
 }
 
 export function lawnPlanSelections(items, buildProduct) {

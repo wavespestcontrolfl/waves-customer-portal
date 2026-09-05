@@ -39,3 +39,14 @@ describe('previous visit scorecard', () => {
     expect(previousLawnAssessment(history, {})).toBeNull();
   });
 });
+
+it('orders linked visits by appointment date and excludes the current service', () => {
+  const rows = [
+    { id: 'current', service_id: 'current', appointment_date: '2026-08-01', service_date: '2026-08-01', confirmed_by_tech: true },
+    { id: 'backfilled', service_id: 'previous', appointment_date: '2026-08-15', service_date: '2026-10-01', confirmed_by_tech: true },
+    { id: 'future', service_id: 'future', appointment_date: '2026-10-01', service_date: '2026-08-20', confirmed_by_tech: true },
+    { id: 'missing-appointment', service_id: 'missing', service_date: '2026-08-31', confirmed_by_tech: true },
+  ];
+  expect(previousLawnAssessment(rows, { id: 'current', scheduledDate: '2026-09-05' }).id).toBe('backfilled');
+  expect(previousLawnAssessment([rows[0]], { id: 'current', scheduledDate: '2026-09-05' })).toBeNull();
+});
