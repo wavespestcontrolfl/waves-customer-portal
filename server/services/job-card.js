@@ -481,13 +481,14 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   if (ungroundedSentence(body, grounding)) return 'ungrounded_sentence';
   // A rewrite that drops a safety-critical fact is not a rewrite — and one
   // that restates it under a negation ("No chemical sensitivity is
-  // reported.") reverses it. The fact's own words are removed before the
+  // reported.") reverses it. Every fact's own words are removed before the
   // negation check so "asthma, no pyrethroids" keeps its "no".
-  for (const fact of critical) {
-    if (!fact) continue;
-    const needle = String(fact).toLowerCase();
-    if (!lower.includes(needle)) return 'critical_fact_dropped';
-    if (sentences.some((sentence) => sentence.toLowerCase().includes(needle) && NEGATION_RE.test(sentence.toLowerCase().split(needle).join(' ')))) return 'critical_fact_negated';
+  const needles = critical.filter(Boolean).map((fact) => String(fact).toLowerCase());
+  if (needles.some((needle) => !lower.includes(needle))) return 'critical_fact_dropped';
+  for (const sentence of sentences) {
+    const said = sentence.toLowerCase();
+    if (!needles.some((needle) => said.includes(needle))) continue;
+    if (NEGATION_RE.test(needles.reduce((rest, needle) => rest.split(needle).join(' '), said))) return 'critical_fact_negated';
   }
   return null;
 }
