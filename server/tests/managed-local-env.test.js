@@ -1,5 +1,7 @@
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');
+const fs = require('node:fs');
+const vm = require('node:vm');
 const root = path.resolve(__dirname, '../..');
 
 function evaluate(code, env) {
@@ -20,4 +22,27 @@ test('managed mode never loads dotenv and refuses deployed processes', () => {
   const code = "require('dotenv').config = () => { throw new Error('dotenv must not run'); }; require('./server/config/load-env')(); console.log('isolated')";
   expect(evaluate(code, { WAVES_LOCAL_DEV: '1' })).toBe('isolated');
   expect(() => evaluate(code, { WAVES_LOCAL_DEV: '1', RAILWAY_DEPLOYMENT_ID: 'deployment' })).toThrow();
+});
+
+test.each([false, true])('pricing startup preserves scheduler ordering (managed=%s)', async (managed) => {
+  const source = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
+  const start = source.indexOf('  (async () => {', source.indexOf('primeCatalogNames.then'));
+  const end = source.indexOf('// Terminal Tap to Pay:', start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const calls = [];
+  let finishPricing;
+  const pricing = new Promise((resolve) => { finishPricing = resolve; });
+  const boot = vm.runInNewContext(source.slice(start, end) + 'recovery(); })()', {
+    process: { env: managed ? { WAVES_LOCAL_DEV: '1' } : {} },
+    config: { nodeEnv: 'production' },
+    initScheduledJobs: () => calls.push('scheduled'),
+    initBankingSync: () => calls.push('banking'),
+    require: () => ({ syncConstantsFromDB: () => { calls.push('pricing'); return pricing; } }),
+    logger: { warn: jest.fn() }, recovery: () => calls.push('recovery'),
+  });
+  expect(calls).toEqual(managed ? ['pricing'] : ['scheduled', 'banking', 'pricing']);
+  finishPricing();
+  await boot;
+  expect(calls).toEqual(managed ? ['pricing'] : ['scheduled', 'banking', 'pricing', 'recovery']);
 });
