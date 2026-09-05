@@ -4054,10 +4054,16 @@ const ReviewService = {
     if (!svcType || !tName) {
       // scheduled_services has no tech_name column — the name comes from the
       // technician row the visit points at (the old read always fell through
-      // to a hardcoded owner name).
+      // to a hardcoded owner name). When the caller names the visit
+      // (scheduledServiceId — the record-less completion path), THAT row is
+      // the source; the customer-wide latest completed visit is only for an
+      // unscoped manual enrollment, so a same-day sibling or a later visit can
+      // never lend its technician to this ask.
       const lastSvc = await db("scheduled_services")
         .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
-        .where({ "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
+        .where(scheduledServiceId
+          ? { "scheduled_services.id": scheduledServiceId }
+          : { "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
         .orderBy("scheduled_services.scheduled_date", "desc")
         .select("scheduled_services.service_type", "technicians.name as tech_name")
         .first()
