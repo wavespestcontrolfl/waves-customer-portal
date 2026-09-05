@@ -23,7 +23,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe("110-gallon tank reference", () => {
   it("keeps products in separate tanks and preserves rainfast and re-entry directions", () => {
     const plan = fixture();
-    Object.assign(plan.items[0].product, { reiHours: 0, reentryText: 'Keep off until dry', rainfastMinutes: 180, doNotTankMixWith: ['Synthetic fertilizer restriction'] });
+    plan.visit = { objective: 'Synthetic seasonal application deadline' };
+    Object.assign(plan.items[0].product, { reiHours: 0, reentryText: 'Keep off until dry', rainfastMinutes: 180, doNotTankMixWith: ['Synthetic fertilizer restriction'], irrigationNotes: 'Synthetic irrigation restriction' });
     plan.items.push({ ...plan.items[0], product: { ...plan.items[0].product, id: 'second', name: 'Synthetic fertilizer' } });
     const { container } = render(<ProtocolTankSheet plan={plan} calibration={calibration} />);
     for (const surface of [container, document.querySelector('.protocol-print-sheet')]) {
@@ -31,6 +32,8 @@ describe("110-gallon tank reference", () => {
       expect(within(surface).getAllByText('180 minutes')).toHaveLength(2);
       expect(within(surface).getAllByText('Keep off until dry')).toHaveLength(2);
       expect(within(surface).getAllByText('Synthetic fertilizer restriction')).toHaveLength(2);
+      expect(within(surface).getAllByText('Synthetic irrigation restriction')).toHaveLength(2);
+      expect(within(surface).getByText('Synthetic seasonal application deadline')).toBeInTheDocument();
       expect(within(surface).queryByText(/0 hours/)).not.toBeInTheDocument();
     }
   });

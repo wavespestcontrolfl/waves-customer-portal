@@ -27,6 +27,7 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
           Follow each product label for mixing, PPE, application restrictions and re-entry.
         </p>
         <p className="mt-2">Each product below requires a separate single-product tank. Do not combine the listed products in one tank.</p>
+        <p className="mt-2">{plan.visit?.objective}</p>
       </div>
       {!tankReady && (
         <p role="alert" className="rounded-md border border-alert-fg/30 bg-alert-bg p-3 text-alert-fg">
@@ -62,6 +63,7 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
           ["PPE", ppe || "Not on file — consult the product label"],
           ["Re-entry", product.reentryText || "Consult the product label"],
           ["Compatibility", product.compatibilityNotes],
+          ["Irrigation", product.irrigationNotes],
           ["Do not tank mix with", (product.doNotTankMixWith || []).join("; ")],
           ["Rainfast timing", product.rainfastMinutes == null ? null : `${product.rainfastMinutes} minutes`],
           ["Pollinators", product.pollinatorPrecautions],

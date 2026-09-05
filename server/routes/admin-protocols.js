@@ -1385,7 +1385,7 @@ async function getProtocolProducts() {
       'requires_surfactant', 'allows_surfactant',
       'label_source_note', 'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
       'ppe_required', 'signal_word', 'compatibility_notes', 'pollinator_precautions',
-      'ppe_text', 'reentry_text', 'do_not_tank_mix_with',
+      'ppe_text', 'reentry_text', 'do_not_tank_mix_with', 'irrigation_notes',
     )
     .catch(() => []);
 
@@ -1673,6 +1673,7 @@ router.get('/lawn-mix', async (req, res, next) => {
           signalWord: product.signal_word || null,
           compatibilityNotes: product.compatibility_notes || null,
           doNotTankMixWith: product.do_not_tank_mix_with || [],
+          irrigationNotes: product.irrigation_notes || null,
           pollinatorPrecautions: product.pollinator_precautions || null,
           ppeText: product.ppe_text || null,
           reentryText: product.reentry_text || null,
