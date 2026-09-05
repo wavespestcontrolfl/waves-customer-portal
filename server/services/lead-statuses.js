@@ -69,11 +69,48 @@ const secondWinSql = (t) => `(${t}.status IS DISTINCT FROM 'won' OR NOT EXISTS (
     END
 ))`;
 const SECOND_WIN_SQL = secondWinSql('leads');
+// The mirror of the second-win rule, from the root's side: an OPEN row whose
+// ancestry holds a live won repeat of the same opportunity is that deal
+// already counted — a repeat's conversion settles the win onto the root's
+// funnel row and deliberately leaves the root's lead row open for the
+// office to merge (funnel writes are funnel-table only), so without this
+// the root and its won repeat are two prospects in every denominator
+// (codex #3834 r35 P2). The walk descends the marker chain (a repeat of a
+// repeat, B → A → O) through live 'duplicate' hops only, bounded and
+// cycle-safe like the ascent; the won row qualifies by the same
+// same-opportunity rule (customer link when both linked, else the root's
+// current phone or email; never through a different estimate). A root
+// staff closed themselves (lost, unresponsive) is left as it is — their
+// decision, already excluded from open work. The reverse join is a plain
+// text comparison on the marker key so the expression index on it
+// (20260905000010) serves the lookup.
+const MARKER_TEXT = (extracted) => `${extracted}->>'duplicate_of_lead_id'`;
+const openStatusList = OPEN_LEAD_STATUSES.map((s) => `'${s}'`).join(', ');
+const wonDescendantSql = (t) => `(${t}.status NOT IN (${openStatusList}) OR NOT EXISTS (
+  WITH RECURSIVE down AS (
+    SELECT d.id, d.status, d.deleted_at, d.customer_id, d.estimate_id, d.phone, d.email, 1 AS depth
+    FROM leads d
+    WHERE d.lead_type = 'quote_wizard' AND ${MARKER_TEXT('d.extracted_data')} = ${t}.id::text
+    UNION ALL
+    SELECT c.id, c.status, c.deleted_at, c.customer_id, c.estimate_id, c.phone, c.email, down.depth + 1
+    FROM down JOIN leads c ON c.lead_type = 'quote_wizard' AND ${MARKER_TEXT('c.extracted_data')} = down.id::text
+    WHERE down.status = 'duplicate' AND down.deleted_at IS NULL AND down.depth < 8
+  )
+  SELECT 1 FROM down
+  WHERE down.status = 'won' AND down.deleted_at IS NULL
+    AND NOT (down.estimate_id IS NOT NULL AND ${t}.estimate_id IS NOT NULL AND down.estimate_id <> ${t}.estimate_id)
+    AND CASE
+      WHEN down.customer_id IS NOT NULL AND ${t}.customer_id IS NOT NULL THEN down.customer_id = ${t}.customer_id
+      ELSE (${phoneDigits('down.phone')} <> '' AND ${phoneDigits('down.phone')} = ${phoneDigits(`${t}.phone`)})
+        OR (LOWER(TRIM(COALESCE(down.email, ''))) <> '' AND LOWER(TRIM(down.email)) = LOWER(TRIM(${t}.email)))
+    END
+))`;
+const WON_DESCENDANT_SQL = wonDescendantSql('leads');
 // The same scope as a raw fragment, for the correlated COUNT subqueries the
 // sources summary builds over an unaliased `leads` (GET /leads/sources).
-const PROSPECT_SCOPE_SQL = `leads.status NOT IN (${NON_ENGAGED_LEAD_STATUSES.map((s) => `'${s}'`).join(', ')}) AND ${SECOND_WIN_SQL}`;
+const PROSPECT_SCOPE_SQL = `leads.status NOT IN (${NON_ENGAGED_LEAD_STATUSES.map((s) => `'${s}'`).join(', ')}) AND ${SECOND_WIN_SQL} AND ${WON_DESCENDANT_SQL}`;
 function scopeToProspects(qb, alias = 'leads') {
-  return qb.whereNotIn(alias === 'leads' ? 'status' : `${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias));
+  return qb.whereNotIn(alias === 'leads' ? 'status' : `${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias)).whereRaw(wonDescendantSql(alias));
 }
 
 module.exports = {
@@ -83,4 +120,5 @@ module.exports = {
   PROSPECT_SCOPE_SQL,
   // exported for tests
   SECOND_WIN_SQL,
+  WON_DESCENDANT_SQL,
 };

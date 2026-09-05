@@ -108,8 +108,22 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     // The sources summary counts (GET /leads/sources) splice the same scope
     // into every COUNT subquery, so the client-derived source conversion
     // rate agrees with the ROI (codex r16 P2).
-    const { PROSPECT_SCOPE_SQL } = require('../services/lead-statuses');
-    expect(PROSPECT_SCOPE_SQL).toBe(`leads.status NOT IN ('cancelled', 'spam', 'duplicate') AND ${SECOND_WIN_SQL}`);
+    const { PROSPECT_SCOPE_SQL, WON_DESCENDANT_SQL } = require('../services/lead-statuses');
+    expect(PROSPECT_SCOPE_SQL).toBe(`leads.status NOT IN ('cancelled', 'spam', 'duplicate') AND ${SECOND_WIN_SQL} AND ${WON_DESCENDANT_SQL}`);
+    // The mirror from the root's side: an OPEN root with a live won repeat of
+    // the same opportunity in its ancestry is that deal already counted — a
+    // repeat's win settles onto the root's funnel row and leaves the root's
+    // lead row open for the office to merge (codex #3834 r35 P2). The
+    // descent walks the marker as text so the expression index serves it.
+    const wonDescendant = mockWhereCalls.find((c) => c[0] === 'leads' && c[1] === 'whereRaw' && /WITH RECURSIVE down AS/.test(c[2]));
+    expect(wonDescendant[2]).toBe(WON_DESCENDANT_SQL);
+    expect(WON_DESCENDANT_SQL).toMatch(/^\(leads\.status NOT IN \('new', 'contacted', 'estimate_sent', 'estimate_viewed'\) OR NOT EXISTS/);
+    expect(WON_DESCENDANT_SQL).toMatch(/WHERE d\.lead_type = 'quote_wizard' AND d\.extracted_data->>'duplicate_of_lead_id' = leads\.id::text/);
+    expect(WON_DESCENDANT_SQL).toMatch(/JOIN leads c ON c\.lead_type = 'quote_wizard' AND c\.extracted_data->>'duplicate_of_lead_id' = down\.id::text/);
+    expect(WON_DESCENDANT_SQL).toMatch(/WHERE down\.status = 'duplicate' AND down\.deleted_at IS NULL AND down\.depth < 8/);
+    expect(WON_DESCENDANT_SQL).toMatch(/WHERE down\.status = 'won' AND down\.deleted_at IS NULL/);
+    expect(WON_DESCENDANT_SQL).toMatch(/AND NOT \(down\.estimate_id IS NOT NULL AND leads\.estimate_id IS NOT NULL AND down\.estimate_id <> leads\.estimate_id\)/);
+    expect(WON_DESCENDANT_SQL).toMatch(/WHEN down\.customer_id IS NOT NULL AND leads\.customer_id IS NOT NULL THEN down\.customer_id = leads\.customer_id/);
     const adminLeadsSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-leads.js'), 'utf8');
     expect((adminLeadsSrc.match(/leads\.deleted_at IS NULL AND \$\{PROSPECT_SCOPE_SQL\}/g) || []).length).toBe(4);
     // The dashboard breakdowns (leads-by-source over `leads as l`, channel-mix)
@@ -123,6 +137,9 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(aliased[1][1]).toMatch(/^\(l\.status IS DISTINCT FROM 'won' OR NOT EXISTS/);
     expect(aliased[1][1]).not.toMatch(/\bleads\.(status|extracted_data|customer_id|estimate_id|phone|email)\b/);
     expect(aliased[1][1]).toMatch(/FROM chain JOIN leads p ON/); // the inner walk still names the table
+    expect(aliased[2][1]).toMatch(/^\(l\.status NOT IN \(/);
+    expect(aliased[2][1]).not.toMatch(/\bleads\.(status|extracted_data|customer_id|estimate_id|phone|email|id)\b/);
+    expect(aliased[2][1]).toMatch(/= l\.id::text/);
     // The cross-source winner map (calculateAllSourceROI) is built over the
     // same population, so a second win never claims a customer its own
     // source cannot credit (codex r20 P2).
