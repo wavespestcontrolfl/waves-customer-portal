@@ -151,7 +151,7 @@ async function ringMissedDeductionBell(db, result, { scheduledServiceId, product
   // it must not prescribe a deduction (Codex r15 P2).
   const body = product
     ? `Adjust the count by ${product.per_completion_usage} ${product.inventory_unit || ''} on the Inventory page. Reason: ${reason}`
-    : `The consumables lookup failed, so nothing was deducted for this visit — check on the Inventory page which per-visit supplies apply to this service line and adjust those counts by hand. Reason: ${reason}`;
+    : `The consumables lookup failed for this visit — check on the Inventory page which per-visit supplies apply to this service line, then adjust by hand ONLY the ones with no usage movement for this visit yet (a concurrent retry may have deducted some already; those show a movement). Reason: ${reason}`;
   const dedupeKey = product ? `supplies-consumption-failed:${product.id}:${scheduledServiceId}` : `supplies-consumption-failed:lookup:${scheduledServiceId}`;
   try {
     const bell = await require('./notification-service').notifyAdmin('system', title, body, { bell: true, link: '/admin/inventory', dedupeKey, metadata: { productId: product?.id || null, scheduledServiceId } });
