@@ -9,6 +9,7 @@ exports.up = async function up(db) {
   for (const col of ['leased_provider', 'lease_mode']) {
     if (!(await db.schema.hasColumn('seo_link_prospects', col))) await db.schema.alterTable('seo_link_prospects', (t) => t.text(col));
   }
+  if (!(await db.schema.hasColumn('seo_link_prospects', 'outreach_draft_attempts'))) await db.schema.alterTable('seo_link_prospects', (t) => t.integer('outreach_draft_attempts').notNullable().defaultTo(0));
   if (!(await db.schema.hasColumn('seo_link_attempts', 'idempotency_key'))) await db.schema.alterTable('seo_link_attempts', (t) => t.text('idempotency_key'));
   await db.raw('CREATE UNIQUE INDEX IF NOT EXISTS seo_link_attempts_idempotency_key_unique ON seo_link_attempts (idempotency_key) WHERE idempotency_key IS NOT NULL');
   await outcomes(db, [...OLD_OUTCOMES, 'slot_released']);
@@ -19,7 +20,7 @@ exports.down = async function down(db) {
   await outcomes(db, OLD_OUTCOMES);
   await db.raw('DROP INDEX IF EXISTS seo_link_attempts_idempotency_key_unique');
   if (await db.schema.hasColumn('seo_link_attempts', 'idempotency_key')) await db.schema.alterTable('seo_link_attempts', (t) => t.dropColumn('idempotency_key'));
-  for (const col of ['leased_provider', 'lease_mode']) {
+  for (const col of ['leased_provider', 'lease_mode', 'outreach_draft_attempts']) {
     if (await db.schema.hasColumn('seo_link_prospects', col)) await db.schema.alterTable('seo_link_prospects', (t) => t.dropColumn(col));
   }
 };

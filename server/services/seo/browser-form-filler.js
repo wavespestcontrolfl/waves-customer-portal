@@ -406,6 +406,8 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit not actionable (nothing dispatched): ${e.message}` };
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {}); // best-effort settle; never fatal post-dispatch
+    // Keep the pinned-host mutation window open for asynchronous validation/POSTs.
+    try { await page.waitForTimeout(5000); } catch { /* page may have closed after submit */ }
     submitPhase = false;
 
     // Verification is best-effort (its own try/catch — a throw here must NOT fall to the
@@ -415,7 +417,6 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     let verify = null;
     let shot2 = null;
     try {
-      await page.waitForTimeout(1500);
       shot2 = await boundedShot(page);
       verify = await callVision(client, shot2.toString('base64'),
         'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection OR a next-step gate that wasn\'t completed (validation error, "required field", a login/CAPTCHA/payment wall, a phone/SMS verification step, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}');

@@ -7,8 +7,9 @@ const { fillCitationForm, _internals } = require('../services/seo/browser-form-f
 // clickOptsLog: records [selector, options] for clicks that pass options.
 // submitReq: {method,url,nav} — a synthetic request fired THROUGH the real route guard
 // when the submit is clicked, so submitDispatched/submitAborted get exercised offline.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null, submitReqs = null, formAction = null, fillRequest = false, requestLog = [] } = {}) {
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null, submitReqs = null, formAction = null, fillRequest = false, delayedSubmit = false, requestLog = [] } = {}) {
   let routeHandler = null;
+  let clicked = false;
   // Fire one OR a SEQUENCE of synthetic requests through the real route guard (submitReqs
   // models e.g. an on-host form POST followed by an off-host confirmation redirect).
   const fireSubmitReq = async () => {
@@ -25,14 +26,14 @@ function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel 
     }
   };
   const page = {
-    goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
+    goto: async () => {}, waitForTimeout: async () => { if (delayedSubmit && clicked) await fireSubmitReq(); }, waitForLoadState: async () => {},
     url: () => landedUrl,
     $eval: async () => (formAction || ''), // the form's resolved action (or '' → guard uses the fallback heuristic)
     screenshot: async () => Buffer.from('png'),
     fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); if (fillRequest) await fireSubmitReq(); },
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
     check: async (sel) => actionsLog.push(['check', sel]),
-    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); actionsLog.push(['click', sel]); await fireSubmitReq(); },
+    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); actionsLog.push(['click', sel]); clicked = true; if (!delayedSubmit) await fireSubmitReq(); },
   };
   const ctx = { newPage: async () => page, route: async (_p, handler) => { routeHandler = handler; } };
   if (wsLog) ctx.routeWebSocket = async (pattern) => { wsLog.push(pattern); };
@@ -582,4 +583,15 @@ test('a page-script POST during filling is aborted before submit authority is gr
     launchBrowser:async()=>fakeBrowser([],{fillRequest:true,requestLog,submitReq:{method:'POST',url:'https://x.com/autosave'}}),
     anthropic:fakeAnthropic({form_present:true,blocked:null,actions:[{action:'fill',selector:'#name',value:'Waves'},{action:'submit',selector:'#go'}]})}));
   expect(requestLog).toEqual(['aborted']);
+});
+
+test('a delayed JavaScript submit POST remains authorized after DOM load is already complete', async () => {
+  const requestLog = [], actions = [];
+  const result = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+    launchBrowser: async () => fakeBrowser(actions, { delayedSubmit: true, requestLog, submitReq: { method: 'POST', url: 'https://x.com/submit' } }),
+    anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#name', value: 'Waves' }, { action: 'submit', selector: '#go' }] }, { success: false }),
+  }));
+  expect(requestLog).toEqual(['continued']);
+  expect(actions.filter(a => a[0] === 'click')).toHaveLength(1);
+  expect(result).toMatchObject({ outcome: 'placed', pending: true });
 });

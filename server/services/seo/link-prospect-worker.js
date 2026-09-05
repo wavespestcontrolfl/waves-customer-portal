@@ -127,7 +127,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // form-only prospects untouched (status='prospect') for manual handling rather
     // than claiming+skipping them every run. External callers (Hermes) omit this and
     // do their own recipient research.
-    if (!execution) q = q.whereNull('outreach_sent_at');
+    if (!execution) q = q.whereNull('outreach_sent_at').where('outreach_draft_attempts', '<', MAX_ATTEMPTS);
     if (requireContactEmail) q = q.whereNotNull('contact_email');
     // An optional classifier filter narrows the batch; execution authority is always required.
     if (effectivePolicy) q = q.where('automation_policy', effectivePolicy);
@@ -509,10 +509,16 @@ async function report({ prospect_id, outcome, lease_token, provider = 'hermes', 
     return { ok: false, code: 'outreach_locked', error: 'outreach already sent, in flight, or awaiting reconciliation' };
   }
 
-  const attempts = (prospect.attempts || 0) + 1;
+  const initialDraft = prospect.lease_mode === 'draft';
+  const attempts = (prospect.attempts || 0) + (initialDraft ? 0 : 1);
   const patch = mapReportToPatch(outcome, body, prospect.quality_signals);
   // Cap retries so a permanently-failing prospect doesn't churn forever.
-  if (outcome === 'failed' && attempts >= MAX_ATTEMPTS) patch.status = 'rejected';
+  if (initialDraft) {
+    // Communication failures cannot undo an acquired placement or spend acquisition retries.
+    delete patch.status;
+    patch.outreach_draft_attempts = outcome === 'skipped' ? MAX_ATTEMPTS
+      : outcome === 'failed' ? Math.min((prospect.outreach_draft_attempts || 0) + 1, MAX_ATTEMPTS) : 0;
+  } else if (outcome === 'failed' && attempts >= MAX_ATTEMPTS) patch.status = 'rejected';
 
   // Optimistic concurrency: only apply if THIS lease is still current. If the
   // claim was swept and re-claimed by another worker, claimed_at no longer
@@ -521,7 +527,7 @@ async function report({ prospect_id, outcome, lease_token, provider = 'hermes', 
     const n = await trx('seo_link_prospects')
       .where({ id: prospect_id })
       .where('claimed_at', leaseDate)
-      .update({ ...patch, attempts });
+      .update({ ...patch, ...(!initialDraft ? { attempts } : {}) });
     if (!n) return { updated: 0, moved: 0, reopened: false };
     // the lease is released — a superseded / changed path is followed in the
     // SAME transaction, even if this row is never claimed again
@@ -562,7 +568,7 @@ async function settleReportRelease(trx, { prospect, outcome }) {
     // route declared gone stays closed. `skipped` is a route-specific
     // decision too (no emailable contact on the OLD route, a duplicate on
     // the OLD page): it reopens the same way when the route changed.
-    if (settled && (outcome === 'failed' || outcome === 'skipped')) {
+    if (settled && prospect.lease_mode !== 'draft' && (outcome === 'failed' || outcome === 'skipped')) {
       const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
       let reopen = false;
       if (after && after.path_id && after.path_id !== prospect.path_id) reopen = true;

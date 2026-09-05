@@ -11,7 +11,7 @@ if (env.WAVES_DATABASE_ENVIRONMENT !== 'test' || !new URL(env.DATABASE_URL).path
 const db = require('knex')({ client: 'pg', connection: env.DATABASE_URL, pool: { min: 0, max: 3 } });
 const root = process.cwd();
 const stub = (file, value) => { const id = require.resolve(`${root}/server/${file}`); require.cache[id] = { id, filename: id, loaded: true, exports: value }; };
-const gates = new Set(['linkAuthority', 'signupRunner']);
+const gates = new Set(['linkAuthority', 'signupRunner', 'outreachDrafter']);
 stub('config/feature-gates', { isEnabled: (k) => gates.has(k) });
 stub('services/logger', { info() {}, warn() {}, error() {} });
 let active;
@@ -55,6 +55,15 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     assert.equal(stored.status, 'placed');
     assert.equal((await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution' }).first()).satisfied_reason, 'placed');
     console.log('PASS bridge → one capped lease → kill/replay/provider refusals → pending placement and authority settlement');
+    await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ acquisition_type: 'content_submission', link_type: 'editorial', execution_after_send: false });
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live', link_type: 'editorial', attempts: 2 });
+    const [draftLease] = await W.claim({ type: 'outreach', mode: 'draft', provider: 'hermes', domains: [domain] });
+    assert.ok(draftLease);
+    assert.equal((await W.report({ prospect_id: p.id, provider: 'hermes', lease_token: draftLease.lease_token, outcome: 'skipped' })).ok, true);
+    const afterDraft = await trx('seo_link_prospects').where({ id: p.id }).first();
+    assert.equal(afterDraft.status, 'live'); assert.equal(afterDraft.attempts, 2); assert.equal(afterDraft.outreach_draft_attempts, W.MAX_ATTEMPTS);
+    assert.deepEqual(await W.claim({ type: 'outreach', mode: 'draft', provider: 'hermes', domains: [domain] }), []);
+    console.log('PASS skipped late pitch preserves live lifecycle and acquisition attempts, then stops reclaiming');
     const V = require(`${root}/server/services/seo/link-prospect-verifier`);
     const Q = require(`${root}/server/services/seo/link-owner-queue`);
     const oid = randomUUID(), opath = randomUUID(), first = randomUUID(), second = randomUUID(), backlink = randomUUID();

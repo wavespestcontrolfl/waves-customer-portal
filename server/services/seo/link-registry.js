@@ -465,7 +465,7 @@ function movePatch(row, target, now, { syncUrl = false } = {}) {
   // The transition CONSUMES the lease stamp: a same-path reconcile at release
   // fires once per lease, never again on every later release or operator
   // draft of the same (now settled) row.
-  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
+  const patch = { path_id: target.id, outreach_draft_attempts: 0, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
   // The execution URL follows the successor; a URL-less successor (outreach)
   // CLEARS it — the retired route must not survive as the page the outreach
   // drafter fetches and cites. A release-time reconcile of the SAME path

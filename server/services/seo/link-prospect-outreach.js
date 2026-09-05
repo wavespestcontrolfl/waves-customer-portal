@@ -250,6 +250,7 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     : null;
 
   const patch = {
+    outreach_draft_attempts: 0,
     outreach_to_email: to.trim(),
     outreach_subject: subject,
     outreach_body: body,
