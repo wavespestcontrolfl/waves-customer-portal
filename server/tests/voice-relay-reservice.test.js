@@ -323,7 +323,9 @@ describe('GATE ON', () => {
 
   test('an in-lock dedupe FAILURE refuses to file (fail closed)', async () => {
     openCallbackExistsForLane.mockRejectedValue(new Error('pool gone'));
-    const out = await executeTool('request_reservice', GOOD, CTX);
+    const ctx = { ...CTX, toolFailed: false };
+    const out = await executeTool('request_reservice', GOOD, ctx);
+    expect(ctx.toolFailed).toBe(true);
     expect(out).toMatch(/could not check whether a re-service is already on the schedule/i);
     expect(builders.service_requests.insert).not.toHaveBeenCalled();
   });
@@ -410,7 +412,9 @@ describe('GATE ON', () => {
   // a customer who already had a visit on the calendar.
   test('a DEDUPE lookup failure refuses to file (fail closed)', async () => {
     reserviceScheduler.openReserviceCallbacks.mockRejectedValue(new Error('db down'));
-    const out = await executeTool('request_reservice', GOOD, CTX);
+    const ctx = { ...CTX, toolFailed: false };
+    const out = await executeTool('request_reservice', GOOD, ctx);
+    expect(ctx.toolFailed).toBe(true);
     expect(builders.service_requests.insert).not.toHaveBeenCalled();
     expect(out).toMatch(/could not check whether a re-service is already on the schedule/i);
     expect(out).toMatch(/nothing was filed/i);

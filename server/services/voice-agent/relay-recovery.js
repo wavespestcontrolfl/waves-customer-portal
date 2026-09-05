@@ -131,6 +131,8 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
       return {
         reconnects,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
+        modelFailures: latest ? Number(latest.model_failures) || 0 : 0,
+        toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
         reserviceFiled: meta.relay_reservice_filed === true || legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
         // A lead captured on an earlier leg even when its relay_lead_id
