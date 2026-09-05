@@ -281,8 +281,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.qtyInput) return st.productControlsHiddenFirst ? hiddenCopy(qtyInput) : qtyInput;
       if (sel === S.addToCart) return st.productControlsHiddenFirst ? hiddenCopy(addToCart) : addToCart;
       // The checkout order summary mirrors the cart unless checkoutLines overrides it, or checkoutLinesAtClick once the Place Order stage has begun (r7 P1)
-      // checkoutLineAppearsAtClick: a second row appears between the scan's count and the re-count (r13 P1)
-      if (sel === S.checkoutLine) { const ls = st.checkoutLines || (st.checkoutLinesAtClick && st.atClick ? st.checkoutLinesAtClick : st.cart); st.lineCounts = (st.lineCounts || 0) + 1; const grow = st.checkoutLineAppearsAtClick && st.atClick && st.lineCounts % 2 === 0 ? 1 : 0; return el({ count: ls.length + grow, nth: (i) => (i < ls.length ? line(ls[i]) : line({ sku: 'S1-99', qty: 1 })) }); }
+      // checkoutLineAppears(AtClick): a second row appears between the scan's count and the re-count (r13 P1)
+      if (sel === S.checkoutLine) { const ls = st.checkoutLines || (st.checkoutLinesAtClick && st.atClick ? st.checkoutLinesAtClick : st.cart); st.lineCounts = (st.lineCounts || 0) + 1; const grow = (st.checkoutLineAppears || (st.checkoutLineAppearsAtClick && st.atClick)) && st.lineCounts % 2 === 0 ? 1 : 0; return el({ count: ls.length + grow, nth: (i) => (i < ls.length ? line(ls[i]) : line({ sku: 'S1-99', qty: 1 })) }); }
       // cartLinesResponsive: every cart line is rendered twice — a hidden mobile copy after the visible row
       if (sel === S.cartLine) return st.cartLinesResponsive
         ? el({ count: st.cart.length * 2, nth: (i) => (i % 2 ? el({ count: 1, visible: false }) : line(st.cart[i / 2])) })
@@ -404,6 +404,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   }
   const creds = { email: 'buyer@example.com', password: 'pw', accountNumber: '12345' };
   const args = (extra = {}) => ({ vendorSku: 'S1-77', quantity: 2, credentials: creds, beforeSubmit: async () => ({ ok: true }), dryRun: false, approvedShipTo: '123 Example Ave, 34205', ...extra });
+  // Every checkout verification passed and the Place Order control was proven actionable: until PR 3c ships the
+  // submit stage, a non-dry-run call refuses HERE — the refusal is the proof the verifications let it through.
+  const NOT_SHIPPED = { refuse: 'checkout_not_shipped' };
 
   test('no approved ship-to configured → refused before the browser launches (pre-push P0)', async () => {
     const { st, deps } = fakeSiteOne();
@@ -484,8 +487,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('the option may be a wrapping label: the proof is its radio (PR3 r3 P1); a hidden associated radio refuses', async () => {
     const labelled = fakeSiteOne({ billIsLabel: true });
-    const r = await s1.place(args(), labelled.deps);
-    expect(r.externalOrderNumber).toBe('SO-778899');
+    await expect(s1.place(args(), labelled.deps)).rejects.toMatchObject(NOT_SHIPPED);
+    expect(labelled.st.trialDone).toBe(true);
     const hidden = fakeSiteOne({ billIsLabel: true, radioVisible: false });
     await expect(s1.place(args(), hidden.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_hidden' });
     expect(hidden.st.placeClicked).toBe(0);
@@ -503,47 +506,6 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args(), rejected.deps)).rejects.toMatchObject({ refuse: 'login_rejected' });
     expect(rejected.st.placeClicked).toBe(0);
     expect(rejected.browser.close).toHaveBeenCalled();
-  });
-
-  test('the order number must be an identifier: a label word next to "Order" never becomes the recorded number (PR3 r1 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberText: 'Order Confirmation Number: SO-778899' });
-    const r = await s1.place(args(), deps);
-    expect(r.externalOrderNumber).toBe('SO-778899');
-    expect(st.placeClicked).toBe(1);
-    expect(s1._internals.orderNumberIn('Thank you for your order')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order # 12345678')).toBe('12345678');
-    expect(s1._internals.orderNumberIn('Order date 2026-09-05 · Order # SO-778899')).toBe('SO-778899'); // every labeled match is tried; a date is never an id (r2 P2)
-    expect(s1._internals.orderNumberIn('Placed 2026-09-05')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order date 09-05-2026')).toBeNull(); // any date shape (r3 P2)
-    expect(s1._internals.orderNumberIn('Order date 05/09/26 ref')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order date 20260905')).toBeNull(); // compact date (r4 P2)
-    expect(s1._internals.orderNumberIn('Order date 09052026')).toBeNull(); // compact, month first (r5 P2)
-    expect(s1._internals.orderNumberIn('Order date 05092026')).toBeNull(); // compact, day first
-    expect(s1._internals.orderNumberIn('Order # 55501234')).toBe('55501234'); // an 8-digit id that is not a date stays an id
-    expect(s1._internals.orderNumberIn('Order # 12345-67890')).toBe('12345-67890'); // separator-joined groups that cannot be a date are an id (r8 P2)
-    expect(s1._internals.orderNumberIn('Order # pending · Total $105.93')).toBeNull(); // a price is never an id (r10 P2)
-    expect(s1._internals.orderNumberIn('Order # pending · Ships to 34205')).toBeNull(); // no unlabeled fallback: a ZIP is never an id (r16 P2)
-    expect(s1._internals.orderNumberIn('Your confirmation number is 55501234')).toBe('55501234');
-    expect(s1._internals.orderNumberIn('Your order number is 55501234.')).toBe('55501234'); // the sentence's period is not part of the id (r17 P2)
-    expect(s1._internals.orderNumberIn('Order # SO-12345.')).toBe('SO-12345');
-    expect(s1._internals.orderNumberIn('Order date 2026-09-05.')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order # pending. Total $105.93.')).toBeNull();
-    expect(s1._internals.orderNumberIn('SO-778899')).toBe('SO-778899'); // a dedicated number element's bare identifier (hook P1)
-    expect(s1._internals.orderNumberIn(' 55501234 ')).toBe('55501234');
-    expect(s1._internals.orderNumberIn('2026-09-05')).toBeNull(); // bare date / price / prose are not ids
-    expect(s1._internals.orderNumberIn('105.93')).toBeNull();
-    expect(s1._internals.orderNumberIn('Processing order…')).toBeNull();
-    expect(s1._internals.orderNumberIn('Ships to 34205')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order ref SO-778899')).toBe('SO-778899');
-    expect(s1._internals.orderNumberIn('Reference 55501 · Ready')).toBeNull();
-    expect(s1._internals.orderNumberIn('Total 1,234.56 · Order # SO-778899')).toBe('SO-778899');
-    expect(s1._internals.orderNumberIn('Subtotal 1,234 items')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order # 2026-778899')).toBe('2026-778899');
-    expect(s1._internals.orderNumberIn('Order date 09-2026')).toBeNull(); // month-year
-    expect(s1._internals.orderNumberIn('Order date 5.9.2026')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order date Sep-05-2026')).toBeNull(); // named month
-    expect(s1._internals.orderNumberIn('Placed 05-Sep-2026')).toBeNull();
-    expect(s1._internals.orderNumberIn('Order date Sep-05-2026 · Order # SO-778899')).toBe('SO-778899');
   });
 
   test('bill-to-account must be CONFIRMED selected before the place-order click (r1 P1)', async () => {
@@ -569,12 +531,6 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args({ beforeSubmit: async () => ({ ok: false, reason: 'over_cap' }) }), first.deps)).rejects.toMatchObject({ refuse: 'over_cap', cents: 9900 });
   });
 
-  test('an ambiguous submit (no confirmation number after the click) carries the checkout total the click happened at (pre-push P0)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberText: 'Thank you for your order', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
   test('a hidden CHECKED terms copy ahead of the visible unchecked checkbox is not acceptance — every shown checkbox is judged (r12 P1)', async () => {
     const { st, deps } = fakeSiteOne({ termsHiddenCheckedFirst: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'terms_required' });
@@ -583,8 +539,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('the bill-to option is the ONE visible copy: a hidden copy ahead of it is skipped, two visible copies refuse (r12 P2)', async () => {
     const { st, deps } = fakeSiteOne({ billHiddenFirst: true });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject(NOT_SHIPPED);
+    expect(st.trialDone).toBe(true);
+    expect(st.placeClicked).toBe(0);
     const dup = fakeSiteOne({ billVisibleCopies: 2 });
     await expect(s1.place(args(), dup.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
     expect(dup.st.placeClicked).toBe(0);
@@ -602,8 +559,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('the checkout and Place Order clicks target the ONE visible control — hidden responsive copies are never clicked (r14 P2)', async () => {
     const { st, deps } = fakeSiteOne({ checkoutHiddenFirst: true, placeOrderHiddenFirst: true });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject(NOT_SHIPPED);
+    expect(st.trialDone).toBe(true); // the visible control was trial-clicked
+    expect(st.placeClicked).toBe(0);
     expect(st.hiddenPlaceClicked).toBeUndefined();
   });
 
@@ -614,16 +572,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.cart).toEqual([]); // cleaned: nothing was submitted
   });
 
-  test('the confirmation number is the ONE visible node — a hidden stale copy ahead of it is never recorded (r15 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberHiddenFirst: true });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
-  });
-
   test('a visible radio and its visible label are ONE bill-to option — counted by the associated radio, the order places (r13 P1)', async () => {
     const { st, deps } = fakeSiteOne({ billLabelAndRadio: true });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject(NOT_SHIPPED);
+    expect(st.trialDone).toBe(true);
   });
 
   test('the cart total is the ONE visible total — a hidden stale copy ahead of it is never the dry-run or cap figure (r12 P2)', async () => {
@@ -633,14 +585,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('nested checkout-total markup (.grand-total wrapping its .price) is ONE figure — the order places on it (r17 P2)', async () => {
     const { st, deps } = fakeSiteOne({ totalTexts: ['Order total $105.93', '$105.93'] });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a retained pre-click reference node beside the appended confirmation node: the ONE new identifier is the order number (r17 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'Order ref SO-000001', orderNumberRetained: true });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ...NOT_SHIPPED, cents: 10593 });
+    expect(st.trialDone).toBe(true);
   });
 
   test('a dry run validates the Place Order control: hidden-only, disabled, or duplicated refuses at the dry-run stop, nothing clicked, cart emptied (r17 P2)', async () => {
@@ -659,12 +605,6 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(ok.st.placeClicked).toBe(0);
   });
 
-  test('a dedicated confirmation element carrying only the bare identifier is the order number (hook P1)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberText: 'SO-778899' });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
-  });
-
   test('loginConfigured mirrors validatePlaceArgs: login + account number (r12 P2)', () => {
     expect(s1.loginConfigured(creds)).toBe(true);
     expect(s1.loginConfigured(null)).toBe(false);
@@ -680,9 +620,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('a checkout that defaults to card entry is switched to bill-to-account before the card field is judged (r6 P1)', async () => {
     const { st, deps } = fakeSiteOne({ cardUntilBillTo: true });
-    const r = await s1.place(args(), deps);
-    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject(NOT_SHIPPED);
+    expect(st.trialDone).toBe(true);
     const stuck = fakeSiteOne({ cardUntilBillTo: true, accountSelectable: false });
     await expect(s1.place(args(), stuck.deps)).rejects.toMatchObject({ refuse: expect.stringMatching(/card_required|bill_to_account/) });
     expect(stuck.st.placeClicked).toBe(0);
@@ -821,70 +760,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
     const { st, deps } = fakeSiteOne({ gotoFailOnce: true });
-    const r = await s1.place(args(), deps);
-    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject(NOT_SHIPPED);
     expect(st.loggedIn).toBe(true);
-  });
-
-  test('a total that changes DURING the tender re-check is caught by the final read, re-gated and recorded (r4 P1)', async () => {
-    // read 1 = checkout stage; read 2 = loop; [tender re-check]; read 3 differs → gate → read 4 equal; [re-check]; read 5 equal → click
-    const seq = { 1: '$105.93', 2: '$105.93', 3: '$112.40' };
-    const { st, deps } = fakeSiteOne({ totalByRead: (n) => `Order total ${seq[n] || '$112.40'}` });
-    const totals = [];
-    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
-    expect(totals).toEqual([9900, 10593, 11240]);
-    expect(r).toMatchObject({ amountCents: 11240 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a checked bill-to radio that a rerender HIDES at the click boundary refuses bill_to_account_hidden, no click (r4 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ hideRadioAtClick: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_hidden' });
-    expect(st.placeClicked || 0).toBe(0);
   });
 
   test('a terms checkbox whose visibility cannot be read refuses terms_unreadable — never dropped from the scan (r4 P1)', async () => {
     const { st, deps } = fakeSiteOne({ termsVisibilityThrows: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'terms_unreadable' });
     expect(st.placeClicked || 0).toBe(0);
-  });
-
-  test('a confirmation element that first renders "Processing order…" is polled until its text yields a number (r4 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberLate: true });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.confReads).toBeGreaterThan(3);
-  });
-
-  test('the tender is re-checked immediately before the click: a rerender that unselects bill-to-account refuses, no click (r3 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ uncheckAccountAtClick: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]);
-  });
-
-  test('a blocker revealed at the click boundary (MFA after the last scan) refuses, no click (r3 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ mfaAtClick: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'mfa_required' });
-    expect(st.placeClicked || 0).toBe(0);
-  });
-
-  test('a confirmation-number node already on the page BEFORE the click is not the outcome: unchanged after the click = ambiguous (r3 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'PO reference 55501', orderNumberText: 'PO reference 55501', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a pre-click reference node whose status text alone changes keeps the same identifier — ambiguous, not placed (r5 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'PO reference 55501 · Ready', orderNumberText: 'PO reference 55501 · Validation failed', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a billing account that changes once the Place Order stage has begun refuses at the click boundary (r5 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ accountAtClick: 'Account # 99999' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'account_mismatch' });
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]); // pre-click refusal: cart emptied
   });
 
   test('a visible but disabled Place Order button refuses BEFORE the submitted guard flips — cart emptied, nothing ambiguous (r5 P2)', async () => {
@@ -894,37 +777,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.cart).toEqual([]);
   });
 
-  test('a rerender DURING the trial click that unselects bill-to-account is caught by the tender re-check after it — refused, no click (r6 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ uncheckAccountAtTrial: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
-    expect(st.trialDone).toBe(true);
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]);
-  });
-
-  test('a rerender DURING the trial click that swaps the billing account is caught by the identity re-check after it — refused, no click (r6 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ accountAtTrial: 'Account # 99999' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'account_mismatch' });
-    expect(st.trialDone).toBe(true);
-    expect(st.placeClicked || 0).toBe(0);
-  });
-
-  test('a reference node that appears DURING the pre-click loop is the baseline, not the outcome: unchanged after the click = ambiguous (r6 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberDuringLoop: 'Order # SO-556677', orderNumberText: 'Order # SO-556677', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
   test('a checkout order summary that no longer matches [SKU × packages] at the stage refuses checkout_lines_mismatch — dry run included, no click (r7 P1)', async () => {
     const { st, deps } = fakeSiteOne({ checkoutLines: [{ sku: 'S1-77', qty: 2 }, { sku: 'S1-99', qty: 1 }] });
     await expect(s1.place(args({ dryRun: true }), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]);
-  });
-
-  test('a quantity SiteOne adjusts once the Place Order stage has begun is caught at the click boundary — refused, no click (r7 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ checkoutLinesAtClick: [{ sku: 'S1-77', qty: 1 }] });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
     expect(st.placeClicked || 0).toBe(0);
     expect(st.cart).toEqual([]);
   });
@@ -938,117 +793,37 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(bad.st.placeClicked || 0).toBe(0);
   });
 
-  test('two shown reference nodes before the click are BOTH the baseline: one left standing after a rejected click is ambiguous, not placed (r7 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumbersBeforeClick: ['Order # SO-111111', 'PO reference 55501'], orderNumberText: 'PO reference 55501', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a pre-click confirmation baseline that cannot be read refuses confirmation_baseline_unreadable BEFORE the click (r7 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberBaselineUnreadable: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'confirmation_baseline_unreadable' });
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]);
-  });
-
-  test('the dispatch click is FORCED — it never waits on actionability past the validated state; a control disabled after the trial submits nothing and parks ambiguous, one click attempt (r8 P1)', async () => {
-    const ok = fakeSiteOne();
-    await expect(s1.place(args(), ok.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(ok.st.placeClickOpts).toMatchObject({ force: true });
-    const { st, deps } = fakeSiteOne({ placeOrderDisabledAfterTrial: true, orderNumberText: 'Thank you', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(0); // the browser ignored the forced click on a disabled control — nothing dispatched, nothing retried
-  });
-
-  test('a pre-click reference whose only post-click change is casing (so-12345 → SO-12345) is the same node — ambiguous, not placed (r8 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'Order ref so-12345', orderNumberText: 'Order ref SO-12345', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('the total is read from ONE element: a node replaced between the text and visibility reads refuses (detached = not visible), never approves the old figure (r10 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ totalNodeReplacedMidRead: true, checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_total_hidden' });
-    expect(st.placeClicked || 0).toBe(0);
-  });
-
-  test('a confirmation node that first shows a price ("Order # pending · Total $105.93") is polled until the real number renders — the price is never the order id (r10 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberLate: true, orderNumberLateText: 'Order # pending · Total $105.93' });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.confReads).toBeGreaterThan(3);
-  });
-
-  test('a submit that lands off the trusted host is ambiguous — a numeric id on the foreign page is never a placement (r10 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ urlAfterClick: 'https://cdn.example.com/error/12345678', orderNumberText: 'Order # 12345678', checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a checkout row replaced the moment its SKU is read is ONE detached snapshot — the substitute\'s quantity is never paired with the old SKU; refused, no click (r11 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ checkoutRowSwapAtClick: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
-    expect(st.rowSwapped).toBe(true);
-    expect(st.placeClicked || 0).toBe(0);
-  });
-
   test('a hidden responsive copy beside the ONE visible account / ship-to / total reading is not ambiguity — the dry run reports the visible total (r12 P2)', async () => {
     const { st, deps } = fakeSiteOne({ responsiveIdentity: true, checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args({ dryRun: true }), deps)).resolves.toMatchObject({ dryRun: true, amountCents: 10593 });
     expect(st.placeClicked || 0).toBe(0);
   });
 
-  test('nested confirmation matches (h1 wrapping the strong) carrying ONE identifier are the confirmation; two shown nodes with different ids stay ambiguous (r12 P2)', async () => {
-    const ok = fakeSiteOne({ orderNumberNested: true });
-    await expect(s1.place(args(), ok.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
-    const bad = fakeSiteOne({ orderNumberNestedDifferent: true, checkoutTotalText: 'Order total $105.93' });
-    await expect(s1.place(args(), bad.deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
-  });
-
   test('a bill-to label whose `for` target is a legal id with punctuation (payment:account) resolves its radio exactly — the order places (r12 P2)', async () => {
     const { st, deps } = fakeSiteOne({ billLabelAndRadio: true, labelForId: 'payment:account' });
-    await expect(s1.place(args(), deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
+    await expect(s1.place(args(), deps)).rejects.toMatchObject(NOT_SHIPPED);
+    expect(st.trialDone).toBe(true);
   });
 
   test('a checkout row that detaches DURING the line scan fails the proof closed — the briefly-present extra line is never dropped to make the cart look exact (r13 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ checkoutLinesAtClick: [{ sku: 'S1-77', qty: 2 }, { sku: 'S1-99', qty: 1, detachedDuringScan: true }] });
+    const { st, deps } = fakeSiteOne({ checkoutLines: [{ sku: 'S1-77', qty: 2 }, { sku: 'S1-99', qty: 1, detachedDuringScan: true }] });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
     expect(st.placeClicked || 0).toBe(0);
   });
 
   test('a row count that differs after the scan from before it is churn — refused, no click (r13 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ checkoutLineAppearsAtClick: true });
+    const { st, deps } = fakeSiteOne({ checkoutLineAppears: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
     expect(st.placeClicked || 0).toBe(0);
   });
 
-  test('the dispatch goes to the ELEMENT the trial validated: a Place Order button replaced after the final checks refuses place_order_replaced — no click, cart emptied (hook P1)', async () => {
-    const { st, deps } = fakeSiteOne({ placeOrderReplacedAtClick: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'place_order_replaced' });
-    expect(st.trialDone).toBe(true);
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]);
-  });
-
   test('the selected-tender count is the radio\'s OWN group: a label-associated radio with an opaque value places; an unnamed radio still uses the account-value fallback (r16 P2)', async () => {
     const named = fakeSiteOne({ billLabelAndRadio: true });
-    await expect(s1.place(args(), named.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    await expect(s1.place(args(), named.deps)).rejects.toMatchObject(NOT_SHIPPED);
     const unnamed = fakeSiteOne({ radioUnnamed: true });
-    await expect(s1.place(args(), unnamed.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    await expect(s1.place(args(), unnamed.deps)).rejects.toMatchObject(NOT_SHIPPED);
     const unnamedDoubled = fakeSiteOne({ radioUnnamed: true, extraCheckedAccounts: 1 });
     await expect(s1.place(args(), unnamedDoubled.deps)).rejects.toMatchObject({ refuse: 'bill_to_account_ambiguous' });
-  });
-
-  test('a confirmation node that first shows an unlabeled number ("Order # pending · Ships to 34205") is polled until the labeled number renders (r16 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberLate: true, orderNumberLateText: 'Order # pending · Ships to 34205' });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.confReads).toBeGreaterThan(3);
-  });
-
-  test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {
-    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'PO reference 55501' });
-    expect(await s1.place(args(), deps)).toMatchObject({ externalOrderNumber: 'SO-778899' });
-    expect(st.placeClicked).toBe(1);
   });
 
   test('a dry run walks through the checkout verifications and the final cap check, then stops BEFORE the click and bells the checkout total (r2 P1)', async () => {
@@ -1069,58 +844,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.placeClicked || 0).toBe(0);
   });
 
-  test('the total is re-read at the click boundary: a changed figure is cap-gated again and is the amount recorded (r2 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93', totalAtClick: 'Order total $112.40' });
-    const totals = [];
-    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
-    expect(totals).toEqual([9900, 10593, 11240]);
-    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 11240 });
-    expect(r.evidence.totalChangedBeforeClick).toEqual({ from: 10593, to: 11240 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a total that changes AGAIN during the cap reservation is re-read and re-gated; the click waits for a stable, approved figure (pre-push P0)', async () => {
-    // read 1 = the checkout-stage read; read 2 differs → gated → read 3 differs again → gated → read 4 stable
-    const seq = { 1: '$105.93', 2: '$112.40', 3: '$118.00', 4: '$118.00', 5: '$118.00' };
-    const { st, deps } = fakeSiteOne({ totalByRead: (n) => `Order total ${seq[n] || '$118.00'}` });
-    const totals = [];
-    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
-    expect(totals).toEqual([9900, 10593, 11240, 11800]);
-    expect(r).toMatchObject({ amountCents: 11800 });
-    expect(st.placeClicked).toBe(1);
-  });
-
-  test('a total that never settles before the click refuses checkout_total_unstable — nothing submitted (pre-push P0)', async () => {
-    const { st, deps } = fakeSiteOne({ totalByRead: (n) => `Order total $${100 + n}.00` });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_total_unstable' });
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]);
-  });
-
-  test('a changed total at the click boundary that the cap refuses is NOT clicked (r2 P1)', async () => {
-    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93', totalAtClick: 'Order total $999.00' });
-    const beforeSubmit = async (cents) => (cents > 20000 ? { ok: false, reason: 'over_cap', message: 'over' } : { ok: true });
-    await expect(s1.place(args({ beforeSubmit }), deps)).rejects.toMatchObject({ refuse: 'over_cap', cents: 99900 });
-    expect(st.placeClicked || 0).toBe(0);
-    expect(st.cart).toEqual([]); // pre-click refusal: cart emptied
-  });
-
   test('an MFA check whose visibility cannot be read refuses (mfa_unreadable) — never read as absent (r2 P1)', async () => {
     const { st, deps } = fakeSiteOne({ mfaUnreadable: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'mfa_unreadable' });
     expect(st.placeClicked || 0).toBe(0);
   });
 
-  test('bill-to-account confirmed → checkout total cap-checked → one place-order click, cart left to the vendor', async () => {
-    const { st, deps } = fakeSiteOne({ checkoutTotalText: 'Order total $105.93' });
-    const totals = [];
-    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
-    expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 10593, dryRun: false });
-    expect(r.evidence.billToAccountVerified).toBe(true);
-    expect(r.evidence.accountVerified).toBe(true);
-    expect(r.evidence.shipToVerified).toMatch(/123 example ave/);
-    expect(totals).toEqual([9900, 10593]);
-    expect(st.placeClicked).toBe(1);
-    expect(st.cart).toEqual([{ sku: 'S1-77', qty: 2 }]); // submitted: never cleared
-  });
 });
