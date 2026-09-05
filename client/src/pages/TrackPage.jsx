@@ -831,7 +831,7 @@ function TransientErrorCard({ onRetry }) {
 
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPage() {
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   const { token } = useParams();
   const [data, setData] = useState(null);

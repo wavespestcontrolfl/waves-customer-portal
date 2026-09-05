@@ -179,7 +179,7 @@ export default function PestReportViewPage() {
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
 
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   const load = useCallback(async () => {
     setLoading(true);

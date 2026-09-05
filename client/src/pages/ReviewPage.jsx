@@ -9,7 +9,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 export default function ReviewPage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);

@@ -198,7 +198,7 @@ export default function LawnReportViewPage() {
   // Liquid-glass theme — now unconditional. This page has no pdf/static
   // render modes — the route only ever serves the live customer view.
   const glassActive = true;
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(glassActive);
 
   const load = useCallback(async () => {
     setLoading(true);

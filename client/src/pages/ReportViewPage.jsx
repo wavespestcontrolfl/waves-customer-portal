@@ -9490,7 +9490,7 @@ export default function ReportViewPage() {
   // renders never mount the scene, so the Playwright print pipeline and
   // cached artifacts stay byte-identical.
   const glassActive = mode === 'live';
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(glassActive);
 
   useEffect(() => {
     let cancelled = false;

@@ -344,6 +344,7 @@ export default function CardPage() {
               onClick={onShare}
               aria-label="Share with a friend"
               title="Share"
+              data-glass-pill=""
               style={{ ...GLASS_MATERIAL, width: 40, height: 40, borderRadius: 999, display: 'flex', alignItems: 'center', justifyContent: 'center', font: 'inherit' }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

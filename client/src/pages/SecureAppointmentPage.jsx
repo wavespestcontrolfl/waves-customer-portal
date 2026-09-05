@@ -104,7 +104,7 @@ function VisitSummary({ data }) {
 export default function SecureAppointmentPage() {
   const { token } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   const [state, setState] = useState('loading'); // loading | notfound | closed | unavailable | ready | secured | prepay_selected
   const [data, setData] = useState(null);

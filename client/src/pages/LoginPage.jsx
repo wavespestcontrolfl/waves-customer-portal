@@ -51,7 +51,7 @@ export default function LoginPage() {
   // (audit S2-3). Shown regardless of the failure's real cause, so it leaks
   // nothing about which numbers have accounts.
   const [failedVerifies, setFailedVerifies] = useState(0);
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   useEffect(() => {
     if (isAuthenticated) navigate(nextPath, { replace: true });

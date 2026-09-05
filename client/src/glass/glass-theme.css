@@ -453,7 +453,7 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
    r12 cards, r10 controls, r999 pills; primary actions 48 (BrandButton), gold
    accent actions 44 minimum, choice chips 40 minimum; 16px input text (no iOS
    zoom) with a 14px placeholder in the muted grey. ===== */
-html[data-glass-theme] [data-glass] { border-radius: 12px !important; }
+html[data-glass-theme] [data-glass]:not([data-glass="modal"]) { border-radius: 12px !important; }
 html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
 html[data-glass-theme] button:not([data-glass-pill]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
 html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }

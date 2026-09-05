@@ -71,8 +71,11 @@ const FONT_FAMILY_LITERAL_RX = new RegExp(
 
 const LOCAL_PALETTE_RX = /^(?:\s*(?:export\s+)?)const\s+(W|BRAND|PALETTE|THEME|COLORS|PALLETTE)\s*=\s*\{/;
 
-// Every literal under the 14px floor (0–13, decimals included).
-const BANNED_FONT_SIZE_RX = /fontSize:\s*((?:\d|1[0-3])(?:\.\d+)?)\b/;
+// Every literal under the 14px floor (1–13, decimals included) anywhere in
+// the value expression — `12`, `'12px'`, `compact ? 12 : 16` — the same reach
+// as the weight rule. A fraction of a computed size (`size * 0.28`, `14.5`)
+// is not a px literal and is left alone.
+const BANNED_FONT_SIZE_RX = /fontSize:\s*[^,}\n]*?(?<![\w.-])((?:[1-9]|1[0-3])(?:\.\d+)?)(?:px)?(?![\w.-])/;
 // Token spellings of the same sizes (FS.micro / FS.caption were 11 / 12 until
 // #3892 deleted them) — a live page must not reach under the floor by name.
 const BANNED_FONT_TOKEN_RX = /fontSize:\s*FS\.(micro|caption)\b/;

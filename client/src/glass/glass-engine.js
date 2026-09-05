@@ -21,15 +21,15 @@ import { useLayoutEffect } from 'react';
 import './glass-theme.css';
 
 /**
- * Mounts the scene: html attribute, mesh background, and (full variant only)
- * the parallax orbs + film grain. Returns the orb container for pointer FX
+ * Mounts the one scene: html attribute, mesh background, the parallax orbs
+ * + film grain. Returns the orb container for pointer FX
  * plus a cleanup that restores everything it changed.
  */
-export function applyGlassScene(variant) {
+export function applyGlassScene() {
   const html = document.documentElement;
   const prevHtmlBg = html.style.background;
   const prevBodyBg = document.body.style.background;
-  html.setAttribute('data-glass-theme', variant);
+  html.setAttribute('data-glass-theme', '');
   // One scene for every customer page (owner 2026-09-03: invoices, receipts
   // and statements look like the estimate — the quieter wash is gone).
   html.style.background = [
@@ -85,8 +85,8 @@ export function applyGlassScene(variant) {
 
 /**
  * Cursor-follow specular + pointer/scroll parallax on the scene orbs.
- * No-ops (and returns a no-op cleanup) when there are no orbs — the pro
- * variant has no motion by design. The specular vars live on <html> so
+ * No-ops (and returns a no-op cleanup) when there are no orbs (reduced
+ * motion mounts none). The specular vars live on <html> so
  * per-frame pointer motion never feeds a consumer's MutationObserver
  * watching #root; var() resolution inherits from the root, and only the
  * :hover element renders its ::before, so a single global pair positions
@@ -172,16 +172,16 @@ export function fireGlassConfetti(cx, cy) {
  * the browser paints the first frame, or every glass surface flashes its
  * un-themed (legacy-token) styling for a frame before the scene mounts.
  */
-export function useGlassSurface(active, variant = 'full') {
+export function useGlassSurface(active) {
   useLayoutEffect(() => {
     if (!active) return undefined;
     const html = document.documentElement;
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const { orbs, cleanup } = applyGlassScene(variant);
+    const { orbs, cleanup } = applyGlassScene();
     const detachFx = attachGlassPointerFx(html, orbs, reduced);
     return () => {
       detachFx();
       cleanup();
     };
-  }, [active, variant]);
+  }, [active]);
 }

@@ -72,7 +72,7 @@ export default function ContractSignPage() {
   const tokenRef = useRef(token);
   tokenRef.current = token;
   // BrandCard / BrandButton / WavesShell already emit their own data-glass markup.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [contract, setContract] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');

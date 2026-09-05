@@ -105,7 +105,7 @@ export default function PublicBookingPage() {
   // Glass like every other customer surface (owner 2026-09-03 — supersedes
   // the 2026-07-21 marketing-chrome exception; the page is no longer
   // matched to a non-glass marketing context).
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';

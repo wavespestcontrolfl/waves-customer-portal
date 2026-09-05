@@ -79,7 +79,7 @@ function getServiceSelection(serviceType) {
 
 export default function RatePage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null); // null | notfound | temporary

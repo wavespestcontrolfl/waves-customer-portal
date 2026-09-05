@@ -74,7 +74,7 @@ function Section({ section }) {
 
 export default function ServiceOutlinePage() {
   const { token } = useParams();
-  useGlassSurface(true, "full");
+  useGlassSurface(true);
   const [packet, setPacket] = useState(null);
   const [loading, setLoading] = useState(true);
   // { kind: 'gone' | 'transient', message } — never a raw HTTP status.

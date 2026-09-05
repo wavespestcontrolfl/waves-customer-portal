@@ -874,7 +874,7 @@ const FLOWS = {
 export default function ScheduleFlowPage({ flow }) {
   const cfg = FLOWS[flow];
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);

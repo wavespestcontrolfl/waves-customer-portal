@@ -114,8 +114,8 @@ export default function WavesAIScheduleSearch({
           aria-label="Search for a service date or time"
           maxLength={500}
           style={{
-            width: '100%', minHeight: 46, border: `1px solid ${t.border}`,
-            borderRadius: 10, padding: '12px 14px', fontSize: 15,
+            width: '100%', minHeight: 48, border: `1px solid ${t.border}`,
+            borderRadius: 10, padding: '12px 14px', fontSize: 16,
             color: t.text, background: t.inputBg, outline: 'none', boxSizing: 'border-box',
           }}
         />
@@ -124,8 +124,8 @@ export default function WavesAIScheduleSearch({
           data-glass-accent=""
           disabled={asking || !query.trim()}
           style={{
-            minHeight: 46, border: 0, borderRadius: 10, padding: '0 20px',
-            background: t.accent, color: t.accentText, fontSize: 15, fontWeight: 700,
+            minHeight: 48, border: 0, borderRadius: 10, padding: '0 20px',
+            background: t.accent, color: t.accentText, fontSize: 16, fontWeight: 700,
             cursor: asking || !query.trim() ? 'not-allowed' : 'pointer',
             opacity: asking || !query.trim() ? 0.8 : 1,
           }}

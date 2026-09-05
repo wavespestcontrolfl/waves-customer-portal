@@ -3067,6 +3067,7 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
                   <button
                     key={key}
                     type="button"
+                    data-glass-pill=""
                     onClick={() => toggle(key)}
                     aria-pressed={on}
                     style={{

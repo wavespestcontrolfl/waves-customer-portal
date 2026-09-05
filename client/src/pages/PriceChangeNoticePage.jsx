@@ -75,7 +75,7 @@ function NotFound() {
 
 export default function PriceChangeNoticePage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null); // null | notfound | temporary
   const [loading, setLoading] = useState(true);

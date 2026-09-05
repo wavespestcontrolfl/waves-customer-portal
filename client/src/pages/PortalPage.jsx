@@ -3916,7 +3916,7 @@ function ServicesTab() {
                 {lightbox.caption}
               </div>
             )}
-            <button type="button" aria-label="Close photo" onClick={() => setLightbox(null)}
+            <button type="button" aria-label="Close photo" data-glass-pill="" onClick={() => setLightbox(null)}
               style={{
                 position: 'absolute', top: -10, right: -10, width: 36, height: 36, borderRadius: '50%',
                 border: 'none', background: B.white, color: B.navy, fontSize: 18, fontWeight: 700, cursor: 'pointer',
@@ -4712,6 +4712,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
               return (
                 <button
+                  data-glass-pill=""
                   onClick={() => handleAllAppointmentChannels(allEmail ? 'sms' : 'email')}
                   disabled={anySaving}
                   style={{
@@ -7014,6 +7015,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
       role="switch"
       aria-checked={!!checked}
       aria-label={label}
+      data-glass-pill=""
       onClick={onChange}
       disabled={disabled}
       style={{
@@ -15218,7 +15220,7 @@ export default function PortalPage() {
   const menuRef = useRef(null);
   // Home is the hero surface (full scene with orbs). Glass is the unconditional
   // portal theme now, so the scene always mounts.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   // Close menu on outside click
   useEffect(() => {

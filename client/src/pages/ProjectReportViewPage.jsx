@@ -383,7 +383,7 @@ export default function ProjectReportViewPage() {
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
   const glassActive = !isPaperDocument;
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(glassActive);
 
   useEffect(() => {
     setLoading(true);
