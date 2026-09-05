@@ -314,6 +314,17 @@ async function assertManualActionAllowed(trx, requestId, action) {
   return { landedAfterReceive: !!meta(row.evidence).landedAfterReceive };
 }
 
+// A manual transition the guard admitted (mark ordered / cancel / receive)
+// resolves whatever the request's ledger bell asked for — a pre-submit
+// park's "order manually", a post-submit park's "receive or revoke" — so
+// the delivered, unread bell is retired in the same transaction; another
+// admin must not follow it into a duplicate purchase (Codex r28 P2). The
+// revoke CLI retires the same keys on a revoke.
+async function settleRequestLedgerBells(trx, requestId) {
+  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id');
+  if (row) await retireLedgerBells(trx, row.id);
+}
+
 // Unlocked read for a pre-check (the IB tool's confirmation card); the
 // locked guard above is what a receive transaction relies on.
 async function landedAfterReceiveFor(conn, requestId) {
@@ -1301,6 +1312,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
 
 module.exports = {
   RECEIVED_SETTLES_SQL,
+  settleRequestLedgerBells,
   findLiveAutoOrder,
   landedAfterReceiveFor,
   settleLandedAfterReceive,

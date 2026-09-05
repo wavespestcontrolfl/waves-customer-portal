@@ -1467,6 +1467,9 @@ async function updateRestockRequest(input) {
       return { error: `This request is already ${lockedRequest.status} — no further actions allowed` };
     }
 
+    // The action resolves the request's ledger bell ("order manually" /
+    // "receive or revoke"): retired here so no one follows it (Codex r28 P2).
+    await require('../procurement/order-dispatch').settleRequestLedgerBells(trx, request.id);
     if (action !== 'receive') return transitionRestockRequest(trx, { request, product, action });
     return receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan, secondReceive: lockedSecondReceive });
   });

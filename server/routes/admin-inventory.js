@@ -3380,6 +3380,9 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 409;
         throw err;
       }
+      // The action resolves the request's ledger bell ("order manually" /
+      // "receive or revoke"): retired here so no one follows it (Codex r28 P2).
+      await dispatch.settleRequestLedgerBells(trx, request.id);
       if (action === 'mark_ordered') {
         const [updated] = await trx('product_restock_requests')
           .where({ id: request.id })
