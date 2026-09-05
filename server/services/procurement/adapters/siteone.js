@@ -70,6 +70,10 @@ const SELECTORS = Object.freeze({
   // password field's form) — a form-prefixed selector applied inside that
   // form would look for a NESTED form and never find the button (r18 P1).
   loginSubmit: 'button[type="submit"], input[type="submit"]',
+  // A signed-in account page: the sign-out link or the account menu. Login
+  // success needs one of these SHOWN — a same-host MFA / maintenance / error
+  // page with no password field is not a login (Codex #3853 r22 P1).
+  accountMarker: 'a[href*="logout"], a[href*="sign-out"], a[href*="signout"], [data-account-menu], .account-menu, .my-account, a[href*="/my-account"]',
   loginError: '.alert-danger, .error-message, [role="alert"]',
   searchInput: 'input[name="text"], input[type="search"], input#js-site-search-input, input[placeholder*="Search"]',
   productLink: '.product-item a.name, .product-item-name a, a.product-name, .product-tile a',
@@ -301,11 +305,15 @@ async function login(page, creds) {
     // duplicate must not read as "still on the login page" — pre-push P1).
     await page.waitForFunction((passSel) => Array.from(document.querySelectorAll(passSel)).every((pw) => !pw.offsetParent), SELECTORS.loginPass, { timeout: LOGIN_TIMEOUT }).catch(() => {});
     await page.waitForTimeout(1500);
-    return (await matches(page, SELECTORS.loginPass)).shown.length === 0 && isTrustedSiteOneUrl(page.url());
+    if ((await matches(page, SELECTORS.loginPass)).shown.length || !isTrustedSiteOneUrl(page.url())) return 'rejected';
+    // The password form is gone — but signed in means a SHOWN account marker;
+    // an intermediate page (MFA step, maintenance, an error page on the same
+    // host) is 'unverified', never a session (Codex #3853 r22 P1).
+    return (await matches(page, SELECTORS.accountMarker)).shown.length ? 'ok' : 'unverified';
   };
-  let ok = false;
+  let outcome = null; // 'ok' | 'rejected' | 'unverified' — the last attempt that RETURNED
   let lastError = null;
-  for (let i = 0; i < 3 && !ok; i += 1) {
+  for (let i = 0; i < 3 && outcome !== 'ok'; i += 1) {
     if (i) await page.waitForTimeout(3000);
     // A transient navigation / wait failure is one failed attempt of three;
     // an off-host redirect or missing fields is run-level at once (Codex r4
@@ -317,10 +325,19 @@ async function login(page, creds) {
     // DEFINITIVE: the same credential is never submitted again in this run —
     // retries are for transient exceptions only, so one bad password cannot
     // trip the vendor's failed-login lockout (Codex #3853 r20 P1).
-    try { ok = await attempt(); lastError = null; if (!ok) break; }
+    try { outcome = await attempt(); lastError = null; if (outcome !== 'ok') break; }
     catch (e) { if (e.runLevel) throw e; lastError = e; logger.warn(`[siteone-bot] login attempt ${i + 1} failed: ${String(e.message).slice(0, 120)}`); }
   }
-  if (ok) return;
+  if (outcome === 'ok') return;
+  if (outcome === 'unverified') {
+    // Not a credential rejection, not a network failure: SiteOne answered
+    // with a page that is neither the login form nor a signed-in account
+    // page. Parks with a bell; the adapter is done for this run so the
+    // remaining requests do not repeat the flow (Codex #3853 r22 P1).
+    const unverified = new RefusedError('login_unverified', 'SiteOne answered the sign-in with a page that is neither the login form nor a signed-in account page (a verification step, maintenance, or an error page) — check by hand');
+    unverified.adapterDown = true;
+    throw unverified;
+  }
   // Exhaustion: three NETWORK failures are the environment's problem —
   // run-level, retry tomorrow. SiteOne answering and keeping us on the login
   // page (wrong password, locked account) is THIS vendor's configuration —
