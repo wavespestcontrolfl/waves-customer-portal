@@ -5137,6 +5137,8 @@ export default function Customer360ProfileV2({
   const [activeTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timeline, setTimeline] = useState([]);
+  const [timelineError, setTimelineError] = useState(false);
+  const [timelineRetrying, setTimelineRetrying] = useState(false);
   const [comms, setComms] = useState([]);
   const [commsLoaded, setCommsLoaded] = useState(false);
   const [commsLoading, setCommsLoading] = useState(false);
@@ -5373,6 +5375,7 @@ export default function Customer360ProfileV2({
     setLoading(true);
     setData(null);
     setProfileLoadError("");
+    setTimelineRetrying(false);
     setProfileActionErr("");
     setCommsLoading(false);
     setMenuOpen(false);
@@ -5388,17 +5391,18 @@ export default function Customer360ProfileV2({
     setRefundPayment(null);
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
-      adminFetch(`/admin/customers/${customerId}/timeline`, {
+      isAdmin ? adminFetch(`/admin/customers/${customerId}/timeline`, {
         signal: ctrl.signal,
       }).catch((err) => {
         if (err.name === "AbortError") throw err;
-        return { timeline: [] };
-      }),
+        return null;
+      }) : Promise.resolve({ timeline: [] }),
     ])
       .then(([detail, tl]) => {
         if (seq !== profileSeqRef.current) return;
         setData(detail);
-        setTimeline(tl.timeline || []);
+        setTimeline(tl?.timeline || []);
+        setTimelineError(tl === null);
         setComms([]);
         setCommsLoaded(false);
         setCommsErr("");
@@ -5410,7 +5414,23 @@ export default function Customer360ProfileV2({
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [customerId, profileReloadKey]);
+  }, [customerId, profileReloadKey, isAdmin]);
+
+  const retryTimeline = async () => {
+    const seq = profileSeqRef.current;
+    const signal = profileAbortRef.current.signal;
+    setTimelineRetrying(true);
+    try {
+      const result = await adminFetch(`/admin/customers/${customerId}/timeline`, { signal });
+      if (signal.aborted || seq !== profileSeqRef.current) return;
+      setTimeline(result.timeline || []);
+      setTimelineError(false);
+    } catch {
+      // Keep the loaded profile and recovery action when history is still unavailable.
+    } finally {
+      if (!signal.aborted && seq === profileSeqRef.current) setTimelineRetrying(false);
+    }
+  };
 
   useEffect(() => {
     if (activeTab !== "comms" || commsLoaded || commsLoading) return;
@@ -7907,13 +7927,13 @@ export default function Customer360ProfileV2({
             </div>
           )}
         </div>
-        {/* ZONE 4 — TIMELINE */}
-        <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
+        {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
+        {isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
           {" "}
           <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">
             {" "}
             <SectionTitle className="mb-0">
-              Timeline ({filteredTimeline.length})
+              Timeline{!timelineError && ` (${filteredTimeline.length})`}
             </SectionTitle>{" "}
             <div className="flex gap-1 flex-wrap">
               {[
@@ -7927,6 +7947,7 @@ export default function Customer360ProfileV2({
                 <button
                   key={f.key}
                   onClick={() => setTimelineFilter(f.key)}
+                  disabled={timelineError}
                   className={cn(
                     "h-6 px-2.5 text-10 uppercase tracking-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
                     timelineFilter === f.key
@@ -7979,17 +8000,32 @@ export default function Customer360ProfileV2({
                 </div>
               );
             })}
-            {filteredTimeline.length === 0 && (
+            {timelineError && (
+              <div className="flex flex-col items-center gap-3 py-4">
+                <p role="alert" className="text-14 text-alert-fg">
+                  Could not load customer history.
+                </p>
+                <Button
+                  variant="secondary"
+                  aria-label="Retry customer history"
+                  onClick={retryTimeline}
+                  disabled={timelineRetrying}
+                >
+                  {timelineRetrying ? "Retrying…" : "Retry"}
+                </Button>
+              </div>
+            )}
+            {!timelineError && filteredTimeline.length === 0 && (
               <div className="text-ink-secondary text-12 text-center py-4">
                 No timeline events
               </div>
             )}
           </div>{" "}
-        </div>
+        </div>}
         {/* Mobile spacer for sticky action bar — tracks the same keyboard
             inset as the bar itself so content still scrolls clear of it. */}
         <div
-          className="c360-mobile-footer-spacer"
+          className="c360-mobile-footer-spacer shrink-0"
           style={{
             height:
               "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))",

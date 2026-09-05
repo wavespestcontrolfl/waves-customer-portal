@@ -56,6 +56,8 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, previousLawnAssessment } from "../../lib/lawn-completion";
+import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
 import {
@@ -4677,6 +4679,8 @@ export function ProtocolPanel({ service, onClose }) {
   const [protocolMatchReason, setProtocolMatchReason] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadErrors, setLoadErrors] = useState([]);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -4684,7 +4688,7 @@ export function ProtocolPanel({ service, onClose }) {
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
   const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
-  const [activeSection, setActiveSection] = useState(
+  const [requestedSection, setActiveSection] = useState(
     isLawn ? "lawn_protocol" : "overview",
   );
 
@@ -4705,6 +4709,11 @@ export function ProtocolPanel({ service, onClose }) {
     const month = new Date().getMonth() + 1;
 
     setLoading(true);
+    setLoadErrors([]);
+    setPhotos([]);
+    setSeasonal([]);
+    setScripts([]);
+    setEquipment([]);
     setLawnProtocol(null);
     setLawnMix(null);
     setLawnContext({ trackKey: null, lawnSqft: null });
@@ -4713,22 +4722,25 @@ export function ProtocolPanel({ service, onClose }) {
     setProtocolMatchReason(null);
 
     (async () => {
+      const failedSections = [];
       const profileResponse =
         isLawn && service.customerId
           ? await adminFetch(
               `/admin/customers/${service.customerId}/turf-profile`,
-            ).catch(() => null)
+            ).catch(() => {
+              failedSections.push("Turf profile");
+              return null;
+            })
           : null;
+      if (cancelled) return;
       const profile = profileResponse?.profile || null;
-      const trackKey = isLawn
-        ? [
-            profile?.track_key,
-            profile?.grass_type,
-            service.lawnType,
-            service.lawn_type,
-          ]
-            .map(protocolTrackForLawnType)
-            .find(Boolean) || null
+      const profileLawnTypes = [profile?.track_key, profile?.grass_type];
+      const recordedLawnTypes = profileLawnTypes.some((value) => String(value || "").trim())
+        ? profileLawnTypes
+        : [service.lawnType, service.lawn_type];
+      const trackKey = isLawn && !failedSections.includes("Turf profile")
+        ? recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean)
+          || (recordedLawnTypes.some((value) => String(value || '').trim()) ? null : "st_augustine")
         : null;
       const lawnSqft = isLawn
         ? lawnAreaForProtocol({
@@ -4737,7 +4749,7 @@ export function ProtocolPanel({ service, onClose }) {
           })
         : null;
 
-      const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
+      const results = await Promise.allSettled([
         adminFetch(
           // The photos endpoint derives its line from literal tokens
           // (lawn/turf, tree/shrub, pest, mosquito, termite) — send the
@@ -4775,10 +4787,19 @@ export function ProtocolPanel({ service, onClose }) {
       ]);
 
       if (cancelled) return;
-      setPhotos(p.photos || []);
-      setSeasonal(s.pests || []);
-      setScripts(sc.scripts || []);
-      setEquipment(eq.checklists || []);
+      const sectionNames = [
+        "ID guide", "Pest pressure", "Scripts", "Equipment",
+        "Lawn protocol", "Mix quantities", "Service protocol",
+      ];
+      results.forEach((result, index) => {
+        if (result.status === "rejected") failedSections.push(sectionNames[index]);
+      });
+      const [p, s, sc, eq, lp, lm, sp] = results.map((result) => result.value);
+      setLoadErrors(failedSections);
+      setPhotos(p?.photos || []);
+      setSeasonal(s?.pests || []);
+      setScripts(sc?.scripts || []);
+      setEquipment(eq?.checklists || []);
       setLawnProtocol(lp?.track || null);
       setLawnMix(lm || null);
       setLawnContext({ trackKey, lawnSqft });
@@ -4787,13 +4808,16 @@ export function ProtocolPanel({ service, onClose }) {
       setProtocolMatchReason(sp?.reason || null);
       setLoading(false);
     })().catch(() => {
-      if (!cancelled) setLoading(false);
+      if (!cancelled) {
+        setLoadErrors(["Service guidance"]);
+        setLoading(false);
+      }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [service, isLawn, serviceCategory]);
+  }, [service, isLawn, serviceCategory, loadAttempt]);
 
   const SECTIONS = [
     ...(isLawn
@@ -4822,6 +4846,10 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
   ];
+
+  const activeSection = SECTIONS.some((section) => section.id === requestedSection)
+    ? requestedSection
+    : "overview";
 
   // Pest pressure stays ordinal but monochrome — peak gets alert-fg because
   // it's a genuine "act now" signal; the rest step down a zinc ramp.
@@ -4939,6 +4967,19 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+        {loadErrors.length > 0 && (
+          <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
+            <div>Could not load: {loadErrors.join(", ")}.</div>
+            <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
+            <button
+              type="button"
+              onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+              style={{ marginTop: 8, minHeight: 44, padding: "8px 12px", border: `1px solid ${D.inputBorder}`, borderRadius: 4, background: D.card, color: D.heading, fontSize: 14, cursor: "pointer" }}
+            >
+              Retry loading
+            </button>
+          </div>
+        )}
         {loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
@@ -4975,54 +5016,56 @@ export function ProtocolPanel({ service, onClose }) {
                     Set the customer turf type to St. Augustine, Bermuda,
                     Zoysia, or Bahia to show the correct protocol.
                   </div>
-                ) : !lawnProtocol ? (
-                  <div
-                    style={{
-                      color: D.muted,
-                      fontSize: 13,
-                      padding: 20,
-                      textAlign: "center",
-                    }}
-                  >
-                    Lawn protocol unavailable
-                  </div>
                 ) : (
                   <>
                     {" "}
-                    <div
-                      style={{
-                        background: D.bg,
-                        borderRadius: 10,
-                        padding: 14,
-                        border: `1px solid ${D.border}`,
-                        marginBottom: 12,
-                      }}
-                    >
-                      {" "}
+                    {!lawnProtocol ? (
                       <div
                         style={{
+                          color: D.muted,
                           fontSize: 13,
-                          fontWeight: 500,
-                          color: D.heading,
-                          marginBottom: 6,
+                          padding: 20,
+                          textAlign: "center",
                         }}
                       >
-                        {lawnProtocol.name}
+                        Lawn protocol unavailable
                       </div>
-                      {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                    ) : (
+                      <div
+                        style={{
+                          background: D.bg,
+                          borderRadius: 10,
+                          padding: 14,
+                          border: `1px solid ${D.border}`,
+                          marginBottom: 12,
+                        }}
+                      >
+                        {" "}
                         <div
-                          key={i}
                           style={{
-                            fontSize: 11,
-                            color: note.startsWith("") ? D.red : D.text,
-                            lineHeight: 1.45,
-                            marginBottom: 4,
+                            fontSize: 13,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 6,
                           }}
                         >
-                          {note}
+                          {lawnProtocol.name}
                         </div>
-                      ))}
-                    </div>
+                        {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              fontSize: 11,
+                              color: note.startsWith("") ? D.red : D.text,
+                              lineHeight: 1.45,
+                              marginBottom: 4,
+                            }}
+                          >
+                            {note}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {!lawnContext.lawnSqft && (
                       <div
                         style={{
@@ -5125,66 +5168,78 @@ export function ProtocolPanel({ service, onClose }) {
                             {w.message}
                           </div>
                         ))}
-                        {(lawnMix.items || []).map((item, i) => (
-                          <div
-                            key={`${i}-${item.raw}`}
-                            style={{
-                              padding: "9px 0",
-                              borderTop:
-                                i === 0 ? "none" : `1px solid ${D.border}`,
-                            }}
-                          >
-                            {" "}
+                        {(lawnMix.items || []).map((item, i) => {
+                          const areaMix = item.jobMix || item.plannedMix;
+                          const tankMix = item.fullTankMix || item.plannedFullTankMix;
+                          const plannedOnly = !item.jobMix && !!(item.plannedMix || item.plannedFullTankMix);
+                          return (
                             <div
+                              key={`${i}-${item.raw}`}
+                              role="group"
+                              aria-label={item.product?.name || item.raw}
                               style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                gap: 10,
+                                padding: "9px 0",
+                                borderTop:
+                                  i === 0 ? "none" : `1px solid ${D.border}`,
                               }}
                             >
                               {" "}
-                              <div style={{ minWidth: 0 }}>
-                                {" "}
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    fontWeight: 500,
-                                    color: D.heading,
-                                  }}
-                                >
-                                  {item.product?.name || item.raw}
-                                </div>{" "}
-                                <div
-                                  style={{
-                                    fontSize: 10,
-                                    color: D.muted,
-                                    lineHeight: 1.4,
-                                  }}
-                                >
-                                  {item.raw}
-                                </div>{" "}
-                              </div>{" "}
                               <div
                                 style={{
-                                  fontSize: 11,
-                                  color: D.text,
-                                  textAlign: "right",
-                                  flexShrink: 0,
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  gap: 10,
                                 }}
                               >
                                 {" "}
-                                <div>
-                                  {fmtProtocolNumber(item.jobMix?.amount)}{" "}
-                                  {item.jobMix?.amountUnit || ""}
+                                <div style={{ minWidth: 0 }}>
+                                  {" "}
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: 500,
+                                      color: D.heading,
+                                    }}
+                                  >
+                                    {item.product?.name || item.raw}
+                                  </div>{" "}
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: D.muted,
+                                      lineHeight: 1.4,
+                                    }}
+                                  >
+                                    {item.raw}
+                                  </div>{" "}
+                                  {plannedOnly && (
+                                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                                      Optional preview
+                                    </div>
+                                  )}
                                 </div>{" "}
-                                <div style={{ color: D.muted }}>
-                                  {fmtProtocolNumber(item.fullTankMix?.amount)}{" "}
-                                  {item.fullTankMix?.amountUnit || ""}/tank
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    color: plannedOnly ? D.muted : D.text,
+                                    textAlign: "right",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {" "}
+                                  <div>
+                                    {fmtProtocolNumber(areaMix?.amount)}{" "}
+                                    {areaMix?.amountUnit || ""}
+                                  </div>{" "}
+                                  <div style={{ color: D.muted }}>
+                                    {fmtProtocolNumber(tankMix?.amount)}{" "}
+                                    {tankMix?.amountUnit || ""}/tank
+                                  </div>{" "}
                                 </div>{" "}
                               </div>{" "}
-                            </div>{" "}
-                          </div>
-                        ))}
+                            </div>
+                          );
+                        })}
                         {lawnMix.mixingOrder?.length > 0 && (
                           <div
                             style={{
@@ -5232,89 +5287,93 @@ export function ProtocolPanel({ service, onClose }) {
                         )}
                       </div>
                     )}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 500,
-                        color: D.heading,
-                        marginBottom: 8,
-                      }}
-                    >
-                      Annual Protocol Calendar
-                    </div>
-                    {(lawnProtocol.visits || []).map((v) => (
-                      <div
-                        key={v.visit}
-                        style={{
-                          background: D.bg,
-                          borderRadius: 10,
-                          padding: 12,
-                          border: `1px solid ${D.border}`,
-                          marginBottom: 8,
-                        }}
-                      >
-                        {" "}
+                    {lawnProtocol && (
+                      <>
                         <div
                           style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 10,
-                            marginBottom: 6,
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 8,
                           }}
                         >
-                          {" "}
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 500,
-                              color: D.heading,
-                            }}
-                          >
-                            Visit {v.visit} · {v.month}
-                          </div>{" "}
-                          <div style={{ fontSize: 11, color: D.muted }}>
-                            Legacy mat: ${v.material_cost || "—"}
-                          </div>{" "}
-                        </div>{" "}
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: D.text,
-                            whiteSpace: "pre-wrap",
-                            lineHeight: 1.45,
-                          }}
-                        >
-                          {v.primary}
+                          Annual Protocol Calendar
                         </div>
-                        {v.secondary && (
+                        {(lawnProtocol.visits || []).map((v) => (
                           <div
+                            key={v.visit}
                             style={{
-                              fontSize: 11,
-                              color: D.muted,
-                              whiteSpace: "pre-wrap",
-                              lineHeight: 1.45,
-                              marginTop: 6,
+                              background: D.bg,
+                              borderRadius: 10,
+                              padding: 12,
+                              border: `1px solid ${D.border}`,
+                              marginBottom: 8,
                             }}
                           >
-                            {v.secondary}
+                            {" "}
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                marginBottom: 6,
+                              }}
+                            >
+                              {" "}
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 500,
+                                  color: D.heading,
+                                }}
+                              >
+                                Visit {v.visit} · {v.month}
+                              </div>{" "}
+                              <div style={{ fontSize: 11, color: D.muted }}>
+                                Legacy mat: ${v.material_cost || "—"}
+                              </div>{" "}
+                            </div>{" "}
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: D.text,
+                                whiteSpace: "pre-wrap",
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {v.primary}
+                            </div>
+                            {v.secondary && (
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: D.muted,
+                                  whiteSpace: "pre-wrap",
+                                  lineHeight: 1.45,
+                                  marginTop: 6,
+                                }}
+                              >
+                                {v.secondary}
+                              </div>
+                            )}
+                            {stripLegacyBoilerplate(v.notes) && (
+                              <div
+                                style={{
+                                  fontSize: 10,
+                                  color: D.muted,
+                                  lineHeight: 1.4,
+                                  marginTop: 6,
+                                  paddingTop: 6,
+                                  borderTop: `1px solid ${D.border}`,
+                                }}
+                              >
+                                {stripLegacyBoilerplate(v.notes)}
+                              </div>
+                            )}
                           </div>
-                        )}
-                        {stripLegacyBoilerplate(v.notes) && (
-                          <div
-                            style={{
-                              fontSize: 10,
-                              color: D.muted,
-                              lineHeight: 1.4,
-                              marginTop: 6,
-                              paddingTop: 6,
-                              borderTop: `1px solid ${D.border}`,
-                            }}
-                          >
-                            {stripLegacyBoilerplate(v.notes)}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                        ))}
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -5835,7 +5894,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No seasonal data for this service line
+                    {loadErrors.includes("Pest pressure") ? "Pest pressure unavailable" : "No seasonal data for this service line"}
                   </div>
                 ) : (
                   seasonal.map((p, i) => (
@@ -5939,7 +5998,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No photo references for this service
+                    {loadErrors.includes("ID guide") ? "ID guide unavailable" : "No photo references for this service"}
                   </div>
                 ) : (
                   photos.map((p, i) => (
@@ -6017,7 +6076,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No scripts for this service line
+                    {loadErrors.includes("Scripts") ? "Scripts unavailable" : "No scripts for this service line"}
                   </div>
                 ) : (
                   scripts.map((s, i) => (
@@ -6096,7 +6155,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No checklist for this service type
+                    {loadErrors.includes("Equipment") ? "Equipment checklist unavailable" : "No checklist for this service type"}
                   </div>
                 ) : (
                   equipment.map((checklist, ci) => (
@@ -7532,9 +7591,9 @@ export function TypedFindingsSection({
 // tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
 const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
-  { key: "weed_suppression", label: "Weeds" },
+  { key: "weed_suppression", label: "Weed control" },
   { key: "color_health", label: "Color" },
-  { key: "stress_damage", label: "Stress" },
+  { key: "stress_damage", label: "Condition" },
 ];
 
 // Stress flags and the "Protocol field checks" inputs (thatch, chinch pair,
@@ -7612,6 +7671,39 @@ function parseAssessmentScores(row = {}) {
 }
 
 
+function LawnPreviousVisitCard({ service }) {
+  const [state, setState] = useState({ loading: true, row: null, error: false });
+  const customerId = service.customerId || service.customer_id;
+  const day = service.scheduledDate || service.scheduled_date || service.date;
+  useEffect(() => {
+    let live = true;
+    setState({ loading: true, row: null, error: false });
+    if (!customerId) { setState({ loading: false, row: null, error: false }); return undefined; }
+    adminFetch(`/admin/lawn-assessment/history/${customerId}`)
+      .then((data) => { if (live) setState({ loading: false, row: previousLawnAssessment(data.history, { id: service.id, date: day }), error: false }); })
+      .catch(() => { if (live) setState({ loading: false, row: null, error: true }); });
+    return () => { live = false; };
+  }, [customerId, day, service.id]);
+  const row = state.row;
+  const display = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : `${Math.round(Number(value))}/100`;
+  return (
+    <section aria-label="Previous lawn visit" style={{ margin: "16px 0", padding: 14, background: D.white, border: `1px solid ${D.border}`, borderRadius: 12, color: D.heading }}>
+      <div style={{ fontSize: 16, fontWeight: 500 }}>Last Visit</div>
+      {state.loading ? <p style={{ fontSize: 14 }}>Loading previous scores…</p>
+        : state.error ? <p style={{ fontSize: 14 }} role="status">Previous scores could not be loaded.</p>
+        : !row ? <p style={{ fontSize: 14 }}>No earlier confirmed assessment. Today’s assessment will establish a baseline.</p>
+        : <>
+          <p style={{ fontSize: 14 }}>Overall score <strong>{display(row.overall_score)}</strong></p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+            {LAWN_ASSESSMENT_METRICS.map((metric) => <div key={metric.key} style={{ fontSize: 14, padding: 10, border: `1px solid ${D.border}`, borderRadius: 8 }}>
+              <div>{metric.label}</div><strong>{display(row[metric.key])}</strong>
+            </div>)}
+          </div>
+        </>}
+    </section>
+  );
+}
+
 function LawnAssessmentCompletionBlock({
   service,
   disabled,
@@ -7620,14 +7712,8 @@ function LawnAssessmentCompletionBlock({
   // once it settles — the parent must not treat the pre-load null confirmed
   // id as "retake pending".
   onReady,
-  // Optional on-site lawn-length (gauge) photo — captured inline next to the turf
-  // photos here, but stored on the shared turf-height state (CompletionPanel owns
-  // it). Only rendered when the gauge-reading capture applies (turf-height flag).
-  gaugePhoto = null,
-  onGaugePhoto,
-  showGaugePhoto = false,
-  // Gauge reading (height-of-cut) — sits inline with the lawn-length photo it
-  // documents. Stored on the same shared turf-height state.
+  // Height measurement stays optional; separate lawn-length photo capture is retired.
+  showGaugeReading = false,
   gaugeHeightIn = null,
   onGaugeHeight,
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
@@ -7643,18 +7729,6 @@ function LawnAssessmentCompletionBlock({
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef(null);
-  const gaugeFileRef = useRef(null);
-
-  async function onPickGaugePhoto(e) {
-    const file = (e.target.files || [])[0];
-    if (!file) return;
-    try {
-      const photo = await prepareCompletionPhoto(file);
-      onGaugePhoto?.({ data: photo.data, name: photo.name || "lawn-length.jpg" });
-    } catch { alert("Could not prepare the lawn length photo."); }
-    if (gaugeFileRef.current) gaugeFileRef.current.value = "";
-  }
-
   useEffect(() => {
     let cancelled = false;
     setPhotos([]);
@@ -7822,7 +7896,7 @@ function LawnAssessmentCompletionBlock({
       {loading && (
         <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
       )}
-      {/* Capture row — always visible so the lawn-length photo + gauge reading can be
+      {/* Capture row — always visible so the mowing-height reading can be
           added even after the assessment is analyzed (Codex P1). "Add turf photos" +
           "Analyze lawn" stay pre-analysis only. */}
       <input
@@ -7858,38 +7932,9 @@ function LawnAssessmentCompletionBlock({
             <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
           </>
         )}
-            {showGaugePhoto && (
+            {showGaugeReading && (
               <>
-                <input
-                  ref={gaugeFileRef}
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  onChange={onPickGaugePhoto}
-                  style={{ display: "none" }}
-                />
-                <button
-                  type="button"
-                  onClick={() => gaugeFileRef.current?.click()}
-                  disabled={disabled || analyzing}
-                  style={{
-                    height: 38,
-                    padding: "0 14px",
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    background: D.white,
-                    color: D.heading,
-                    fontSize: 13,
-                    fontWeight: 500,
-                    cursor: disabled || analyzing ? "not-allowed" : "pointer",
-                    opacity: disabled || analyzing ? 0.55 : 1,
-                  }}
-                >
-                  Add lawn length photo
-                </button>
-                <span style={{ fontSize: 12, color: D.muted }}>{gaugePhoto ? 1 : 0}/1</span>
-                {/* Gauge reading (height of cut) — sits with the lawn-length photo it documents. */}
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Gauge reading</span>
+                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Lawn length</span>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -7994,9 +8039,9 @@ function LawnAssessmentCompletionBlock({
                   }}
                 >
                   <div style={{ fontSize: 15, fontWeight: 500, color: lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value}%
+                    {value}/100
                   </div>
-                  <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>{metric.label}</div>
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
                   {!confirmed && (
                     <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: 6 }}>
                       <button type="button" onClick={() => adjustScore(metric.key, -5)} style={scoreButtonStyle}>
@@ -8684,9 +8729,7 @@ function smsRecapPreview(value) {
   return text ? `${text} - Waves` : "";
 }
 
-// (Removed the standalone TurfHeightCapture component + its grass-band map — the
-// gauge reading is now captured inline in LawnAssessmentCompletionBlock next to
-// the lawn-length photo it documents.)
+// Mowing height is captured inline in LawnAssessmentCompletionBlock.
 
 // Recap chips — action tags (top 8 + more). role is sent to the server, which
 // derives the friendly customer caption (recap-media.js ROLE_MAP). Mirrors the
@@ -9705,6 +9748,7 @@ export function CompletionPanel({
   // including the mobile payment handoff — through this callback.
   onCompletionResult,
 }) {
+  const { enabled: completionImprovements } = useFeatureFlagReady("lawn-completion-improvements");
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
@@ -9957,11 +10001,19 @@ export function CompletionPanel({
   // flag had no closeout UI to collect the required fields and every
   // completion hard-400'd (tree_shrub_closeout_lockout).
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
-  const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null });
+  const [turfHeight, setTurfHeight] = useState({ heightIn: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
-  const [areasServiced, setAreasServiced] = useState([]);
+  const lawnDefaultAreas = completionImprovements && serviceLineFromType(service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
+    ? LAWN_DEFAULT_AREAS : [];
+  const [areasServiced, setAreasServiced] = useState(() => [...lawnDefaultAreas]);
+  const lawnAreasInitializedRef = useRef(completionImprovements);
+  useEffect(() => {
+    if (!completionImprovements || lawnAreasInitializedRef.current) return;
+    lawnAreasInitializedRef.current = true;
+    setAreasServiced((current) => current.length ? current : [...lawnDefaultAreas]);
+  }, [completionImprovements, lawnDefaultAreas]);
   // Property satellite basemap (bait-station marking). The manual per-area
   // zone-mark widget this also fed was retired 2026-07-23 — the traced
   // Treatment Zone Mapper is the report's coverage-map source now.
@@ -11008,6 +11060,29 @@ export function CompletionPanel({
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
   }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit]);
+  const lawnDefaultMixSeededRef = useRef(false);
+  const lawnDefaultMixSnapshotRef = useRef(null);
+  useEffect(() => {
+    if (!completionImprovements || !isLawn || !inventoryAdvisoryTier || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
+    if (!products?.length) return;
+    const currentSnapshot = JSON.stringify(selectedProducts);
+    // Refresh only an untouched seed when today’s assessment changes the plan.
+    if (lawnDefaultMixSeededRef.current && currentSnapshot !== lawnDefaultMixSnapshotRef.current) return;
+    if (!lawnDefaultMixSeededRef.current && selectedProducts.length) { lawnDefaultMixSeededRef.current = true; return; }
+    const rows = lawnPlanSelections(treatmentPlanMixItems, buildSelectedProduct, products);
+    const nextSnapshot = JSON.stringify(rows);
+    if (nextSnapshot === currentSnapshot) return;
+    lawnDefaultMixSeededRef.current = true;
+    lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
+    setSelectedProducts(rows);
+  }, [completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts]);
+  useEffect(() => {
+    if (!completionImprovements || !isLawn) return;
+    const area = areasServiced.join(", ");
+    setSelectedProducts((current) => current.some((product) => product.applicationAreaDefault && product.applicationArea !== area)
+      ? current.map((product) => product.applicationAreaDefault ? { ...product, applicationArea: area } : product)
+      : current);
+  }, [completionImprovements, isLawn, areasServiced, selectedProducts]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -11390,7 +11465,7 @@ export function CompletionPanel({
   // or restored closeout can never POST before the advisories had a chance to
   // render (the server records conditions now instead of rejecting them).
   const closeoutAdvisoriesPending =
-    calibrationRequired &&
+    (calibrationRequired || (completionImprovements && isLawn)) &&
     !isIncompleteVisit &&
     (treatmentPlanLoading || (isLawn && protocolActionsLoading));
   const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
@@ -11589,7 +11664,7 @@ export function CompletionPanel({
   ]);
 
   useEffect(() => {
-    if (!calibrationRequired) return;
+    if (!calibrationRequired && !(completionImprovements && isLawn)) return;
     let cancelled = false;
     setTreatmentPlanError("");
     setTreatmentPlanLoading(true);
@@ -11666,7 +11741,7 @@ export function CompletionPanel({
     return () => {
       cancelled = true;
     };
-  }, [calibrationRequired, service.id, lawnAssessmentRevision]);
+  }, [calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision]);
 
   useEffect(() => {
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
@@ -11711,9 +11786,10 @@ export function CompletionPanel({
       // input — opening the panel must not mint a draft (and a restore
       // prompt). Any edit, removal, or addition changes the JSON and
       // drafts as before.
-      (selectedProducts.length > 0 &&
-        JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current) ||
-      areasServiced.length ||
+      ((selectedProducts.length > 0 || lawnDefaultMixSnapshotRef.current) &&
+        JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
+        JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
+      JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -11772,6 +11848,7 @@ export function CompletionPanel({
         savedAt: new Date().toISOString(),
         notes,
         selectedProducts,
+        lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
         sendSms,
         includePayLink,
         requestReview,
@@ -11955,6 +12032,9 @@ export function CompletionPanel({
 
   function restoreDraft() {
     if (!savedDraft) return;
+    lawnAreasInitializedRef.current = true;
+    lawnDefaultMixSeededRef.current = true;
+    if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
@@ -12690,7 +12770,9 @@ export function CompletionPanel({
     return lines.filter((line) => !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
   }
   function observationFreeText() {
-    return uniqueLines([...freeTextLines(observationsText), ...freeTextLines(parkedFound), ...taggedNoteLines("found")]);
+    const lines = uniqueLines([...freeTextLines(observationsText), ...freeTextLines(parkedFound), ...taggedNoteLines("found")]);
+    const selected = new Set(activeSelectedLabels(selectedObservationLabels).map((label) => label.toLowerCase()));
+    return lines.filter((line) => !selected.has(line.toLowerCase()));
   }
   function recommendationFreeText() {
     return uniqueLines([...freeTextLines(recommendationsText), ...freeTextLines(parkedNext), ...taggedNoteLines("next")]);
@@ -12994,6 +13076,7 @@ export function CompletionPanel({
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
+    lawnDefaultMixSeededRef.current = true;
     setSelectedProducts((prev) => [...prev, buildSelectedProduct(product)]);
     setProductSearch("");
   }
@@ -13145,6 +13228,7 @@ export function CompletionPanel({
   }
   function removeProduct(productId) {
     if (generating) return;
+    lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
@@ -13152,11 +13236,13 @@ export function CompletionPanel({
   }
   function updateProduct(productId, field, value) {
     if (generating) return;
+    lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.map((p) => {
         if (p.productId !== productId) return p;
         const next = { ...p, [field]: value };
+        if (field === "applicationArea") next.applicationAreaDefault = false;
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
@@ -13220,6 +13306,8 @@ export function CompletionPanel({
   }
   function toggleArea(area) {
     if (generating) return;
+    lawnAreasInitializedRef.current = true;
+    invalidateGeneratedReportOnTypedEdit();
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
@@ -13908,6 +13996,7 @@ export function CompletionPanel({
           specialtyProtocolActions.length > 0
             ? specialtyProtocolActions.some((action) => action.label === label)
             : !isLawn ||
+              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
               (protocolActionsLoaded &&
                 protocolActions.some(
                   (action) =>
@@ -14103,7 +14192,9 @@ export function CompletionPanel({
         observations: reportObservations,
         structuredObservations: specialtyCompletion
           ? activeSelectedLabels(selectedObservationLabels)
-          : [],
+          : completionImprovements && isLawn
+            ? activeSelectedLabels(selectedObservationLabels).filter(isLawnFindingSelection)
+            : [],
         recommendations: reportRecommendations,
         lawnAssessmentId,
         // Tree & Shrub AI photo assessment. When the background review ran,
@@ -14133,12 +14224,9 @@ export function CompletionPanel({
           caption: photo.caption || null,
           ...(photo.captionSource === "ai" ? { aiTags: { captionSource: "ai" } } : {}),
         })),
-        // Gauge reading (lawn only, behind the flag). Both the height-of-cut
-        // reading and the on-site lawn-length photo are OPTIONAL; the server
-        // snapshots the authoritative band. Off-flag/non-lawn these are inert.
+        // Optional mowing height. The server snapshots the authoritative band.
         ...(turfHeightFlag && isLawn ? {
           manualHeightIn: turfHeight.heightIn,
-          gaugePhoto: turfHeight.gaugePhoto,
         } : {}),
       };
       if (isCustomerConcernInteraction(customerInteraction) && customerConcern) {
@@ -14383,7 +14471,9 @@ export function CompletionPanel({
   }));
   const effectiveProtocolActions = specialtyProtocolActions.length
     ? specialtyProtocolActions
-    : protocolActions;
+    : completionImprovements && isLawn
+      ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
+      : protocolActions;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   const hideProtocolActionsField =
     isLawn &&
@@ -14481,6 +14571,12 @@ export function CompletionPanel({
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
     }
+  }
+  function handleLawnFindingAdd(text) {
+    if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
+    const detached = invalidateGeneratedReportOnTypedEdit();
+    appendUniqueLabel(setSelectedObservationLabels, text);
+    if (!detached) addChipNote("Found", text);
   }
   function handleSpecialtyFindingChange(group, value) {
     if (generating || photoAnalyzing) return;
@@ -15388,9 +15484,7 @@ export function CompletionPanel({
                   disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
                   onReady={setLawnAssessmentReady}
-                  showGaugePhoto={turfHeightFlag}
-                  gaugePhoto={turfHeight.gaugePhoto}
-                  onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
+                  showGaugeReading={turfHeightFlag}
                   gaugeHeightIn={turfHeight.heightIn}
                   onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
                   technicianNotes={notes}
@@ -15421,7 +15515,8 @@ export function CompletionPanel({
                 />
               </Field>
             )}
-            {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
+            {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+            {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
               <Field label="Lawn Care Protocol">
                 <ProtocolMixSummary
                   protocol={treatmentPlanStructuredProtocol}
@@ -15484,7 +15579,7 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>{" "}
-            <Field label="Technician notes">
+            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label="Technician notes">
               {" "}
               <div style={{ position: "relative" }}>
                 <textarea
@@ -15551,7 +15646,7 @@ export function CompletionPanel({
                   </button>
                 )}
               </div>
-            </Field>
+            </Field></details>
             {/* Post-AI-draft structured selections — the tagged lines no
                 longer ride in the report text, so the pills are the deselect
                 handle (tap × to remove an item before completing). */}
@@ -15623,7 +15718,10 @@ export function CompletionPanel({
                 </Field>
               );
             })}
+            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
             {!isTypedFindings && !hideProtocolActionsField && (
+              <details open={!(completionImprovements && isLawn) || undefined}>
+                {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
               <Field label="Protocol actions">
                 {!specialtyCompletion && protocolActionsLoading ? (
                   <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
@@ -15679,6 +15777,7 @@ export function CompletionPanel({
                   </>
                 )}
               </Field>
+              </details>
             )}
             {/* Frozen while an AI draft is in flight (codex P2) — the
                 generate payload snapshots these fields, and an edit landing
@@ -17669,9 +17768,7 @@ export function CompletionPanel({
                 disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
                 onReady={setLawnAssessmentReady}
-                showGaugePhoto={turfHeightFlag}
-                gaugePhoto={turfHeight.gaugePhoto}
-                onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
+                showGaugeReading={turfHeightFlag}
                 gaugeHeightIn={turfHeight.heightIn}
                 onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
                 technicianNotes={notes}
@@ -17751,7 +17848,8 @@ export function CompletionPanel({
               )}
             </div>
           )}
-          {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
+          {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+          {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Lawn Care Protocol</label>
               <div style={{ marginBottom: 10 }}>
@@ -17864,6 +17962,7 @@ export function CompletionPanel({
             ))}
           </select>
           {/* Technician Notes */}
+          <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}
           <label style={labelStyle}>Technician Notes</label>{" "}
           <div style={{ position: "relative" }}>
             <textarea
@@ -17936,6 +18035,7 @@ export function CompletionPanel({
               </button>
             )}
           </div>
+          </details>
           {/* Post-AI-draft structured selections — the tagged lines no longer
               ride in the report text, so the pills are the deselect handle
               (click × to remove an item before completing). */}
@@ -18010,8 +18110,11 @@ export function CompletionPanel({
                 </div>
               );
             })}
+            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
             {!isTypedFindings && !hideProtocolActionsField && (
-            <div style={{ marginBottom: 12 }}>
+            <details open={!(completionImprovements && isLawn) || undefined}>
+                {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
+              <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
               </label>
@@ -18065,6 +18168,7 @@ export function CompletionPanel({
                 </>
               )}
             </div>
+              </details>
             )}
             {/* Frozen while an AI draft is in flight (codex P2) — mirrors
                 the mobile variant. Observations also freeze during photo

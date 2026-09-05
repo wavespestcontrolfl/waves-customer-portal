@@ -85,7 +85,7 @@ export default function NewsletterArchivePage() {
   // Glass scene (owner 2026-07-09) — customers read the archive from inside
   // the portal (Learn tab + portal /newsletter landing), so it renders like
   // the other glass surfaces. The public/SEO archive lives on the astro site.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [post, setPost] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ok | notfound | error
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -141,7 +141,7 @@ export default function NewsletterArchivePage() {
           style={{
             fontFamily: FONTS.ui,
             fontSize: 14,
-            fontWeight: 800,
+            fontWeight: 700,
             letterSpacing: 0,
             color: '#fff',
             background: B.glassNavy,
@@ -175,7 +175,7 @@ export default function NewsletterArchivePage() {
             href="https://www.wavespestcontrol.com/newsletter/"
             style={{
               fontFamily: FONTS.ui,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 700,
               letterSpacing: 0,
               textTransform: 'uppercase',
@@ -184,7 +184,7 @@ export default function NewsletterArchivePage() {
             }}
           >← Waves Newsletter</a>
           {dateLabel && (
-            <span style={{ fontFamily: FONTS.body, fontSize: 12, color: 'rgba(255,255,255,0.78)' }}>
+            <span style={{ fontFamily: FONTS.body, fontSize: 14, color: 'rgba(255,255,255,0.78)' }}>
               {dateLabel}
             </span>
           )}

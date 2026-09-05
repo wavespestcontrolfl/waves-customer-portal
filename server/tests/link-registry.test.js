@@ -28,7 +28,8 @@ describe('enums (plan §3)', () => {
     for (const o of ['slot_reserved', 'submitting', 'submit_ambiguous', 'placed', 'pending', 'drafted', 'sent', 'failed', 'skipped', 'blocked', 'captcha', 'needs_owner', 'human_step_done', 'ready_for_payment', 'ready_for_credentials', 'no_payment_required', 'price_changed', 'instrument_unavailable', 'auto_renew_unavoidable', 'payment_ambiguous', 'mint_not_started', 'terms_changed', 'send_error', 'sandbox_replay']) {
       expect(R.ATTEMPT_OUTCOMES).toContain(o);
     }
-    expect(R.ATTEMPT_OUTCOMES.length).toBe(24);
+    expect(R.ATTEMPT_OUTCOMES).toContain('slot_released');
+    expect(R.ATTEMPT_OUTCOMES.length).toBe(25);
   });
 });
 

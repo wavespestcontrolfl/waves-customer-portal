@@ -2936,7 +2936,8 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'custom', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
+        // actorId = Quick Move's actorUserId: a tech moving their own visit gets no tech notice.
+        { allowLive: true, actorId: 'admin-7', overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
       );
       expect(renderSmsTemplate).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();

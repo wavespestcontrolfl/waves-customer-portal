@@ -52,10 +52,10 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
         </div>
         {appointmentLabel ? (
           <div style={estimateInnerBox({ marginTop: 16, padding: '16px 16px' })}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: W.textCaption, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: W.textCaption, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
               Your visit
             </div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: W.blueDeeper, marginTop: 4, lineHeight: 1.35 }}>
+            <div style={{ fontSize: 18, fontWeight: 700, color: W.blueDeeper, marginTop: 4, lineHeight: 1.35 }}>
               {appointmentLabel}
             </div>
             {appointmentServiceType ? (

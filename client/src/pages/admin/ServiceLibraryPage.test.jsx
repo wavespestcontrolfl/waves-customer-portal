@@ -82,7 +82,7 @@ describe("ServiceLibraryPage hub", () => {
     expect(await screen.findByText("Embedded protocol workspace"))
       .toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Protocol & readiness" }),
+      screen.getByRole("button", { name: "Protocols" }),
     ).toHaveAttribute("aria-current", "page");
   });
 
@@ -90,7 +90,7 @@ describe("ServiceLibraryPage hub", () => {
     renderServices("/admin/service-library?source=settings");
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Protocol & readiness" }),
+      screen.getByRole("button", { name: "Protocols" }),
     );
 
     expect(await screen.findByText("Embedded protocol workspace"))

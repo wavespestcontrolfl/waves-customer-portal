@@ -6,17 +6,32 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { readContext, childEnvironment, identity } = require('./context');
 const { doctor } = require('./doctor');
+const { checkRuntime } = require('./runtime');
 
 async function main() {
   const context = readContext();
   const mode = process.argv[2] || 'app';
   if (!['app', 'client', 'debug', 'migrate'].includes(mode)) throw new Error('Expected app, client, debug, or migrate.');
+  checkRuntime(context.root);
+  const options = process.argv.slice(3);
+  if (options.length && !(mode === 'migrate' && options.length === 1 && options[0] === '--remote')) throw new Error('Only dev:migrate supports --remote.');
   const env = childEnvironment(context, { database: mode !== 'client' });
   if (mode === 'migrate') {
-    const child = spawn(process.execPath, ['node_modules/knex/bin/cli.js', 'migrate:latest', '--knexfile', 'server/knexfile.js'],
-      { cwd: context.root, env, stdio: 'inherit' });
-    child.on('error', () => { process.exitCode = 1; });
-    child.on('exit', (code) => { process.exitCode = code ?? 1; });
+    const started = Date.now();
+    console.error('Applying pending migrations to the selected nonproduction database. Initial setup can take several minutes.');
+    const heartbeat = setInterval(() => {
+      console.error(`Migrations still running (${Math.floor((Date.now() - started) / 1000)}s elapsed).`);
+    }, 30000);
+    heartbeat.unref();
+    try {
+      process.exitCode = options.includes('--remote') ? await require('./remote-migrate').remoteMigration(context, env) :
+        await new Promise((resolve) => {
+          const child = spawn(process.execPath, ['node_modules/knex/bin/cli.js', 'migrate:latest', '--knexfile', 'server/knexfile.js'],
+            { cwd: context.root, env, stdio: 'inherit' });
+          child.once('error', () => resolve(1));
+          child.once('exit', (code) => resolve(code ?? 1));
+        });
+    } finally { clearInterval(heartbeat); }
     return;
   }
   const report = await doctor(context, { frontend: mode === 'client' });
@@ -50,7 +65,7 @@ async function main() {
   });
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => stop(0));
   function launch(args, cwd) {
-    const child = spawn(process.execPath, args, { cwd, env, stdio: 'inherit' });
+    const child = options.includes('--remote') ? require('./remote-migrate').remoteMigration(context, env) : spawn(process.execPath, args, { cwd, env, stdio: 'inherit' });
     children.push(child);
     child.on('error', () => stop(1));
     child.on('exit', (code) => { if (!stopping) stop(code || 1); });

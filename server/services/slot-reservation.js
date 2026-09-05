@@ -1448,6 +1448,17 @@ async function commitReservation({
       .where({ id: scheduledServiceId })
       .update(updates)
       .returning('*');
+    // Tech-facing "new visit" card (tech-visit-notifications.js): the hold
+    // kept its technician, and graduating it IS the booking — no assignment
+    // write follows to announce it. Rides `client` so it waits for the
+    // enclosing accept transaction's commit; gate-dark, never awaited.
+    if (updated?.technician_id) {
+      void require('./tech-visit-notifications').notifyTechVisitChange({
+        visitId: updated.id, kind: 'assigned', technicianId: updated.technician_id, actorId: 'customer_estimate_accept',
+        snapshot: { date: updated.scheduled_date, windowStart: updated.window_start || null, windowEnd: updated.window_end || null },
+        trx: client,
+      });
+    }
 
     // Inspection credit: graduating a held slot IS the customer's booking —
     // both estimate-accept branches (one-time and recurring) land here, and
