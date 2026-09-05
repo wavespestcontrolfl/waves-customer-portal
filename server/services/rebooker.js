@@ -1494,8 +1494,10 @@ class SmartRebooker {
     // response path): a tech change tells both techs; a same-tech
     // date/window move tells the holder. options.actorId is the acting staff row when a
     // staff surface made the move (so their own move stays silent); system
-    // callers are named by initiatedBy.
-    try {
+    // callers are named by initiatedBy. options.suppressTechNotice: the unit
+    // mover's member moves — the canonical assignment right after sends the
+    // pair, so no intermediate "visit moved" card.
+    if (options.suppressTechNotice !== true) try {
       const techNotices = require('./tech-visit-notifications');
       const noticeActor = options.actorId || initiatedBy || null;
       const priorTechId = service.technician_id || null;

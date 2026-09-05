@@ -236,7 +236,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // card names the schedule that will commit, not the row as it stood here.
   const rowSnapshot = { date: updatedRow.scheduled_date, windowStart: updatedRow.window_start, windowEnd: updatedRow.window_end };
   const overrides = Object.fromEntries(Object.entries(noticeSnapshot || {}).filter(([, v]) => v !== undefined));
-  require('./tech-visit-notifications').notifyAssignmentChange({
+  void require('./tech-visit-notifications').notifyAssignmentChange({
     visitId: jobId, fromTechId, toTechId: newTechId, actorId, trx,
     snapshot: { ...rowSnapshot, ...overrides },
   });

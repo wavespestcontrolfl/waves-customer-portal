@@ -320,6 +320,19 @@ describe('live-status reschedule override (allowLive)', () => {
     });
   });
 
+  test('suppressTechNotice (unit mover member moves) sends neither card — the canonical reassignment right after does', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin',
+      { allowLive: true, actorId: 'virginia', suppressTechNotice: true },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(notifyVisitRescheduled).not.toHaveBeenCalled();
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+  });
+
   test('a successful reschedule delta-shifts the pending call-created follow-up child', async () => {
     const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
     wireRescheduleMocks(liveService('confirmed'));

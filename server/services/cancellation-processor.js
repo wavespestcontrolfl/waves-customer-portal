@@ -1213,7 +1213,7 @@ async function processCancellationRequest({
         cancelledIds.push(svc.id);
         // The cancel stands — now the assigned tech hears it (post-commit,
         // best-effort, gate-dark; recipient read from the row).
-        require('./tech-visit-notifications').notifyVisitCancelled({ visitId: svc.id, actorId: null });
+        void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: svc.id, actorId: null });
       }
     }
 

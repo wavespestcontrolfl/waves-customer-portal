@@ -875,7 +875,7 @@ async function transitionJobStatus({
     // release, and the notice must wait for the OUTERMOST commit
     // (commitPromiseOf inside the service) — same rule as the dispatch
     // broadcast. With no trx it runs now (the write is already committed).
-    require('./tech-visit-notifications').notifyVisitCancelled({
+    void require('./tech-visit-notifications').notifyVisitCancelled({
       visitId: jobId, technicianId: adminPayload.tech_id, actorId: transitionedBy || null,
       snapshot: { date: adminPayload.scheduled_date, windowStart: adminPayload.window_start, windowEnd: adminPayload.window_end },
       trx: trx || null,

@@ -2869,6 +2869,18 @@ async function createSelfBooking(payload = {}) {
       throw txErr;
     }
 
+    // Tech-facing notice (tech-visit-notifications.js): a self-booking that
+    // landed on a tech's route is a "new visit" to them. Post-commit,
+    // gate-dark, never awaited; a double-submit replay returns { existing }
+    // with no serviceRow and sends nothing.
+    if (txResult?.serviceRow?.technician_id) {
+      const row = txResult.serviceRow;
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: 'customer_self_serve',
+        snapshot: { date: row.scheduled_date, windowStart: row.window_start, windowEnd: row.window_end },
+      });
+    }
+
     // New bookings mark their recovery intents converted INSIDE the transaction
     // above (atomic, race-free). This post-commit helper now only covers the
     // double-submit REPLAY path — the existing booking committed in an earlier

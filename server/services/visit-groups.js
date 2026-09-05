@@ -2707,13 +2707,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // dispatch broadcast). The rebooker's occupancy probe therefore runs on
     // the row's CURRENT technician; staff surfaces are advisory anyway.
     const { technicianId: _primaryTech, ...primaryBase } = options;
+    // A unit move that ALSO changes technician re-points every member
+    // through assignDispatchJob right after — that writer sends the
+    // moved-off / new-visit pair, so the member's own rebooker call must not
+    // first tell the old tech "visit moved" (tech-visit-notifications.js).
+    const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+      && (options.technicianId || null) !== (target.expect.technician_id || null);
+    const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
     const memberOpts = target.isPrimary
-      ? { ...primaryBase, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series

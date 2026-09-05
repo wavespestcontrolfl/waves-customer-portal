@@ -10481,7 +10481,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Tech-facing notice for a same-tech date/time move (a tech change in the
     // same edit already told both techs through assignScheduleJobs).
     if (techMoveForNotice && techMoveForNotice.technicianId && !assignmentNeedsChange) {
-      require('../services/tech-visit-notifications').notifyVisitRescheduled({
+      void require('../services/tech-visit-notifications').notifyVisitRescheduled({
         visitId: req.params.id,
         technicianId: techMoveForNotice.technicianId,
         actorId: req.technicianId || null,
