@@ -182,6 +182,9 @@ const GATE_OFF_REASON = 'GATE_LINK_AUTHORITY off — follow-ups send under the a
 // row (placed / live / indexed, FOLLOW_UP_STATUSES(path)) still has the follow-up to send — scheduled (a due date),
 // due, or drafted — so its conversation is not over: the inbox guard and the domain guard both hold it (a send-first
 // row that reached live has no follow-up left: the sender refuses it by the same rule). ONE reader for both guards.
+const initialSendOwed = (row, path) => FOLLOW_UP_JUDGE_STATUSES.includes(row.status)
+  && Boolean(path) && require('./link-authority-policy').submitFirst(path)
+  && !row.outreach_sent_at && row.outreach_status !== 'sent';
 const followUpOwed = (row, path) => row.outreach_status === 'sent'
   && (['due', 'drafted'].includes(row.follow_up_status) || (row.follow_up_status === 'none' && Boolean(row.follow_up_due_at)))
   && FOLLOW_UP_JUDGE_STATUSES.includes(row.status) && FOLLOW_UP_STATUSES(path).includes(row.status);
@@ -290,4 +293,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpRetirement, GATE_OFF_REASON, followUpOwed, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpRetirement, GATE_OFF_REASON, initialSendOwed, followUpOwed, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import ProtocolReferenceTabV2 from './ProtocolReferenceTabV2';
 
-const catalog = {lawn:{tracks:[{key:'qa_lawn',name:'Synthetic Lawn',visits:0}]},programs:[{key:'qa_pest',name:'Synthetic Pest',visits:0}]};
+const catalog = {lawn:{tracks:[{key:'st_augustine',name:'Synthetic Lawn',visits:0}]},programs:[{key:'qa_pest',name:'Synthetic Pest',visits:0}]};
 const ok = data => ({ok:true,json:async () => data});
 const fail = () => ({ok:false,json:async () => ({error:'Synthetic unavailable'})});
 let catalogFails, trackFails;
@@ -27,9 +27,10 @@ it('reports initial catalog failure, repeats a failed retry, then loads the cata
   await screen.findByRole('alert');
   catalogFails=false;
   fireEvent.click(screen.getByRole('button',{name:'Retry'}));
-  await waitFor(() => expect(screen.getByLabelText('Protocol')).toHaveValue('qa_lawn'));
-  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-  expect(fetch).toHaveBeenCalledWith('/api/admin/protocols/programs?track=qa_lawn',expect.anything());
+  await waitFor(() => expect(screen.getByLabelText('Protocol')).toHaveValue('st_augustine'));
+  // Calibration warnings are independent of catalog request recovery.
+  expect(screen.queryByText('Failed to load protocol catalog')).not.toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledWith('/api/admin/protocols/programs?track=st_augustine',expect.anything());
 });
 
 it('keeps a default-track failure distinct from a catalog failure and allows manual recovery',async () => {
@@ -38,7 +39,7 @@ it('keeps a default-track failure distinct from a catalog failure and allows man
   await screen.findByText('Select a program above');
   expect(screen.queryByText('Failed to load protocol catalog')).not.toBeInTheDocument();
   trackFails=false;
-  fireEvent.change(screen.getByLabelText('Protocol'),{target:{value:'qa_lawn'}});
+  fireEvent.change(screen.getByLabelText('Protocol'),{target:{value:'st_augustine'}});
   await screen.findByText('Tier Legend');
 });
 
@@ -49,7 +50,7 @@ it('preserves individual protocol rollback and retry after a successful catalog'
   trackFails=true;
   fireEvent.change(screen.getByLabelText('Protocol'),{target:{value:'qa_pest'}});
   await screen.findByText(/Couldn't load that protocol/);
-  expect(screen.getByLabelText('Protocol')).toHaveValue('qa_lawn');
+  expect(screen.getByLabelText('Protocol')).toHaveValue('st_augustine');
   trackFails=false;
   fireEvent.click(screen.getByRole('button',{name:'Retry'}));
   await waitFor(() => expect(screen.getByLabelText('Protocol')).toHaveValue('qa_pest'));
