@@ -41,7 +41,8 @@ function age(t, value, fallbackMs) {
 
 function budgetRisk(run, budget) {
   if (!budget) return null;
-  if (budget.max_steps && Number(run.stepsDone || 0) >= budget.max_steps * BUDGET_RISK_SHARE) return 'steps';
+  // every attempted step spends budget (the writer counts before running it)
+  if (budget.max_steps && Number(run.stepsTotal ?? run.stepsDone ?? 0) >= budget.max_steps * BUDGET_RISK_SHARE) return 'steps';
   if (budget.max_tool_calls && Number(run.toolCalls || 0) >= budget.max_tool_calls * BUDGET_RISK_SHARE) return 'tool_calls';
   return null;
 }

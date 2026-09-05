@@ -42,6 +42,8 @@ test('any live run past hard_timeout_ms is stalled (hard_timeout), including wai
 test('budget_risk at 80 % of max_steps or max_tool_calls, below late', () => {
   const policy = { ...P, budget: { max_steps: 10, max_tool_calls: 20 } };
   expect(deriveHealth(run({ stepsDone: 8, startedAt: ago(P.expected_duration_ms + 1) }), policy, NOW)).toEqual({ health: 'budget_risk', reason: 'steps', attention: null });
+  // every attempted step spends budget: failed / running steps count through stepsTotal
+  expect(deriveHealth(run({ stepsDone: 2, stepsTotal: 8 }), policy, NOW).reason).toBe('steps');
   expect(deriveHealth(run({ stepsDone: 7, toolCalls: 16 }), policy, NOW).reason).toBe('tool_calls');
   expect(deriveHealth(run({ stepsDone: 7, toolCalls: 15 }), policy, NOW).health).toBe('healthy');
 });

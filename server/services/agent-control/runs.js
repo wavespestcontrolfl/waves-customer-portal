@@ -46,7 +46,7 @@ const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { sanitizeJobError } = require('../../utils/cron-lock');
 const { policyFor } = require('./lane-policies');
-const { classifyFailure, isQualityFailure, riskTierFor, RESULT, DISPOSITION } = require('./taxonomy');
+const { classifyFailure, isQualityFailure, riskTierFor, RESULT, DISPOSITION, FAILURE_CLASS } = require('./taxonomy');
 const context = require('./context');
 
 const NO_RETRY_CLASSES = new Set(['money', 'irreversible_external']);
@@ -94,6 +94,11 @@ function clip(value, max) {
 
 // Serialisation is part of the ledger write: a caller's summary with a
 // cycle or a BigInt must not throw into the business path either.
+// A workflow-only run (no lane) has no side-effect class and so no tier.
+function tierFor(policy) {
+  return policy.side_effect_class ? riskTierFor(policy.side_effect_class) : null;
+}
+
 function jsonb(value) {
   try {
     return JSON.stringify(value && typeof value === 'object' ? value : {});
@@ -154,7 +159,7 @@ async function upsertWorkItem(conn, args, laneId, policy) {
       entity_id: clip(wi.entityId, 120),
       customer_id: wi.customerId || null,
       title: clip(wi.title, 300),
-      risk_tier: riskTierFor(policy.side_effect_class),
+      risk_tier: tierFor(policy),
       priority: clip(wi.priority, 4),
     })
     .onConflict(['source_system', 'source_ref'])
@@ -187,7 +192,7 @@ async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
       max_attempts: Math.max(1, Number(args.maxAttempts) || 1 + Number(policy.budget?.max_retries || 0)),
       idempotency_key: clip(args.idempotencyKey, 260),
       side_effect_class: policy.side_effect_class || null,
-      risk_tier: riskTierFor(policy.side_effect_class),
+      risk_tier: tierFor(policy),
       summary: jsonb(args.summary),
       link: clip(args.link, 2000),
     })
@@ -219,12 +224,18 @@ async function openAttempt(conn, run, policy, now) {
     finished_at: null,
     result: null,
     disposition: null,
+    // a new attempt's output is unjudged until someone judges it — a prior
+    // attempt's verdict must not carry over (Codex r1); the attempt rows
+    // and run_events keep the history
+    verification: 'unjudged',
     failure_class: null,
     error_code: null,
     error_message: null,
     last_heartbeat_at: now,
     updated_at: now,
   }).returning('attempts');
+  // the work item is open again while a new attempt runs at it
+  if (run.work_item_id) await conn('work_items').where({ id: run.work_item_id }).update({ status: 'open', updated_at: now });
   const attemptNo = Number(updated && updated.attempts != null ? updated.attempts : updated);
   const [attempt] = await conn('agent_attempts')
     .insert({ run_id: run.id, attempt_no: attemptNo, worker_id: WORKER_ID, started_at: now })
@@ -262,14 +273,21 @@ async function startRun(args = {}) {
     const workItemId = await upsertWorkItem(trx, args, laneId, policy);
     const run = await insertRun(trx, args, laneId, policy, workItemId, traceId, now);
     if (!run) throw new Error('run row missing after insert');
+    // A reopened run keeps ITS lane and policy: the persisted row decides
+    // (a money lane cannot be reopened under a read-only one and gain a
+    // retry — Codex r1). A mismatch is logged, never honoured.
+    const persistedLane = run.lane_id || null;
+    // lane ids only — safe to log in full, and rare enough not to rate-limit
+    if (persistedLane !== laneId) logger.warn(`[agent-runs] lane mismatch on reopen: persisted ${persistedLane}, requested ${laneId} — keeping ${persistedLane}`);
+    const runPolicy = policyFor(persistedLane);
     const resumed = Number(run.attempts || 0) > 0 || run.lifecycle !== 'running';
-    const { attemptId, attemptNo } = await openAttempt(trx, run, policy, now);
+    const { attemptId, attemptNo } = await openAttempt(trx, run, runPolicy, now);
     await trx('run_events').insert({ run_id: run.id, event_type: resumed ? 'resumed' : 'started', message: null, metadata: jsonb({ attempt: attemptNo, worker: WORKER_ID }) });
-    return { run, attemptId, attemptNo, workItemId: run.work_item_id || workItemId };
+    return { run, attemptId, attemptNo, workItemId: run.work_item_id || workItemId, laneId: persistedLane, policy: runPolicy };
   }));
   if (!opened) return inertHandle(args);
   // a reopened run keeps the trace its ledger rows already carry
-  return liveHandle({ ...opened, laneId, policy, traceId: opened.run.trace_id || traceId, workflowId: args.workflowId || null });
+  return liveHandle({ ...opened, traceId: opened.run.trace_id || traceId, workflowId: opened.run.workflow_id || args.workflowId || null });
 }
 
 // ── Live handle ──────────────────────────────────────────────────────
@@ -379,23 +397,29 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     });
   }
 
+  // Transitions write their event only when the fenced update moved the
+  // run: an older handle (a newer attempt opened) must not narrate
+  // transitions on the current attempt's timeline (Codex r1).
   async function wait(kind = 'external', reason = null) {
     if (spent()) return null;
     const lifecycle = kind === 'human' ? 'waiting_human' : 'waiting_external';
-    await touch({ lifecycle, last_progress_at: new Date() }, false);
-    await insertEvent(runId, 'waiting', clip(reason, 2000), { kind });
+    const moved = await touch({ lifecycle, last_progress_at: new Date() }, false);
+    if (Number(moved)) await insertEvent(runId, 'waiting', clip(reason, 2000), { kind });
+    return Number(moved) > 0;
   }
 
   async function resume(reason = null) {
     if (spent()) return null;
-    await touch({ lifecycle: 'running', last_progress_at: new Date() });
-    await insertEvent(runId, 'resumed', clip(reason, 2000));
+    const moved = await touch({ lifecycle: 'running', last_progress_at: new Date() });
+    if (Number(moved)) await insertEvent(runId, 'resumed', clip(reason, 2000));
+    return Number(moved) > 0;
   }
 
   async function checkpoint(data = {}) {
     if (spent()) return null;
-    await touch({ summary: db.raw('summary || ?::jsonb', [jsonb(data)]), last_progress_at: new Date() });
-    await insertEvent(runId, 'checkpoint', null, data);
+    const moved = await touch({ summary: db.raw('summary || ?::jsonb', [jsonb(data)]), last_progress_at: new Date() });
+    if (Number(moved)) await insertEvent(runId, 'checkpoint', null, data);
+    return Number(moved) > 0;
   }
 
   async function writeArtifacts(artifacts) {
@@ -468,7 +492,9 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     const err = error && typeof error === 'object' ? error : { message: error, code: null };
     const code = clip(errorCode ?? err.code, 80);
     const message = sanitizeJobError(err.message ?? code ?? 'failed');
-    const klass = failureClass ?? classifyFailure(code ?? message);
+    // an explicit class must be in the taxonomy (the column has no CHECK);
+    // anything else is classified from the code / message like an omission
+    const klass = FAILURE_CLASS.includes(failureClass) ? failureClass : classifyFailure(code ?? message);
     const canRetry = [retryable, attemptNo < Number(run.max_attempts), run.idempotency_key, !NO_RETRY_CLASSES.has(policy.side_effect_class)].every(Boolean);
     const result = CODE_RESULT[code] ?? CLASS_RESULT[klass] ?? 'errored';
     const outcome = canRetry

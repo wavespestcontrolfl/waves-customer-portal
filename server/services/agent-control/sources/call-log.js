@@ -18,7 +18,7 @@ const COLUMNS = () => [
   'id', 'direction', 'status', 'duration_seconds', 'processing_status', 'transcription_status', 'v2_extraction_status',
   'classification', 'disposition', 'call_outcome', 'processing_started_at', 'processing_heartbeat_at',
   db.raw('(ai_extraction_enriched IS NOT NULL) AS enriched'),
-  'extraction_attempts', 'ai_extraction_model', 'ai_extraction_prompt_version', 'created_at', 'updated_at', 'caller_city',
+  'extraction_attempts', 'ai_extraction_model', 'ai_extraction_prompt_version', 'created_at', 'updated_at', 'caller_city', 'recording_url',
 ];
 
 const STATUS_MAP = Object.freeze({
@@ -96,12 +96,15 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(db('call_log')
       .select(COLUMNS())
-      .whereNotNull('processing_status')
+      // a fresh, never-claimed row is processing_status NULL (the processor
+      // treats NULL as queued); a call with neither a status nor a
+      // recording is not work
+      .where((q) => q.whereNotNull('processing_status').orWhereNotNull('recording_url'))
       // a voice-agent sandbox call is not a run anyone supervises
       .modify((qb) => whereNotSandboxCall(qb))
       .where((q) => {
-        // queued and in-flight calls stay listed however old (a stuck queue is the point)
-        q.whereIn('processing_status', ['pending', 'processing']);
+        // queued (NULL / pending) and in-flight calls stay listed however old (a stuck queue is the point)
+        q.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
         q.orWhere(START(), '>=', from);
       }), { source: SOURCE, idColumn: 'call_log.id' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };

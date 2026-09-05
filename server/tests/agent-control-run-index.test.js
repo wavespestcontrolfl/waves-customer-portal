@@ -162,6 +162,8 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
     expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
     expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
+    // a fresh, never-claimed call (NULL status) is queued work too
+    expect(callLog.fromRow({ ...base, processing_status: null }).lifecycle).toBe('queued');
   });
 
   test('call_log: every processing_status the processor writes or sweeps is mapped; an unknown one surfaces as failed / attention', () => {

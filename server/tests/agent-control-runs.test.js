@@ -126,6 +126,15 @@ describe('gate and failure isolation', () => {
     expect(store.agent_runs).toBeUndefined();
   });
 
+  test('a workflow-only run (no lane) records with no side-effect class and no tier', async () => {
+    const h = await runs.startRun({ workflowId: 'nightly_sweep', sourceSystem: SRC, sourceRunId: 'w1', workItem: { sourceRef: 'w' } });
+    expect(h.inert).toBe(false);
+    expect(runRow()).toMatchObject({ lane_id: null, workflow_id: 'nightly_sweep', side_effect_class: null, risk_tier: null });
+    expect(store.work_items[0].risk_tier).toBeNull();
+    await h.finish({});
+    expect(runRow().lifecycle).toBe('terminal');
+  });
+
   test('missing identity → inert with one warning; DB refusing the start → inert, never a throw; the start is one transaction', async () => {
     expect((await runs.startRun({ laneId: 'blog_draft' })).inert).toBe(true);
     expect(mockWarn).toHaveBeenCalledTimes(1);
@@ -166,10 +175,16 @@ describe('start / step / finish', () => {
   test('a second startRun on the same source key joins the run as attempt 2 (resumed); a successful retry clears the earlier error', async () => {
     const a = await runs.startRun(base);
     await a.fail({ error: new Error('first'), errorCode: 'openai_500', retryable: false });
+    store.agent_runs[0].verification = 'passed';
+    store.work_items = [{ id: 'wi-1', status: 'done' }];
+    store.agent_runs[0].work_item_id = 'wi-1';
     const b = await runs.startRun(base);
     expect(b.id).toBe(a.id);
     expect(b.attemptNo).toBe(2);
     expect(b.traceId).toBe(a.traceId); // the persisted trace, not a fresh one
+    // a new attempt is unjudged and its work item is open again
+    expect(runRow().verification).toBe('unjudged');
+    expect(store.work_items[0].status).toBe('open');
     expect(runRow()).toMatchObject({ lifecycle: 'running', finished_at: null, error_code: null, progress_sequence: 0 });
     // the retry's clock is its own: started_at moved to the reopen, not attempt 1's start
     expect(runRow().started_at.getTime()).toBeGreaterThanOrEqual(store.agent_attempts[1].started_at.getTime());
@@ -198,7 +213,7 @@ describe('start / step / finish', () => {
     const h = await runs.startRun(base);
     const bad = await runs.startRun({ ...base, sourceRunId: 'bad', idempotencyKey: 'kbad' });
     const cyclic = {}; cyclic.self = cyclic;
-    await expect(bad.checkpoint(cyclic)).resolves.toBeUndefined();
+    await expect(bad.checkpoint(cyclic)).resolves.toBe(true);
     await expect(bad.finish({ summary: { big: BigInt(1) } })).resolves.toBe(true);
     expect(store.agent_runs.find((r) => r.source_run_id === 'bad')).toMatchObject({ lifecycle: 'terminal', summary: {} });
     await h.wait('human', 'owner reply');
@@ -243,6 +258,11 @@ describe('concurrent starts', () => {
     expect([a.attemptNo, b.attemptNo]).toEqual([1, 2]);
     expect(a.attemptId).not.toBe(b.attemptId);
     expect(store.agent_attempts.map((x) => x.attempt_no)).toEqual([1, 2]);
+    // fenced transitions from the older handle move nothing and write no event
+    expect(await a.wait('human', 'x')).toBe(false);
+    expect(await a.resume()).toBe(false);
+    expect(await a.checkpoint({ n: 1 })).toBe(false);
+    expect(events(a.id)).toEqual(['started', 'resumed']);
     expect(await a.finish({ result: 'succeeded', disposition: 'applied' })).toBe(false);
     // fenced out: the run still belongs to attempt 2; no work-item / event side effects, only attempt 1 closed
     expect(runRow()).toMatchObject({ lifecycle: 'running', attempts: 2, result: null, disposition: null });
@@ -253,6 +273,9 @@ describe('concurrent starts', () => {
     expect(events(a.id)).toEqual(['started', 'resumed']);
     await a.heartbeat({ progress: true });
     expect(runRow().progress_sequence ?? 0).toBe(0);
+    // spent: every later transition is a no-op
+    expect(await a.wait('human', 'x')).toBeNull();
+    expect(events(a.id)).toEqual(['started', 'resumed']);
     await b.fail({ error: new Error('x'), errorCode: 'openai_500' });
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'errored', attempts: 2 });
     expect(events(a.id)).toEqual(['started', 'resumed', 'failed']);
@@ -318,6 +341,22 @@ describe('fail and retry', () => {
     expect(await b.fail({ error: new Error('still'), errorCode: 'openai_500', retryable: true })).toMatchObject({ retry: false, result: 'errored' });
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'errored', attempts: 2 });
     expect(store.agent_attempts[1]).toMatchObject({ result: 'errored', error_code: 'openai_500' });
+  });
+
+  test('a reopen under a different lane keeps the persisted lane and its no-retry rule', async () => {
+    const money = Object.entries(require('../services/agent-control/lane-policies').LANE_RUNTIME).find(([, p]) => runs.NO_RETRY_CLASSES.has(p.side_effect_class))[0];
+    const a = await runs.startRun({ laneId: money, sourceSystem: SRC, sourceRunId: 'mm', idempotencyKey: 'kmm', maxAttempts: 3 });
+    await a.fail({ error: new Error('x') });
+    const b = await runs.startRun({ laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'mm', idempotencyKey: 'kmm', maxAttempts: 3 });
+    expect(b.laneId).toBe(money);
+    expect(runRow().lane_id).toBe(money);
+    expect((await b.fail({ error: new Error('y'), retryable: true })).retry).toBe(false);
+    expect(mockWarn.mock.calls.some((c) => /lane mismatch/.test(c[0]))).toBe(true);
+  });
+
+  test('an explicit failure class outside the taxonomy is classified from the code instead', async () => {
+    const h = await runs.startRun({ ...base, sourceRunId: 'fc' });
+    expect((await h.fail({ errorCode: 'openai_500', failureClass: 'typo' })).failureClass).toBe('provider');
   });
 
   test('no retry without an idempotency key, on a money / irreversible lane, or when not retryable', async () => {
