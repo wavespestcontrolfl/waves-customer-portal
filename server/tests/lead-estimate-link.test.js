@@ -1544,6 +1544,28 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(database._deleted).toEqual([]);
     });
 
+    test('a root of this opportunity that staff marked WON after the win settled onto it: a replayed conversion of the repeat finds the root\'s row already booked and rebuilds nothing (the r33 replay residual)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'won', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'booked' }, { funnelOwners: { root: 'c1' } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+      // ...judged under the lock on the root as won.
+      expect(database._locks[1]).toEqual({ table: 'leads', where: { id: 'root', customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'won' } });
+    });
+
+    test.each([
+      ['whose row is still below booked', { root: 'lead' }, {}],
+      ['whose row belongs to another customer', { root: 'booked' }, { root: 'c-A' }],
+      ['with no row at all', {}, {}],
+    ])('a WON root of this opportunity %s does not carry the win: the repeat\'s own row is rebuilt', async (_label, funnelRows, funnelOwners) => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'won', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, funnelRows, { funnelOwners });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ funnelStage: 'booked' }));
+    });
+
     test('a root row ALREADY at booked (a replayed conversion: the monotonic bridge updates 0 rows) is settled — the repeat is not rebuilt into a second row (codex r28 P1)', async () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });

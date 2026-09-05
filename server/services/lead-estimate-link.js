@@ -104,6 +104,12 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // judged first; an unlinked repeat carries none of its own, and reading only
 // the repeat's link let root A take the funnel row of a deposit on estimate
 // B (pre-push P1 on 1ea5d47).
+async function wonRootCarriesWin(trx, rootId, customerId) {
+  const row = await trx('ad_service_attribution').where({ lead_id: rootId }).first('funnel_stage', 'customer_id');
+  return !!row && FUNNEL_STAGE_RANK[row.funnel_stage] >= FUNNEL_STAGE_RANK.booked
+    && (!row.customer_id || !customerId || String(row.customer_id) === String(customerId));
+}
+
 async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCustomerId = null, estimateId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
   if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
@@ -115,10 +121,17 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
   const customerId = repeat.customer_id || suppliedCustomerId || null;
   const { root } = await resolveAncestry(database, repeat);
   const scope = estimateId || repeat.estimate_id;
-  const rootOurs = !!root && !root.deleted_at && OPEN_LEAD_STATUSES.includes(root.status)
+  const sameOpportunity = !!root && !root.deleted_at
     && leadMatchesEstimateContact(root, { customer_id: customerId, customer_phone: repeat.phone, customer_email: repeat.email })
     && !(root.estimate_id && scope && String(root.estimate_id) !== String(scope));
-  const onlyIfLead = rootOurs ? { ...identityOf(root), status: root.status } : null;
+  const rootOurs = sameOpportunity && OPEN_LEAD_STATUSES.includes(root.status);
+  // A root of this opportunity that staff has since marked WON is the deal
+  // closed: when its funnel row already carries the win (booked or beyond,
+  // this customer's or unowned), a replayed conversion of the repeat is
+  // settled — nothing is rebuilt beside it (the r33 replay residual, fixed).
+  // Judged under the lock on the root as won.
+  const rootWon = sameOpportunity && root.status === 'won';
+  const onlyIfLead = rootOurs || rootWon ? { ...identityOf(root), status: root.status } : null;
   // Every read or write on the root's row below carries the lead claim the
   // advance carried: the root, as validated, still open, not deleted.
   const rootStillOurs = function leadStillMatches() {
@@ -154,9 +167,10 @@ async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCus
       .whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateMarkerOf(repeat)])
       .whereNull('deleted_at').forUpdate().first('id');
     if (!stillWon) return null;
-    if (!rootOurs) return rebuild(trx);
+    if (!rootOurs && !rootWon) return rebuild(trx);
     const rootHeld = await trx('leads').where({ id: root.id, ...onlyIfLead }).whereNull('deleted_at').forUpdate().first('id');
     if (!rootHeld) return rebuild(trx);
+    if (rootWon) return (await wonRootCarriesWin(trx, root.id, customerId)) ? null : rebuild(trx);
     const own = await trx('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
     if (own && own.funnel_stage === 'completed') return null;
     // A root row still owned by ANOTHER customer (staff re-assigned the lead
