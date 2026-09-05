@@ -184,17 +184,22 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   const packet = buildHandoffPacket(input, facts);
   const { copy } = require('./relay-language');
 
-  const wrote = await writePacketBounded(ctx, packet);
-  if (wrote === 'rejected') {
-    // 0 rows = the owner fence or the terminal guard refused: this socket no
-    // longer owns the call (a reconnect took the claim) or the call is
-    // already over. A stale socket must not end the replacement session or
-    // ring staff — abort, and the model is told not to retry.
-    logger.warn(`[voice-relay] transfer refused — row not owned or already terminal callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
+  // A CONFIRMED durable write — the full packet, or the minimal no-context
+  // stamp — is what authorizes the transfer: it proves this socket still
+  // owns the row (the owner fence) and that /relay-complete's own
+  // owner-bound ring claim will find it. 0 rows on either write = the
+  // fence or the terminal guard refused (a reconnect took the call, or the
+  // call is over); neither confirming = storage down. Both abort: a stale
+  // socket must not end the replacement session, and an unconfirmed
+  // transfer would only end in /relay-complete's voicemail fallback — the
+  // callback offer below is the better outcome (hook P1s).
+  let wrote = await writePacketBounded(ctx, packet);
+  if (wrote === 'failed') wrote = await recordNoContext(ctx, packet, facts);
+  if (wrote !== 'written') {
+    logger.warn(`[voice-relay] transfer refused (${wrote}) — row not owned, already terminal, or storage unconfirmed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     return 'The transfer could not be started on this call. Do NOT try again — take their details with capture_lead '
       + 'and say a Waves team member will call them back.';
   }
-  if (wrote !== 'written') await recordNoContext(ctx, packet, facts);
   // Speak, then end the relay leg: /relay-complete reads reason 'transfer'
   // from the end frame and rings the office.
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', facts.language));
@@ -224,15 +229,19 @@ async function writePacketBounded(ctx, packet) {
 }
 
 /**
- * The packet did not land: a second, minimal UPDATE says so on the row (the
- * office at least learns a summary existed) and the no-context bell rings —
- * never on the sandbox. Bounded, best-effort, never blocks the transfer.
+ * The packet did not land (storage failure / timeout): a second, minimal
+ * UPDATE says so on the row (the office at least learns a summary existed)
+ * — the transfer proceeds ONLY when that write confirms — and the
+ * no-context bell rings, never on the sandbox. Returns the same status
+ * vocabulary as writePacketBounded.
  */
 async function recordNoContext(ctx, packet, facts) {
+  let status = 'failed';
   try {
-    await withTimeout(Promise.resolve(ctx.writeHandoff({ ...packet, summary: null, unresolved_question: null, facts_collected: {}, tools: [], commitments: [], context_available: false })), NO_CONTEXT_WRITE_TIMEOUT_MS, 'timeout');
-  } catch { /* the bell below is the record */ }
-  if (ctx.sandbox === true) return;
+    const rows = await withTimeout(Promise.resolve(ctx.writeHandoff({ ...packet, summary: null, unresolved_question: null, facts_collected: {}, tools: [], commitments: [], context_available: false })), NO_CONTEXT_WRITE_TIMEOUT_MS, 'timeout');
+    if (rows !== 'timeout') status = Number(rows) > 0 ? 'written' : 'rejected';
+  } catch { /* storage down: unconfirmed */ }
+  if (status !== 'written' || ctx.sandbox === true) return status;
   // Detached (never on the caller's path or the tool budget) and DEDUPED per
   // CallSid: a reconnect or a repeated attempt on the same call re-uses the
   // one bell (the call-commitments watchdog pattern — notifyAdmin with a
@@ -250,6 +259,7 @@ async function recordNoContext(ctx, packet, facts) {
       },
     ))
     .catch((err) => logger.warn(`[voice-relay] ${NO_CONTEXT_BELL} bell failed: ${err.message}`));
+  return status;
 }
 
 /**

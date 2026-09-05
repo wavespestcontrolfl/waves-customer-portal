@@ -167,6 +167,12 @@ describe('/call-complete after an unanswered transfer ring', () => {
     expect(res.body).toContain('<Record');
     expect(res.body).not.toContain('ConversationRelay');
     expect(res.body).not.toContain('<Connect');
+    // An UNCONFIRMED marker read (DB error) fails closed to voicemail too.
+    callLog.first = jest.fn(async (...cols) => { if (cols[0] === 'metadata' && cols[1] === 'call_outcome') throw new Error('pool down'); return null; });
+    const res2 = mockRes();
+    await handlerFor('/call-complete')({ body: { CallSid: 'CA-noans2', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res2);
+    expect(res2.body).toContain('<Record');
+    expect(res2.body).not.toContain('<Connect');
   });
 });
 

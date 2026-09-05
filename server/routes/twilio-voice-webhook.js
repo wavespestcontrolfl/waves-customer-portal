@@ -1522,13 +1522,16 @@ router.post('/call-complete', async (req, res) => {
       // who asked for a person — straight back to Sandy (hook P1). The
       // durable transfer markers decide; a read that fails or times out
       // reads as "not a transfer" (today's path).
+      // An UNCONFIRMED read (error / timeout — not "no row") fails CLOSED to
+      // voicemail: a transient DB incident must not route a caller who asked
+      // for a person back to Sandy (hook P1).
       const transferRow = await withDeadline(
-        db('call_log').where('twilio_call_sid', CallSid).first('metadata', 'call_outcome'),
+        db('call_log').where('twilio_call_sid', CallSid).first('metadata', 'call_outcome').then((r) => r || false),
         STAMP_DEADLINE_MS,
-        null,
+        'unconfirmed',
       );
-      const wasTransfer = isTransferredRow(transferRow);
-      if (wasTransfer) logger.info(`[call-complete] unanswered Sandy transfer ${maskSid(CallSid)} — voicemail, no AI backstop`);
+      const wasTransfer = transferRow === 'unconfirmed' || isTransferredRow(transferRow);
+      if (wasTransfer) logger.info(`[call-complete] ${transferRow === 'unconfirmed' ? 'transfer lookup unconfirmed' : 'unanswered Sandy transfer'} ${maskSid(CallSid)} — voicemail, no AI backstop`);
       // Fail-open AI backstop: replace dumb voicemail with the bilingual agent
       // when enabled (the greeting/disclosure already played at /voice, so
       // consent persists). Any error → fall through to voicemail below.

@@ -231,6 +231,7 @@ const TRIGGER_REGISTRY = {
     category: 'alert',
     priority: 'high',
     group: 'Communication',
+    techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
     build: (p) => ({
       title: 'Sandy transfer without context',
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,

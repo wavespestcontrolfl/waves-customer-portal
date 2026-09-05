@@ -108,7 +108,24 @@ describe('executeTool transfer_to_office', () => {
     expect(p.verification_tier).toBe('unverified');
   });
 
-  test('packet write failure ⇒ the transfer still proceeds, a no-context stamp is attempted, and the bell fires ONCE', async () => {
+  test('both writes unconfirmed (storage down) ⇒ ABORT with the callback offer, no bell', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValue(new Error('pool down')) });
+    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.writeHandoff).toHaveBeenCalledTimes(2);
+    expect(ctx.endForTransfer).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('full write failed, fallback REJECTED (0 rows — ownership lost meanwhile) ⇒ ABORT', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValueOnce(new Error('pool down')).mockResolvedValueOnce(0) });
+    expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.endForTransfer).not.toHaveBeenCalled();
+  });
+
+  test('packet write failure with a CONFIRMED no-context stamp ⇒ the transfer proceeds and the bell fires ONCE', async () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const writeHandoff = jest.fn().mockRejectedValueOnce(new Error('pool down')).mockResolvedValueOnce(1);
     const { ctx } = ctxFor({ writeHandoff });
@@ -220,9 +237,10 @@ describe('codex r1 follow-ups', () => {
     expect(ctx.toolFailed).toBe(true);
   });
 
-  test('the no-context bell is registered as a trigger key (tech-visible rows) and written deduped per CallSid', () => {
-    const { listTriggers } = require('../services/notification-triggers');
-    expect(listTriggers().some((t) => t.key === 'sandy_transfer_no_context' || t === 'sandy_transfer_no_context')).toBe(true);
+  test('the no-context bell is registered as a TECH-VISIBLE trigger key and written deduped per CallSid', () => {
+    const { listTriggers, TRIGGER_REGISTRY } = require('../services/notification-triggers');
+    expect(listTriggers().some((t) => t.key === 'sandy_transfer_no_context')).toBe(true);
+    expect((TRIGGER_REGISTRY || {}).sandy_transfer_no_context?.techVisible).toBe(true);
   });
 });
 
@@ -257,7 +275,7 @@ describe('whisper + AI segment', () => {
     expect(transfer.composeRelaySegment({ ...row, transcription: '' })).toBeNull();
   });
 
-  test('the packet + fallback deadlines fit strictly inside the 8s write-tool budget', async () => {
+  test('the packet + fallback deadlines fit strictly inside the 8s write-tool budget (a hung pool settles as an abort, not a late end frame)', async () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     jest.useFakeTimers();
     const never = () => new Promise(() => {});
@@ -266,7 +284,7 @@ describe('whisper + AI segment', () => {
     await jest.advanceTimersByTimeAsync(7000);
     const out = await p;
     jest.useRealTimers();
-    expect(out).toMatch(/Transferring the caller/);
-    expect(ctx.endForTransfer).toHaveBeenCalledTimes(1); // settled before the outer 8s deadline
+    expect(out).toMatch(/could not be started/);
+    expect(ctx.endForTransfer).not.toHaveBeenCalled(); // settled before the outer 8s deadline, and nothing ended the call
   });
 });
