@@ -689,8 +689,17 @@ async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGe
     if (String(row.direction || 'inbound') !== 'inbound') return { verified: false, reason: 'not_inbound' };
     if (lastTenDigits(row.from_phone) !== aniKey) return { verified: false, reason: 'ani_mismatch' };
     // A permanent row is not a live call — bound it to one (see the header).
+    // A RECONNECTED call (Sandy PR 2B) may be older than the window: its
+    // reconnect stamp was written seconds ago by the signed /relay-complete
+    // webhook, so a stamp inside the same window is the same freshness
+    // proof for the resumed socket (hook r29 P1) — the bound stays tight
+    // against a replayed old CallSid either way.
+    let meta = null;
+    try { meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {}); } catch { meta = null; }
     const startedAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
-    if (!Number.isFinite(startedAt) || Date.now() - startedAt > VERIFY_CALL_MAX_AGE_MS) {
+    const reconnectedAt = Number(meta && meta.relay_reconnect_ms) || NaN;
+    const current = (ts) => Number.isFinite(ts) && Date.now() - ts <= VERIFY_CALL_MAX_AGE_MS;
+    if (!Number.isFinite(startedAt) || !(current(startedAt) || current(reconnectedAt))) {
       return { verified: false, reason: 'call_not_current' };
     }
     // …and one live call is ONE session. The burn happens here, after every
@@ -700,11 +709,7 @@ async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGe
     if (!(await beginRelaySessionClaim(callSid, sessionKey, sessionGeneration))) {
       return { verified: false, reason: 'call_sid_already_claimed' };
     }
-    let attestation = null;
-    try {
-      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-      attestation = (meta && meta.stir_verstat) || null;
-    } catch { attestation = null; }
+    const attestation = (meta && meta.stir_verstat) || null;
     return { verified: true, attestation };
   } catch (err) {
     // FAIL CLOSED: an unverifiable caller is an unknown caller.
