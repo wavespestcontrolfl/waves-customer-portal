@@ -21,7 +21,6 @@ import { COLORS, FONTS } from '../theme-brand';
 import { FS, FW, LH, SP } from '../theme-doc';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
@@ -68,7 +67,6 @@ function Page({ children }) {
     <WavesShell variant="customer" topBar="solid">
       <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
         {children}
-        <BrandFooter />
       </div>
     </WavesShell>
   );

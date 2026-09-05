@@ -25,7 +25,6 @@ import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import {
@@ -71,7 +70,6 @@ function Page({ children }) {
     <WavesShell variant="customer" topBar="solid">
       <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
         {children}
-        <BrandFooter />
       </div>
     </WavesShell>
   );
