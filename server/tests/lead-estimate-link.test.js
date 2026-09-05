@@ -1453,7 +1453,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       const database = dbOf(rows, { root: 'lead' });
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
       expect(database._locks).toEqual([
-        { table: 'leads', where: { id: 'rep', status: 'won' } },
+        { table: 'leads', where: { id: 'rep', status: 'won', customer_id: 'c1', phone: '9415550142', email: 'a@example.com', estimate_id: null } },
         { table: 'leads', where: { id: 'root', ...ROOT_CLAIM.onlyIfLead } },
       ]);
     });
@@ -1468,12 +1468,24 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(database._updated).toEqual([]);
     });
 
+    test.each([
+      ['re-assigned to another customer', { customer_id: 'c-OTHER' }],
+      ['linked to another estimate', { estimate_id: 'e-other' }],
+    ])('a repeat %s between the settlement\'s read and its lock is not the row judged: nothing is booked, dropped or rebuilt (pre-push P1 on 0731ebb)', async (_label, change) => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead' }, { leadsNow: { rep: { ...repeat('rep'), ...change } } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).not.toHaveBeenCalled();
+      expect(database._deleted).toEqual([]);
+    });
+
     test('a repeat closed after its conversion committed is not rebuilt either — the rebuild runs inside the settlement under the won lock, never in the caller (pre-push P1 on 28489d7)', async () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'lost', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       const database = dbOf(rows, {}, { leadsNow: { rep: { ...repeat('rep'), status: 'lost' } } });
       await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
       expect(stampLeadFunnelRow).not.toHaveBeenCalled();
-      expect(database._locks).toEqual([{ table: 'leads', where: { id: 'rep', status: 'won' } }]);
+      expect(database._locks).toEqual([{ table: 'leads', where: { id: 'rep', status: 'won', customer_id: 'c1', phone: '9415550142', email: 'a@example.com', estimate_id: null } }]);
     });
 
     test.each([

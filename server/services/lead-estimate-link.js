@@ -141,7 +141,12 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null, esti
   const KEEP_OWN_ROW = Symbol('keep-own-row');
   const rebuild = async (trx) => { await stampLeadFunnelRow(trx, repeat, { customerId, funnelStage: 'booked' }); return null; };
   return database.transaction(async (trx) => {
-    const stillWon = await trx('leads').where({ id: repeat.id, status: 'won' }).whereNull('deleted_at').forUpdate().first('id');
+    // ...on the identity and marker the settlement was judged with, not the
+    // status alone: a repeat staff re-assigned, re-linked or re-pointed since
+    // the read would otherwise book the OLD root (pre-push P1 on 0731ebb).
+    const stillWon = await trx('leads').where({ id: repeat.id, status: 'won', ...identityOf(repeat) })
+      .whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateMarkerOf(repeat)])
+      .whereNull('deleted_at').forUpdate().first('id');
     if (!stillWon) return null;
     if (!rootOurs) return rebuild(trx);
     const rootHeld = await trx('leads').where({ id: root.id, ...onlyIfLead }).whereNull('deleted_at').forUpdate().first('id');
