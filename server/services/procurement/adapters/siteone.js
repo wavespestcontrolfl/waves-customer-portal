@@ -190,6 +190,17 @@ async function visibleControl(page, selector, what, evidence) {
   return shown[0];
 }
 
+// Wait (bounded) until at least one match is SHOWN — the login form's
+// password field behind a hidden responsive duplicate (pre-push P1).
+async function waitForAnyShown(page, selector, timeout) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if ((await matches(page, selector)).shown.length) return;
+    if (Date.now() >= deadline) throw new Error(`no visible match for ${selector.slice(0, 40)} within ${timeout} ms`);
+    await page.waitForTimeout(500);
+  }
+}
+
 // Any visible match (the MFA / card / unavailable blockers fail closed).
 async function visible(page, selector) {
   try { return (await matches(page, selector)).shown.length > 0; } catch { return false; }
@@ -274,19 +285,18 @@ async function login(page, creds) {
   const attempt = async () => {
     await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: LOGIN_TIMEOUT });
     if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone login aborted: navigation redirected off the trusted host');
-    await page.locator(SELECTORS.loginPass).first().waitFor({ state: 'visible', timeout: 30000 });
+    await waitForAnyShown(page, SELECTORS.loginPass, 30000);
     // Host check + both writes in ONE page-context execution (veseris.js).
     const filled = await page.evaluate(fillLoginForm, { user: creds.email || creds.username, pw: creds.password, userSel: SELECTORS.loginUser, passSel: SELECTORS.loginPass });
     const FILL_ABORT = { offhost: 'redirected off the trusted host', nofields: 'login fields not found', ambiguousform: 'more than one visible login form — nothing typed', badform: 'the login form would post credentials off the trusted host — nothing typed' };
     if (filled !== 'ok') throw runLevel(`siteone login aborted: ${FILL_ABORT[filled] || filled}`);
     const submit = page.locator(SELECTORS.loginSubmit).first();
     await submit.click().catch(() => page.locator(SELECTORS.loginPass).first().press('Enter'));
-    await page.waitForFunction((passSel) => {
-      const pw = document.querySelector(passSel);
-      return !pw || !pw.offsetParent;
-    }, SELECTORS.loginPass, { timeout: LOGIN_TIMEOUT }).catch(() => {});
+    // Signed in = EVERY password field gone or hidden (a hidden responsive
+    // duplicate must not read as "still on the login page" — pre-push P1).
+    await page.waitForFunction((passSel) => Array.from(document.querySelectorAll(passSel)).every((pw) => !pw.offsetParent), SELECTORS.loginPass, { timeout: LOGIN_TIMEOUT }).catch(() => {});
     await page.waitForTimeout(1500);
-    return (await page.locator(`${SELECTORS.loginPass}:visible`).count()) === 0 && isTrustedSiteOneUrl(page.url());
+    return (await matches(page, SELECTORS.loginPass)).shown.length === 0 && isTrustedSiteOneUrl(page.url());
   };
   let ok = false;
   let lastError = null;

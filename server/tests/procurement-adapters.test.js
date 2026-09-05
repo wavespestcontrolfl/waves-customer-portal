@@ -231,7 +231,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     });
     const line = (l) => el({ count: 1, sub: (sub) => sub === S.cartLineSku ? el({ count: 1, text: l.sku }) : sub === S.cartLineQty ? el({ count: 1, value: l.qty }) : el() });
     const resolve = (sel) => {
-      if (sel.startsWith(S.loginPass)) return el({ count: st.loggedIn ? 0 : 1 });
+      // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
+      if (sel === S.loginPass) return st.loggedIn ? (st.loginPassHiddenAfterLogin ? el({ count: 1, visible: false }) : el()) : el({ count: 1, visible: true });
       if (sel === S.loginSubmit) return el({ count: 1, onClick: () => { if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
       if (sel === S.loginError) return el();
       if (sel === S.searchInput) return el({ count: 1 });
@@ -528,6 +529,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.loggedIn).toBe(false);
     expect(st.placeClicked).toBe(0);
     expect(browser.close).toHaveBeenCalled();
+  });
+
+  test('a hidden password input left behind after a successful sign-in is not "still on the login page" — every field is judged (pre-push P1)', async () => {
+    const { st, deps } = fakeSiteOne({ loginPassHiddenAfterLogin: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.loggedIn).toBe(true);
   });
 
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
