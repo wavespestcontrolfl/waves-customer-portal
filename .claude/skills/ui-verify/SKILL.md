@@ -29,9 +29,10 @@ on exercising real customer records or payment flows with live credentials.
 
 1. Run the app in the background and navigate to the changed page with the
    available browser tool or existing QA script. For client-only changes
-   use `npm run dev:client` — the full `npm run dev` has a `predev` hook
-   that runs `db:migrate` and fails without a `DATABASE_URL` (and agent
-   sessions must not point one at prod). Reserve full `npm run dev` for
+   use `npm run dev:managed-client` after `worktree:setup` and frontend
+   `dev:doctor` (or standalone `dev:client`). Full managed `dev` checks
+   the dedicated dev database without migrating; follow `docs/development.md`.
+   Codex sessions must never connect to production. Reserve full `npm run dev` for
    server-rendered or backend-dependent pages, against a dev/preview DB.
 2. Screenshot at TWO widths minimum: desktop (~1440) and mobile (390 —
    Virginia and the techs live on phones). With Chrome DevTools, use

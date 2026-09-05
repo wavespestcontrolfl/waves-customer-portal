@@ -106,6 +106,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: Worktree and managed startup checks
+        run: npm run test:dev-workflow
       - name: Client tests (vitest)
         working-directory: client
         run: npm run test:coverage

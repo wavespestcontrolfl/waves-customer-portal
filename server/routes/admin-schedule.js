@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { applyAssignable, assertAssignableTechnician, isAssignable } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
@@ -65,6 +66,13 @@ const {
   resolveSeriesParentId,
   buildPrepaidSeriesContext,
 } = require('../services/prepaid-series');
+// Single-visit prepaid stamp: refuse only rows that are genuinely over.
+// NOT the series helper's TERMINAL_STATUSES — that set also skips
+// 'rescheduled' for fan-out (a replacement row usually exists), but a
+// customer's pending reschedule REQUEST parks the SAME row as 'rescheduled'
+// without a replacement (routes/schedule.js), and staff must still be able
+// to record its payment (pre-push hook on #3878).
+const PREPAID_STAMP_REFUSED_STATUSES = ['completed', 'cancelled', 'no_show', 'skipped'];
 const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
@@ -1465,6 +1473,22 @@ function dateOnly(value) {
 function recurringTemplateTechnicianId(parent) {
   if (parent?.recurring_technician_override) return parent.recurring_technician_id || null;
   return parent?.recurring_technician_id || parent?.technician_id || null;
+}
+
+// The template tech for a NEW series child, fenced on the writing trx: if
+// the parent's tech is no longer assignable (offboarded, or field eligibility
+// removed) the child is seeded unassigned so auto-dispatch places it — never
+// onto a tech who cannot take it. FOR SHARE conflicts with the Team tab's
+// FOR UPDATE, so the change cannot commit underneath the insert.
+async function assignableRecurringTemplateTechnicianId(conn, parent) {
+  const techId = recurringTemplateTechnicianId(parent);
+  if (!techId) return null;
+  let q = conn('technicians').where({ id: techId });
+  if (conn.isTransaction) q = q.forShare();
+  const tech = await q.first('id', 'employment_status', 'field_dispatchable');
+  if (isAssignable(tech)) return techId;
+  logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
+  return null;
 }
 
 // Statuses that mean a series visit is still ahead of us. Confirmed counts:
@@ -3996,7 +4020,8 @@ router.get('/', async (req, res, next) => {
       tech.loadList = Object.keys(materials);
     });
 
-    const technicians = await db('technicians').select('id', 'name').where({ active: true }).orderBy('name');
+    // Assignment picker roster: assignable staff only (technician-eligibility.js).
+    const technicians = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
 
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
@@ -5442,6 +5467,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           throw dupErr;
         }
       }
+      // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE) —
+      // covers a stale picker and the auto-assign path alike; recurring
+      // children below inherit this row's tech, so one check fences both.
+      await assertAssignableTechnician(resolvedTechId, { conn: trx });
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -9929,7 +9958,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const childIdentity = await resolveSeriesChildIdentity(trx, parent);
             const childData = {
               customer_id: parent.customer_id,
-              technician_id: recurringTemplateTechnicianId(parent),
+              technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
@@ -10963,8 +10992,13 @@ router.post('/:id/prepaid', async (req, res, next) => {
       );
       return res.json({ success: true, ...result });
     }
+    // Terminal rows never take a stamp (same set the series fan-out
+    // skips): a visit cancelled between the ownership read and this write
+    // — including by a concurrent series cancel — must not end up holding
+    // money for a visit that never runs (Codex #3878 r1 P1 / hook r2).
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
+      .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
@@ -10973,7 +11007,16 @@ router.post('/:id/prepaid', async (req, res, next) => {
         prepaid_at: db.fn.now(),
       })
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
-    if (!updated.length) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (!updated.length) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('status');
+      if (current && PREPAID_STAMP_REFUSED_STATUSES.includes(String(current.status || '').toLowerCase())) {
+        return res.status(409).json({
+          error: `This visit is already ${current.status} — it can't be marked prepaid. Refresh and try again.`,
+          code: 'visit_terminal',
+        });
+      }
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
 
     // Optional: mint the visit's invoice, apply this prepayment, and email/text
@@ -11513,11 +11556,33 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // in this file): this query gates a destructive action, so an unreadable
 // table must block the trim rather than wave it through. A pre-migration env
 // without the table is the one tolerated case — hasTable is checked first.
-async function findBillingCoveredVisits(conn, visits) {
+//
+// `feeRails: false` skips ONLY the two card-fee reads (estimate_card_holds,
+// appointment_card_requests) for callers that run the fee rails themselves
+// with a fee preview and waiver control — the dispatch series cancel — where
+// a live hold is handled, not a reason to refuse. Money already TAKEN (prepay
+// term, prepaid_amount, an invoice holding money) is checked either way.
+async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
+  // The term LINK outlives the coverage: a voided/refunded prepay flips the
+  // term to cancelled/refunded and clearPrepaidStampsForTerm keeps
+  // annual_prepay_term_id on the visits for audit (annual-prepay-renewals).
+  // Only a term whose PAID coverage is still live is money held (Codex #3878
+  // r1 P2) — decided through the canonical reader, coveredTermsAsOf, not a
+  // status list: a 'cancelled' term with renewal_decision 'cancel' is a paid
+  // non-renewal riding out its window (still covered, pre-push P0), and a
+  // paid invoice can be clawed back by a dispute (no longer covered). A
+  // reader failure keeps every linked visit covered (fail-closed).
+  const termIds = [...new Set(visits.map((v) => v.annual_prepay_term_id).filter(Boolean))];
+  let liveTermIds = new Set(termIds);
+  if (termIds.length > 0) {
+    const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+    const liveTerms = await coveredTermsAsOf(conn).whereIn('t.id', termIds).select('t.id');
+    liveTermIds = new Set(liveTerms.map((t) => t.id));
+  }
   for (const v of visits) {
-    if (v.annual_prepay_term_id) mark(v.id, 'covered by an annual prepay term');
+    if (v.annual_prepay_term_id && liveTermIds.has(v.annual_prepay_term_id)) mark(v.id, 'covered by an annual prepay term');
     // Hand-collected prepayment (cash / phone card / Zelle), single-visit or
     // stamped across the series by POST /:id/prepaid. Cancelling one of these
     // silently is money taken for a visit that never happens (Codex #3337 P1).
@@ -11526,7 +11591,7 @@ async function findBillingCoveredVisits(conn, visits) {
     }
   }
   const ids = visits.map((v) => v.id);
-  if (ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
+  if (feeRails && ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
     const holds = await conn('estimate_card_holds')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', ['released', 'cancelled', 'charged', 'failed'])
@@ -11549,7 +11614,7 @@ async function findBillingCoveredVisits(conn, visits) {
   // terms, recorded consent and a charge target — and its fee event is either
   // absent or still in flight (charging / charge_review are unsettled, not
   // benign absence).
-  if (ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
+  if (feeRails && ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
     const requests = await conn('appointment_card_requests')
       .whereIn('scheduled_service_id', ids)
       .where('status', 'completed')
@@ -11791,7 +11856,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
       customer_id: parent.customer_id,
-      technician_id: recurringTemplateTechnicianId(parent),
+      technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
       scheduled_date: nd,
       window_start: parent.window_start,
       window_end: parent.window_end,
@@ -12098,7 +12163,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           const childIdentity = await resolveSeriesChildIdentity(conn, parent);
           const nextData = {
             customer_id: parent.customer_id,
-            technician_id: recurringTemplateTechnicianId(parent),
+            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent),
             scheduled_date: nextStr,
             window_start: parent.window_start, window_end: parent.window_end,
             service_type: childIdentity.service_type, status: 'pending',
@@ -16864,7 +16929,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
@@ -16954,7 +17019,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
@@ -17412,6 +17477,11 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
+// Shared "is money already taken for this visit" guard — the plan-length
+// trim's refusal contract, consumed lazily by the admin-dispatch series
+// cancel so a 'following' / 'series' cancel refuses prepaid visits the same
+// way the trim does instead of silently dropping paid visits off the books.
+module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;

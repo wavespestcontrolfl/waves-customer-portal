@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { assertAssignableTechnician, applyAssignable } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
@@ -623,6 +624,8 @@ async function assignTechnician(input) {
     // already on tech.id are a no-op reassignment: clearing them would
     // erase a valid manual/optimized position (uncapped audit r25 P1) —
     // the predicate is on the row value the UPDATE itself observes.
+    // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE).
+    await assertAssignableTechnician(tech.id, { conn: trx });
     const [{ count: alreadyOn }] = await trx('scheduled_services')
       .whereIn('id', serviceIds)
       .where('technician_id', tech.id)
@@ -1306,6 +1309,11 @@ async function swapTechAssignments(input) {
     // route_order: null on both real reassignments — each stop's sequence
     // number belonged to its OLD tech's run; carrying it into the new tech's
     // day would interleave stale numbers (consumers append NULLs last).
+      // Only a tech RECEIVING stops must be assignable: swapping an offboarded
+      // tech's remaining route onto an eligible one is exactly how their
+      // retained future work gets reassigned.
+      if (bIds.length) await assertAssignableTechnician(techA.id, { conn: trx });
+      if (aIds.length) await assertAssignableTechnician(techB.id, { conn: trx });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
       if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
@@ -1353,7 +1361,9 @@ async function findScheduleGaps(input) {
   const from = date || date_from || etDateString();
   const to = date || date_to || etDateString(addETDays(new Date(), 6));
 
-  const techs = await db('technicians').where({ active: true }).select('id', 'name');
+  // Capacity = assignable staff only (technician-eligibility.js); an
+  // office-only admin has no route to have gaps in.
+  const techs = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name');
 
   const services = await db('scheduled_services')
     .whereBetween('scheduled_date', [from, to])

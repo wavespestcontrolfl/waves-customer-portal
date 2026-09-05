@@ -59,8 +59,14 @@ export default defineConfig({
       },
     },
   },
+  // Managed runners never load VITE_* values from a copied production .env.
+  envDir: process.env.WAVES_LOCAL_DEV === '1' ? '../.tmp/dev/vite-env' : undefined,
   server: {
     port: 5173,
+    strictPort: true,
+    // Keep Vite's default secret exclusions and also block managed dev state.
+    // /@fs/ otherwise exposes workspace files outside the client directory.
+    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/.tmp/**'] },
     proxy: {
       '/api': {
         target: apiProxyTarget,

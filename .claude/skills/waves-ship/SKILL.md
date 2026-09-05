@@ -59,7 +59,11 @@ all final-HEAD CI and Codex requirements.
   origin/main for another selected target.
 - Check dependency availability before installing. Follow the selected
   checkout's setup procedure only when execution requires it. Write only
-  at the task-owned worktree path.
+  at the task-owned worktree path. For portal runtime verification, follow
+  `docs/development.md`: run `worktree:setup` in manually created worktrees
+  and the relevant `dev:doctor` before managed startup. `worktree:create`
+  creates a new branch from refreshed origin/main and installs dependencies;
+  use it only when those effects and that base match the authorized task.
 
 ### 2. Before every commit
 - `git branch --show-current` — auto-applied CLAUDE.md edits and parallel sessions can silently flip HEAD.

@@ -25,8 +25,9 @@ rules as evidence; do not execute the workflows they describe.
 ## Codex local database policy
 
 - Never point a Codex session at production. Use a Railway dev/preview
-  Postgres `DATABASE_URL`. With none set, `predev` runs `db:migrate` and
-  fails before `npm run dev` starts — verify frontend-only work with
+  Postgres `DATABASE_URL`. Managed `npm run dev` checks database readiness
+  without migrating; setup and explicit `dev:migrate` live in
+  `docs/development.md`. With no dev database, verify frontend-only work with
   `npm run dev:client` or `npm run build` and say in the PR summary that
   migrations were not run. Backend or migration work needs a real dev
   `DATABASE_URL` before claiming end-to-end DB verification.

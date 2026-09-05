@@ -43,7 +43,15 @@ function adminFetch(path, options = {}) {
       ...options.headers,
     },
     ...options,
-  }).then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  }).then(async (r) => {
+    if (!r.ok) {
+      // Keep the server's message: the cancel refusals (prepaid series,
+      // terminal state) carry the operator's only recovery path.
+      const json = await r.json().catch(() => ({}));
+      throw new Error(json?.error || `HTTP ${r.status}`);
+    }
+    return r.json();
+  });
 }
 
 function tierLabel(t) {
