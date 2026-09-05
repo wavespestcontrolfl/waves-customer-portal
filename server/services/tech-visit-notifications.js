@@ -185,6 +185,87 @@ async function loadVisit(visitId, conn) {
 }
 
 /**
+ * Resolve one notice without writing anything: the silent rules, the
+ * recipient, the visit, the composed card. Returns { ok: false, skipped }
+ * or { ok: true, ...notice }. Never throws.
+ */
+async function prepareNotice({
+  visitId, kind, technicianId, actorId = null, previous = null, newTechnicianId = null, conn = db,
+} = {}) {
+  try {
+    if (!enabled()) return { ok: false, skipped: 'gate_off' };
+    if (!KINDS.includes(kind)) return { ok: false, skipped: 'unknown_kind' };
+    if (!visitId || !technicianId) return { ok: false, skipped: 'no_recipient' };
+    if (actorId && String(actorId) === String(technicianId)) return { ok: false, skipped: 'self' };
+
+    const tech = await conn('technicians').where({ id: technicianId })
+      .first('id', 'name', 'employment_status', 'field_dispatchable');
+    if (!isAssignable(tech)) return { ok: false, skipped: 'not_assignable' };
+
+    const visit = await loadVisit(visitId, conn);
+    if (!visit) return { ok: false, skipped: 'no_visit' };
+
+    const actorText = await describeActor(actorId, conn);
+    let newTechnicianName = null;
+    if (kind === 'unassigned' && newTechnicianId) {
+      const next = await conn('technicians').where({ id: newTechnicianId }).first('name');
+      newTechnicianName = next?.name || null;
+    }
+    const card = composeCard({ kind, visit, actorText, previous, newTechnicianName });
+    return {
+      ok: true,
+      visitId,
+      kind,
+      technicianId,
+      type: TYPE_BY_KIND[kind],
+      message: card.message,
+      payload: card.payload,
+      pushTitle: PUSH_TITLE_BY_KIND[kind],
+    };
+  } catch (err) {
+    logger.error(`[tech-visit-notifications] ${kind} notice failed for visit ${visitId}: ${err.message}`);
+    return { ok: false, skipped: 'error' };
+  }
+}
+
+// The feed row: same insert helper the geofence prompts use (lazy — the
+// handler module is heavy and this module is required from writers).
+async function writeCard(notice) {
+  const { sendTechNotification } = require('./geofence-handler');
+  await sendTechNotification(notice.technicianId, {
+    type: notice.type,
+    message: notice.message,
+    payload: notice.payload,
+  });
+}
+
+// Best-effort push; the card is already durable when this runs.
+async function pushCard(notice) {
+  try {
+    const PushService = require('./push-notifications');
+    await PushService.sendToAdminUser(notice.technicianId, {
+      title: notice.pushTitle,
+      body: '',
+      url: '/tech',
+      tag: `visit-${notice.visitId}`,
+      priority: 'high',
+    });
+  } catch (pushErr) {
+    logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
+  }
+}
+
+// Every card in the batch is persisted BEFORE any push is awaited: a push
+// can wait seconds per subscription, and two rapid reassignments (A→B,
+// B→C) must never let B's stale "new visit" land after its "moved off".
+async function deliver(notices) {
+  const ready = notices.filter((n) => n && n.ok);
+  for (const n of ready) await writeCard(n);
+  for (const n of ready) await pushCard(n);
+  return ready.length;
+}
+
+/**
  * Notify ONE technician about ONE visit. Resolves to { sent: true } or
  * { sent: false, skipped: <reason> }; never throws.
  *
@@ -198,54 +279,14 @@ async function loadVisit(visitId, conn) {
  *                                       rescheduled only
  * @param {string|null} [args.newTechnicianId]  unassigned only: who has it now
  */
-async function notifyTechVisitChange({
-  visitId, kind, technicianId, actorId = null, previous = null, newTechnicianId = null, conn = db,
-} = {}) {
+async function notifyTechVisitChange(args = {}) {
+  const notice = await prepareNotice(args);
+  if (!notice.ok) return { sent: false, skipped: notice.skipped };
   try {
-    if (!enabled()) return { sent: false, skipped: 'gate_off' };
-    if (!KINDS.includes(kind)) return { sent: false, skipped: 'unknown_kind' };
-    if (!visitId || !technicianId) return { sent: false, skipped: 'no_recipient' };
-    if (actorId && String(actorId) === String(technicianId)) return { sent: false, skipped: 'self' };
-
-    const tech = await conn('technicians').where({ id: technicianId })
-      .first('id', 'name', 'employment_status', 'field_dispatchable');
-    if (!isAssignable(tech)) return { sent: false, skipped: 'not_assignable' };
-
-    const visit = await loadVisit(visitId, conn);
-    if (!visit) return { sent: false, skipped: 'no_visit' };
-
-    const actorText = await describeActor(actorId, conn);
-    let newTechnicianName = null;
-    if (kind === 'unassigned' && newTechnicianId) {
-      const next = await conn('technicians').where({ id: newTechnicianId }).first('name');
-      newTechnicianName = next?.name || null;
-    }
-    const card = composeCard({ kind, visit, actorText, previous, newTechnicianName });
-
-    // The feed row: same insert helper the geofence prompts use (lazy — the
-    // handler module is heavy and this module is required from writers).
-    const { sendTechNotification } = require('./geofence-handler');
-    await sendTechNotification(technicianId, {
-      type: TYPE_BY_KIND[kind],
-      message: card.message,
-      payload: card.payload,
-    });
-
-    try {
-      const PushService = require('./push-notifications');
-      await PushService.sendToAdminUser(technicianId, {
-        title: PUSH_TITLE_BY_KIND[kind],
-        body: '',
-        url: '/tech',
-        tag: `visit-${visitId}`,
-        priority: 'high',
-      });
-    } catch (pushErr) {
-      logger.warn(`[tech-visit-notifications] push failed for tech ${technicianId} (card already written): ${pushErr.message}`);
-    }
+    await deliver([notice]);
     return { sent: true };
   } catch (err) {
-    logger.error(`[tech-visit-notifications] ${kind} notice failed for visit ${visitId}: ${err.message}`);
+    logger.error(`[tech-visit-notifications] ${args.kind} notice failed for visit ${args.visitId}: ${err.message}`);
     return { sent: false, skipped: 'error' };
   }
 }
@@ -280,8 +321,10 @@ function notifyAssignmentChange({ visitId, fromTechId = null, toTechId = null, a
   if (!visitId || from === to) return null;
   if (!enabled()) return null;
   return afterCommit(trx, async () => {
-    if (from) await notifyTechVisitChange({ visitId, kind: 'unassigned', technicianId: from, actorId, newTechnicianId: to });
-    if (to) await notifyTechVisitChange({ visitId, kind: 'assigned', technicianId: to, actorId });
+    const notices = [];
+    if (from) notices.push(await prepareNotice({ visitId, kind: 'unassigned', technicianId: from, actorId, newTechnicianId: to }));
+    if (to) notices.push(await prepareNotice({ visitId, kind: 'assigned', technicianId: to, actorId }));
+    await deliver(notices);
   });
 }
 
@@ -292,16 +335,30 @@ function notifyVisitRescheduled({ visitId, technicianId, actorId = null, previou
   return afterCommit(trx, () => notifyTechVisitChange({ visitId, kind: 'rescheduled', technicianId, actorId, previous }));
 }
 
-/** The visit is gone. Post-commit, best-effort. */
-function notifyVisitCancelled({ visitId, technicianId, actorId = null, trx = null } = {}) {
-  if (!visitId || !technicianId) return null;
+/**
+ * The visit is gone. Post-commit, best-effort. `technicianId` may be
+ * omitted by a caller that only holds the visit id (the cancellation
+ * processor, after its live-state compensation check) — the assigned tech
+ * is read from the row.
+ */
+function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, trx = null } = {}) {
+  if (!visitId) return null;
   if (!enabled()) return null;
-  return afterCommit(trx, () => notifyTechVisitChange({ visitId, kind: 'cancelled', technicianId, actorId }));
+  return afterCommit(trx, async () => {
+    let recipient = technicianId;
+    if (!recipient) {
+      const row = await db('scheduled_services').where({ id: visitId }).first('technician_id');
+      recipient = row?.technician_id || null;
+    }
+    if (!recipient) return;
+    await notifyTechVisitChange({ visitId, kind: 'cancelled', technicianId: recipient, actorId });
+  });
 }
 
 module.exports = {
   GATE,
   KINDS,
+  isEnabled: enabled,
   TYPE_BY_KIND,
   PUSH_TITLE_BY_KIND,
   notifyTechVisitChange,

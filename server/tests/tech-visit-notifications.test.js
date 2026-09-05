@@ -157,6 +157,36 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
     expect(mockSendTechNotification.mock.calls.map(([id, row]) => [id, row.type])).toEqual([['tech-1', 'visit_unassigned']]);
   });
 
+  test('both cards are written BEFORE any push is awaited (a slow push cannot reorder a rapid A→B, B→C)', async () => {
+    const order = [];
+    mockSendTechNotification.mockImplementation(async (techId, row) => { order.push(`card:${techId}:${row.type}`); });
+    mockSendToAdminUser.mockImplementation(async (techId) => {
+      order.push(`push:${techId}`);
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    await notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: ADAM_ID });
+    expect(order).toEqual(['card:tech-1:visit_unassigned', 'card:tech-2:visit_assigned', 'push:tech-1', 'push:tech-2']);
+    mockSendTechNotification.mockResolvedValue(undefined);
+    mockSendToAdminUser.mockResolvedValue({ sent: 1 });
+  });
+
+  test('notifyVisitCancelled without a technicianId reads the assigned tech from the row', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        const c = { where: jest.fn(() => c), first: jest.fn(async () => ({ technician_id: 'tech-1' })) };
+        return c;
+      }
+      if (table === 'technicians') {
+        const c = { where: jest.fn(() => c), first: jest.fn(async () => TECH) };
+        return c;
+      }
+      if (table === 'scheduled_services as s') return chain(VISIT);
+      throw new Error(`unexpected table ${table}`);
+    });
+    await notices.notifyVisitCancelled({ visitId: 'visit-1' });
+    expect(mockSendTechNotification).toHaveBeenCalledWith('tech-1', expect.objectContaining({ type: 'visit_cancelled' }));
+  });
+
   test('no change (same tech, or both null) is a no-op; gate off never reads', async () => {
     expect(notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: 'tech-1', toTechId: 'tech-1' })).toBeNull();
     expect(notices.notifyAssignmentChange({ visitId: 'visit-1', fromTechId: null, toTechId: null })).toBeNull();

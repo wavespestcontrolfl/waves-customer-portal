@@ -6353,7 +6353,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
         // Optional: push an in-app notification to the assigned tech's PWA queue
         // (honors the "Notify technician" checkbox — unchecked by default).
-        if (sendTechNotification && resolvedTechId) {
+        // A visit created straight onto a tech's route is a "new visit" to
+        // them (tech-visit-notifications.js: post-commit, gate-dark, silent
+        // when the creator IS the tech). With the gate on it replaces the
+        // legacy opt-in `new_appointment` row below, which the tech feed
+        // never rendered; gate off keeps that legacy path byte-identical.
+        const techNotices = require('../services/tech-visit-notifications');
+        const visitNoticeLive = !!resolvedTechId && techNotices.isEnabled();
+        if (visitNoticeLive) {
+          void techNotices.notifyTechVisitChange({
+            visitId: svc.id, kind: 'assigned', technicianId: resolvedTechId, actorId: req.technicianId || null,
+          });
+        }
+        if (sendTechNotification && resolvedTechId && !visitNoticeLive) {
           try {
             const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
             const custName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Customer';

@@ -155,7 +155,7 @@ async function executeScheduleTool(toolName, input, actionContext = {}) {
       case 'optimize_all_routes': return await optimizeAllRoutes(input);
       case 'optimize_tech_route': return await optimizeTechRoute(input);
       case 'assign_technician': return await assignTechnician(input, actionContext);
-      case 'move_stops_to_day': return await moveStopsToDay(input);
+      case 'move_stops_to_day': return await moveStopsToDay(input, actionContext);
       case 'swap_tech_assignments': return await swapTechAssignments(input, actionContext);
       case 'find_schedule_gaps': return await findScheduleGaps(input);
       case 'find_available_slots': return await findAvailableSlotsTool(input);
@@ -695,7 +695,7 @@ async function assignTechnician(input, actionContext = {}) {
 const TERMINAL_MOVE_STATUSES = new Set(require('./proposal-pins').TERMINAL_APPOINTMENT_STATUSES);
 const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
-async function moveStopsToDay(input) {
+async function moveStopsToDay(input, actionContext = {}) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
   const notifyCustomers = input.notify_customers === true;
 
@@ -1047,6 +1047,22 @@ async function moveStopsToDay(input) {
     throw err;
   }
   for (const c of classified) movedIds.add(c.s.id);
+
+  // Tech-facing notices (tech-visit-notifications.js): this writer changes
+  // scheduled_date itself, so it tells the holder itself. Post-commit,
+  // best-effort, NOT awaited; the operator's own move stays silent.
+  {
+    const { notifyVisitRescheduled } = require('../tech-visit-notifications');
+    for (const c of classified) {
+      if (!c.s.technician_id) continue;
+      void notifyVisitRescheduled({
+        visitId: c.s.id,
+        technicianId: c.s.technician_id,
+        actorId: actionContext.technicianId || null,
+        previous: { date: c.oldDate, windowStart: c.s.window_start, windowEnd: c.s.window_end },
+      });
+    }
+  }
 
   // ── Phase B: post-commit side effects per moved stop — best-effort; the
   // batch is committed, so failures surface as warnings, never unwind it.

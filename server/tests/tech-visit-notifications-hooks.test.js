@@ -137,6 +137,28 @@ describe('transitionJobStatus → cancelled tech notice', () => {
     expect(mockNotifyVisitCancelled).toHaveBeenCalledWith({ visitId: 'job-1', technicianId: 't-1', actorId: 'virginia' });
   });
 
+  test.each([
+    ['a caller that may still compensate the cancel (suppressTechNotice)', { fromStatus: 'confirmed', toStatus: 'cancelled', suppressTechNotice: true }],
+    ['a cancelled → cancelled retry (idempotent side-effect repair, not a new cancel)', { fromStatus: 'cancelled', toStatus: 'cancelled' }],
+  ])('%s never fires the cancel notice', async (_label, args) => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    const db2 = require('../models/db');
+    const ROW = { id: 'job-1', job_id: 'job-1', status: args.fromStatus, customer_id: 'c-1', tech_id: 't-1', technician_id: 't-1' };
+    const trx = permissiveTrx(ROW);
+    db2.mockImplementation(() => trx());
+    db2.transaction = jest.fn(async (cb) => cb(trx));
+    db2.raw = trx.raw;
+    db2.schema = trx.schema;
+    const { transitionJobStatus } = require('../services/job-status');
+    mockNotifyVisitCancelled.mockClear();
+
+    await transitionJobStatus({ jobId: 'job-1', transitionedBy: 'virginia', ...args });
+    await new Promise((r) => setImmediate(r));
+
+    expect(mockNotifyVisitCancelled).not.toHaveBeenCalled();
+  });
+
   test('a non-cancel transition never fires the cancel notice', async () => {
     jest.resetModules();
     jest.doMock('../models/db', () => jest.fn());

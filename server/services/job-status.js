@@ -311,7 +311,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  */
 async function transitionJobStatus({
   jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
-  cancelNoticeToken, legacyOutboundActivation,
+  cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false,
 }) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
@@ -863,8 +863,14 @@ async function transitionJobStatus({
   // tech hears a cancel from any path — dispatch status, series, bulk,
   // customer, track-transitions. Both call sites below run after commit;
   // best-effort, silent for the actor's own cancel and while the gate is off.
+  // Only a real transition notifies: a cancelled → cancelled retry re-runs
+  // the idempotent side effects, not the card. `suppressTechNotice` is for
+  // a caller whose cancel may still be compensated (the cancellation
+  // processor reverts when the tech went live mid-request) — it sends the
+  // notice itself once the cancel is known to stand.
   function notifyTechOfCancel(adminPayload) {
-    if (String(toStatus) !== 'cancelled' || !adminPayload?.tech_id) return;
+    if (suppressTechNotice) return;
+    if (String(toStatus) !== 'cancelled' || String(fromStatus) === 'cancelled' || !adminPayload?.tech_id) return;
     require('./tech-visit-notifications').notifyVisitCancelled({
       visitId: jobId, technicianId: adminPayload.tech_id, actorId: transitionedBy || null,
     });
