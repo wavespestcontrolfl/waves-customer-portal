@@ -3096,9 +3096,13 @@ const ReviewService = {
     let intended = noLinkSend ? "sms" : channel === "email" ? "email" : "sms";
     if (!noLinkSend && prefChannel === "email") intended = "email";
 
-    let actualChannel = intended;
-    if (actualChannel === "sms" && !allowSms) actualChannel = !strictChannel && allowEmail ? "email" : null;
-    if (actualChannel === "email" && !allowEmail) actualChannel = !strictChannel && allowSms ? "sms" : null;
+    // The intended channel when allowed; else the other one unless the
+    // operator chose the channel (strictChannel — Quick Links Email-only,
+    // owner ruling 2026-09-03: an unavailable channel is a refusal, never a
+    // swap); else nothing.
+    const allowed = { sms: allowSms, email: allowEmail };
+    const other = { sms: "email", email: "sms" }[intended];
+    const actualChannel = allowed[intended] ? intended : (!strictChannel && allowed[other] ? other : null);
     if (!actualChannel) {
       const optedOut = reviewBlocked || (intended === "email" ? emailBlocked : smsBlocked);
       return { ok: false, reason: optedOut ? "opted_out" : "no_contact", blocked: optedOut, terminal: true };
