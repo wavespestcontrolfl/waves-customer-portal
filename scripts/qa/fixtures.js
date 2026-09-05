@@ -107,6 +107,8 @@ async function cleanup(db, f) {
     await trx('scheduled_services').where({ customer_id: f.customerId }).del();
     await trx('estimates').where({ id: f.estimateId }).del();
     await trx('customers').where({ id: f.customerId }).del();
+    // OTP login adopts an account-less customer as their own account.
+    await trx('customer_accounts').where({ id: f.customerId, email: f.customerEmail }).del();
     await trx('admin_usage_events').whereIn('technician_id', [f.adminId, f.technicianId]).del();
     await trx('technicians').whereIn('id', [f.adminId, f.technicianId]).del();
   });

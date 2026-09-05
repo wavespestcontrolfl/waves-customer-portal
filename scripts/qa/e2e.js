@@ -38,7 +38,7 @@ async function main() {
     }
     if (process.argv.includes('--cleanup')) return;
     await doctor(context);
-    if (!fs.existsSync(path.join(context.root, 'client/dist/index.html'))) throw new Error('Run npm run build before end-to-end QA.');
+    if (!process.argv.includes('--seed') && !fs.existsSync(path.join(context.root, 'client/dist/index.html'))) throw new Error('Run npm run build before end-to-end QA.');
     fixture = { ...fixtureIdentity(), databaseFingerprint };
     fs.writeFileSync(fixtureFile, JSON.stringify(fixture, null, 2), { mode: 0o600 });
     await seed(db, fixture);
@@ -192,18 +192,26 @@ async function main() {
     console.error(error.message);
     process.exitCode = 1;
   } finally {
-    if (browserContext) await browserContext.tracing.stop({ path: path.join(artifactDir, 'trace.zip') });
-    await browser?.close();
-    if (server && server.exitCode === null) {
-      const exited = new Promise((resolve) => server.once('exit', resolve));
-      server.kill('SIGTERM');
-      const timer = setTimeout(() => server.kill('SIGKILL'), 5000);
-      await exited;
-      clearTimeout(timer);
+    report.cleanupErrors = [];
+    for (const [label, close] of [
+      ['Trace', () => browserContext?.tracing.stop({ path: path.join(artifactDir, 'trace.zip') })],
+      ['Browser', () => browser?.close()],
+      ['Server', async () => {
+        if (!server || server.exitCode !== null || server.signalCode != null) return;
+        const exited = new Promise((resolve) => server.once('exit', resolve));
+        server.kill('SIGTERM');
+        const timer = setTimeout(() => server.kill('SIGKILL'), 5000);
+        await exited;
+        clearTimeout(timer);
+      }],
+      ['Database', () => db.destroy()],
+    ]) {
+      try { await close(); }
+      catch (error) { report.cleanupErrors.push(`${label}: ${error.message}`); }
     }
+    if (report.cleanupErrors.length) process.exitCode = 1;
     const reportFile = process.argv.includes('--cleanup') ? 'cleanup.json' : 'report.json';
     fs.writeFileSync(path.join(artifactDir, reportFile), JSON.stringify(report, null, 2) + '\n');
-    await db.destroy();
     console.log(`Private QA artifacts: ${artifactDir}`);
   }
 }
