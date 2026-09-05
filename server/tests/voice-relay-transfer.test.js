@@ -424,8 +424,10 @@ describe('pre-push hook round 9', () => {
     expect(relayOnlyAt).toBeLessThan(wholeCallAt);
     const site = src.slice(relayOnlyAt, wholeCallAt);
     expect(site).toContain("if (!wroteRelayOnly) return abandonToPeer('the relay-only transcript write');");
-    expect(site).toContain('relayPending = !relayOnly;'); // a still-pending AI text is composed inside this UPDATE too
-    expect(site).toContain(': TRANSCRIPTION_REJECTED_SENTINEL;'); // …onto the BARE sentinel — the header is added exactly once by composition
+    expect(site).toContain('const composeInUpdate = !relayOnly || relayState.reconnected === true;'); // a still-pending AI text — or any reconnected call — is composed inside this UPDATE (PR 2B)
+    expect(site).toContain('relayPending = composeInUpdate;');
+    expect(site).toContain('recordedSegmentText = null; // the write composes around the BARE sentinel, never the rejected text');
+    expect(site).toContain('transcription = composeInUpdate ? TRANSCRIPTION_REJECTED_SENTINEL :'); // …onto the BARE sentinel — the header is added exactly once by composition
     expect(site).toContain('fallbackImplausible = false;');
     expect(site).toContain('primaryTranscriptRejected = false;');
     expect(site).toContain('recorded_segment_rejected');

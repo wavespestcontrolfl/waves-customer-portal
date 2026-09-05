@@ -7084,13 +7084,19 @@ const CallRecordingProcessor = {
       // With the relay text still pending, the BARE sentinel is written:
       // composition (in the UPDATE now, or the late stash) adds the segment
       // header exactly once, and a bare sentinel stays a rejected fallback.
-      transcription = relayOnly ? `${relayOnly.text}\n\n[${relayState.label} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}` : TRANSCRIPTION_REJECTED_SENTINEL;
+      // A RECONNECTED call composes inside the UPDATE from the row's current
+      // metadata (a later segment can land between the read and this write,
+      // hook P1): the bare sentinel is the recorded text it composes around.
+      // A transfer with relay text in hand composes here.
+      const composeInUpdate = !relayOnly || relayState.reconnected === true;
+      transcription = composeInUpdate ? TRANSCRIPTION_REJECTED_SENTINEL : `${relayOnly.text}\n\n[${relayState.label} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}`;
       transcriptionProvenance = transcriptionProvenance || { provider: null, model: null, metadata: {} };
       transcriptionProvenance.metadata = { ...(transcriptionProvenance.metadata || {}), ...(relayOnly ? { relay: relayOnly.metadata } : {}), recorded_segment_rejected: { reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rejectedChars, recording_seconds: recordingSeconds } };
       // Through the same SQL-time composition as every other transcript write
       // (hook P1): when the AI text was still pending here, a stash landing
       // before this UPDATE is composed ahead of the rejected segment.
-      relayPending = !relayOnly;
+      relayPending = composeInUpdate;
+      recordedSegmentText = null; // the write composes around the BARE sentinel, never the rejected text
       const wroteRelayOnly = await writeTranscript(
         db('call_log').where({ id: call.id }).where('processing_token', procToken),
         { transcription, transcription_status: 'completed', transcription_provider: transcriptionProvenance.provider, transcription_model: transcriptionProvenance.model, transcript_structured: null, transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date() },
