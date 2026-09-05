@@ -42,6 +42,8 @@ describeOrSkip('llm call ledger schema', () => {
     expect(cols.trace_id.type).toMatch(/char/);
     // the chain-era columns are untouched
     ['policy', 'ok', 'provider', 'model', 'fallback_used', 'failure_reasons', 'created_at'].forEach((c) => expect(cols).toHaveProperty(c));
+    // 20260905000060: the session recorder persists the runner's captured start
+    expect(cols.started_at).toMatchObject({ nullable: true, type: expect.stringMatching(/timestamp/) });
   });
 
   test('the ledger indexes exist', async () => {

@@ -334,7 +334,6 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   let stepsThisAttempt = 0; // the budget's unit: this attempt starts its budget over
   let toolCalls = 0;
   let budgetFlagged = false;
-  let progress = 0; // this attempt's count: openAttempt reset the persisted one (a reopen's row is pre-reset)
   // this handle's attempt is the run's current one (see openAttempt) and
   // the run is still open: a terminal run is changed only by openAttempt,
   // and a QUEUED one (a retryable fail) awaits its next attempt — the
@@ -376,14 +375,15 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     }), false);
   }
 
+  // Progress is incremented IN the fenced update, not written from a
+  // process-local count: two overlapping heartbeats (parallel steps) can
+  // take the row lock in either order, and an absolute value from the
+  // later caller would regress the earlier one; a rolled-back write must
+  // not skip a number either (Codex r12). openAttempt reset the persisted
+  // counter, so a retry still counts from zero.
   async function heartbeat({ progress: progressed = false } = {}) {
     if (spent()) return null;
-    const patch = {};
-    if (progressed) {
-      progress += 1;
-      patch.progress_sequence = progress;
-      patch.last_progress_at = new Date();
-    }
+    const patch = progressed ? { progress_sequence: db.raw('progress_sequence + 1'), last_progress_at: new Date() } : {};
     return touch(patch);
   }
 

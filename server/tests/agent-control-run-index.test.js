@@ -279,7 +279,7 @@ describe('adapters project onto the canonical shape', () => {
   test('job_health: a running job is live, a failing job is errored, a lane comes from its policy workflow_id', () => {
     const running = jobHealth.fromRow({ job_name: 'nightly_sweep', last_status: 'running', last_started_at: ago(5e3), last_finished_at: ago(3600e3), last_duration_ms: 400 });
     expect(running).toMatchObject({ lifecycle: 'running', finishedAt: null, durationMs: null, workflowId: 'nightly_sweep', title: 'nightly sweep' });
-    expect(jobHealth.fromRow({ job_name: 'j', last_status: 'failed', consecutive_failures: 3, last_error: 'ENOTFOUND', last_started_at: ago(5e3), last_finished_at: ago(4e3) })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', subtitle: '3 consecutive failures', detail: 'ENOTFOUND', attempts: 3 });
+    expect(jobHealth.fromRow({ job_name: 'j', last_status: 'failed', consecutive_failures: 3, last_error: 'ENOTFOUND', last_started_at: ago(5e3), last_finished_at: ago(4e3) })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', subtitle: '3 consecutive failures', detail: 'ENOTFOUND', attempts: 1, maxAttempts: null });
     const { LANE_RUNTIME, policyFor } = require('../services/agent-control/lane-policies');
     // every lane that names its cron: the job exists in the scheduler under that name, and the job reads with the lane's policy
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');

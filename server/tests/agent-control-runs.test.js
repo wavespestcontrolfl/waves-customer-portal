@@ -381,6 +381,15 @@ describe('a spent handle', () => {
     expect(runRow().progress_sequence).toBe(1);
   });
 
+  test('progress is incremented in the fenced update: a heartbeat whose write failed recorded no progress, so the next one lands at 1, not 2 (Codex r12)', async () => {
+    const h = await runs.startRun(base);
+    state.failNext = 'agent_runs';
+    expect(await h.heartbeat({ progress: true })).toBeNull();
+    expect(runRow().progress_sequence).toBe(0);
+    await h.heartbeat({ progress: true });
+    expect(runRow().progress_sequence).toBe(1);
+  });
+
   test('a failed write inside finish / fail rolls the whole transition back: the run stays running and its attempt open', async () => {
     const a = await runs.startRun(base);
     state.failNext = 'run_events';

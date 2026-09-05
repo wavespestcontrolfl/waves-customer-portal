@@ -10,20 +10,24 @@ const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require
 const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
-// recordSessionUsage inserts AFTER the runner finishes. The session's
-// start is its FIRST turn's: that turn row's recording time minus its own
-// latency (the session row's latency_ms is GREATEST across turns, so a
-// longer later turn would move a start derived from it — and with it an
-// already-paged row behind its cursor; pre-push audit). A session recorded
-// before turn rows existed falls back to its own created_at − latency.
+// recordSessionUsage inserts AFTER the runner finishes AND after its usage
+// GET. The session's start is its FIRST turn's: the recorder persists the
+// start the runner captured (started_at; the session row's is the LEAST
+// across its turns — Codex r12: created_at − latency_ms drifts late by the
+// whole fetch, up to its timeout). Rows recorded before that column derive
+// it: the first turn row's recording time minus its own latency (the
+// session row's latency_ms is GREATEST across turns, so a longer later turn
+// would move a start derived from it — and with it an already-paged row
+// behind its cursor; pre-push audit), else the session row's own.
 // Sort / page on that same start so the cursor and the rows agree. The
 // latest activity is the newest session_turn row (created_at for a
 // one-turn session): that is the finish, and the WINDOW is judged on it,
 // so a long-lived assistant conversation stays listed while it still
 // turns instead of ageing out with its first turn (Codex r1).
 const TURNS = "FROM llm_dispatch_log t WHERE t.row_kind = 'session_turn' AND t.provider_ref = llm_dispatch_log.provider_ref";
-const FIRST_TURN_START = `(SELECT t.created_at - make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0) ${TURNS} ORDER BY t.created_at ASC LIMIT 1)`;
-const SESSION_START = `COALESCE(${FIRST_TURN_START}, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))`;
+const TURN_START = 'COALESCE(t.started_at, t.created_at - make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0))';
+const FIRST_TURN_START = `(SELECT ${TURN_START} ${TURNS} ORDER BY ${TURN_START} ASC LIMIT 1)`;
+const SESSION_START = `COALESCE(started_at, ${FIRST_TURN_START}, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))`;
 const START = () => db.raw(`date_trunc('milliseconds', ${SESSION_START})`);
 const LAST_TURN = `COALESCE((SELECT max(t.created_at) ${TURNS}), created_at)`;
 const ID = 'provider_ref';
@@ -32,6 +36,7 @@ const COLUMNS = () => [
   'latency_ms', 'input_tokens', 'output_tokens', 'created_at', 'run_id', 'trace_id', 'workload',
   db.raw(`(SELECT count(*) ${TURNS}) AS turns`),
   db.raw(`(SELECT count(*) ${TURNS} AND t.ok IS NOT FALSE) AS turns_ok`),
+  // shadows the raw column: the resolved start, whichever record carried it
   db.raw(`${SESSION_START} AS started_at`),
   db.raw(`${LAST_TURN} AS last_turn_at`),
 ];
@@ -92,16 +97,18 @@ async function get(sessionId) {
   try {
     const row = await baseQuery().where({ provider_ref: sessionId }).first();
     if (!row) return null;
-    const turns = await db('llm_dispatch_log')
-      .select('id', 'step_id', 'ok', 'error_code', 'latency_ms', 'input_tokens', 'output_tokens', 'created_at')
-      .where({ row_kind: 'session_turn', provider_ref: sessionId })
-      .orderBy('created_at', 'asc');
+    // aliased `t`: TURN_START is the list's expression, so the timeline orders the way the list starts
+    const turns = await db({ t: 'llm_dispatch_log' })
+      .select('t.id', 't.step_id', 't.ok', 't.error_code', 't.latency_ms', 't.input_tokens', 't.output_tokens', 't.created_at', 't.started_at')
+      .where({ 't.row_kind': 'session_turn', 't.provider_ref': sessionId })
+      .orderByRaw(`${TURN_START} ASC`);
     const run = fromRow(row);
-    // a turn row lands after the turn finished: its start is that minus its latency (Codex r5)
+    // a turn's start is the one the runner captured; a row recorded before
+    // that column lands after the turn finished, so it is that minus its latency (Codex r5 / r12)
     run.steps = turns.map((t, i) => ({
       key: `turn_${i + 1}`, label: `Turn ${i + 1}`, status: t.ok === false ? 'failed' : 'done',
       detail: t.ok === false ? t.error_code || null : null, ms: t.latency_ms == null ? null : Number(t.latency_ms), toolName: null,
-      startedAt: new Date(new Date(t.created_at).getTime() - Number(t.latency_ms || 0)), spanId: null,
+      startedAt: t.started_at ? new Date(t.started_at) : new Date(new Date(t.created_at).getTime() - Number(t.latency_ms || 0)), spanId: null,
     }));
     return { run };
   } catch (err) {

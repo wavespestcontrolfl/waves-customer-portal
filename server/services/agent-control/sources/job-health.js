@@ -64,7 +64,12 @@ function fromRow(job) {
     lastHeartbeatAt: finishedAt ?? job.last_started_at,
     lastProgressAt: finishedAt ?? job.last_started_at,
     durationMs,
-    attempts: Math.max(1, failures),
+    // The row is the LATEST tick: one execution, and the schedule keeps
+    // invoking the job (runExclusive caps nothing), so no attempt limit.
+    // The failure streak is a diagnostic (the subtitle), not attempts
+    // against a cap it never had (Codex r12).
+    attempts: 1,
+    maxAttempts: null,
     steps: [{ key: 'tick', label: 'Run', status: state.step, detail: error, ms: durationMs, toolName: null }],
     detail: error,
   });
