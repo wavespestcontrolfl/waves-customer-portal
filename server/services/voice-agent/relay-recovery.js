@@ -65,8 +65,35 @@ function undoLateReconnect(db, { callSid, nowMs, outcome = 'voicemail', answered
   return db('call_log')
     .where('twilio_call_sid', callSid)
     .whereRaw("(metadata->>'relay_reconnect_ms')::bigint = ?", [nowMs])
+    // …and no socket minted by the reconnect has claimed the call meanwhile
+    // (a retry may have re-issued the render while this compensation was
+    // pending): a claim at or after the stamp is the healthy resumed
+    // session, never put back (hook r21 P1).
+    .whereRaw("COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?", [nowMs])
     .whereNull('call_outcome')
     .update({ call_outcome: outcome, answered_by: answeredBy, status, updated_at: new Date() });
+}
+
+/**
+ * The RE-ISSUE of a reconnect whose response Twilio never received (codex
+ * r2 P1): one fenced UPDATE that moves the stamp forward to `nowMs` — only
+ * while the row is still in the live shape the claim left (outcome NULL:
+ * a claim put back to voicemail / relay_failed is never re-rendered, hook
+ * r21 P1) and no socket minted by the prior stamp has claimed it (the
+ * resumed leg is not live). The new stamp is the fence the fresh token is
+ * minted against, and it retires the prior stamp's pending compensation
+ * (fenced on `priorMs`). Returns the row count.
+ */
+function reissueReconnect(db, { callSid, priorMs, nowMs = Date.now() }) {
+  return db('call_log')
+    .where('twilio_call_sid', callSid)
+    .whereRaw("(metadata->>'relay_reconnect_ms')::bigint = ?", [priorMs])
+    .whereRaw("COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?", [priorMs])
+    .whereNull('call_outcome')
+    .update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_reconnect_ms', ?::bigint)", [nowMs]),
+      updated_at: new Date(),
+    });
 }
 
 /** The welcome greeting Twilio speaks on the reconnected leg. */
@@ -336,6 +363,7 @@ module.exports = {
   isRecoveryGateOn,
   claimReconnect,
   undoLateReconnect,
+  reissueReconnect,
   resumeGreeting,
   buildSegment,
   appendSegmentSql,

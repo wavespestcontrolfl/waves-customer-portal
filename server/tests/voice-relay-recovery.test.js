@@ -80,12 +80,25 @@ describe('relay-recovery module', () => {
     expect(updates[0].metadata.bindings).toEqual([1725500000000]);
   });
 
-  test('undoLateReconnect puts back only the claim it made (fenced on its own reconnect_ms and a NULL outcome)', async () => {
+  test('undoLateReconnect puts back only the claim it made (fenced on its own reconnect_ms, a NULL outcome, and no claim at/after the stamp — a resumed socket that claimed is never put back, hook r21 P1)', async () => {
     const { db, builder, updates } = primeDb();
     await recovery.undoLateReconnect(db, { callSid: 'CA-1', nowMs: 42 });
     expect(builder.whereRaw).toHaveBeenCalledWith("(metadata->>'relay_reconnect_ms')::bigint = ?", [42]);
+    expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?", [42]);
     expect(builder.whereNull).toHaveBeenCalledWith('call_outcome');
     expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'voicemail', answered_by: 'voicemail', status: 'completed' }));
+  });
+
+  test('reissueReconnect moves the stamp forward in ONE fenced UPDATE: prior stamp, no claim at/after it, outcome still NULL — never a compensated row, never a live resumed leg (codex r2 P1 / hook r21 P1)', async () => {
+    const { db, builder, updates } = primeDb();
+    expect(await recovery.reissueReconnect(db, { callSid: 'CA-1', priorMs: 777, nowMs: 900 })).toBe(1);
+    expect(builder.whereRaw).toHaveBeenCalledWith("(metadata->>'relay_reconnect_ms')::bigint = ?", [777]);
+    expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?", [777]);
+    expect(builder.whereNull).toHaveBeenCalledWith('call_outcome');
+    expect(updates[0].metadata.sql).toContain("jsonb_build_object('relay_reconnect_ms', ?::bigint)");
+    expect(updates[0].metadata.sql).not.toContain('relay_reconnects'); // the reconnect COUNT is untouched — still the one reconnect
+    expect(updates[0].metadata.bindings).toEqual([900]);
+    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'updated_at']);
   });
 
   test('segments: append never overwrites; composition orders by generation with the [Reconnected] separator; the fence is ≤ generation', () => {

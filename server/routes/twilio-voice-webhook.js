@@ -1822,21 +1822,47 @@ async function attemptRelayReconnect(req, callSid, failure) {
         // new <ConversationRelay>, so no resumed socket exists — the row's
         // claim is still the FIRST leg's (its token was minted before the
         // stamp, so its generation is below relay_reconnect_ms). Re-issue
-        // the same reconnect (same generation on the action; a fresh token)
-        // instead of ending the call. Once a socket minted by the reconnect
-        // has claimed (claimGen ≥ the stamp), the resumed leg is live and a
-        // retry is ignored.
+        // the reconnect (a fresh stamp + token) instead of ending the call.
+        // The re-stamp is ONE fenced UPDATE (relay-recovery.reissueReconnect):
+        // 0 rows = the row went terminal (a compensated claim — today's
+        // path) or the resumed leg claimed meanwhile (ignore); unconfirmed =
+        // today's path, with a late-landing re-stamp put back (hook r21 P1).
         if (!secondFailure && state.reconnectMs && !(state.claimGen >= state.reconnectMs)) {
-          logger.warn(`[relay-complete] reconnect response for ${maskSid(callSid)} was never acted on — re-issuing (retry after ${failure})`);
-          return renderRelayReconnect(req, callSid, failure, state.reconnectMs);
+          const reissued = await reissueRelayReconnect(callSid, state.reconnectMs);
+          if (reissued.ms) {
+            logger.warn(`[relay-complete] reconnect response for ${maskSid(callSid)} was never acted on — re-issued (retry after ${failure})`);
+            return renderRelayReconnect(req, callSid, failure, reissued.ms);
+          }
+          if (reissued.rows === 0) {
+            const now = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
+            duplicate = Boolean(now && now.reconnectMs && now.claimGen >= now.reconnectMs);
+          }
+        } else {
+          duplicate = !secondFailure;
         }
-        duplicate = !secondFailure;
       }
     }
     logger.info(`[relay-complete] no reconnect for ${maskSid(callSid)} (${claimed === 0 ? (duplicate ? 'duplicate callback' : secondFailure ? 'second failure' : 'not resumable') : claimed}) after ${failure}`);
     return { xml: null, duplicate, secondFailure };
   }
   return renderRelayReconnect(req, callSid, failure, nowMs);
+}
+
+/** The bounded re-stamp for a replay: { ms } when it landed, { rows: 0 } when refused, {} when unconfirmed. */
+async function reissueRelayReconnect(callSid, priorMs) {
+  const recovery = require('../services/voice-agent/relay-recovery');
+  const nowMs = Date.now();
+  const promise = recovery.reissueReconnect(db, { callSid, priorMs, nowMs })
+    .catch((err) => { logger.warn(`[relay-complete] reconnect re-issue failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
+  const rows = await withDeadline(promise, STAMP_DEADLINE_MS, 'timeout');
+  if (rows === 'timeout') {
+    void promise
+      .then((n) => (Number(n) > 0 ? recovery.undoLateReconnect(db, { callSid, nowMs }) : 0))
+      .then((n) => { if (Number(n) > 0) logger.warn(`[relay-complete] late reconnect re-issue for ${maskSid(callSid)} put back to voicemail`); })
+      .catch((err) => logger.warn(`[relay-complete] late re-issue compensation failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  if (Number(rows) > 0) return { ms: nowMs };
+  return rows === 0 ? { rows: 0 } : {};
 }
 
 /**
