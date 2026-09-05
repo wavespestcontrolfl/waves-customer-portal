@@ -61,11 +61,12 @@ Dispatch caller retains its series scope.
 No deployment, production writes, customer messages, or gate flips were performed.
 The address action uses the prerequisite's default-off `GATE_EDIT_APPT_ADDRESS`;
 activation remains an owner release decision. No migration was added.
-The full existing migration history is being verified in a newly created,
-private synthetic database on Railway codex-dev. Database test results are
-pending; this report does not yet claim database verification.
-A dev/preview database is still required for end-to-end schema and concurrent
-transaction verification; mocked transaction tests do not establish that evidence.
+All 1,374 existing migrations completed in a newly created private database on
+Railway codex-dev. Both PostgreSQL integration tests passed against those real
+tables: rental discovery, grouped en-route writes, preserved future visits,
+audit insertion, updated schedule reads and rejection of a changed destination.
+Each fixture transaction was rolled back. This verifies the tool/database path;
+it is not full HTTP/browser backend QA or a concurrent multi-session race test.
 No live model call was used to claim a measured change in conversational behavior.
 
 Before release, reconcile this branch with the final reviewed version of the
@@ -77,7 +78,7 @@ and this branch's production build passed.
 ## PR preparation
 
 Reconciled with origin/main at `11e21a852` and address prerequisite review fixes
-at `dbd362c19`. The IB writer now acquires technician-day fences explicitly
+at `998513425` (including the `dbd362c19` review fixes). The IB writer now acquires technician-day fences explicitly
 and locks the selected property before service rows, matching the updated
 shared writer. Frozen grouped visits remain subject to the shared guard.
 An opt-in PostgreSQL integration suite exercises real migrated tables, the
@@ -90,3 +91,7 @@ a broadcast failure retains committed success and surfaces a manual-refresh
 warning. A regression covers both broadcast invocation and failure behavior.
 The broader Intelligence Bar/tech/address/dispatch suite passed 620 tests before
 this follow-up; its five switch-property tests passed after the broadcast fix.
+
+CI initially caught a fixture-only date-helper misuse in the new PostgreSQL
+suite. It now passes a Date and converts the result to an ET date string; both
+PostgreSQL tests passed locally after that correction.

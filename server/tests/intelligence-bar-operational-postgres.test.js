@@ -41,7 +41,7 @@ postgres('Intelligence Bar operational flows on PostgreSQL', () => {
     await mockDb('scheduled_services').insert([
       { ...base, id: ids.stop, status: 'en_route', recurring_parent_id: ids.template, visit_id: ids.visit },
       { ...base, id: ids.grouped, status: 'en_route', visit_id: ids.visit },
-      { ...base, id: ids.future, recurring_parent_id: ids.template, scheduled_date: addETDays(today, 30) },
+      { ...base, id: ids.future, recurring_parent_id: ids.template, scheduled_date: etDateString(addETDays(new Date(), 30)) },
     ]);
     input = { appointment_id: ids.stop, property_id: ids.rental };
   });
