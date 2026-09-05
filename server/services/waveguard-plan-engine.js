@@ -1018,13 +1018,13 @@ async function getApplicableOrdinances(knex, profile, cities = {}) {
   return query;
 }
 
-async function getLatestAssessment(knex, customerId) {
+async function getLatestAssessment(knex, customerId, { strict = false } = {}) {
   const row = await knex('lawn_assessments')
     .where({ customer_id: customerId })
     .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
     .first()
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
   if (!row) return null;
   return {
     ...row,
@@ -1099,7 +1099,7 @@ async function getProducts(knex, { strict = false } = {}) {
   }));
 }
 
-async function getAppointmentSubstitutions(knex, serviceId, products) {
+async function getAppointmentSubstitutions(knex, serviceId, products, { strict = false } = {}) {
   if (!(await knex.schema.hasTable('lawn_protocol_product_substitutions'))) return new Map();
   const rows = await knex('lawn_protocol_product_substitutions as lpps')
     .leftJoin('products_catalog as op', 'lpps.original_product_id', 'op.id')
@@ -1111,7 +1111,7 @@ async function getAppointmentSubstitutions(knex, serviceId, products) {
       'op.name as original_product_name',
       'sp.name as substitute_product_name',
     )
-    .catch(() => []);
+    .catch((err) => { if (strict) throw err; return []; });
   const productById = new Map((products || []).map((product) => [String(product.id), product]));
   const map = new Map();
   for (const row of rows) {
@@ -1309,14 +1309,19 @@ async function buildPlanForService(serviceId, options = {}) {
   }
 
   const serviceDate = toServiceDate(service.scheduled_date, now);
+  // strict (job card): every safety read below throws on failure instead of
+  // reading as "nothing on file" — turf profile, catalog, substitutions,
+  // latest assessment, ordinance context, manager approvals. The Lawn plan
+  // and closeout keep the lenient default.
+  const strict = options.strict === true;
   const profile = await knex('customer_turf_profiles')
     .where({ customer_id: service.customer_id, active: true })
     .first()
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
   const profileCompleteness = summarizeTurfProfileCompleteness(profile);
-  const products = await getProducts(knex, { strict: options.strict === true });
-  const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
-  const latestAssessment = await getLatestAssessment(knex, service.customer_id);
+  const products = await getProducts(knex, { strict });
+  const substitutions = await getAppointmentSubstitutions(knex, service.id, products, { strict });
+  const latestAssessment = await getLatestAssessment(knex, service.customer_id, { strict });
   const stressFlags = latestAssessment?.stress_flags || {};
   // One resolved city for BOTH the ordinance query and the property gate the
   // panel displays — the restriction must be labeled with the city it was
@@ -1339,7 +1344,7 @@ async function buildPlanForService(serviceId, options = {}) {
     serviceDate,
     grassTrack: trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
-  }).catch(() => null);
+  }).catch((err) => { if (strict) throw err; return null; });
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const baseLines = parseProtocolLines(visit?.primary, 'base');
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
@@ -1562,6 +1567,7 @@ async function buildPlanForService(serviceId, options = {}) {
         rateUnit: item.mix?.rateUnit,
       })),
     serviceDate: etDateString(serviceDate),
+    strict,
   });
   for (const block of managerApprovals.blocks) blocks.push(block);
   for (const warning of managerApprovals.warnings) warnings.push(warning);

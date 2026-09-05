@@ -929,3 +929,21 @@ describe('waveguard-plan-engine helpers', () => {
     });
   });
 });
+
+describe('buildPlanForService strict mode (job-card hook P1)', () => {
+  const { buildPlanForService } = require('../services/waveguard-plan-engine');
+  const service = { id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' };
+  const knex = (table) => {
+    const chain = {};
+    for (const m of ['leftJoin', 'where', 'select', 'orderBy']) chain[m] = () => chain;
+    chain.first = () => (table === 'scheduled_services as ss'
+      ? Promise.resolve(service)
+      : { catch: (fn) => Promise.resolve().then(() => fn(new Error('db down'))) });
+    return chain;
+  };
+  knex.schema = { hasTable: async () => false };
+
+  test('strict: a failed safety read (turf profile) throws instead of reading as "nothing on file"', async () => {
+    await expect(buildPlanForService('svc1', { db: knex, strict: true })).rejects.toThrow('db down');
+  });
+});
