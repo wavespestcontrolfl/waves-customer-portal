@@ -776,7 +776,7 @@ describe('review request follow-up flow', () => {
     const EmailLib = require('../services/email-template-library');
     let rrUpdate;
     const CLAIM_STAMP = expect.objectContaining({ email_leg_owed_at: null, channel: 'both', sent_at: expect.anything() });
-    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com', customerRow = {} } = {}) => {
+    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com', customerRow = {}, requestRow = {} } = {}) => {
       rrUpdate = jest.fn().mockResolvedValue(1);
       // The claim's sent_at is COALESCE(sent_at, now) — a raw binding.
       db.raw = (sql, bindings) => ({ sql, bindings });
@@ -784,7 +784,7 @@ describe('review request follow-up flow', () => {
       db.mockImplementation((table) => {
         if (table === 'review_requests') {
           const q = chain({
-            first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', token: 'tok-1', status: 'sent' }),
+            first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', token: 'tok-1', status: 'sent', ...requestRow }),
             update: rrUpdate,
           });
           // A real promise: the pre-dispatch owed clear is awaited directly,
@@ -802,6 +802,19 @@ describe('review request follow-up flow', () => {
         throw new Error(`Unexpected table query: ${table}`);
       });
     };
+
+    test('the email names the technician createInline persisted on the row; Adam only as the fallback (r30 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: 'Alex' } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); return { sent: true }; });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Alex' }) }));
+
+      EmailLib.sendTemplate.mockClear();
+      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: null } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-2' }); return { sent: true }; });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Adam' }) }));
+    });
 
     test('emails the SAME ask (same token) and stamps sent_at once — status untouched', async () => {
       wire({ prefs: { review_request: true, email_enabled: true } });

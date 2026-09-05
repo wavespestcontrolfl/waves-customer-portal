@@ -2079,7 +2079,9 @@ const ReviewService = {
         payload: {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
-          tech_name: "Adam",
+          // The technician createInline persisted on the row; Adam only as
+          // the fallback, as the normal email path (GH Codex #3856 r30 P2).
+          tech_name: request.tech_name || "Adam",
           intro_paragraph: GENERIC_EMAIL_INTRO,
         },
         recipientType: "customer",

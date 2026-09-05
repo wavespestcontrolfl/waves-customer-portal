@@ -52,6 +52,7 @@ jest.mock('../services/prep-guide-sender', () => ({
     bed_bug: { label: 'Bed Bug Treatment Service', serviceKeywords: ['bed bug'], emailTemplateKey: 'prep.bed_bug' },
   },
   nextUpcomingVisit: jest.fn(),
+  settleHeldEnrollment: jest.fn(async () => {}),
 }));
 jest.mock('../services/project-email', () => ({ ensureServicePrepToken: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
@@ -1833,7 +1834,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       { customerId: 'c1', pestType: 'flea', serviceId: 'svc-1', templateKey: 'prep.flea' },
       // A second visit of the same customer + pest: stamped too, marker once.
       { customerId: 'c1', pestType: 'flea', serviceId: 'svc-2', templateKey: 'prep.flea' },
-      { customerId: 'c2', pestType: 'bed_bug' },
+      { customerId: 'c2', pestType: 'bed_bug', serviceId: null, templateKey: 'prep.bed_bug' },
     ], 'admin-9');
     // The texted visit page is stamped delivered (the fence every release
     // predicate honours), conditional on the key that rendered — only the
@@ -1847,6 +1848,14 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     expect(insert).toHaveBeenCalledTimes(2);
     expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c1', interaction_type: 'sms_outbound', subject: 'flea prep info sent', admin_user_id: 'admin-9' }));
     expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c2', subject: 'bed_bug prep info sent' }));
+    // The texted guide is the prep delivery: the customer's live step-0
+    // enrolment for that sequence is settled once per customer + pest, as
+    // the manual sender does — the runner consults neither the stamp nor
+    // the marker (GH Codex #3856 r30 P1).
+    const { settleHeldEnrollment } = require('../services/prep-guide-sender');
+    expect(settleHeldEnrollment).toHaveBeenCalledTimes(2);
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c1', 'prep.flea');
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c2', 'prep.bed_bug');
   });
 
   test('markStatementsSent goes through the email delivery\'s own finalized → sent writer, per statement', async () => {

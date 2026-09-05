@@ -112,6 +112,13 @@ const PREP_CONFIG = Object.freeze({
   rodent: {
     label: 'Rodent Service',
     serviceKeywords: ['rodent'],
+    // prep.rodent says trapping comes first and describes trap resets and
+    // later exclusion work — a standalone "Rodent Sanitation Service"
+    // (slot-reservation.js classifies it as its own rodent_sanitation lane)
+    // is a cleanup visit and gets none of it; a combined "Rodent Trapping &
+    // Sanitation" keeps the prep (GH Codex #3856 r30 P1). Inspections stay:
+    // the guide covers them itself.
+    excludeKeywords: [{ keyword: 'sanitation', unless: ['trap', 'exclusion', 'bait', 'control'] }],
     emailTemplateKey: 'prep.rodent',
     smsStandaloneKey: null,
   },
@@ -123,7 +130,11 @@ const PREP_CONFIG = Object.freeze({
     // prep. Mirrors appointment-tagger classifyAppointmentType: wdo /
     // wood destroying / inspection outrank the termite-treatment tag
     // (GH Codex #3856 r20 P1).
-    excludeKeywords: ['inspect', 'monitor', 'wdo', 'wood destroying'].map(inspectionOnly),
+    // A "Termite Warranty Renewal" / bond-only visit (service library
+    // termite_renewal; service-line-configs treats renewal / warranty as
+    // no-application work) applies nothing either — same lift for a
+    // treatment cue in the name (GH Codex #3856 r30 P1).
+    excludeKeywords: ['inspect', 'monitor', 'wdo', 'wood destroying', 'renew', 'warranty', 'bond'].map(inspectionOnly),
     emailTemplateKey: 'prep.termite',
     smsStandaloneKey: null,
   },
@@ -294,6 +305,9 @@ async function automationLaneLive(visit, key, customerId) {
 // manual send through only when no enrolment still awaits the prep step;
 // this closes the held case (step 0 only — an enrolment on its follow-up
 // steps keeps them), and a lost write is logged, never a failed send.
+// The composer's prep-link text is the same confirmed delivery and settles
+// through here too — the runner's step-0 pick consults neither prep_sent_at
+// nor the interaction marker (GH Codex #3856 r30 P1).
 async function settleHeldEnrollment(customerId, templateKey) {
   const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[templateKey];
   if (!sequenceKey) return;
@@ -766,5 +780,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 }
 
 module.exports = {
-  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
+  sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
 };

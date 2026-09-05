@@ -1250,6 +1250,7 @@ async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestinati
  * (GH Codex #3844 r8 P2). Fail-soft: the text already went out.
  */
 async function markPrepGuidesSent(preps, actorId) {
+  const { settleHeldEnrollment } = require('./prep-guide-sender');
   const marked = new Set(); // customer + pest — one replay marker per pair
   for (const { customerId, pestType, serviceId, templateKey } of preps) {
     // The visit-level delivery fence FIRST: a texted page is a delivered
@@ -1278,6 +1279,12 @@ async function markPrepGuidesSent(preps, actorId) {
       subject: `${pestType} prep info sent`,
       body: 'Prep SMS sent via the Communications composer (prep guide link).',
     });
+    // A sequence-backed guide (flea / bed bug / cockroach) texted here is the
+    // prep delivery: the customer's live enrolment still awaiting its prep
+    // step is settled, as the manual sender does, or the runner — which
+    // consults neither the stamp above nor the marker — emails the same
+    // prep on its next tick (GH Codex #3856 r30 P1). Fail-soft inside.
+    await settleHeldEnrollment(customerId, templateKey);
   }
 }
 

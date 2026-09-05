@@ -700,8 +700,24 @@ describe('sendPrepToCustomer', () => {
     // "Termite Liquid Treatment & Inspection" / "Termite Inspection & Spot
     // Treatment" keep their prep (GH Codex #3856 r28 P1).
     const ex = inspectionOnlyExclusions();
-    expect(ex.map((e) => e.keyword)).toEqual(expect.arrayContaining(['%inspect%', '%monitor%', '%wdo%', '%wood destroying%']));
+    // A "Termite Warranty Renewal" / bond-only visit applies nothing either
+    // (GH Codex #3856 r30 P1).
+    expect(ex.map((e) => e.keyword)).toEqual(expect.arrayContaining(['%inspect%', '%monitor%', '%wdo%', '%wood destroying%', '%renew%', '%warranty%', '%bond%']));
     for (const e of ex) expect(e.unless).toEqual(expect.arrayContaining(['%treatment%', '%liquid%', '%foam%', '%trench%', '%spot%', '%drill%', '%applic%']));
+  });
+
+  test('the rodent visit match excludes a sanitation-only visit — a "Rodent Sanitation Service" is a cleanup lane, not trapping (GH Codex #3856 r30 P1)', async () => {
+    upcomingVisitRow = VISIT;
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'rodent', channel: 'email' });
+    const ex = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls
+      .filter(([sql]) => sql.startsWith('(LOWER(service_type) NOT LIKE ? OR LOWER(service_type) LIKE ?'))
+      .map(([, args]) => ({ keyword: args[0], unless: args.slice(1) })));
+    expect(ex).toHaveLength(1);
+    expect(ex[0].keyword).toBe('%sanitation%');
+    // A combined "Rodent Trapping & Sanitation" keeps its prep.
+    expect(ex[0].unless).toEqual(expect.arrayContaining(['%trap%', '%exclusion%']));
+    // No inspection exclusion: prep.rodent covers inspections itself.
+    expect(ex.map((e) => e.keyword)).not.toContain('%inspect%');
   });
 
   test('the lawn visit match excludes inspection and assessment visits — a "Lawn Health Inspection" gets no mow / irrigation / keep-off prep (GH Codex #3856 r22 P1)', async () => {
