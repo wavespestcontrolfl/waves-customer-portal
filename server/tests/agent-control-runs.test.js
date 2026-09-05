@@ -187,8 +187,13 @@ describe('start / step / finish', () => {
     expect(mockToolEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'agent_run', toolName: 'web_search', success: false, metadata: { run_id: h.id, step_id: store.agent_run_steps[1].id } }));
   });
 
-  test('wait / resume / checkpoint move the lifecycle and merge the summary', async () => {
+  test('wait / resume / checkpoint move the lifecycle and merge the summary; an unserialisable checkpoint never throws', async () => {
     const h = await runs.startRun(base);
+    const bad = await runs.startRun({ ...base, sourceRunId: 'bad', idempotencyKey: 'kbad' });
+    const cyclic = {}; cyclic.self = cyclic;
+    await expect(bad.checkpoint(cyclic)).resolves.toBeUndefined();
+    await expect(bad.finish({ summary: { big: BigInt(1) } })).resolves.toBe(true);
+    expect(store.agent_runs.find((r) => r.source_run_id === 'bad')).toMatchObject({ lifecycle: 'terminal', summary: {} });
     await h.wait('human', 'owner reply');
     expect(runRow().lifecycle).toBe('waiting_human');
     await h.resume();

@@ -79,8 +79,27 @@ describe('adapters project onto the canonical shape', () => {
     expect(autonomousRuns.fromRow({ ...base, outcome: 'failed_publish', failure_message: 'boom' })).toMatchObject({ result: 'errored', errorCode: 'failed_publish', detail: 'boom' });
   });
 
-  test('message_drafts: pending waits on the owner; approved / rejected close with a verification', () => {
+  test('message_drafts: the CHECK vocabulary is fully mapped; pending / suggested wait on the owner; decisions close with a verification', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '..', 'models', 'migrations');
+    // the LAST migration (by name = by date) that redefines message_drafts_status_check is the live constraint
+    // up() only — a down() restores the previous vocabulary
+    const up = (src) => src.split(/exports\.down\b/)[0];
+    const defs = fs.readdirSync(dir).sort().flatMap((f) => [...up(fs.readFileSync(path.join(dir, f), 'utf8')).matchAll(/message_drafts_status_check CHECK \(status IN \(([^)]*)\)\)/g)].map((m) => m[1]));
+    expect(defs.length).toBeGreaterThan(0);
+    const statuses = [...defs[defs.length - 1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+    expect(statuses).toEqual(expect.arrayContaining(['pending', 'suggested', 'auto_sent', 'shadow']));
+    for (const st of statuses) expect(messageDrafts.STATUS_MAP).toHaveProperty(st);
+    expect([...messageDrafts.LIVE_STATUSES].sort()).toEqual(['pending', 'suggested']);
     const base = { id: 'd', created_at: ago(5e3), draft_ms: 900, customer_name: 'Pat Lee', intent: 'reschedule' };
+    const suggested = messageDrafts.fromRow({ ...base, status: 'suggested' });
+    expect(suggested).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted' });
+    expect(suggested.steps[2].detail).toBe('Suggested in the thread');
+    expect(messageDrafts.fromRow({ ...base, status: 'revised', approved_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', verification: 'warning' });
+    expect(messageDrafts.fromRow({ ...base, status: 'auto_sent', sent_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' });
+    expect(messageDrafts.fromRow({ ...base, status: 'shadow' })).toMatchObject({ disposition: 'no_action' });
+    expect(messageDrafts.fromRow({ ...base, status: 'brand_new' })).toMatchObject({ lifecycle: 'terminal', result: null });
     const pending = messageDrafts.fromRow({ ...base, status: 'pending' });
     expect(pending).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted', title: 'Reply draft for Pat Lee', laneId: 'sms_draft', durationMs: 900 });
     expect(pending.steps[2].status).toBe('running');

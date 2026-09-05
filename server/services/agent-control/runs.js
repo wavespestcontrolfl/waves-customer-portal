@@ -89,8 +89,15 @@ function clip(value, max) {
   return s.length > max ? s.slice(0, max) : s;
 }
 
+// Serialisation is part of the ledger write: a caller's summary with a
+// cycle or a BigInt must not throw into the business path either.
 function jsonb(value) {
-  return JSON.stringify(value && typeof value === 'object' ? value : {});
+  try {
+    return JSON.stringify(value && typeof value === 'object' ? value : {});
+  } catch (err) {
+    warn('jsonb', err);
+    return '{}';
+  }
 }
 
 async function insertEvent(runId, eventType, message = null, metadata = null) {

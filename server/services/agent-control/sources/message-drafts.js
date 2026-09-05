@@ -16,18 +16,30 @@ const COLUMNS = [
   db.raw("NULLIF(TRIM(CONCAT_WS(' ', c.first_name, c.last_name)), '') AS customer_name"),
 ];
 
-// status → (lifecycle, result, disposition). Anything unknown is terminal
-// with no disposition rather than a guess.
+// message_drafts.status → (lifecycle, result, disposition, verification).
+// The vocabulary is the table's CHECK constraint (message_drafts_status_check,
+// latest definition in models/migrations — drift-tested):
+//   pending    parked in Pending Drafts for the owner
+//   suggested  published into the thread as a suggestion (sms-suggest-mode):
+//              the owner sends, edits or ignores it there — still their call
+//   approved / revised / sent   the owner used it (revised = edited first)
+//   auto_sent  the executor sent it with no human (sms-auto-send)
+//   rejected   the owner declined it
+//   shadow     a shadow-mode draft never shown to anyone
 const STATUS_MAP = Object.freeze({
   pending: { lifecycle: 'waiting_human', disposition: 'drafted' },
-  approved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' },
+  suggested: { lifecycle: 'waiting_human', disposition: 'drafted' },
+  approved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'passed' },
+  revised: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'warning' },
   sent: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' },
-  edited: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'warning' },
+  auto_sent: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' },
   rejected: { lifecycle: 'terminal', result: 'succeeded', disposition: 'rejected', verification: 'failed' },
-  dismissed: { lifecycle: 'terminal', result: 'succeeded', disposition: 'rejected' },
-  expired: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
-  superseded: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
+  shadow: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
 });
+// A status this map does not know is NOT a success: terminal with no
+// result, which the index buckets as failed / attention so it surfaces.
+const UNKNOWN_STATUS = Object.freeze({ lifecycle: 'terminal', result: null });
+const LIVE_STATUSES = Object.freeze(Object.entries(STATUS_MAP).filter(([, m]) => m.lifecycle !== 'terminal').map(([k]) => k));
 
 // Title by (proactive, has a customer name); approval step by outcome.
 const TITLE = Object.freeze({
@@ -38,7 +50,7 @@ const APPROVAL = Object.freeze({ waiting_human: 'running', rejected: 'blocked' }
 const DRAFTS_LINK = '/admin/agents?tab=drafts';
 
 function fromRow(d) {
-  const map = STATUS_MAP[d.status] || { lifecycle: 'terminal', result: 'succeeded' };
+  const map = STATUS_MAP[d.status] || UNKNOWN_STATUS;
   const kind = d.campaign_type || d.purpose ? 'proactive' : 'reply';
   const draftMs = d.draft_ms == null ? null : Number(d.draft_ms);
   const terminalAt = map.lifecycle === 'terminal' ? d.created_at : null;
@@ -59,7 +71,7 @@ function fromRow(d) {
     steps: [
       { key: 'inbound', label: kind === 'proactive' ? 'Trigger' : 'Inbound text', status: 'done', detail: null, ms: null, toolName: null },
       { key: 'draft', label: 'Draft reply', status: 'done', detail: modelLabel(d), ms: draftMs, toolName: null },
-      { key: 'approve', label: 'Owner approval', status: approval, detail: approval === 'running' ? 'Waiting in Pending Drafts' : humanize(d.status), ms: null, toolName: null },
+      { key: 'approve', label: 'Owner approval', status: approval, detail: approval === 'running' ? (d.status === 'suggested' ? 'Suggested in the thread' : 'Waiting in Pending Drafts') : humanize(d.status), ms: null, toolName: null },
     ],
     link: DRAFTS_LINK,
     entity: { type: 'message_draft', id: d.id },
@@ -74,7 +86,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(baseQuery()
       .where((q) => {
-        q.where('d.status', 'pending');
+        q.whereIn('d.status', LIVE_STATUSES);
         q.orWhere(START, '>=', from);
       }), { source: SOURCE, idColumn: 'd.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
@@ -94,4 +106,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, LANE, list, get, fromRow };
+module.exports = { SOURCE, LANE, STATUS_MAP, LIVE_STATUSES, list, get, fromRow };
