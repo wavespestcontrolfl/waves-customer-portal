@@ -732,10 +732,14 @@ function expiredShortRow(row) {
 
 const APPOINTMENT_TOKEN_RE = /^\/appointment\/([A-Za-z0-9_-]{16,})$/i;
 const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
-// /report/project/<vanity-slug>-<12-hex prefix> or /report/project/<32 hex>
-// (project-report-links.js extractProjectReportTokenLookup takes the
-// segment). Judged before the service-report seam, which skips these runs.
-const PROJECT_REPORT_PATH_RE = /^\/report\/project\/([A-Za-z0-9-]+)$/i;
+// /report/project/<vanity-slug>-<12-hex prefix> or /report/project/<32 hex>.
+// The whole segment is taken and project-report-links.js
+// extractProjectReportTokenLookup judges it — the viewer ignores the slug
+// and accepts any characters ahead of the -<12 hex> suffix, so a narrower
+// character class here would let a working vanity URL (`_` / `.` in the
+// slug) slip the immediate-only fence and the account binding (GH Codex
+// #3893 r5 P1). Judged before the service-report seam, which skips these runs.
+const PROJECT_REPORT_PATH_RE = /^\/report\/project\/([^/]+)$/i;
 const PROJECT_REPORT_RUN_RE = /\/report\/project\//i;
 // price-change-notices.js mints notice_token as 16 random bytes, hex.
 const PRICE_CHANGE_TOKEN_RE = /^\/price-change\/([a-f0-9]{32})$/i;
@@ -1113,8 +1117,8 @@ async function checkPriceChangeLinks(ctx) {
     // Stored lowercase; the public route lowercases before its lookup, so a
     // pasted upper-cased token is the same working page and is judged the
     // same (pre-push Codex P1).
-    const notice = await db('price_change_notices').where({ notice_token: token.toLowerCase() }).first('id', 'customer_id', 'status', 'effective_date');
-    if (!notice || !PRICE_CHANGE_LINKABLE_STATUSES.includes(notice.status) || dateOnly(notice.effective_date) < etDateString()) {
+    const notice = await db('price_change_notices').where({ notice_token: token.toLowerCase() }).first('id', 'customer_id', 'status', 'effective_date', 'sent_at');
+    if (!deliveredPriceChangeNotice(notice) || dateOnly(notice.effective_date) < etDateString()) {
       return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
     }
     const bad = await ownedByRecipient(ctx, notice.customer_id, 'price change notice link');
@@ -1926,6 +1930,16 @@ async function buildReceiptLink(customerIds) {
 // never texted from here (GH Codex #3893 r2 P1 ×2); draft / sending rows
 // are its in-flight state.
 const PRICE_CHANGE_LINKABLE_STATUSES = ['sent', 'viewed'];
+// Status alone is not delivery evidence: /price-change/:token flips ANY
+// resolved row to 'viewed' (a draft or unreachable one included), and a
+// failed or blocked attempt keeps the full link in messaging_audit_log —
+// staff opening it while investigating must not turn the composer into the
+// notice's first send. sent_at is stamped only by the lane's success branch
+// (with the sms_sent / email_sent flags), so it is required too (GH Codex
+// #3893 r5 P1).
+function deliveredPriceChangeNotice(notice) {
+  return Boolean(notice && notice.sent_at && PRICE_CHANGE_LINKABLE_STATUSES.includes(notice.status));
+}
 
 /**
  * Price-change notice link — the phone owner's OWN newest DELIVERED notice
@@ -1939,8 +1953,12 @@ async function buildPriceChangeNoticeLink(customerId) {
   const notice = await db('price_change_notices')
     .where({ customer_id: customerId })
     .whereIn('status', PRICE_CHANGE_LINKABLE_STATUSES)
+    .whereNotNull('sent_at')
     .where('effective_date', '>=', etDateString())
-    .orderBy([{ column: 'effective_date', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    // Newest ISSUED, not farthest-out: a later correction effective sooner
+    // must not be shadowed by an older notice with a farther effective date
+    // (GH Codex #3893 r5 P1).
+    .orderBy([{ column: 'sent_at', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
     .first('id', 'notice_token', 'effective_date', 'current_amount_cents', 'new_amount_cents', 'cadence_label', 'status');
   if (!notice) return { url: null, line: '', reason: 'No upcoming price change notice for this customer' };
   const { formatMoney } = require('./price-change-notices');
