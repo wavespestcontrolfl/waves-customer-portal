@@ -562,11 +562,16 @@ async function replyCheck(trx, { prospectId, current, mode, now, followUp }) {
   }
   const own = M.normalizeEmail(gmailClient.ownAddress());
   const froms = messages.map((m) => addressOf(headerOf(m, 'From')));
-  const reason = froms.some((a) => /^(mailer-daemon|postmaster)@/.test(a)) ? 'bounce' : froms.some((a) => a && a !== own) ? 'reply' : null;
+  // …and a SECOND message of our own in the thread is a follow-up already sent by hand from the inbox (the owner
+  // answering silence before the due date): the ONE follow-up the plan allows exists — the scheduled one settles
+  const reason = froms.some((a) => /^(mailer-daemon|postmaster)@/.test(a)) ? 'bounce'
+    : froms.some((a) => a && a !== own) ? 'reply'
+      : froms.filter((a) => a === own).length > 1 ? 'manual_follow_up' : null;
   if (reason) {
     await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_status: 'skipped', follow_up_skipped_reason: reason, updated_at: now });
     logger.info(`[link-outreach] follow-up for ${prospectId} skipped: ${reason}`);
-    return { ok: false, code: reason === 'bounce' ? 'bounced' : 'reply_received', error: reason === 'bounce' ? 'the pitch bounced — no follow-up' : 'the recipient replied — the conversation is the owner\'s; no automatic follow-up' };
+    const refusal = { bounce: ['bounced', 'the pitch bounced — no follow-up'], reply: ['reply_received', 'the recipient replied — the conversation is the owner\'s; no automatic follow-up'], manual_follow_up: ['follow_up_in_thread', 'a follow-up was already sent from the inbox by hand — the one follow-up exists; the scheduled one is settled'] }[reason];
+    return { ok: false, code: refusal[0], error: refusal[1] };
   }
   return { ok: true, inReplyTo: headerOf(messages[0], 'Message-ID') || null };
 }
@@ -1067,6 +1072,15 @@ const signalsOf = (r) => (r.quality_signals && typeof r.quality_signals === 'obj
 const checkedAt = (r) => (signalsOf(r).closure_checked_at ? new Date(signalsOf(r).closure_checked_at).getTime() : 0);
 async function closeSilentConversations({ now = new Date(), limit = 50 } = {}) {
   const out = { scanned: 0, closed: 0, open: 0, failed: 0 };
+  // the authority contract OFF (a redeploy after follow-ups were scheduled): nothing visits a pending follow-up any
+  // more — the drafter and the bridge are gated, no send is attempted — so THIS sweep, gated on the outreach lane
+  // only, settles them (skipped, GATE_OFF_REASON: what the pitch stamps when it schedules under the gate off) and
+  // the conversations below complete on the same run. A leased row belongs to its lease until the stale sweep.
+  if (!isEnabled('linkAuthority')) {
+    out.settled = await db('seo_link_prospects').where({ outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due', 'drafted']).whereNull('claimed_at')
+      .update({ follow_up_status: 'skipped', follow_up_due_at: null, follow_up_skipped_reason: M.GATE_OFF_REASON, updated_at: now });
+    if (out.settled) logger.info(`[link-outreach] closure: ${out.settled} pending follow-up(s) settled — ${M.GATE_OFF_REASON}`);
+  }
   // silent = CONVERSATION_SILENT_ET_DAYS ET calendar days after the last send AT ITS ET WALL-CLOCK TIME (as the
   // follow-up's due date is computed) — never a bare calendar-day compare, which would release an evening send at
   // the 03:50 sweep of the 45th day, half a day early
