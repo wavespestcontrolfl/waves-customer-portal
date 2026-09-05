@@ -906,7 +906,7 @@ async function checkPrepLinks(ctx, preps) {
     // PREP_CONFIG (a project prep page) has no replay guard to satisfy.
     const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === source.templateKey);
     if (pestType && !preps.some((p) => p.customerId === source.customerId && p.pestType === pestType)) {
-      preps.push({ customerId: source.customerId, pestType });
+      preps.push({ customerId: source.customerId, pestType, serviceId: serviceId || null, templateKey: source.templateKey });
     }
   }
   return null;
@@ -1217,7 +1217,24 @@ async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestinati
  * (GH Codex #3844 r8 P2). Fail-soft: the text already went out.
  */
 async function markPrepGuidesSent(preps, actorId) {
-  for (const { customerId, pestType } of preps) {
+  for (const { customerId, pestType, serviceId, templateKey } of preps) {
+    // The visit-level delivery fence FIRST: a texted page is a delivered
+    // page — prep_sent_at is what every release predicate (the manual
+    // sender's releasePrepPage, the executor's releaseFreshPrepClaim) fences
+    // on, so an automation whose fresh claim this text rode cannot hand the
+    // key back after a blocked or failed send and 404 a URL the customer
+    // holds (pre-push Codex P1 on d5c33f299). Conditional on the key that
+    // rendered; a lost stamp never fails a text that already left.
+    if (serviceId) {
+      try {
+        await db('scheduled_services')
+          .where({ id: serviceId, prep_template_key: templateKey })
+          .whereNull('prep_sent_at')
+          .update({ prep_sent_at: db.fn.now() });
+      } catch (stampErr) {
+        logger.warn(`[composer-customer-links] prep_sent_at stamp failed for service ${serviceId}: ${stampErr.message}`);
+      }
+    }
     await db('customer_interactions').insert({
       customer_id: customerId,
       interaction_type: 'sms_outbound',

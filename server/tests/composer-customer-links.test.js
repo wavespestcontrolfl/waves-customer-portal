@@ -1347,14 +1347,14 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     });
 
     test('a resolving token whose guide has an active version, owned by the recipient, passes — its customer + pest ride back for the dedupe marker', async () => {
-      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea' }] });
+      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea', serviceId: null, templateKey: 'prep.flea' }] });
       expect(resolvePrepSource).toHaveBeenCalledWith(PREP);
       expect(loadTemplateByKey).toHaveBeenCalledWith('prep.flea');
     });
 
     test('a pasted prep link with no selected customer adopts the one live owner of the number (null is no trusted id — pre-push Codex P1 on r9); a selected customer who is not the owner refuses', async () => {
       mockBuilders.customers = chainBuilder({ firstRow: { id: 'c1', phone: '+1 (941) 555-0100' }, rows: [{ id: 'c1' }] });
-      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea' }], customerId: 'c1' });
+      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea', serviceId: null, templateKey: 'prep.flea' }], customerId: 'c1' });
       expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c2' })).error).toMatch(/Pick this customer/);
       expect(mockBuilders.customers.whereNull).toHaveBeenCalledWith('deleted_at');
     });
@@ -1797,8 +1797,18 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
   test('markPrepGuidesSent writes the tagger\'s replay-guard marker (sms_outbound + "<pest> prep info sent") per verified prep page (GH Codex #3844 r8 P2)', async () => {
     const insert = jest.fn(async () => [1]);
-    mockBuilders = { customer_interactions: { insert } };
-    await markPrepGuidesSent([{ customerId: 'c1', pestType: 'flea' }, { customerId: 'c2', pestType: 'bed_bug' }], 'admin-9');
+    const stamp = { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), update: jest.fn(async () => 1) };
+    mockBuilders = { customer_interactions: { insert }, scheduled_services: stamp };
+    mockDb.fn = { now: () => 'NOW()' };
+    await markPrepGuidesSent([{ customerId: 'c1', pestType: 'flea', serviceId: 'svc-1', templateKey: 'prep.flea' }, { customerId: 'c2', pestType: 'bed_bug' }], 'admin-9');
+    // The texted visit page is stamped delivered (the fence every release
+    // predicate honours), conditional on the key that rendered — only the
+    // prep that carried a visit (pre-push Codex P1 on d5c33f299).
+    expect(stamp.where).toHaveBeenCalledTimes(1);
+    expect(stamp.where).toHaveBeenCalledWith({ id: 'svc-1', prep_template_key: 'prep.flea' });
+    expect(stamp.whereNull).toHaveBeenCalledWith('prep_sent_at');
+    expect(stamp.update).toHaveBeenCalledWith({ prep_sent_at: expect.anything() });
+    expect(stamp.update.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
     expect(insert).toHaveBeenCalledTimes(2);
     expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c1', interaction_type: 'sms_outbound', subject: 'flea prep info sent', admin_user_id: 'admin-9' }));
     expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c2', subject: 'bed_bug prep info sent' }));

@@ -1112,6 +1112,64 @@ async function finalizeSentRun(run, result) {
   return { status, updated: updated || { ...run, status } };
 }
 
+// Claim → send → settle / release for a prep run happen under the manual
+// sender's per-customer `prep-send:<customer>` lock — the same lease the
+// Communications composer's prep-link send and the Send prep guide button
+// take — so neither can text this visit's page between this run's fresh
+// claim and its release (pre-push Codex P1 on d5c33f299). A held lease is a
+// transient failure: nothing was claimed, so the retry path re-runs the
+// attempt later. Non-prep runs and prep runs without a customer recipient
+// take no lock (there is no manual path to collide with).
+const PREP_LOCK_HELD = 'prep send lock held by another sender';
+async function withPrepSendLock(run, fn) {
+  const customerId = isPrepRun(run) && String(run.recipient_type || '') === 'customer' ? run.recipient_id : null;
+  if (!customerId) return fn();
+  const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+  const out = await runExclusive(`prep-send:${customerId}`, fn, { recordHealth: false, waitForSlot: false });
+  if (wasLockSkipped(out)) throw new Error(PREP_LOCK_HELD);
+  return out;
+}
+
+// One attempt's claim → provider → finalize, with the fresh-claim release
+// on a conclusive no-delivery (prepUndelivered). Returns the finalized run
+// row, or { skipReason } when the page belongs to another guide; rethrows a
+// send failure for executeRun's retry / fail decision.
+async function dispatchRun(run, automation, executionPayload) {
+  const prepClaim = await claimPrepPageForRun(run);
+  if (!prepClaim.owned) return { skipReason: 'prep page owned by another guide' };
+  let prepDispatched = false;
+  try {
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: run.template_key,
+      versionId: run.template_version_id || undefined,
+      to: run.recipient_email,
+      payload: executionPayload,
+      recipientType: run.recipient_type,
+      recipientId: run.recipient_id,
+      triggerEventId: run.trigger_event_id,
+      automationRunId: run.id,
+      idempotencyKey: run.idempotency_key,
+      categories: ['email_template_automation', `automation_${run.automation_key}`],
+      suppressionGroupKey: automation.suppression_group_key || undefined,
+      // Fires immediately before the provider call — the dispatch boundary.
+      onQueued: () => { prepDispatched = true; },
+    });
+    const { status, updated } = await finalizeSentRun(run, result);
+    await settlePrepAfterSend(run, prepClaim, status);
+    return { updated };
+  } catch (err) {
+    // A fresh claim this attempt conclusively did not deliver on is handed
+    // back NOW — before a retry as much as before the final failure: a
+    // retried attempt finds the page keyed and reads it as owned-not-fresh,
+    // so a claim carried into the retry would survive a conclusive final
+    // failure and pin the visit to a guide nobody received (GH Codex #3856
+    // r24 P2). The retry re-claims fresh, or is skipped if another guide
+    // took the page meanwhile — the right answer either way.
+    if (prepUndelivered(prepClaim, prepDispatched, err)) await releaseFreshPrepClaim(run);
+    throw err;
+  }
+}
+
 async function finalizeFailedRun(run, err, attemptNumber, retryPolicy) {
   const [failed] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'failed',
@@ -1176,9 +1234,6 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     attempt: attemptNumber,
   });
   const claimedRun = { ...run, ...running };
-  // Prep-page claim bookkeeping for the catch below (see prepUndelivered).
-  let prepClaim = { owned: true, fresh: false };
-  let prepDispatched = false;
 
   try {
     const storedPayload = asObject(claimedRun.payload);
@@ -1194,38 +1249,12 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     if (conditionFailure) {
       return markRunSkipped(claimedRun, conditionFailure, { guard: 'conditions', attempt: attemptNumber });
     }
-    prepClaim = await claimPrepPageForRun(claimedRun);
-    if (!prepClaim.owned) {
-      return markRunSkipped(claimedRun, 'prep page owned by another guide', { guard: 'prep_page_owned', attempt: attemptNumber });
+    const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
+    if (outcome.skipReason) {
+      return markRunSkipped(claimedRun, outcome.skipReason, { guard: 'prep_page_owned', attempt: attemptNumber });
     }
-
-    const result = await EmailTemplates.sendTemplate({
-      templateKey: claimedRun.template_key,
-      versionId: claimedRun.template_version_id || undefined,
-      to: claimedRun.recipient_email,
-      payload: executionPayload,
-      recipientType: claimedRun.recipient_type,
-      recipientId: claimedRun.recipient_id,
-      triggerEventId: claimedRun.trigger_event_id,
-      automationRunId: claimedRun.id,
-      idempotencyKey: claimedRun.idempotency_key,
-      categories: ['email_template_automation', `automation_${claimedRun.automation_key}`],
-      suppressionGroupKey: resolvedAutomation.suppression_group_key || undefined,
-      // Fires immediately before the provider call — the dispatch boundary.
-      onQueued: () => { prepDispatched = true; },
-    });
-    const { status, updated } = await finalizeSentRun(claimedRun, result);
-    await settlePrepAfterSend(claimedRun, prepClaim, status);
-    return updated;
+    return outcome.updated;
   } catch (err) {
-    // A fresh claim this attempt conclusively did not deliver on is handed
-    // back NOW — before a retry as much as before the final failure: a
-    // retried attempt finds the page keyed and reads it as owned-not-fresh,
-    // so a claim carried into the retry would survive a conclusive final
-    // failure and pin the visit to a guide nobody received (GH Codex #3856
-    // r24 P2). The retry re-claims fresh, or is skipped if another guide
-    // took the page meanwhile — the right answer either way.
-    if (prepUndelivered(prepClaim, prepDispatched, err)) await releaseFreshPrepClaim(claimedRun);
     if (attemptNumber < retryPolicy.maxAttempts) {
       return scheduleRetry(claimedRun, err, attemptNumber, retryPolicy, now);
     }
