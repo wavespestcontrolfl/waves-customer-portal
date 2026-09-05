@@ -136,3 +136,10 @@ All four palette/card tests passed, including desktop/mobile integration cases.
 The production build passed. Desktop 1440px and mobile 390px browser captures
 were inspected using the real palette with synthetic responses; the failure
 remained visible and Confirm stayed absent after a follow-up.
+
+The pre-push review identified the parallel HTTP-error path. Caught failures
+now persist through the same callback, including cancellation errors. Six
+palette/card tests pass with both HTTP 200 handled failures and HTTP 409
+responses on desktop/mobile. HTTP 409 was also exercised in the real palette
+browser fixture at both widths; inspected captures retain the error and no
+Confirm button. Build passed again.

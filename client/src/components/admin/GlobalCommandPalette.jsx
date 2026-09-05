@@ -351,7 +351,7 @@ function GlobalCommandPalette(_props, ref) {
   const paletteRef = useModalFocus(open);
 
   const onActionResolved = useCallback((action, decision, body) => {
-    const failed = decision === 'confirm' && body.success === false;
+    const failed = body.success === false;
     const status = failed ? 'failed' : decision === 'confirm' ? 'confirmed' : 'cancelled';
     const warning = failed ? (body.result?.error || 'The action could not be completed') : (body.result?.warning || null);
     setPendingActions(previous => previous.map(item => item.id === action.id

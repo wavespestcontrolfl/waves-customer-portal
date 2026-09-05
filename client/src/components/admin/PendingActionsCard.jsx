@@ -202,6 +202,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       if (onResolved) onResolved(action, decision, body);
     } catch (err) {
       setStatus(action.id, "failed", err.message);
+      if (onResolved) onResolved(action, decision, { success: false, result: { error: err.message } });
     }
   };
 
