@@ -252,6 +252,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
       void Promise.resolve(ctx.revertHandoff(packet.attempt))
         .catch((err) => logger.warn(`[voice-relay] abandoned-transfer revert failed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}: ${err.message}`));
     }
+    revertLateWrites(ctx, packet.attempt, late); // a timed-out full write landing after this revert is undone too
     return 'The call has ended. Do not say anything else and do not call any more tools.';
   }
   // Speak, then end the relay leg: /relay-complete reads reason 'transfer'

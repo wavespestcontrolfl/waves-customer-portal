@@ -446,6 +446,22 @@ describe('codex r3 follow-ups', () => {
     expect(revertHandoff).toHaveBeenCalledWith(writeHandoff.mock.calls[0][0].attempt);
     expect(ctx.say).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
+    // Full write timed out, fallback confirmed, THEN the hangup: the pending full write is cleaned up when it lands too.
+    jest.useFakeTimers();
+    let settleFull; const full = new Promise((r) => { settleFull = r; });
+    let ended2 = false;
+    const wh2 = jest.fn().mockReturnValueOnce(full).mockImplementationOnce(async () => { ended2 = true; return { rows: 1, contextAvailable: false }; });
+    const rv2 = jest.fn(async () => 1);
+    const { ctx: ctx2 } = ctxFor({ writeHandoff: wh2, revertHandoff: rv2, sessionEnded: () => ended2 });
+    const p2 = executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx2);
+    await jest.advanceTimersByTimeAsync(4010);
+    expect(await p2).toMatch(/call has ended/);
+    settleFull({ rows: 1, contextAvailable: true });
+    await jest.advanceTimersByTimeAsync(0);
+    jest.useRealTimers();
+    await new Promise((r) => setImmediate(r));
+    expect(rv2).toHaveBeenCalledTimes(2); // the current stamp, then the late full write
+    expect(ctx2.endForTransfer).not.toHaveBeenCalled();
     const convo = new RelayConversation({ callSid: 'CA-se', from: '+19415551234', send: jest.fn() });
     const tctx = convo._buildToolCtx();
     expect(tctx.sessionEnded()).toBe(false);
