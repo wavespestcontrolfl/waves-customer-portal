@@ -1053,6 +1053,9 @@ describe('buildReceiptLink', () => {
     // never a homeowner quick link (pre-push Codex P0).
     expect(mockBuilders.invoices.whereNull).toHaveBeenCalledWith('payer_id');
     expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('token');
+    // Re-share only: first receipt delivery (template + receipt_sent_at
+    // stamp) is InvoiceService.sendReceipt's (GH Codex #3893 r8 P1).
+    expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('receipt_sent_at');
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
     expect(r.line).toBe(`Here is your receipt for invoice INV-1042: ${r.url}\n\n`);
     expect(r.immediateOnly).toBeUndefined();
@@ -1151,6 +1154,9 @@ describe('buildProjectReportLink', () => {
     expect(q.whereNotNull).toHaveBeenCalledWith('sent_at');
     expect(q.orWhere).toHaveBeenCalledWith({ delivery_status: 'legacy_sent' });
     expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
+    // Stamped first; legacy rows by creation among themselves (id is a
+    // random UUID, not chronological — r8 P2).
+    expect(mockBuilders.projects.orderByRaw).toHaveBeenCalledWith('sent_at DESC NULLS LAST, created_at DESC, id DESC');
     expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/project/dana-${'f'.repeat(12)}`);
     // The title rides the email path's type-gated fee scrub (projectTitle),

@@ -1909,7 +1909,8 @@ const RECEIPT_INVOICE_STATUSES = ['paid', 'refunded'];
  * invoice (payer_id) is the payer's AP inbox's alone: its receipt shows the
  * payer's billing address, AP email and payment method, and receipt delivery
  * already suppresses the homeowner text for it (pre-push Codex P0) — never
- * selected here. Raw permanent URL, nothing minted.
+ * selected here. Delivered receipts only (receipt_sent_at). Raw permanent
+ * URL, nothing minted.
  */
 const RECEIPT_CANDIDATES = 20;
 // When the invoice settled, from the linked payment the receipt viewer
@@ -1929,6 +1930,13 @@ async function buildReceiptLink(customerIds) {
     .whereIn('status', RECEIPT_INVOICE_STATUSES)
     .whereNull('payer_id')
     .whereNotNull('token')
+    // A re-share only: first receipt delivery is InvoiceService.sendReceipt's
+    // (the invoice_receipt template, the receipt_sent_at stamp closeout-status
+    // and the receipt queue read as delivered) — a composer text of an
+    // unsent receipt would leave that stamp empty, so the queue sends a
+    // duplicate later while the admin workflow reports it outstanding (GH
+    // Codex #3893 r8 P1; same ruling as price notices, r2).
+    .whereNotNull('receipt_sent_at')
     // A bounded recent window; the pick below orders by the linked
     // payment's settlement event, which the row alone cannot.
     .orderByRaw('COALESCE(paid_at, updated_at, created_at) DESC, id DESC')
@@ -2078,7 +2086,9 @@ async function buildProjectReportLink(customerIds) {
       .whereNotNull('report_token')
       // A migrated legacy delivery without sent_at sorts after every
       // stamped one (it predates the stamp).
-      .orderByRaw('sent_at DESC NULLS LAST, id DESC')
+      // … by creation among themselves — projects.id is a random UUID, not
+      // a chronological key (r8 P2).
+      .orderByRaw('sent_at DESC NULLS LAST, created_at DESC, id DESC')
       .offset(offset)
       .limit(PAGE);
     project = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;
