@@ -102,9 +102,10 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [] }) {
   return {
     lookup_refs: lookupRefs,
+    lookup_results: lookupResults,
     // Customer-book lookups consumed on this leg — the per-call anti-fishing
     // budget continues across the reconnect (codex r4 P2).
     lookups_used: Number(lookupsUsed) || 0,
@@ -308,6 +309,7 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         // stamp (best-effort) did not land (codex r3 P2).
         leadCaptured: legs.some((seg) => seg.lead_captured === true),
         lookupsUsed: legs.reduce((max, seg) => Math.max(max, Number(seg.lookups_used) || 0), 0),
+        lookupResults: [...new Set(legs.flatMap((seg) => Array.isArray(seg.lookup_results) ? seg.lookup_results.filter((result) => typeof result === 'string') : []))],
         lookupRefs: legs.flatMap((seg) => Array.isArray(seg.lookup_refs) ? seg.lookup_refs : [])
           .filter((entry) => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' && typeof entry[1] === 'string'),
         // The earliest leg's start = the call's start (null when no leg recorded one).

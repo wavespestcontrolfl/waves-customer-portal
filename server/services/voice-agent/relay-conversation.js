@@ -587,6 +587,7 @@ class RelayConversation {
     // OPAQUE per-call handles — raw customer ids never cross the model
     // boundary in either direction, so the model can only reference accounts
     // this call actually looked up (an invented ref resolves to nothing).
+    this._lookupResults = []; // already-redacted lookup tool results for verified resume context
     this._lookupRefs = new Map(); // 'C1' -> customerId
     this._lookupRefsByCustomer = new Map(); // customerId -> 'C1'
     // Per-CALL lookup budget. lookup_customer is the one tool an anonymous
@@ -1688,6 +1689,7 @@ class RelayConversation {
     this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
     // …and so do the customer-book lookups already spent (codex r4 P2).
     this._priorLookupsUsed = Math.max(this._priorLookupsUsed, Number(state.lookupsUsed) || 0);
+    this._lookupResults = [...new Set([...(state.lookupResults || []), ...this._lookupResults])];
     for (const [ref, customerId] of (state.lookupRefs || [])) {
       if (this._lookupRefs.has(ref)) continue;
       this._lookupRefs.set(ref, customerId);
@@ -1900,7 +1902,7 @@ class RelayConversation {
     if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
       this._resumeSeeded = true;
       this.messages.push(
-        { role: 'user', content: `[Earlier in this call, before the line dropped — the caller may pick up where this left off]\n${this._resume.segmentsText}` },
+        { role: 'user', content: `[Earlier in this call, before the line dropped — the caller may pick up where this left off]\n${this._resume.segmentsText}\n[Previously issued account lookup results — same redacted access rules apply]\n${this._lookupResults.join('\n')}` },
         { role: 'assistant', content: 'Understood — I have what we covered before the line dropped.' },
       );
     }
@@ -2116,6 +2118,7 @@ class RelayConversation {
           // must not tell staff a failed lookup succeeded, codex r1 P2).
           const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
           const toolOk = !sentinel && toolCtx.toolFailed !== true;
+          if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
           this._toolOutcomes.push({ name: block.name, ok: toolOk });
           this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
@@ -2279,6 +2282,7 @@ class RelayConversation {
           startedAt: this._startedAt,
           lookupsUsed: this._priorLookupsUsed + this._lookupsUsed,
           lookupRefs: [...this._lookupRefs.entries()],
+          lookupResults: this._lookupResults,
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)
