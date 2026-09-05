@@ -177,6 +177,28 @@ describe('siteone internals', () => {
     expect(s1._internals.requestPermitted(undefined, pinned)).toBe(false);
   });
 
+  test('the login fill binds both fields to the ONE visible password form — a newsletter email input ahead of it is never the username; two visible forms abort (r15 P1)', () => {
+    const { fillLoginForm, SELECTORS: S } = s1._internals;
+    const field = (name, extra = {}) => ({ name, value: '', events: [], focus() {}, dispatchEvent(e) { this.events.push(e.type); }, offsetParent: {}, ...extra });
+    const mkForm = (action, fields) => ({ getAttribute: () => action, querySelector: () => fields.user || null });
+    const pw = field('password'); const user = field('username');
+    const form = mkForm('/login', { user }); pw.form = form; user.form = form;
+    const newsletter = field('email');
+    const hiddenPw = field('password', { offsetParent: null });
+    global.location = { hostname: 'www.siteone.com', protocol: 'https:', href: 'https://www.siteone.com/en/login' };
+    global.document = { querySelectorAll: (sel) => (sel === S.loginPass ? [hiddenPw, pw] : [newsletter, user]) };
+    global.Event = class { constructor(type) { this.type = type; } };
+    try {
+      expect(fillLoginForm({ user: 'u@x', pw: 'p', userSel: S.loginUser, passSel: S.loginPass })).toBe('ok');
+      expect(user.value).toBe('u@x'); expect(pw.value).toBe('p');
+      expect(newsletter.value).toBe(''); // the document-wide first email input is untouched
+      const pw2 = field('password', { form }); global.document.querySelectorAll = (sel) => (sel === S.loginPass ? [pw, pw2] : [user]);
+      expect(fillLoginForm({ user: 'u@x', pw: 'p', userSel: S.loginUser, passSel: S.loginPass })).toBe('ambiguousform');
+      const orphan = field('password'); orphan.form = mkForm('/login', {}); global.document.querySelectorAll = (sel) => (sel === S.loginPass ? [orphan] : []);
+      expect(fillLoginForm({ user: 'u@x', pw: 'p', userSel: S.loginUser, passSel: S.loginPass })).toBe('nofields');
+    } finally { delete global.location; delete global.document; delete global.Event; }
+  });
+
   test('every selector lives in the frozen SELECTORS map', () => {
     expect(Object.isFrozen(SELECTORS)).toBe(true);
     for (const k of ['loginUser', 'loginPass', 'searchInput', 'qtyInput', 'addToCart', 'cartTotal', 'cardField', 'mfaField', 'billToAccount', 'placeOrder', 'orderNumber']) expect(typeof SELECTORS[k]).toBe('string');

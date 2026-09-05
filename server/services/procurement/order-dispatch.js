@@ -579,7 +579,10 @@ function claimIneligibility({ product, request, vendor }) {
 async function resolveClaimVendor(trx, { request, registry, deadAdapters = null, login = null }) {
   const m = meta(request.metadata);
   if (!m.vendorId) return { skipped: 'no_vendor' };
-  const vendor = await trx('vendors').where({ id: m.vendorId }).first('id', 'name', 'code', 'active');
+  // Locked: a vendor edit (password rotation, account change) between the
+  // login prefetch and this claim commits after it, and the version check
+  // below sees the prefetch's row (Codex #3853 r15 P1).
+  const vendor = await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at');
   const adapterKey = adapterKeyFor(vendor);
   if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
   if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
@@ -597,11 +600,11 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null,
   // so a missing login hands the request back (retryable once the owner
   // stores it) instead of parking a claim as no_credentials (Codex #3853 r12
   // P2). The login was read by prefetchVendorLogin BEFORE this transaction
-  // opened (see there); a vendor that changed between the prefetch and the
-  // lock is not claimed on a login read for another vendor — skipped without
-  // a bell, the next run re-reads it.
+  // opened (see there); a login read for another vendor OR an older version
+  // of this row (its password / account changed in between) is not claimed
+  // on — skipped without a bell, the next run re-reads it.
   if (!adapter.loginRequired) return { vendor, adapterKey, m };
-  if (!login || login.vendorId !== vendor.id) return { skipped: 'vendor_changed_at_claim' };
+  if (!login || login.vendorId !== vendor.id || login.version !== rowVersion(vendor)) return { skipped: 'vendor_changed_at_claim' };
   if (typeof adapter.loginConfigured === 'function' && adapter.loginConfigured(login.credentials) !== true) return { skipped: 'adapter_unconfigured' };
   return { vendor, adapterKey, m, credentials: login.credentials };
 }
@@ -615,14 +618,18 @@ async function resolveClaimVendor(trx, { request, registry, deadAdapters = null,
 // from inside the transaction would wait forever (pre-push P1). A lookup that
 // THROWS is run-level for this adapter: nothing written. Null when the
 // request's vendor needs no login (the claim re-resolves the vendor under lock).
+const rowVersion = (row) => (row && row.updated_at != null ? new Date(row.updated_at).toISOString() : null);
+
 async function prefetchVendorLogin(conn, requestId, registry) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first('metadata');
   const vendorId = request ? meta(request.metadata).vendorId : null;
-  const vendor = vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active') : null;
+  const vendor = vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active', 'updated_at') : null;
   const adapterKey = adapterKeyFor(vendor);
   const adapter = adapterKey ? registry[adapterKey] : null;
   if (!adapter || !adapter.loginRequired) return null;
-  try { return { vendorId: vendor.id, credentials: await getVendorLoginCredentials(conn, vendor.id) }; }
+  // version = the vendor row's updated_at at read time: the claim re-reads it
+  // under lock and refuses a login read from an older row (Codex #3853 r15 P1).
+  try { return { vendorId: vendor.id, version: rowVersion(vendor), credentials: await getVendorLoginCredentials(conn, vendor.id) }; }
   catch (e) { const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; err.adapterKey = adapterKey; throw err; }
 }
 

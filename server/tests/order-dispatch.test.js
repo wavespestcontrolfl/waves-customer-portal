@@ -887,6 +887,25 @@ test('a login-required vendor without its stored login is handed back before any
   expect(await dispatch.canAutoOrder({ vendor: mockState.vendor })).toBe(true); // the default mock login is complete
 });
 
+test('a vendor row that changed between the login prefetch and the locked claim is not claimed on the stale login — skipped, no bell, no ledger row (Codex #3853 r15 P1)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true, updated_at: '2026-09-05T00:00:00.000Z' };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  // The password is rotated while the prefetch is reading it: the row the claim locks is newer than the one the login came from.
+  getVendorLoginCredentials.mockImplementationOnce(async () => { mockState.vendor = { ...mockState.vendor, updated_at: '2026-09-05T00:00:01.000Z' }; return { email: 'a@b.c', password: 'old', accountNumber: '123' }; });
+  const place = jest.fn();
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place });
+  expect(r).toEqual({ requestId: 'req-1', skipped: 'vendor_changed_at_claim' });
+  expect(place).not.toHaveBeenCalled();
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(notify).not.toHaveBeenCalled();
+  // Same row version → the claim proceeds on the prefetched login (dry run parks as before)
+  const place2 = jest.fn(async () => ({ dryRun: true, amountCents: 9900, externalOrderNumber: null, evidence: {} }));
+  expect(await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place: place2 })).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
+});
+
 test('a credential lookup that THROWS is run-level: nothing claimed, nothing parked failed, the adapter is dead for the run (pre-push P1)', async () => {
   const { getVendorLoginCredentials } = require('../services/vendor-credentials');
   getVendorLoginCredentials.mockRejectedValueOnce(new Error('connection reset'));

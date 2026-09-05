@@ -55,7 +55,7 @@
  *   err.ambiguous = true = the submit click happened and the outcome is
  *     unknown: needs_review, never retried.
  */
-/* global document, location */ // page.evaluate bodies run in the browser
+/* global document, location, Event */ // page.evaluate bodies run in the browser
 const logger = require('../../logger');
 const { _internals: filler } = require('../../seo/browser-form-filler');
 const { uploadEvidence } = require('../../seo/signup-evidence');
@@ -235,6 +235,40 @@ async function clearCart(page) {
   return page.locator(SELECTORS.cartLine).count();
 }
 
+// Runs INSIDE the page (page.evaluate serializes it — no closures, browser
+// globals only). The login form is the ONE visible password field's form, and
+// the username field is resolved inside THAT form: a document-wide first
+// match would take an unrelated `input[name="email"]` (a newsletter field
+// ahead of the form) and park a valid login as login_rejected (Codex #3853
+// r15 P1). Returns a verdict string; the caller maps it.
+function fillLoginForm({ user, pw, userSel, passSel }) {
+  const h = location.hostname.toLowerCase();
+  if (location.protocol !== 'https:' || !(h === 'siteone.com' || h.endsWith('.siteone.com'))) return 'offhost';
+  const visiblePw = Array.from(document.querySelectorAll(passSel)).filter((el) => !!el.offsetParent);
+  if (visiblePw.length > 1) return 'ambiguousform';
+  const p = visiblePw[0];
+  if (!p) return 'nofields';
+  // Where the credentials would POST: the password field's owning form,
+  // its action resolved against the page — HTTPS on siteone.com or a
+  // subdomain, or nothing is typed. SITEONE_BOT_ALLOWED_HOSTS widens the
+  // egress lock for assets, never for a credential post (pre-push P0).
+  const form = p.form;
+  if (!form) return 'badform';
+  let action;
+  try { action = new URL(form.getAttribute('action') || '', location.href); } catch { return 'badform'; }
+  const ah = action.hostname.toLowerCase();
+  if (action.protocol !== 'https:' || !(ah === 'siteone.com' || ah.endsWith('.siteone.com'))) return 'badform';
+  const u = form.querySelector(userSel);
+  if (!u) return 'nofields';
+  for (const [el, v] of [[u, user], [p, pw]]) {
+    el.focus();
+    el.value = v;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return 'ok';
+}
+
 async function login(page, creds) {
   const loginUrl = creds.loginUrl && isTrustedSiteOneUrl(creds.loginUrl) ? creds.loginUrl : DEFAULT_LOGIN_URL;
   const attempt = async () => {
@@ -242,31 +276,8 @@ async function login(page, creds) {
     if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone login aborted: navigation redirected off the trusted host');
     await page.locator(SELECTORS.loginPass).first().waitFor({ state: 'visible', timeout: 30000 });
     // Host check + both writes in ONE page-context execution (veseris.js).
-    const filled = await page.evaluate(({ user, pw, userSel, passSel }) => {
-      const h = location.hostname.toLowerCase();
-      if (location.protocol !== 'https:' || !(h === 'siteone.com' || h.endsWith('.siteone.com'))) return 'offhost';
-      const u = document.querySelector(userSel);
-      const p = document.querySelector(passSel);
-      if (!u || !p) return 'nofields';
-      // Where the credentials would POST: the password field's owning form,
-      // its action resolved against the page — HTTPS on siteone.com or a
-      // subdomain, or nothing is typed. SITEONE_BOT_ALLOWED_HOSTS widens the
-      // egress lock for assets, never for a credential post (pre-push P0).
-      const form = p.form;
-      if (!form) return 'badform';
-      let action;
-      try { action = new URL(form.getAttribute('action') || '', location.href); } catch { return 'badform'; }
-      const ah = action.hostname.toLowerCase();
-      if (action.protocol !== 'https:' || !(ah === 'siteone.com' || ah.endsWith('.siteone.com'))) return 'badform';
-      for (const [el, v] of [[u, user], [p, pw]]) {
-        el.focus();
-        el.value = v;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      return 'ok';
-    }, { user: creds.email || creds.username, pw: creds.password, userSel: SELECTORS.loginUser, passSel: SELECTORS.loginPass });
-    const FILL_ABORT = { offhost: 'redirected off the trusted host', nofields: 'login fields not found', badform: 'the login form would post credentials off the trusted host — nothing typed' };
+    const filled = await page.evaluate(fillLoginForm, { user: creds.email || creds.username, pw: creds.password, userSel: SELECTORS.loginUser, passSel: SELECTORS.loginPass });
+    const FILL_ABORT = { offhost: 'redirected off the trusted host', nofields: 'login fields not found', ambiguousform: 'more than one visible login form — nothing typed', badform: 'the login form would post credentials off the trusted host — nothing typed' };
     if (filled !== 'ok') throw runLevel(`siteone login aborted: ${FILL_ABORT[filled] || filled}`);
     const submit = page.locator(SELECTORS.loginSubmit).first();
     await submit.click().catch(() => page.locator(SELECTORS.loginPass).first().press('Enter'));
@@ -678,5 +689,5 @@ module.exports = {
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, EVIDENCE_PREFIX },
+  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, fillLoginForm, EVIDENCE_PREFIX },
 };
