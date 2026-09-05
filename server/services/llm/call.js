@@ -124,11 +124,23 @@ function parseLooseJson(text) {
 // dispatchWithFallback lane recovers repairable output instead of burning the
 // leg as empty_json.
 function parseRepairedJson(raw) {
+  raw = String(raw);
   let out = '';
   let inString = false;
   let escaped = false;
-  for (const ch of String(raw)) {
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
     if (!inString) {
+      // Only remove trailing commas between tokens; quoted values and keys
+      // can legitimately contain comma/bracket sequences.
+      if (ch === ',') {
+        let next = i + 1;
+        while (next < raw.length && /\s/.test(raw[next])) next += 1;
+        if (raw[next] === ']' || raw[next] === '}') {
+          i = next - 1;
+          continue;
+        }
+      }
       if (ch === '"') inString = true;
       out += ch;
       continue;
@@ -146,8 +158,7 @@ function parseRepairedJson(raw) {
     }
     out += ch;
   }
-  const fixed = out.replace(/,\s*([\]}])/g, '$1'); // trailing commas between tokens
-  try { return JSON.parse(fixed); } catch { return null; }
+  try { return JSON.parse(out); } catch { return null; }
 }
 
 // Per-provider image block shapes (normalized input: { data: base64, mimeType }).
