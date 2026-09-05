@@ -372,6 +372,21 @@ describe('the conversation side', () => {
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('Caller: my ants are back'))).toBe(true);
   });
 
+  test('the kill switch flipped after the reconnect rendered: neither the turn-time nor the close-time reload runs (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
+    const convo = resumedConvo({ callSid: 'CA-kill' });
+    await convo._resumeReady;
+    delete process.env.GATE_VOICE_RELAY_RECOVERY; // unset = the live kill
+    builder.first = jest.fn(async () => ({ metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back' }] } }));
+    await convo._runLoop('hello').catch(() => {});
+    expect(convo._resumeReloads || 0).toBe(0);
+    expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
+    convo.leadCaptured = true;
+    await convo.end('ws_close');
+    expect(convo._resume.segmentsText).toBe('');
+  });
+
   test('a proven prior lead restores the capture state (lead_captured true; the session may end when the caller is done) (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1' } } });

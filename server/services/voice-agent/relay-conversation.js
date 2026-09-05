@@ -1699,7 +1699,7 @@ class RelayConversation {
     // PR 2B: the earlier segment(s) of a reconnected call ride the USER role
     // the same way, ONCE, as played text — the model resumes instead of
     // starting over. Only when the row proved the reconnect.
-    if (!this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS) {
+    if (!this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS && require('./relay-recovery').isRecoveryGateOn()) {
       // The previous socket appends its segment only after draining its turn
       // chain and in-flight writes; a reconnect that wins that race read an
       // empty list. Reload (bounded) on each of the first turns until the
@@ -2004,7 +2004,7 @@ class RelayConversation {
       // segment is refreshed ONCE here (bounded): the floor below must see
       // the earlier caller turns even when the caller never spoke on this
       // leg, so the turn-time reload never ran (hook P1).
-      if (this._resumedHint && (!this._resume || !this._resume.segmentsText)) {
+      if (this._resumedHint && (!this._resume || !this._resume.segmentsText) && require('./relay-recovery').isRecoveryGateOn()) {
         try {
           const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
           if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh);
