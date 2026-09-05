@@ -134,17 +134,22 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
   // Only recommend slots the day panel actually renders — the ranked list
   // and days[].slots are built separately server-side, and a pick with no
   // matching panel row would select a slot the times panel never shows.
-  // Nearby days lead; the engine's rank order is preserved within each
-  // group via a stable sort.
+  // Nearby slots lead; within a group the engine's `rank` (lower = better;
+  // /book's curated list arrives chronological, so list order is NOT the
+  // ranking) decides, and list order only breaks ties or stands in when no
+  // rank rides along (estimate slots are engine-ordered).
+  const rankOf = (panelSlot, s) => [panelSlot.rank, s.rank].find(Number.isFinite) ?? null;
   const picks = (slots || [])
     .map((s, i) => {
       const day = s.date ? byDate.get(s.date) : null;
       // slotId first (two technicians can share a date + start), else time.
       const panelSlot = day?.slots?.find((x) => (s.slotId ? x.slotId === s.slotId : x.start_time === s.start_time));
-      return panelSlot ? { s: panelSlot, day, i, nearby: !!panelSlot.nearby } : null;
+      return panelSlot ? { s: panelSlot, day, i, nearby: !!panelSlot.nearby, rank: rankOf(panelSlot, s) } : null;
     })
     .filter(Boolean)
-    .sort((a, b) => (Number(b.nearby) - Number(a.nearby)) || (a.i - b.i))
+    .sort((a, b) => (Number(b.nearby) - Number(a.nearby))
+      || ((a.rank != null && b.rank != null) ? a.rank - b.rank : 0)
+      || (a.i - b.i))
     .slice(0, 3);
   if (!picks.length) return null;
   return (

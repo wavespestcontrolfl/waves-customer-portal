@@ -44,6 +44,31 @@ describe('SchedulePicker', () => {
   });
 });
 
+describe('PickerBestTimes ordering', () => {
+  it('orders same-nearby picks by engine rank, not list order, before slicing to three', () => {
+    // /book hands the curated list chronologically; rank 1 sits last.
+    const slots = [
+      { start_time: '08:00', start_label: '8:00 AM', nearby: false, rank: 3 },
+      { start_time: '10:00', start_label: '10:00 AM', nearby: false, rank: 4 },
+      { start_time: '12:00', start_label: '12:00 PM', nearby: false, rank: 2 },
+      { start_time: '14:00', start_label: '2:00 PM', nearby: false, rank: 1 },
+    ];
+    const day = { ...DAY, nearby: false, slots };
+    render(
+      <SchedulePicker
+        availability={{ days: [day] }}
+        rankedSlots={slots.map((s) => ({ date: day.date, start_time: s.start_time }))}
+        selectedDate={day.date}
+        onSelectDay={() => {}}
+        selectedSlot={null}
+        onSelectSlot={() => {}}
+      />,
+    );
+    const chips = screen.getAllByRole('button', { name: /Pick/ }).map((b) => b.textContent);
+    expect(chips.map((t) => t.match(/\d{1,2}:\d{2} [AP]M/)[0])).toEqual(['2:00 PM', '12:00 PM', '8:00 AM']);
+  });
+});
+
 describe('pickerRange', () => {
   it('starts the grid at a first opening that sits past the two-week window', () => {
     // A picked date 15 days out must not draw two weeks of empty cells first.
