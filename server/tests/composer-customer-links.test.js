@@ -48,10 +48,11 @@ jest.mock('../services/appointment-card-request', () => ({
 jest.mock('../services/appointment-link', () => ({ buildAppointmentLink: jest.fn() }));
 jest.mock('../services/prep-guide-sender', () => ({
   PREP_CONFIG: {
-    flea: { label: 'Flea Treatment', serviceKeyword: 'flea', emailTemplateKey: 'prep.flea' },
-    bed_bug: { label: 'Bed Bug Treatment Service', serviceKeyword: 'bed bug', emailTemplateKey: 'prep.bed_bug' },
+    flea: { label: 'Flea Treatment', serviceKeywords: ['flea'], emailTemplateKey: 'prep.flea' },
+    bed_bug: { label: 'Bed Bug Treatment Service', serviceKeywords: ['bed bug'], emailTemplateKey: 'prep.bed_bug' },
   },
   nextUpcomingVisit: jest.fn(),
+  settleHeldEnrollment: jest.fn(async () => {}),
 }));
 jest.mock('../services/project-email', () => ({ ensureServicePrepToken: jest.fn() }));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
@@ -867,10 +868,31 @@ describe('buildCardRequestLink', () => {
 });
 
 describe('buildPrepGuideLink', () => {
+  // The post-mint key re-read (r27 P0): what the row carries after the mint.
+  let keyedAfterMint = null;
   beforeEach(() => {
     nextUpcomingVisit.mockReset();
     ensureServicePrepToken.mockReset().mockResolvedValue('a'.repeat(32));
     loadTemplateByKey.mockReset().mockResolvedValue({ template: { id: 't1' }, activeVersion: { id: 'tv1' } });
+    keyedAfterMint = null;
+    mockBuilders = { scheduled_services: { where: jest.fn(function () { return this; }), first: jest.fn(async () => ({ prep_template_key: keyedAfterMint })) } };
+  });
+
+  test('a concurrent mint for ANOTHER guide won the unkeyed visit: the line names the guide the page renders, or refuses one the composer cannot name (GH Codex #3856 r27 P0)', async () => {
+    nextUpcomingVisit.mockImplementation(async (_ids, keyword) => (
+      keyword === 'flea' ? { id: 'v-flea', customer_id: 'c1', scheduled_date: '2026-09-20', prep_template_key: null, prep_expires_at: null } : null
+    ));
+    keyedAfterMint = 'prep.bed_bug';
+    let r = await buildPrepGuideLink(['c1']);
+    expect(ensureServicePrepToken).toHaveBeenCalledWith('v-flea', 'prep.flea');
+    expect(r.line).toContain('Bed Bug Treatment Service');
+    expect(r.line).not.toContain('Flea Treatment');
+    expect(r.prep.pestType).toBe('bed_bug');
+
+    keyedAfterMint = 'prep.wildlife';
+    r = await buildPrepGuideLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/cannot name/);
   });
 
   test('a guide with no active version refuses — the public page would 404 (same predicate as prep-public)', async () => {
@@ -891,7 +913,7 @@ describe('buildPrepGuideLink', () => {
     expect(nextUpcomingVisit).toHaveBeenCalledWith(['c1', 'c2'], 'flea');
     expect(nextUpcomingVisit).toHaveBeenCalledWith(['c1', 'c2'], 'bed bug');
     expect(r.url).toBeNull();
-    expect(r.reason).toMatch(/No upcoming flea, bed bug, or cockroach visit/);
+    expect(r.reason).toMatch(/No upcoming visit of a prep-guide service/);
     expect(ensureServicePrepToken).not.toHaveBeenCalled();
   });
 
@@ -1346,15 +1368,28 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       loadTemplateByKey.mockReset().mockResolvedValue({ template: { id: 't1' }, activeVersion: { id: 'tv1' } });
     });
 
+    test('the composer line must name the guide the page renders: a mismatched label refuses, an operator-edited line is not checked (GH Codex #3856 r27 P0)', async () => {
+      const mismatched = `Your prep checklist for the upcoming Rodent Service is here: portal.wavespestcontrol.com/prep/${PREP}`;
+      expect((await bearerLinkSendCheck(mismatched, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/names Rodent Service but the page now shows the Flea Treatment guide/);
+      const matching = `Your prep checklist for the upcoming Flea Treatment is here: https://portal.wavespestcontrol.com/prep/${PREP}`;
+      expect((await bearerLinkSendCheck(matching, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(true);
+      expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).ok).toBe(true);
+    });
+
+    test('the in-lock recheck returns the entries it resolved NOW — the post-send bookkeeping uses these, not the pre-lock ones (pre-push Codex P1 on e8b68e9cc)', async () => {
+      const { recheckPrepLinks } = require('../services/composer-customer-links');
+      expect(await recheckPrepLinks(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea', serviceId: null, templateKey: 'prep.flea' }] });
+    });
+
     test('a resolving token whose guide has an active version, owned by the recipient, passes — its customer + pest ride back for the dedupe marker', async () => {
-      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea' }] });
+      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea', serviceId: null, templateKey: 'prep.flea' }] });
       expect(resolvePrepSource).toHaveBeenCalledWith(PREP);
       expect(loadTemplateByKey).toHaveBeenCalledWith('prep.flea');
     });
 
     test('a pasted prep link with no selected customer adopts the one live owner of the number (null is no trusted id — pre-push Codex P1 on r9); a selected customer who is not the owner refuses', async () => {
       mockBuilders.customers = chainBuilder({ firstRow: { id: 'c1', phone: '+1 (941) 555-0100' }, rows: [{ id: 'c1' }] });
-      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea' }], customerId: 'c1' });
+      expect(await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, preps: [{ customerId: 'c1', pestType: 'flea', serviceId: null, templateKey: 'prep.flea' }], customerId: 'c1' });
       expect((await bearerLinkSendCheck(PREP_BODY, '9415550100', { trustedCustomerId: 'c2' })).error).toMatch(/Pick this customer/);
       expect(mockBuilders.customers.whereNull).toHaveBeenCalledWith('deleted_at');
     });
@@ -1797,11 +1832,57 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
   test('markPrepGuidesSent writes the tagger\'s replay-guard marker (sms_outbound + "<pest> prep info sent") per verified prep page (GH Codex #3844 r8 P2)', async () => {
     const insert = jest.fn(async () => [1]);
-    mockBuilders = { customer_interactions: { insert } };
-    await markPrepGuidesSent([{ customerId: 'c1', pestType: 'flea' }, { customerId: 'c2', pestType: 'bed_bug' }], 'admin-9');
+    const stamp = { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), update: jest.fn(async () => 1) };
+    mockBuilders = { customer_interactions: { insert }, scheduled_services: stamp };
+    mockDb.fn = { now: () => 'NOW()' };
+    await markPrepGuidesSent([
+      { customerId: 'c1', pestType: 'flea', serviceId: 'svc-1', templateKey: 'prep.flea' },
+      // A second visit of the same customer + pest: stamped too, marker once.
+      { customerId: 'c1', pestType: 'flea', serviceId: 'svc-2', templateKey: 'prep.flea' },
+      { customerId: 'c2', pestType: 'bed_bug', serviceId: null, templateKey: 'prep.bed_bug' },
+    ], 'admin-9');
+    // The texted visit page is stamped delivered (the fence every release
+    // predicate honours), conditional on the key that rendered — only the
+    // prep that carried a visit (pre-push Codex P1 on d5c33f299).
+    expect(stamp.where).toHaveBeenCalledTimes(2);
+    expect(stamp.where).toHaveBeenCalledWith({ id: 'svc-1', prep_template_key: 'prep.flea' });
+    expect(stamp.where).toHaveBeenCalledWith({ id: 'svc-2', prep_template_key: 'prep.flea' });
+    expect(stamp.whereNull).toHaveBeenCalledWith('prep_sent_at');
+    expect(stamp.update).toHaveBeenCalledWith({ prep_sent_at: expect.anything() });
+    expect(stamp.update.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
     expect(insert).toHaveBeenCalledTimes(2);
     expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c1', interaction_type: 'sms_outbound', subject: 'flea prep info sent', admin_user_id: 'admin-9' }));
     expect(insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id: 'c2', subject: 'bed_bug prep info sent' }));
+    // The texted guide is the prep delivery: the customer's live step-0
+    // enrolment for that sequence is settled once per customer + pest, as
+    // the manual sender does — the runner consults neither the stamp nor
+    // the marker (GH Codex #3856 r30 P1).
+    const { settleHeldEnrollment } = require('../services/prep-guide-sender');
+    expect(settleHeldEnrollment).toHaveBeenCalledTimes(2);
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c1', 'prep.flea');
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c2', 'prep.bed_bug');
+  });
+
+  test('markPrepGuidesSent settles the enrolment BEFORE the replay marker, and a failed marker insert neither skips the settle nor aborts the batch (GH Codex #3856 r31 P1)', async () => {
+    const { settleHeldEnrollment } = require('../services/prep-guide-sender');
+    settleHeldEnrollment.mockClear();
+    const insert = jest.fn(async () => { throw new Error('customer_interactions down'); });
+    const stamp = { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), update: jest.fn(async () => 1) };
+    mockBuilders = { customer_interactions: { insert }, scheduled_services: stamp };
+    mockDb.fn = { now: () => 'NOW()' };
+    await expect(markPrepGuidesSent([
+      { customerId: 'c1', pestType: 'flea', serviceId: 'svc-1', templateKey: 'prep.flea' },
+      { customerId: 'c2', pestType: 'cockroach', serviceId: 'svc-2', templateKey: 'prep.cockroach' },
+    ], 'admin-9')).resolves.toBeUndefined();
+    // Both customers' live step-0 enrolments are settled — the duplicate-send
+    // fence does not ride on the audit write — and the settle ran first.
+    expect(settleHeldEnrollment).toHaveBeenCalledTimes(2);
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c1', 'prep.flea');
+    expect(settleHeldEnrollment).toHaveBeenCalledWith('c2', 'prep.cockroach');
+    expect(settleHeldEnrollment.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
+    expect(insert).toHaveBeenCalledTimes(2);
+    // The delivered-page stamp still lands for each visit.
+    expect(stamp.update).toHaveBeenCalledTimes(2);
   });
 
   test('markStatementsSent goes through the email delivery\'s own finalized → sent writer, per statement', async () => {
