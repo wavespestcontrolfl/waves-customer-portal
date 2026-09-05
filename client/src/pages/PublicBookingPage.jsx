@@ -270,6 +270,10 @@ export default function PublicBookingPage() {
   // clears with the results (a stale "Two openings Tuesday afternoon" line
   // must not sit above the full calendar).
   const [aiSession, setAiSession] = useState(0);
+  // True while the model-backed search is in flight — Continue waits for it
+  // (a late result clears the selection, so advancing meanwhile would land
+  // on the contact step with no time).
+  const [aiSearching, setAiSearching] = useState(false);
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
@@ -765,24 +769,29 @@ export default function PublicBookingPage() {
 
   const runAiSearch = async (query) => {
     const seq = addressLookupSeqRef.current;
-    const res = await fetch(`${API_BASE}/booking/find-slots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, ...slotSearchBody() }),
-    });
-    // Same non-JSON tolerance as loadAvailability (audit S3-17).
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || "We couldn't run that search right now — try again in a moment.");
-    // Address edited mid-search: don't restore this address's result or
-    // capture token onto the new one.
-    if (seq !== addressLookupSeqRef.current) return { summary: data.summary };
-    if (data.capture_token) captureTokenRef.current = data.capture_token;
-    setPickedDate(null);
-    setSelectedDate(null);
-    setSelectedSlot(null);
-    setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [], slots: data.slots || [] });
-    track(FUNNEL_EVENTS.BOOKING_AI_SEARCH_USED);
-    return { summary: data.summary };
+    setAiSearching(true);
+    try {
+      const res = await fetch(`${API_BASE}/booking/find-slots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, ...slotSearchBody() }),
+      });
+      // Same non-JSON tolerance as loadAvailability (audit S3-17).
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "We couldn't run that search right now — try again in a moment.");
+      // Address edited mid-search: don't restore this address's result or
+      // capture token onto the new one.
+      if (seq !== addressLookupSeqRef.current) return { summary: data.summary };
+      if (data.capture_token) captureTokenRef.current = data.capture_token;
+      setPickedDate(null);
+      setSelectedDate(null);
+      setSelectedSlot(null);
+      setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [], slots: data.slots || [] });
+      track(FUNNEL_EVENTS.BOOKING_AI_SEARCH_USED);
+      return { summary: data.summary };
+    } finally {
+      setAiSearching(false);
+    }
   };
 
   const onPickDate = async (date) => {
@@ -846,7 +855,7 @@ export default function PublicBookingPage() {
   const slotLenLabel = service.duration === 60 ? '1-hour' : `${service.duration}-minute`;
   // A pending custom-date lookup will replace the picker (and clear the
   // selection) when it lands — Continue waits for it.
-  const continueDisabled = !selectedSlot || browseLoading;
+  const continueDisabled = !selectedSlot || browseLoading || aiSearching;
 
   return (
     <WavesShell variant="customer" topBar="solid">

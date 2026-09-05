@@ -593,6 +593,11 @@ function RescheduleHero({ data, selectedSlot }) {
     <>
       {move ? (
         <div style={{ margin: '8px 2px 20px' }}>
+          {/* The move's classification stays, as the eyebrow (no chip —
+              owner 2026-09-04): a schedule move must never read as weather. */}
+          <div data-gt="eyebrow" style={DOC_EYEBROW}>
+            {SCHEDULE_MOVE_LEADS[move.reasonCode] ? 'Schedule update' : 'Moved for weather'}
+          </div>
           {/* h2, not h1: the glass type ramp sizes headings by tag, and the
               owner sized the weather flow one step down (2026-07-30). */}
           <h2 style={{ margin: 0, fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.15, color: S.text }}>
@@ -806,22 +811,68 @@ function ReserviceHero({ data, bookableLanes, selectedLane, onSelectLane, detail
 
 // ───────────────────────────── the page ─────────────────────────────
 
+// Everything that differs between the two flows lives here, as data — the
+// page body below makes no per-flow decisions of its own.
 const FLOWS = {
   reschedule: {
     endpoint: 'reschedule',
     notFound: { title: "We couldn't find that appointment", body: "This link may have expired. Text or call us and we'll get you scheduled." },
     loadErrorTitle: "We couldn't load that appointment",
+    // A card when the loaded state cannot proceed to the picker, else null.
+    blocked: (data) => (data?.state !== 'reschedulable' ? <IneligibleCard data={data} /> : null),
+    Hero: RescheduleHero,
+    Success: ({ result, data }) => <RescheduleSuccessCard result={result} service={data?.service} />,
+    canConfirm: () => true,
+    actionLabel: ({ submitting }) => (submitting ? 'Moving…' : `Confirm ${'→'}`),
+    payload: ({ slot, data }) => ({
+      date: slot.date,
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      technician_id: slot.technician_id || null,
+      // Scope pin: the series behavior this page DISCLOSED, and the anchor
+      // date that promise was framed against. A gate flip or a dispatch
+      // race between render and commit 409s (SCOPE_CHANGED) instead of
+      // silently doing something the customer wasn't told.
+      disclosed_collective: !!data?.collectiveAnchor,
+      disclosed_current_date: data?.current?.date || null,
+    }),
+    // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.
+    stateChangedCodes: ['SCOPE_CHANGED'],
+    stateChangedMessage: 'The scheduling details for your plan just updated — here is the latest.',
+    // Inside the picked row so the heads-up sits directly under the Confirm
+    // it applies to — never below the fold.
+    pickedNote: (data, slot) => (!data.collectiveAnchor && slotReanchors(data, slot.date)
+      ? <div className="wpk-picked-note"><ReanchorNote /></div>
+      : null),
   },
   reservice: {
     endpoint: 'reservice',
     notFound: { title: "We couldn't find that link", body: "This link may have expired. Text or call us and we'll get your re-service scheduled." },
     loadErrorTitle: "We couldn't load your re-service options",
+    blocked: (data) => {
+      if (data?.state === 'not_eligible') return <NotEligibleCard data={data} />;
+      if (data?.state === 'already_booked') return <ReserviceCoveredView data={data} />;
+      return null;
+    },
+    Hero: ReserviceHero,
+    Success: ({ result }) => <ReserviceSuccessCard result={result} />,
+    canConfirm: ({ lane }) => !!lane,
+    actionLabel: ({ submitting, lane }) => (submitting ? 'Booking…' : !lane ? 'Pick what needs another look above' : `Book ${'→'} free`),
+    payload: ({ slot, lane, details }) => ({
+      lane,
+      date: slot.date,
+      start_time: slot.start_time,
+      details: details.trim() || undefined,
+    }),
+    // ALREADY_BOOKED / NOT_ELIGIBLE: office booked one, plan lapsed.
+    stateChangedCodes: ['ALREADY_BOOKED', 'NOT_ELIGIBLE'],
+    stateChangedMessage: 'Your re-service options just updated — here is the latest.',
+    pickedNote: () => null,
   },
 };
 
 export default function ScheduleFlowPage({ flow }) {
   const cfg = FLOWS[flow];
-  const isReservice = flow === 'reservice';
   const { token } = useParams();
   useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
@@ -937,29 +988,10 @@ export default function ScheduleFlowPage({ flow }) {
   };
 
   const confirm = async () => {
-    if (!selectedSlot || submitting) return;
-    if (isReservice && !selectedLane) return;
+    if (!selectedSlot || submitting || !cfg.canConfirm({ lane: selectedLane })) return;
     setSubmitting(true);
     setSubmitError(null);
-    const payload = isReservice
-      ? {
-        lane: selectedLane,
-        date: selectedSlot.date,
-        start_time: selectedSlot.start_time,
-        details: details.trim() || undefined,
-      }
-      : {
-        date: selectedSlot.date,
-        start_time: selectedSlot.start_time,
-        end_time: selectedSlot.end_time,
-        technician_id: selectedSlot.technician_id || null,
-        // Scope pin: the series behavior this page DISCLOSED, and the
-        // anchor date that promise was framed against. A gate flip or a
-        // dispatch race between render and commit 409s (SCOPE_CHANGED)
-        // instead of silently doing something the customer wasn't told.
-        disclosed_collective: !!data?.collectiveAnchor,
-        disclosed_current_date: data?.current?.date || null,
-      };
+    const payload = cfg.payload({ slot: selectedSlot, data, lane: selectedLane, details });
     try {
       const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, {
         method: 'POST',
@@ -991,16 +1023,12 @@ export default function ScheduleFlowPage({ flow }) {
           : 'That time was just taken — here are the latest open times.');
         return;
       }
-      // The plan's state changed under us — reschedule's SCOPE_CHANGED (gate
-      // flip / dispatch race on the disclosed series scope), re-service's
-      // ALREADY_BOOKED / NOT_ELIGIBLE (office booked one, plan lapsed).
-      // Reload so the page re-renders the truthful state.
-      if (body.code === 'SCOPE_CHANGED' || body.code === 'ALREADY_BOOKED' || body.code === 'NOT_ELIGIBLE') {
+      // The plan's state changed under us (see each flow's
+      // stateChangedCodes) — reload so the page re-renders the truthful state.
+      if (cfg.stateChangedCodes.includes(body.code)) {
         setSelectedSlot(null);
         await load();
-        setSubmitError(body.error || (isReservice
-          ? 'Your re-service options just updated — here is the latest.'
-          : 'The scheduling details for your plan just updated — here is the latest.'));
+        setSubmitError(body.error || cfg.stateChangedMessage);
         return;
       }
       setSubmitError(body.error || 'Something went wrong. Please try again, or text us and we\'ll help.');
@@ -1014,19 +1042,9 @@ export default function ScheduleFlowPage({ flow }) {
   if (loading) return <Page><SkeletonCard /></Page>;
   if (notFound) return <Page><NotFoundCard title={cfg.notFound.title} body={cfg.notFound.body} /></Page>;
   if (loadError) return <Page><LoadErrorCard title={cfg.loadErrorTitle} onRetry={load} /></Page>;
-  if (result) {
-    return (
-      <Page>
-        {isReservice ? <ReserviceSuccessCard result={result} /> : <RescheduleSuccessCard result={result} service={data?.service} />}
-      </Page>
-    );
-  }
-  if (isReservice) {
-    if (data?.state === 'not_eligible') return <Page><NotEligibleCard data={data} /></Page>;
-    if (data?.state === 'already_booked') return <Page><ReserviceCoveredView data={data} /></Page>;
-  } else if (data?.state !== 'reschedulable') {
-    return <Page><IneligibleCard data={data} /></Page>;
-  }
+  if (result) return <Page><cfg.Success result={result} data={data} /></Page>;
+  const blocked = cfg.blocked(data);
+  if (blocked) return <Page>{blocked}</Page>;
 
   const lanes = data?.lanes || [];
   const bookableLanes = lanes.filter((l) => !l.alreadyBooked);
@@ -1034,27 +1052,22 @@ export default function ScheduleFlowPage({ flow }) {
   const days = data?.availability?.days || [];
   const selectedDay = days.find((d) => d.date === selectedDate) || days[0] || null;
 
-  const actionLabel = isReservice
-    ? (submitting ? 'Booking…' : !selectedLane ? 'Pick what needs another look above' : `Book ${'→'} free`)
-    : (submitting ? 'Moving…' : `Confirm ${'→'}`);
+  const actionLabel = cfg.actionLabel({ submitting, lane: selectedLane });
 
   return (
     // Single column at every width (owner ask 2026-07-14) — the page keeps
     // the standard flow reading measure on desktop instead of a two-pane
     // split, so the flow reads identically on phone and desktop.
     <Page>
-      {isReservice ? (
-        <ReserviceHero
-          data={data}
-          bookableLanes={bookableLanes}
-          selectedLane={selectedLane}
-          onSelectLane={setSelectedLane}
-          details={details}
-          onDetails={setDetails}
-        />
-      ) : (
-        <RescheduleHero data={data} selectedSlot={selectedSlot} />
-      )}
+      <cfg.Hero
+        data={data}
+        selectedSlot={selectedSlot}
+        bookableLanes={bookableLanes}
+        selectedLane={selectedLane}
+        onSelectLane={setSelectedLane}
+        details={details}
+        onDetails={setDetails}
+      />
       {blockedLanes.map((lane) => (
         <AlreadyBookedCard key={lane.key} lane={lane} />
       ))}
@@ -1079,15 +1092,11 @@ export default function ScheduleFlowPage({ flow }) {
               data-glass-accent=""
               className="wpk-action-btn"
               onClick={confirm}
-              disabled={submitting || (isReservice && !selectedLane)}
+              disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
             >
               {actionLabel}
             </button>
-            {!isReservice && !data.collectiveAnchor && slotReanchors(data, slot.date) ? (
-              // Inside the picked row so the heads-up sits directly under
-              // the Confirm it applies to — never below the fold.
-              <div className="wpk-picked-note"><ReanchorNote /></div>
-            ) : null}
+            {cfg.pickedNote(data, slot)}
           </>
         )}
         empty={<EmptyTimesCard aiFiltered={aiFiltered} />}

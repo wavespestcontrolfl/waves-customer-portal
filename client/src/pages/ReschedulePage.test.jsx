@@ -465,6 +465,8 @@ describe('ReschedulePage weather-move banner', () => {
     renderPage();
 
     expect(await screen.findByText(/Hi Pat — rain moved your pest control to a dry window/)).toBeInTheDocument();
+    // The classification stays as the eyebrow (no chip).
+    expect(screen.getByText('Moved for weather')).toBeInTheDocument();
     // Matched Was/Now rows with the day-level rain chances.
     expect(screen.getByText('Was')).toBeInTheDocument();
     expect(screen.getByText('Now')).toBeInTheDocument();
@@ -487,6 +489,7 @@ describe('ReschedulePage weather-move banner', () => {
 
     await screen.findByText(/Hey Pat/);
     expect(screen.queryByText('Was')).not.toBeInTheDocument();
+    expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
     expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
   });
 
@@ -561,6 +564,8 @@ describe('ReschedulePage weather-move banner', () => {
 
     // Date-neutral: the banner can be read days after the move, so no "today".
     expect(await screen.findByText(/Hi Pat — our schedule ran behind, so we moved your pest control to a new window/)).toBeInTheDocument();
+    expect(screen.getByText('Schedule update')).toBeInTheDocument();
+    expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
     expect(screen.queryByText(/dry window|better window/)).not.toBeInTheDocument();
     // The was/now story still tells the move.
     expect(screen.getByText('Was')).toBeInTheDocument();

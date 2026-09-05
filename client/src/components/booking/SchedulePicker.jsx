@@ -410,14 +410,13 @@ export default function SchedulePicker({
   slotDetail = null,
   empty = null,
   frame = 'card',
-  styles = true,
 }) {
   const days = availability?.days || [];
   const byDate = new Map(days.map((d) => [d.date, d]));
   const selectedDay = byDate.get(selectedDate) || days[0] || null;
   return (
     <>
-      {styles ? <SchedulePickerStyles /> : null}
+      <SchedulePickerStyles />
       {rankedSlots ? (
         <PickerBestTimes
           frame={frame}
