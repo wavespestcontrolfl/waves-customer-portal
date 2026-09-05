@@ -1184,7 +1184,12 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
       if (err.ambiguous) submitted = true;
-      return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env });
+      const parked = await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env });
+      // A refusal the adapter marks adapterDown (SiteOne rejected the stored
+      // login) parks THIS request as usual and takes the adapter out of the
+      // run: its remaining requests stay unclaimed instead of resubmitting
+      // the same rejected credential once each (Codex #3853 r21 P1).
+      return err.adapterDown ? { ...parked, adapterDown: adapterKey } : parked;
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
@@ -1338,7 +1343,11 @@ async function dispatchPasses({ conn, notify, adapters, now, env }) {
     for (const row of rows) {
       seen.add(row.id);
       try {
-        results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters }));
+        const result = await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters });
+        results.push(result);
+        // Not a run-level error — the request parked with its bell — but the
+        // adapter is done for this run (a rejected login: Codex #3853 r21 P1).
+        if (result && result.adapterDown) { deadAdapters.add(result.adapterDown); logger.warn(`[order-dispatch] ${result.adapterDown} is down for this run after request ${row.id} (${result.reason}); its remaining requests wait for the next run`); }
       } catch (err) {
         // An unscoped error (the registry, a transaction) is batch-wide and must
         // not be masked by an earlier adapter-scoped one still held in

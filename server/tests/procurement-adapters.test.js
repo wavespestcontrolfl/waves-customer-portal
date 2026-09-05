@@ -237,7 +237,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     });
     // cartRowChildrenHiddenFirst: inside a visible row, a hidden stale SKU / quantity copy precedes the shown one (r20 P2)
     const child = (spec) => (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
-    const line = (l) => el({ count: 1, visible: true, sub: (sub) => sub === S.cartLineSku ? child({ text: l.sku }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
+    // cartSkuInAttribute: the row's SKU node carries the code in data-product-code and shows unrelated text (r21 P2)
+    const line = (l) => el({ count: 1, visible: true, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: l.sku }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
     const resolve = (sel) => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
@@ -451,12 +452,18 @@ describe('siteone bot cart + tender rules (fake page)', () => {
 
   test('a definitive login rejection is submitted ONCE — no retry with the same credential (vendor lockout; r20 P1)', async () => {
     const { st, deps } = fakeSiteOne({ loginRejects: true });
-    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_rejected' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_rejected', adapterDown: true }); // adapterDown: the dispatcher claims no more SiteOne requests this run (r21 P1)
     expect(st.loginSubmits).toBe(1);
   });
 
   test('inside a visible cart row the SHOWN SKU / quantity node is read, not a hidden stale copy (r20 P2)', async () => {
     const { st, deps } = fakeSiteOne({ cartRowChildrenHiddenFirst: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.addClicked).toBe(1);
+  });
+
+  test('a cart row whose SKU node carries the code in data-product-code passes the exact-cart proof (r21 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ cartSkuInAttribute: true });
     expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
     expect(st.addClicked).toBe(1);
   });
