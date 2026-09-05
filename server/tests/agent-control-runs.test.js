@@ -126,6 +126,15 @@ describe('gate and failure isolation', () => {
     expect(store.agent_runs).toBeUndefined();
   });
 
+  test('an unknown lane id is refused (inert + one warning): a misspelled money lane must not run under the unclassified default', async () => {
+    const h = await runs.startRun({ ...base, laneId: 'blog_drafts' });
+    expect(h.inert).toBe(true);
+    expect(store.agent_runs || []).toHaveLength(0);
+    expect(mockWarn).toHaveBeenCalledWith(expect.stringContaining('unknown lane blog_drafts'));
+    const r = await h.fail({ error: new Error('x'), retryable: true });
+    expect(r.retry).toBe(false);
+  });
+
   test('a workflow-only run (no lane) records with no side-effect class and no tier', async () => {
     const h = await runs.startRun({ workflowId: 'nightly_sweep', sourceSystem: SRC, sourceRunId: 'w1', workItem: { sourceRef: 'w' } });
     expect(h.inert).toBe(false);

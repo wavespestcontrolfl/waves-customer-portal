@@ -53,6 +53,8 @@ const TRANSCRIBED = new Set(['completed', 'summary_only']);
 const V2_VALID = 'valid';
 const TRANSCRIBE_FAILED = 'no_transcription';
 const EXTRACT_FAILED = /_failed$|^api_unavailable$/;
+// extraction landed; the customer / lead write after it did not (its own step)
+const LINK_FAILED = new Set(['customer_creation_failed', 'lead_creation_failed']);
 // PAN quarantine clears recording_url by design; the row's MASKED
 // transcript is still queued work (the processor's transcript-only branch
 // in processAllPending), so the prefilter admits it like a recording.
@@ -69,19 +71,22 @@ function title(c) {
   return parts.join(' ');
 }
 
-// The three stages as steps: transcribe → extract → enrich. A failed
-// transcription fails its own step (nothing after it was attempted); an
-// extraction failure fails the extract step.
+// The stages as steps: transcribe → extract → enrich → link (the customer /
+// lead write). Each failure fails ITS step only — a failed transcription
+// attempts nothing after it; an extraction failure is the extractor's
+// (`extraction_failed` or a v2 failure status), never a later write's
+// (Codex r5); a linkage failure fails the link step with extraction done.
 function stepsFor(c, status, map) {
   const live = map.lifecycle === 'running';
   const extracted = status === 'processed' || c.v2_extraction_status === V2_VALID;
   const transcribeFailed = status === TRANSCRIBE_FAILED;
-  const extractFailed = !transcribeFailed && (map.result === 'errored' || EXTRACT_FAILED.test(c.v2_extraction_status || ''));
+  const extractFailed = status === 'extraction_failed' || EXTRACT_FAILED.test(c.v2_extraction_status || '');
   const transcribed = extracted || TRANSCRIBED.has(c.transcription_status);
   return [
     { key: 'transcribe', label: 'Transcribe', status: transcribeFailed ? 'failed' : stepStatus(transcribed, live), detail: null, ms: null, toolName: null },
     { key: 'extract', label: 'Extract', status: extractFailed ? 'failed' : stepStatus(extracted, live && transcribed), detail: extractFailed && c.v2_extraction_status ? c.v2_extraction_status : modelLabel(c, 'ai_extraction_model', 'ai_extraction_prompt_version'), ms: null, toolName: null },
     { key: 'enrich', label: 'Enrich', status: stepStatus(!!c.enriched, live && extracted), detail: null, ms: null, toolName: null },
+    { key: 'link', label: 'Link customer / lead', status: LINK_FAILED.has(status) ? 'failed' : stepStatus(status === 'processed', live && extracted), detail: LINK_FAILED.has(status) ? humanize(status) : null, ms: null, toolName: null },
   ];
 }
 

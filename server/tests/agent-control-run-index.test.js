@@ -75,8 +75,9 @@ describe('adapters project onto the canonical shape', () => {
     const executing = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), updated_at: ago(40e3), approval_status: 'executing', approval_at: ago(1e3) });
     expect(executing).toMatchObject({ lifecycle: 'running', startedAt: ago(1e3).toISOString(), lastHeartbeatAt: ago(1e3).toISOString(), lastProgressAt: ago(1e3).toISOString(), finishedAt: null });
     // a failed emailed approval names ITS failure (content_email_approvals.last_error), not the parked generation outcome
-    const approvalFailed = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), approval_status: 'failed', approval_at: ago(1e3), approval_error: 'astro PR open failed: 502' });
-    expect(approvalFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'approval_failed', errorMessage: 'astro PR open failed: 502', detail: 'astro PR open failed: 502', finishedAt: ago(1e3).toISOString() });
+    // … and keeps the execution's own span: the decision → the failure (approval_at = the approval row's updated_at for a failed one)
+    const approvalFailed = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), approval_status: 'failed', execution_started_at: ago(30e3), approval_at: ago(1e3), approval_error: 'astro PR open failed: 502' });
+    expect(approvalFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'approval_failed', errorMessage: 'astro PR open failed: 502', detail: 'astro PR open failed: 502', startedAt: ago(30e3).toISOString(), finishedAt: ago(1e3).toISOString(), durationMs: 29e3 });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', trust_build_approved_at: ago(500) })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', finishedAt: ago(500).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'skipped_gate_fail', quality_gate_result: { ok: false } })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'instruction' });
     // an in-app approval flips a parked draft to publishing_* in place (completed_at stays, only updated_at moves): running, active from that claim, kept live by the list predicate however old
@@ -189,7 +190,7 @@ describe('adapters project onto the canonical shape', () => {
     const base = { id: 'c', direction: 'inbound', duration_seconds: 125, created_at: ago(9e5), processing_started_at: ago(8e5), processing_heartbeat_at: ago(10e3), extraction_attempts: 2 };
     const live = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed' });
     expect(live).toMatchObject({ lifecycle: 'running', lastHeartbeatAt: ago(10e3).toISOString(), attempts: 2, laneId: 'call_extraction', title: 'inbound · 2 min' });
-    expect(live.steps.map((s) => s.status)).toEqual(['done', 'running', 'skipped']);
+    expect(live.steps.map((s) => s.status)).toEqual(['done', 'running', 'skipped', 'skipped']);
     // the processor's stage vocabulary: 'valid' is the one extraction success; its *_failed values fail the step; enrichment = the enriched payload
     // every server-side writer of the call_log stage columns
     const fs = require('fs');
@@ -201,15 +202,21 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.V2_VALID).toBe('valid');
     for (const t of callLog.TRANSCRIBED) expect(src).toMatch(new RegExp(`transcription_status: '${t}'`));
     const done = callLog.fromRow({ ...base, processing_status: 'processed', v2_extraction_status: 'valid', transcription_status: 'summary_only', enriched: true });
-    expect(done.steps.map((s) => s.status)).toEqual(['done', 'done', 'done']);
+    expect(done.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'done']);
     const parseFailed = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed', v2_extraction_status: 'schema_failed' });
     expect(parseFailed.steps[1]).toMatchObject({ status: 'failed', detail: 'schema_failed' });
-    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
+    const extractionFailed = callLog.fromRow({ ...base, processing_status: 'extraction_failed' });
+    expect(extractionFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
+    expect(extractionFailed.steps[1].status).toBe('failed');
+    // extraction landed, the lead write did not: the extract step stays done, the link step fails
+    const linkFailed = callLog.fromRow({ ...base, processing_status: 'lead_creation_failed', v2_extraction_status: 'valid', transcription_status: 'completed', enriched: true });
+    expect(linkFailed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'failed']);
+    expect(linkFailed.steps[3].detail).toBe('lead creation failed');
     expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
     // no transcription = the processor's known-failed retry state (its sweep re-runs it, its stats count it failed): errored, the transcribe step failed, nothing after it attempted
     const noTranscript = callLog.fromRow({ ...base, processing_status: 'no_transcription', transcription_status: 'failed' });
     expect(noTranscript).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider', errorCode: 'no_transcription' });
-    expect(noTranscript.steps.map((s) => s.status)).toEqual(['failed', 'skipped', 'skipped']);
+    expect(noTranscript.steps.map((s) => s.status)).toEqual(['failed', 'skipped', 'skipped', 'skipped']);
     expect(runIndex.bucketsOf({ ...noTranscript, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
     expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
     // a fresh, never-claimed call (NULL status) is queued work too

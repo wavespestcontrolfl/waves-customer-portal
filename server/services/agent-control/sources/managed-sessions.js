@@ -95,10 +95,11 @@ async function get(sessionId) {
       .where({ row_kind: 'session_turn', provider_ref: sessionId })
       .orderBy('created_at', 'asc');
     const run = fromRow(row);
+    // a turn row lands after the turn finished: its start is that minus its latency (Codex r5)
     run.steps = turns.map((t, i) => ({
       key: `turn_${i + 1}`, label: `Turn ${i + 1}`, status: t.ok === false ? 'failed' : 'done',
       detail: t.ok === false ? t.error_code || null : null, ms: t.latency_ms == null ? null : Number(t.latency_ms), toolName: null,
-      startedAt: t.created_at, spanId: null,
+      startedAt: new Date(new Date(t.created_at).getTime() - Number(t.latency_ms || 0)), spanId: null,
     }));
     return { run };
   } catch (err) {

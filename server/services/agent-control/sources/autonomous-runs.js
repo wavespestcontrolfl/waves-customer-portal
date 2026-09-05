@@ -11,9 +11,11 @@ const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require
 const SOURCE = 'autonomous_runs';
 const LANE = 'blog_draft';
 // The newest emailed approval on the run (see COLUMNS): while the poller
-// is executing its decision, that decision's time is the run's start.
+// is executing its decision — and once that execution FAILED — the
+// decision's time is the run's start (the failed execution keeps its span:
+// decided_at → the approval row's updated_at, Codex r5).
 const NEWEST_APPROVAL = 'FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1';
-const EXECUTING_AT = `(SELECT CASE WHEN a.status = 'executing' THEN a.decided_at END ${NEWEST_APPROVAL})`;
+const EXECUTION_STARTED_AT = `(SELECT CASE WHEN a.status IN ('executing', 'failed') THEN a.decided_at END ${NEWEST_APPROVAL})`;
 // An in-app approval of a parked draft flips its outcome to publishing_*
 // IN PLACE (autonomous-runner: outcome + updated_at only; completed_at and
 // claimed_at stay) — agent-activity's runStatus reads publishing* as
@@ -22,7 +24,7 @@ const EXECUTING_AT = `(SELECT CASE WHEN a.status = 'executing' THEN a.decided_at
 const PUBLISHING = "outcome LIKE 'publishing%'";
 const PUBLISHING_RE = /^publishing/;
 // Sort / page key = the run's startedAt in fromRow (spanFor), at ms precision.
-const START = () => db.raw(`date_trunc('milliseconds', COALESCE(${EXECUTING_AT}, CASE WHEN ${PUBLISHING} THEN updated_at END, claimed_at, created_at))`);
+const START = () => db.raw(`date_trunc('milliseconds', COALESCE(${EXECUTION_STARTED_AT}, CASE WHEN ${PUBLISHING} THEN updated_at END, claimed_at, created_at))`);
 const ID = 'id';
 const COLUMNS = () => [
   'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
@@ -34,7 +36,9 @@ const COLUMNS = () => [
   'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result', 'trust_build_approved_at',
   // the NEWEST emailed approval on the run decides whether the owner still owes a reply
   db.raw(`(SELECT a.status ${NEWEST_APPROVAL}) AS approval_status`),
-  db.raw(`(SELECT COALESCE(a.decided_at, a.created_at) ${NEWEST_APPROVAL}) AS approval_at`),
+  // the approval's latest event: a failed execution's finish is its updated_at
+  db.raw(`(SELECT COALESCE(CASE WHEN a.status = 'failed' THEN a.updated_at END, a.decided_at, a.created_at) ${NEWEST_APPROVAL}) AS approval_at`),
+  db.raw(`${EXECUTION_STARTED_AT} AS execution_started_at`),
   db.raw(`(SELECT a.last_error ${NEWEST_APPROVAL}) AS approval_error`),
 ];
 // A run parked for the owner (completed_pending_review) stays live until a
@@ -107,6 +111,8 @@ function decisionFor(run, status) {
 // owner replies) and with no finish yet (Codex r1).
 function spanFor(run, decided, decidedAt) {
   if (decided === DECIDED.executing) return { startedAt: decidedAt, finishedAt: null, lastHeartbeatAt: decidedAt };
+  // a failed execution keeps its own span: the decision → the failure
+  if (decided === DECIDED.failed) return { startedAt: run.execution_started_at || run.claimed_at || run.created_at, finishedAt: decidedAt, lastHeartbeatAt: decidedAt };
   if (PUBLISHING_RE.test(run.outcome || '')) return { startedAt: run.updated_at || run.claimed_at || run.created_at, finishedAt: null, lastHeartbeatAt: run.updated_at };
   return {
     startedAt: run.claimed_at || run.created_at,

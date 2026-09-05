@@ -108,8 +108,8 @@ function jsonb(value) {
   }
 }
 
-async function insertEvent(runId, eventType, message = null, metadata = null) {
-  return guarded('run_events', () => db('run_events').insert({
+async function insertEvent(runId, eventType, message = null, metadata = null, conn = db) {
+  return guarded('run_events', () => conn('run_events').insert({
     run_id: runId,
     event_type: clip(eventType, 40),
     message: clip(message, 2000),
@@ -262,6 +262,13 @@ async function startRun(args = {}) {
     return inertHandle(args);
   }
   const laneId = args.laneId ? clip(args.laneId, 80) : null;
+  // an unknown lane would take the unclassified default policy — no
+  // side-effect class, so a money / irreversible lane misspelled here would
+  // regain retries; refuse it (the workflow-only form stays) (Codex r5)
+  if (laneId && !context.isKnownLane(laneId)) {
+    logger.warn(`[agent-runs] startRun refused: unknown lane ${laneId} (source ${clip(args.sourceSystem, 60)})`);
+    return inertHandle(args);
+  }
   const policy = policyFor(laneId);
   const ambient = context.current();
   const traceId = args.traceId || ambient.traceId || context.newTraceId();
@@ -440,7 +447,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     return Number(moved) > 0;
   }
 
-  async function writeArtifacts(artifacts) {
+  async function writeArtifacts(artifacts, conn = db) {
     if (!Array.isArray(artifacts) || !artifacts.length) return;
     const rows = artifacts
       .filter((a) => a && ARTIFACT_KINDS.has(a.kind))
@@ -452,7 +459,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         content_redacted: clip(a.content, 8192),
         redaction_confidence: clip(a.redactionConfidence, 8),
       }));
-    if (rows.length) await guarded('artifacts', () => db('run_artifacts').insert(rows));
+    if (rows.length) await guarded('artifacts', () => conn('run_artifacts').insert(rows));
   }
 
   async function closeAttempt(result, failure = {}) {
@@ -466,10 +473,11 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     }));
   }
 
-  // Shared effects (work item, events) follow ONLY a fenced transition that
-  // moved the run — a stale handle (a newer attempt opened) closes its own
-  // attempt row and nothing else. The run + work-item writes share one
-  // transaction so the pair is atomic.
+  // Shared effects (work item, artifacts, events) follow ONLY a fenced
+  // transition that moved the run — a stale handle (a newer attempt opened)
+  // closes its own attempt row and nothing else — and land INSIDE that
+  // transaction: a reopen racing the commit cannot slip its `resumed` event
+  // in before this attempt's `finished` / artifacts (Codex r5).
   async function finish({ result = 'succeeded', disposition = null, summary = null, artifacts = null } = {}) {
     if (spent()) return false;
     closed = true;
@@ -493,14 +501,14 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
         ...(summary ? { summary: db.raw('summary || ?::jsonb', [jsonb(summary)]) } : {}),
         updated_at: now,
       });
-      if (n && workItemId && res === 'succeeded') await trx('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now });
-      return Number(n) > 0;
+      if (!Number(n)) return false;
+      if (workItemId && res === 'succeeded') await trx('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now });
+      await writeArtifacts(artifacts, trx);
+      await insertEvent(runId, 'finished', null, { result: res, disposition: dispo }, trx);
+      if (dispo) await insertEvent(runId, 'disposition', null, { disposition: dispo }, trx);
+      return true;
     }), false);
-    if (!moved) return false;
-    await writeArtifacts(artifacts);
-    await insertEvent(runId, 'finished', null, { result: res, disposition: dispo });
-    if (dispo) await insertEvent(runId, 'disposition', null, { disposition: dispo });
-    return true;
+    return moved;
   }
 
   async function fail({ error = null, errorCode = null, failureClass = null, retryable = false } = {}) {
@@ -519,21 +527,26 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
       ? { lifecycle: 'queued', result: null, finished_at: null, event: 'retry_scheduled' }
       : { lifecycle: 'terminal', result, finished_at: now, event: 'failed' };
     await closeAttempt(result, { failureClass: klass, errorCode: code, errorMessage: message });
-    const moved = await guarded('fail', () => fenced().update({
-      lifecycle: outcome.lifecycle,
-      result: outcome.result,
-      failure_class: klass,
-      error_code: code,
-      error_message: message,
-      finished_at: outcome.finished_at,
-      last_heartbeat_at: now,
-      lease_expires_at: null,
-      updated_at: now,
-    }), 0);
+    // the transition and its events in one transaction (see finish)
+    const moved = await guarded('fail', () => db.transaction(async (trx) => {
+      const n = await fenced(trx).update({
+        lifecycle: outcome.lifecycle,
+        result: outcome.result,
+        failure_class: klass,
+        error_code: code,
+        error_message: message,
+        finished_at: outcome.finished_at,
+        last_heartbeat_at: now,
+        lease_expires_at: null,
+        updated_at: now,
+      });
+      if (!Number(n)) return false;
+      await insertEvent(runId, outcome.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: outcome.result }, trx);
+      if (isQualityFailure(klass)) await insertEvent(runId, 'eval_candidate', null, { failure_class: klass }, trx);
+      return true;
+    }), false);
     // stale handle: its attempt row carries the failure; the run belongs to a newer attempt
-    if (!Number(moved)) return { retry: false, failureClass: klass, result: null, stale: true };
-    await insertEvent(runId, outcome.event, message, { failure_class: klass, error_code: code, attempt: attemptNo, result: outcome.result });
-    if (isQualityFailure(klass)) await insertEvent(runId, 'eval_candidate', null, { failure_class: klass });
+    if (!moved) return { retry: false, failureClass: klass, result: null, stale: true };
     return { retry: canRetry, failureClass: klass, result: outcome.result };
   }
 
