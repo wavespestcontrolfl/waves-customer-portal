@@ -83,7 +83,7 @@ const card = {
   marginBottom: 20,
 };
 const eyebrow = {
-  fontSize: 12,
+  fontSize: 14,
   textTransform: 'uppercase',
   letterSpacing: '0.08em',
   color: MUTED,
@@ -105,7 +105,7 @@ function TrendArrow({ trend }) {
   const up = TREND_UP.has(trend);
   if (!up && !TREND_DOWN.has(trend)) return null;
   return (
-    <span style={{ color: up ? COLORS.red : COLORS.glassNavy, fontSize: 11, marginLeft: 4 }}>
+    <span style={{ color: up ? COLORS.red : COLORS.glassNavy, fontSize: 14, marginLeft: 4 }}>
       {up ? '▲' : '▼'}
     </span>
   );
@@ -153,7 +153,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 25, color: TEXT, margin: 0 }}>{status.label}</h2>
       </div>
       {statusSummary ? (
-        <p style={{ fontSize: 15, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
+        <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
       ) : null}
       {/* The score pill hides when the reading is still insufficient (score
           null) — the metric may then exist solely to carry the rating picker. */}
@@ -236,10 +236,10 @@ function SupportingMetric({ metric }) {
       marginTop: 14, padding: '8px 14px', background: CARD,
       border: `1px solid ${BORDER}`, borderRadius: 999,
     }}>
-      <span style={{ fontSize: 12, color: MUTED, fontWeight: 600 }}>{metric.caption}</span>
+      <span style={{ fontSize: 14, color: MUTED, fontWeight: 600 }}>{metric.caption}</span>
       <span style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 18, color: TEXT }}>{value}</span>
-      {showOutOf ? <span style={{ fontSize: 12, color: MUTED }}>/ {metric.max}</span> : null}
-      {metric.label && metric.score != null ? <span style={{ fontSize: 12, color: MUTED }}>· {metric.label}</span> : null}
+      {showOutOf ? <span style={{ fontSize: 14, color: MUTED }}>/ {metric.max}</span> : null}
+      {metric.label && metric.score != null ? <span style={{ fontSize: 14, color: MUTED }}>· {metric.label}</span> : null}
       <TrendArrow trend={metric.trend} />
     </div>
   );
@@ -298,12 +298,12 @@ function PestPressureRating({ metric, token, live, onRefreshed, onSettled }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 6 }}>
         {[0, 1, 2, 3, 4, 5].map((n) => (
           <button key={n} type="button" disabled={busy} onClick={() => submit(n)} aria-label={`Rating ${n} of 5`}
-            style={{ padding: '10px 0', borderRadius: 9, border: `1px solid ${BORDER}`, background: COLORS.white, color: TEXT, fontWeight: 700, fontSize: 15, cursor: busy ? 'wait' : 'pointer' }}>{n}</button>
+            style={{ padding: '10px 0', borderRadius: 9, border: `1px solid ${BORDER}`, background: COLORS.white, color: TEXT, fontWeight: 700, fontSize: 16, cursor: busy ? 'wait' : 'pointer' }}>{n}</button>
         ))}
       </div>
-      <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
+      <div style={{ fontSize: 14, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
       {failed && (
-        <div style={{ fontSize: 12, color: '#991B1B', marginTop: 8 }}>
+        <div style={{ fontSize: 14, color: '#991B1B', marginTop: 8 }}>
           Couldn&rsquo;t save your rating — please tap a number to try again.
         </div>
       )}
@@ -590,7 +590,7 @@ export function PestProtectionMap({ defense, print = false }) {
                   <circle cx={n.x} cy={n.y} r="6.5" fill={COLORS.white} stroke={color} strokeWidth="2.5" />
                   <circle cx={n.x} cy={n.y} r="2.5" fill={color} />
                 </g>
-                <text x={n.x} y={n.y + (n.dy > 0 ? n.dy + 4 : n.dy)} textAnchor="middle" fontSize="10" fontWeight="700" fill={TEXT} fontFamily={FONTS.body}>{n.label}</text>
+                <text x={n.x} y={n.y + (n.dy > 0 ? n.dy + 4 : n.dy)} textAnchor="middle" fontSize="14" fontWeight="700" fill={TEXT} fontFamily={FONTS.body}>{n.label}</text>
               </g>
             );
           })}
@@ -605,7 +605,7 @@ export function PestProtectionMap({ defense, print = false }) {
             className="pest-legend-row"
             style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 14, animationDelay: '0.35s' }}
           >
-            <span style={{ color: ringColor, fontWeight: 800, lineHeight: 1.2 }} aria-hidden="true">〰</span>
+            <span style={{ color: ringColor, fontWeight: 700, lineHeight: 1.2 }} aria-hidden="true">〰</span>
             <span style={{ color: BODY }}><strong style={{ color: TEXT }}>Exterior perimeter</strong> — <span style={{ color: perimeterActive ? COLORS.glassNavy : COLORS.glassNavy, fontWeight: 700 }}>{perimeterActive ? 'Treated' : 'Monitored'}</span>{perimeter.detail ? ` · ${perimeter.detail}` : ''}</span>
           </div>
         ) : null}
@@ -637,7 +637,7 @@ export function PestPrimaryMove({ primaryMove }) {
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
       {primaryMove.impact ? <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
       {primaryMove.dueLabel ? (
-        <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.glassNavy, borderRadius: 999, fontSize: 12, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
+        <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.glassNavy, borderRadius: 999, fontSize: 14, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
       ) : null}
     </section>
   );
@@ -652,7 +652,7 @@ export function PestCustomerConcern({ concern }) {
   return (
     <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${COLORS.glassNavy}` }}>
       <div data-gt="eyebrow" style={eyebrow}>{concern.headline || 'We looked into what you flagged'}</div>
-      <p style={{ fontSize: 15, color: TEXT, lineHeight: 1.5, margin: '0 0 6px', fontStyle: 'italic' }}>
+      <p style={{ fontSize: 16, color: TEXT, lineHeight: 1.5, margin: '0 0 6px', fontStyle: 'italic' }}>
         “{concern.concern}”
       </p>
       {concern.body ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{concern.body}</p> : null}
@@ -671,8 +671,8 @@ export function PestReceipt({ receipt }) {
         {receipt.stats.map((stat) => (
           <div key={stat.label} style={{ background: '#F8FAFC', border: `1px solid ${BORDER}`, borderRadius: 12, padding: '12px 12px' }}>
             <div style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 18, color: TEXT }}>{stat.value}</div>
-            <div style={{ fontSize: 12, color: MUTED, fontWeight: 600, marginTop: 2 }}>{stat.label}</div>
-            {stat.detail ? <div style={{ fontSize: 11, color: MUTED, marginTop: 2 }}>{stat.detail}</div> : null}
+            <div style={{ fontSize: 14, color: MUTED, fontWeight: 600, marginTop: 2 }}>{stat.label}</div>
+            {stat.detail ? <div style={{ fontSize: 14, color: MUTED, marginTop: 2 }}>{stat.detail}</div> : null}
           </div>
         ))}
       </div>
@@ -690,9 +690,9 @@ export function PestBugFiles({ bugFiles = [], print = false }) {
         {bugFiles.map((bug) => (
           <div key={bug.pestKey || bug.suspectLabel} style={{ border: `1px solid ${BORDER}`, borderRadius: 12, padding: '12px 14px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: TEXT }}>{bug.suspectLabel}</span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: TEXT }}>{bug.suspectLabel}</span>
               {bug.confirmedByTech ? (
-                <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.glassNavy, background: 'rgba(4, 57, 94, 0.08)', borderRadius: 999, padding: '2px 8px' }}>Identified on-site</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: COLORS.glassNavy, background: 'rgba(4, 57, 94, 0.08)', borderRadius: 999, padding: '2px 8px' }}>Identified on-site</span>
               ) : null}
             </div>
             {bug.whereSeen ? <div style={{ fontSize: 14, color: BODY, marginTop: 4 }}>Where: {bug.whereSeen}</div> : null}
@@ -714,7 +714,7 @@ export function PestBugFiles({ bugFiles = [], print = false }) {
 function Line({ label, value }) {
   return (
     <div>
-      <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</span>
+      <span style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</span>
       <div style={{ fontSize: 14, color: BODY, lineHeight: 1.45 }}>{value}</div>
     </div>
   );
@@ -731,7 +731,7 @@ export function PestSeasonForecast({ forecast }) {
       <div data-gt="eyebrow" style={eyebrow}>Seasonal outlook</div>
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 4px' }}>{title}</h3>
       {forecast.headline ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{forecast.headline}</p> : null}
-      {forecast.weatherSummary ? <div style={{ fontSize: 12, color: MUTED, marginBottom: 10 }}>{forecast.weatherSummary}{forecast.locationLabel ? ` · ${forecast.locationLabel}` : ''}</div> : null}
+      {forecast.weatherSummary ? <div style={{ fontSize: 14, color: MUTED, marginBottom: 10 }}>{forecast.weatherSummary}{forecast.locationLabel ? ` · ${forecast.locationLabel}` : ''}</div> : null}
       <div style={{ display: 'grid', gap: 8 }}>
         {forecast.pests.map((p) => (
           <div key={p.key || p.label} style={{ display: 'flex', alignItems: 'center', gap: 10, border: `1px solid ${BORDER}`, borderRadius: 12, padding: '10px 12px' }}>
@@ -741,15 +741,15 @@ export function PestSeasonForecast({ forecast }) {
                 <span style={{ fontSize: 14, fontWeight: 700, color: TEXT }}>{p.label}</span>
                 <TrendArrow trend={p.trend} />
               </div>
-              {p.note ? <div style={{ fontSize: 12, color: MUTED, lineHeight: 1.4 }}>{p.note}</div> : null}
+              {p.note ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.4 }}>{p.note}</div> : null}
             </div>
             {p.level ? (
-              <span style={{ fontSize: 11, fontWeight: 700, color: LEVEL_COLOR[p.level] || COLORS.grayMid, textTransform: 'capitalize', flexShrink: 0 }}>{p.level}</span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: LEVEL_COLOR[p.level] || COLORS.grayMid, textTransform: 'capitalize', flexShrink: 0 }}>{p.level}</span>
             ) : null}
           </div>
         ))}
       </div>
-      {forecast.disclaimer ? <div style={{ fontSize: 11, color: MUTED, marginTop: 10, fontStyle: 'italic' }}>{forecast.disclaimer}</div> : null}
+      {forecast.disclaimer ? <div style={{ fontSize: 14, color: MUTED, marginTop: 10, fontStyle: 'italic' }}>{forecast.disclaimer}</div> : null}
     </section>
   );
 }

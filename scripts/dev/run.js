@@ -6,17 +6,25 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { readContext, childEnvironment, identity } = require('./context');
 const { doctor } = require('./doctor');
+const { checkRuntime } = require('./runtime');
 
 async function main() {
   const context = readContext();
   const mode = process.argv[2] || 'app';
   if (!['app', 'client', 'debug', 'migrate'].includes(mode)) throw new Error('Expected app, client, debug, or migrate.');
+  checkRuntime(context.root);
   const env = childEnvironment(context, { database: mode !== 'client' });
   if (mode === 'migrate') {
     const child = spawn(process.execPath, ['node_modules/knex/bin/cli.js', 'migrate:latest', '--knexfile', 'server/knexfile.js'],
       { cwd: context.root, env, stdio: 'inherit' });
-    child.on('error', () => { process.exitCode = 1; });
-    child.on('exit', (code) => { process.exitCode = code ?? 1; });
+    const started = Date.now();
+    console.error('Applying pending migrations to the selected nonproduction database. Initial setup can take several minutes.');
+    const heartbeat = setInterval(() => {
+      console.error(`Migrations still running (${Math.floor((Date.now() - started) / 1000)}s elapsed).`);
+    }, 30000);
+    heartbeat.unref();
+    child.on('error', () => { clearInterval(heartbeat); process.exitCode = 1; });
+    child.on('exit', (code) => { clearInterval(heartbeat); process.exitCode = code ?? 1; });
     return;
   }
   const report = await doctor(context, { frontend: mode === 'client' });

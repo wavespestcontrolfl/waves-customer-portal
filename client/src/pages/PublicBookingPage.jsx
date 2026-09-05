@@ -105,7 +105,7 @@ export default function PublicBookingPage() {
   // Glass like every other customer surface (owner 2026-09-03 — supersedes
   // the 2026-07-21 marketing-chrome exception; the page is no longer
   // matched to a non-glass marketing context).
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';
@@ -747,7 +747,7 @@ export default function PublicBookingPage() {
   // CTAs use <Button variant="primary"|"tertiary"> (see usages below).
   const inputStyle = {
     width: '100%', padding: '12px 14px', borderRadius: 8,
-    border: `1.5px solid ${COLORS.grayLight}`, fontSize: 15,
+    border: `1.5px solid ${COLORS.grayLight}`, fontSize: 16,
     color: COLORS.navy, background: '#fff',
     transition: 'border-color 0.2s',
   };
@@ -891,9 +891,9 @@ export default function PublicBookingPage() {
         {/* Customers-only verification gate (GATE_BOOKING_CUSTOMERS_ONLY) */}
         {gateActive && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               Book your next visit
-            </h2>
+            </h1>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
               Online self-scheduling is for current Waves customers. Verify your
               mobile number and we&rsquo;ll pull up your account — it takes one text.
@@ -995,7 +995,7 @@ export default function PublicBookingPage() {
               border: `1px solid ${COLORS.slate200}`, borderRadius: 12,
               padding: 16, textAlign: 'center',
             }}>
-              <div style={{ fontSize: 15, color: COLORS.slate600, marginBottom: 10 }}>
+              <div style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 10 }}>
                 Not a Waves customer yet?
               </div>
               <a
@@ -1003,7 +1003,7 @@ export default function PublicBookingPage() {
                 style={{
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                   minHeight: 44, padding: '0 20px', background: COLORS.glassNavy,
-                  color: '#fff', borderRadius: 8, fontWeight: 800, fontSize: 15,
+                  color: '#fff', borderRadius: 8, fontWeight: 700, fontSize: 16,
                   textDecoration: 'none',
                 }}
                 data-glass-accent=""
@@ -1019,13 +1019,13 @@ export default function PublicBookingPage() {
         {/* STEP 1 — Address */}
         {step === 1 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
-            </h2>
+            </h1>
             {multiServiceEnabled && !quotedServiceLabel && !tokenEntry && (
               <div style={{ marginTop: 18 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8 }}>
-                  What can we help with? <span style={{ fontWeight: 400, color: '#6B7280' }}>Pick up to 3 — one visit, one arrival window.</span>
+                  What can we help with? <span style={{ fontWeight: 400, color: '#475569' }}>Pick up to 3 — one visit, one arrival window.</span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   {SERVICES.map((s) => {
@@ -1056,7 +1056,7 @@ export default function PublicBookingPage() {
                   })}
                 </div>
                 {selectedServices.length > 1 && (
-                  <div style={{ marginTop: 8, fontSize: 14, color: '#6B7280' }}>
+                  <div style={{ marginTop: 8, fontSize: 14, color: '#475569' }}>
                     {service.label} — about {Math.round(service.duration / 60 * 10) / 10} hours in one visit.
                   </div>
                 )}
@@ -1144,9 +1144,9 @@ export default function PublicBookingPage() {
         {/* STEP 2 — Times */}
         {step === 2 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               Find a time
-            </h2>
+            </h1>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
               Pick a day and we'll show the open {slotLenLabel} windows. Days where a tech is already working nearby are marked.
             </p>
@@ -1226,7 +1226,7 @@ export default function PublicBookingPage() {
                     onChange={(e) => onPickDate(e.target.value)}
                     className="waves-focus-ring" style={inputStyle}
                   />
-                  <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 8 }}>
+                  <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 8 }}>
                     We'll check open windows up to 90 days out.
                   </div>
                 </div>
@@ -1282,9 +1282,9 @@ export default function PublicBookingPage() {
         {/* STEP 3 — Contact */}
         {step === 3 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               {existingCustomerId ? 'Confirm your booking' : 'Your info'}
-            </h2>
+            </h1>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
               {existingCustomerId
                 ? 'We found the customer for this address. Confirm the details below.'
@@ -1296,13 +1296,13 @@ export default function PublicBookingPage() {
               background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
               borderRadius: 10, padding: 14, marginBottom: 20,
             }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.blueDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.blueDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
                 Your selected time
               </div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.glassNavy }}>
+              <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.glassNavy }}>
                 {selectedSlot?.fullDate || selectedDayLabel} · {selectedSlot?.start_label}
               </div>
-              <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 2 }}>
+              <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
                 {service?.label}
               </div>
             </div>
@@ -1330,7 +1330,7 @@ export default function PublicBookingPage() {
                 color: COLORS.green,
                 marginBottom: 14,
               }}>
-                <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5 }}>
                   Customer found
                 </div>
                 <div className="ph-mask" style={{ fontSize: 17, fontWeight: 700, color: COLORS.glassNavy }}>
@@ -1369,7 +1369,7 @@ export default function PublicBookingPage() {
                   aria-describedby={contactPhoneInvalid ? 'book-phone-error' : undefined}
                 />
                 {contactPhoneInvalid && (
-                  <div id="book-phone-error" style={{ fontSize: 12, color: '#991B1B', marginTop: 6 }}>
+                  <div id="book-phone-error" style={{ fontSize: 14, color: '#991B1B', marginTop: 6 }}>
                     Enter a 10-digit phone number.
                   </div>
                 )}
@@ -1439,7 +1439,7 @@ export default function PublicBookingPage() {
                 <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 6 }}>
                   Self-scheduling is for current customers
                 </div>
-                <div style={{ fontSize: 15, color: COLORS.slate600, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.5 }}>
                   {refusal.message || "New to Waves? Get your free quote and we'll take care of the rest."}
                 </div>
                 <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
@@ -1449,7 +1449,7 @@ export default function PublicBookingPage() {
                     style={{
                       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                       minHeight: 44, padding: '0 18px', background: COLORS.glassNavy,
-                      color: '#fff', borderRadius: 8, fontWeight: 800, fontSize: 15,
+                      color: '#fff', borderRadius: 8, fontWeight: 700, fontSize: 16,
                       textDecoration: 'none',
                     }}
                   >
@@ -1461,7 +1461,7 @@ export default function PublicBookingPage() {
                       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                       minHeight: 44, padding: '0 18px', background: '#fff',
                       color: COLORS.glassNavy, border: `1px solid ${COLORS.slate200}`,
-                      borderRadius: 8, fontWeight: 800, fontSize: 15, textDecoration: 'none',
+                      borderRadius: 8, fontWeight: 700, fontSize: 16, textDecoration: 'none',
                     }}
                   >
                     Call (941) 297-5749
@@ -1504,9 +1504,9 @@ export default function PublicBookingPage() {
                 <polyline points="20 6 9 17 4 12" />
               </svg>
             </div>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h1 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, marginTop: 0, letterSpacing: '-0.5px' }}>
               You're booked!
-            </h2>
+            </h1>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
               We just texted a confirmation to {contact.phone || 'the phone number on file'}.
             </p>
@@ -1515,7 +1515,7 @@ export default function PublicBookingPage() {
               background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
               borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
             }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
                 Confirmation
               </div>
               <div style={{ fontSize: 20, fontWeight: 700, color: COLORS.wavesBlue, fontFamily: FONTS.mono, marginBottom: 14 }}>
@@ -1555,7 +1555,7 @@ export default function PublicBookingPage() {
                 background: COLORS.white, border: `1px solid ${COLORS.slate200}`,
                 borderRadius: 12, padding: 18, marginBottom: 20, textAlign: 'left',
               }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.slate400, textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 10 }}>
                   One last step
                 </div>
                 <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6, marginBottom: 14 }}>
@@ -1577,12 +1577,12 @@ export default function PublicBookingPage() {
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     minHeight: 48, padding: '0 20px', background: COLORS.glassNavy,
                     color: COLORS.white, border: `1px solid ${COLORS.glassNavy}`,
-                    borderRadius: 8, fontWeight: 800, fontSize: 15, textDecoration: 'none',
+                    borderRadius: 8, fontWeight: 700, fontSize: 16, textDecoration: 'none',
                   }}
                 >Secure my visit — $0 today</a>
               </div>
             ) : null}
-            <p style={{ fontSize: 12, color: COLORS.slate400 }}>
+            <p style={{ fontSize: 14, color: COLORS.slate400 }}>
               Need to change it? Text us at (941) 297-5749 or reply RESCHEDULE to the confirmation text.
             </p>
           </div>

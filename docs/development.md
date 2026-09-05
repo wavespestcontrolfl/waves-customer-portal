@@ -5,14 +5,25 @@ runner installs no packages and performs no migrations at startup.
 
 ## Fresh checkout
 
-Use the Node version selected in CI (currently Node 20), then:
+The root `.nvmrc` selects Node 20 for development and all jobs in the main CI
+workflow. Use your version manager to select it before installing dependencies.
+With nvm already installed, run:
 
 ```sh
+nvm install
+nvm use
 npm ci
 npm run worktree:setup
 npm run dev:doctor -- --frontend
 npm run dev:managed-client
 ```
+
+The file selects a major line, not an exact patch; Node 20.9 is the minimum.
+Doctor reports the actual Node version and rejects a different major or an older
+20.x runtime with instructions to switch and reinstall dependencies. Worktree
+setup and creation use the same check; creation checks before fetching or
+creating the checkout and again against the new checkout before `npm ci`.
+Status and stop remain usable after changing Node versions.
 
 The runner prints the URL, checkout path, commit SHA and assigned ports. Its API,
 Vite, debugger and control listener bind to loopback. Ports never silently move.
@@ -47,6 +58,12 @@ npm run dev:migrate
 npm run dev:doctor
 npm run dev
 ```
+
+`dev:migrate` prints an elapsed-time heartbeat every 30 seconds while the child
+process runs. Initial setup applies the full migration history and can take
+several minutes over a remote connection; the heartbeat indicates the process
+is still running, not a completed migration or a successful result. Wait for
+the command to exit, then run doctor.
 
 `dev:doctor` performs read-only migration readiness checks. `dev:migrate` is the
 explicit write step. Managed commands ignore the repository's `.env` and inherited
@@ -92,6 +109,12 @@ fallbacks. It writes screenshots, Playwright traces and commit/scenario metadata
 under .tmp/qa/previews. Traces contain only the synthetic preview session; keep
 real sessions out of this harness. Open a trace with `npx playwright show-trace`
 and its zip path. CI retains evidence for seven days, including failed runs.
+
+Production and preview entry points share self-hosted fonts. Browser QA waits
+for all declared families to load before captures and fails on missing fonts;
+external requests remain blocked. Font files, upstream source hashes and licenses
+live in `client/public/fonts/`; Inter and Roboto use the existing Fontsource
+dependencies. No font download is needed during a build or QA run.
 
 Browser previews are fixture-based UI evidence. They do not exercise the backend,
 provider APIs or database and must not be described as full end-to-end QA.

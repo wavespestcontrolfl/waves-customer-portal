@@ -1822,6 +1822,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         try {
           const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
             allowLive: true,
+            ...(actorUserId ? { actorId: actorUserId } : {}),
             overlapAdvisory: true,
             sourceSurface: 'quick_move',
             // The intent is recorded WITH the operation (durable): the live
@@ -1871,6 +1872,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         // caught below as a per-member failure the tech re-runs.
         const moveResult = await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
           allowLive: true,
+          // The acting staff row (Quick Move's actorUserId): a tech moving
+          // their own visit must not be told about it.
+          ...(actorUserId ? { actorId: actorUserId } : {}),
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_

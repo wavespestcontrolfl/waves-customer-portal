@@ -677,6 +677,11 @@ const gates = {
   // status/log listing. Kill switch: unset.
   voiceRelayTransfer: process.env.GATE_VOICE_RELAY_TRANSFER === 'true',
 
+  // Durable capture evidence for voice-session recovery. Strict opt-in,
+  // read at write time; unset is the kill switch. Reconnect behavior follows
+  // in the recovery PR built on this prerequisite.
+  voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -1477,19 +1482,9 @@ const gates = {
   // unset.
   blogBodyImages: process.env.GATE_BLOG_BODY_IMAGES === 'true',
 
-  // Named-competitor drafts that PASS every comparison/quality gate publish
-  // autonomously instead of parking at named_competitor_review (owner
-  // directive 2026-08-26: the intercept lane runs with no human review queue,
-  // matching the brief set's standing "fully autonomous — no UAT hold"
-  // override of 2026-06-11). Gate failures (disparagement, unsourced facts,
-  // unknown competitor, …) still block exactly as before — this flag only
-  // removes the review park on CLEAN drafts. Consumers require
-  // namedCompetitorComparison to ALSO be on (enforced at both read sites —
-  // this flag alone never lifts a park). OFF in EVERY environment
-  // unless set to exactly 'true' (same posture as GATE_COMPLIANCE — a
-  // policy flag, not a dev feature, so dev/test keep the review-park
-  // default); kill switch = unset GATE_NAMED_COMPETITOR_AUTOPUBLISH.
-  namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
+  // Owner-authorized unattended blog publishing. Explicit false disables
+  // competitor autopublishing; comparison/content checks remain mandatory.
+  namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH == null || process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
   // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
   // When ON, content-guardrails resolves <AffiliateLink product="…"> tags
@@ -2390,6 +2385,15 @@ const gates = {
   // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
   // FIX alerts are not routed here. Kill switch: unset. This entry is for
   // logGateStatus; the helper reads both env vars at CALL time.
+  // Tech visit notifications (Field Team Program Phase 0 item 2,
+  // services/tech-visit-notifications.js): the assigned field technician gets
+  // a tech-home card + a one-line push when a visit is assigned to them, taken
+  // off them, moved, or cancelled. Staff-only — never a customer channel.
+  // OFF unless set, dev AND prod; unset is the kill switch. The service reads
+  // gateEnvValue at CALL time, so a flip needs no redeploy; this entry is for
+  // logGateStatus.
+  techVisitNotifications: gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS'),
+
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
   // Closeout money + comms alerts — services/closeout-alerts.js maps three

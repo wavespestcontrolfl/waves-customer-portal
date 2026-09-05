@@ -307,7 +307,7 @@ export function SchedulePickerStyles() {
       }
       .wpk-section-inner { border-radius: 10px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(4, 57, 94, 0.06); }
       .wpk-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 2px; }
-      .wpk-title { font-size: 17px; font-weight: 800; font-family: ${FONTS.heading}; color: ${S.text}; }
+      .wpk-title { font-size: 17px; font-weight: 700; font-family: ${FONTS.heading}; color: ${S.text}; }
       .wpk-aside { font-size: 14px; color: ${S.muted}; white-space: nowrap; }
       .wpk-intro { font-size: 14px; color: ${S.muted}; line-height: 1.45; margin-bottom: 12px; }
       .wpk-intro-times { margin-bottom: 14px; }
@@ -324,10 +324,10 @@ export function SchedulePickerStyles() {
         background: #FFFBEA; border: 1px solid #F5D76E; border-radius: 12px;
         padding: 12px 14px; color: ${S.text};
       }
-      .wpk-best-when { display: block; font-size: 15px; font-weight: 800; }
+      .wpk-best-when { display: block; font-size: 15px; font-weight: 700; }
       .wpk-best-why { display: block; font-size: 14px; font-weight: 500; color: ${S.muted}; margin-top: 2px; }
       .wpk-best-go {
-        flex: 0 0 auto; font-size: 14px; font-weight: 800; color: ${COLORS.glassNavy};
+        flex: 0 0 auto; font-size: 14px; font-weight: 700; color: ${COLORS.glassNavy};
         background: ${COLORS.yellow}; border-radius: 999px; padding: 7px 13px; white-space: nowrap;
       }
 
@@ -342,8 +342,8 @@ export function SchedulePickerStyles() {
       }
       .wpk-day:disabled { opacity: .35; cursor: default; }
       .wpk-day-selected { background: ${COLORS.glassNavy}; color: ${COLORS.white}; border-color: ${COLORS.glassNavy}; }
-      .wpk-day-num { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; }
-      .wpk-day-rain { position: absolute; top: 2px; right: 4px; font-size: 10px; line-height: 1; opacity: .85; }
+      .wpk-day-num { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+      .wpk-day-rain { position: absolute; top: 2px; right: 4px; line-height: 1; opacity: .85; }
       .wpk-day-dots { position: absolute; left: 0; right: 0; bottom: 5px; display: flex; justify-content: center; gap: 3px; }
       .wpk-day-dots i { width: 5px; height: 5px; border-radius: 999px; background: ${COLORS.yellow}; border: .5px solid rgba(4,57,94,.3); }
       .wpk-day-dots i.wpk-dot-nearby { background: ${COLORS.green}; border-color: transparent; }
@@ -373,7 +373,7 @@ export function SchedulePickerStyles() {
       .wpk-action-btn {
         font: inherit; border: 1px solid ${COLORS.glassNavy}; border-radius: 12px;
         background: ${COLORS.yellow}; color: ${COLORS.glassNavy};
-        font-size: 15px; font-weight: 800; padding: 12px 14px; cursor: pointer;
+        font-size: 15px; font-weight: 700; padding: 12px 14px; cursor: pointer;
       }
       .wpk-action-btn:disabled { opacity: .6; cursor: default; }
       .wpk-picked-note { grid-column: 1 / -1; font-size: 14px; color: ${S.body}; line-height: 1.45; }

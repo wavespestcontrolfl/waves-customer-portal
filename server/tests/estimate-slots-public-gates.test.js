@@ -273,6 +273,7 @@ describe('bermuda-suppression money/slot gate', () => {
     // the accept client must always get its 409-with-exemptReason
     // "nothing owed" verdict (a 404 or other shape would block accepts
     // that re-consult after a non-superseding card/hold 409).
+    db.mockClear();
     for (const leg of ['deposit-intent', 'deposit-quote', 'deposit-finalize', 'deposit-reset']) {
       const retiredDeposit = await fetch(`${base}/${TOKEN}/${leg}`, {
         method: 'POST',
@@ -280,8 +281,14 @@ describe('bermuda-suppression money/slot gate', () => {
         body: '{}',
       });
       expect(retiredDeposit.status).toBe(409);
-      expect((await retiredDeposit.json()).exemptReason).toBe('deposits_retired');
+      expect(await retiredDeposit.json()).toEqual({
+        error: 'No deposit is required for this estimate', exemptReason: 'deposits_retired',
+      });
     }
+    const malformedDeposit = await fetch(`${base}/invalid!token/deposit-intent`, { method: 'POST' });
+    expect(malformedDeposit.status).toBe(404);
+    expect(await malformedDeposit.json()).toEqual({ error: 'Not found' });
+    expect(db).not.toHaveBeenCalled();
 
     // Money boundary: card-hold-intent (the other deposit routes were
     // REMOVED 2026-08-10 — card-hold is the live money/commitment boundary

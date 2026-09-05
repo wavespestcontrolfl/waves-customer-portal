@@ -17,6 +17,8 @@ jest.mock('../models/db', () => {
 });
 const mockReschedule = jest.fn();
 jest.mock('../services/rebooker', () => ({ reschedule: (...args) => mockReschedule(...args) }));
+const mockNotifyVisitRescheduled = jest.fn().mockReturnValue(null);
+jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitRescheduled: (...args) => mockNotifyVisitRescheduled(...args) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const mockCreateOrJoin = jest.fn();
 const mockFrozen = jest.fn();
@@ -44,7 +46,7 @@ const { abutPlan, combineRows } = require('../services/visit-combine');
 const row = (id, start, end, extra = {}) => ({ id, scheduled_date: '2026-09-04', window_start: start, window_end: end, visit_id: null, ...extra });
 const from = (start, end = null) => ({ scheduled_date: '2026-09-04', window_start: start, window_end: end, visit_id: null });
 const mv = (id, start, end, fromStart, fromEnd) => ({ id, scheduledDate: '2026-09-04', start, end, from: from(fromStart, fromEnd) });
-const MOVE_OPTS = { adminWindowRules: true, overlapAdvisory: true, sourceSurface: 'dispatch_board', notifyRequested: false, keepStatus: true };
+const MOVE_OPTS = { adminWindowRules: true, overlapAdvisory: true, sourceSurface: 'dispatch_board', notifyRequested: false, keepStatus: true, suppressTechNotice: true };
 
 describe('abutPlan', () => {
   test('moves the later row to start when the earlier one ends, keeping its span', () => {
@@ -100,6 +102,7 @@ describe('combineRows', () => {
   beforeEach(() => {
     mockDb.mockReset();
     mockReschedule.mockReset();
+    mockNotifyVisitRescheduled.mockClear();
     mockCreateOrJoin.mockReset();
     mockFrozen.mockReset().mockResolvedValue({ frozen: false, reason: null });
     mockOpenMembers.mockReset().mockResolvedValue([]);
@@ -253,6 +256,37 @@ describe('combineRows', () => {
     expect(mockReschedule.mock.calls[1].slice(0, 3)).toEqual(['b', '2026-09-04', { start: '13:00', end: null }]);
     expect(mockReschedule.mock.calls[1][5]).toEqual({ ...MOVE_OPTS, clearWindowEnd: true, expect: { scheduled_date: '2026-09-04', window_start: '10:00', window_end: '11:30', visit_id: null } });
     expect(mockReleaseHold).toHaveBeenCalledTimes(1);
+  });
+
+  test('the holders hear about the moves ONLY after the grouping stands — one card per moved row, from the committed holder, the combining staff member as actor (Codex r7 P1)', async () => {
+    createOrJoin
+      .mockRejectedValueOnce(new Error('rows not mutually groupable: window'))
+      .mockResolvedValueOnce({ id: 'v1' });
+    selectRows([row('a', '08:00', '09:00'), row('b', '11:00', '12:00'), row('c', '15:00', '17:00')]);
+    mockReschedule
+      .mockResolvedValueOnce({ success: true, technicianId: 'tech-b' })
+      .mockResolvedValueOnce({ success: true, technicianId: null }); // c is unassigned: nobody to tell
+    await combineRows({ serviceIds: ['a', 'b', 'c'], createdBy: 'admin:t1', actorId: 't1' });
+    // Every move (and any rollback) rides suppressTechNotice; the card comes from here.
+    for (const call of mockReschedule.mock.calls) expect(call[5].suppressTechNotice).toBe(true);
+    expect(mockNotifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    expect(mockNotifyVisitRescheduled).toHaveBeenCalledWith({
+      visitId: 'b', technicianId: 'tech-b', actorId: 't1',
+      previous: { date: '2026-09-04', windowStart: '11:00', windowEnd: '12:00' },
+      snapshot: { date: '2026-09-04', windowStart: '09:00', windowEnd: '10:00' },
+    });
+    expect(mockNotifyVisitRescheduled.mock.invocationCallOrder[0]).toBeGreaterThan(createOrJoin.mock.invocationCallOrder[1]);
+  });
+
+  test('a grouping that fails after the moves tells nobody (the rows went back, silently)', async () => {
+    createOrJoin
+      .mockRejectedValueOnce(new Error('rows not mutually groupable: window'))
+      .mockRejectedValueOnce(new Error('visit membership conflict: a row is already terminal'));
+    selectRows([row('a', '08:00', '09:00'), row('b', '11:00', '12:00')]);
+    mockReschedule.mockResolvedValue({ success: true, technicianId: 'tech-b' });
+    await expect(combineRows({ serviceIds: ['a', 'b'], createdBy: 'admin:t1', actorId: 't1' })).rejects.toThrow('membership conflict');
+    expect(mockReschedule).toHaveBeenCalledTimes(2);
+    expect(mockNotifyVisitRescheduled).not.toHaveBeenCalled();
   });
 
   test('a rebooker refusal mid-move propagates (the route maps its statusCode)', async () => {

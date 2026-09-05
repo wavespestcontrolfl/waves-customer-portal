@@ -16,6 +16,7 @@ import CockroachReportV2Section from '../components/report/cockroachV2/Cockroach
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication } from '../lib/product-application';
+import { isLawnFindingSelection } from '../lib/lawn-completion';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
   AlertTriangle,
@@ -1912,7 +1913,7 @@ function ReentryTargetTile({ target, nowMs, mode, timezone }) {
 function PressureTrendChart({ points = [], neighborhood, summary }) {
   const width = 320;
   const height = 120;
-  const padding = { top: 12, right: 16, bottom: 24, left: 28 };
+  const padding = { top: 12, right: 16, bottom: 24, left: 36 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const xFor = (index, count = points.length) => {
@@ -2013,7 +2014,7 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
 function LawnTrendChart({ trend = [], summary }) {
   const width = 320;
   const height = 120;
-  const padding = { top: 12, right: 16, bottom: 24, left: 30 };
+  const padding = { top: 12, right: 16, bottom: 24, left: 36 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const points = trend.filter((point) => point.overallScore != null);
@@ -3214,7 +3215,7 @@ function TypedVisitTimelineCard({ timeline, sectionId = 'typed-visit-timeline' }
                   )}
                 </div>
                 {visit.headline && (
-                  <div className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.45, marginTop: 2 }}>
+                  <div className="sr-ink" style={{ fontSize: 16, color: '#04395E', lineHeight: 1.45, marginTop: 2 }}>
                     {visit.headline}
                   </div>
                 )}
@@ -3523,7 +3524,6 @@ function AppliedProductsSection({ data, mode = 'live' }) {
       <div className="applied-products-header">
         <div>
           <h2>Products Applied</h2>
-          <p>Why these products were selected for today&apos;s service.</p>
         </div>
       </div>
       {isLawn && (
@@ -5503,7 +5503,7 @@ function SmsReportPreview({ data }) {
                 ? `${data.lawnAssessment.scores.overallScore ?? '-'}% overall`
                 : dynamicContext.pressureTrend?.customerSummary || `${formatPressureIndex(data.pressureIndex)} pressure index`}
             </strong>
-            <span>{isLawn ? 'Higher is better' : 'Lower is better'}</span>
+            {!isLawn && <span>Lower is better</span>}
           </div>
           <div className="sms-preview-tile">
             <div className="sms-preview-eyebrow">Ready to re-enter</div>
@@ -5564,7 +5564,7 @@ function NotFoundState({ glass = false }) {
         }}
       >
         <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 15, color: glass ? '#3F4A65' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+        <div style={{ fontSize: 16, color: glass ? '#3F4A65' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
         <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 16 }}>Call Waves</a>
@@ -5598,7 +5598,7 @@ function LegacyReport({ data, token, glass = false }) {
           justifyContent: 'space-between',
           gap: 16,
         }}>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: ESTIMATE_TEXT, fontSize: 15, fontWeight: 600, textDecoration: 'none' }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: ESTIMATE_TEXT, fontSize: 16, fontWeight: 600, textDecoration: 'none' }}>
             {WAVES_PHONE_DISPLAY}
           </a>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 28, display: 'block' }} />
@@ -5620,7 +5620,7 @@ function LegacyReport({ data, token, glass = false }) {
           <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
-          {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
+          {data.notes && <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
           <a
             href={pdfUrl}
             download
@@ -5703,6 +5703,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const dynamicContext = data.dynamicContext || {};
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
+  const lawnFindings = data.serviceLine === 'lawn'
+    ? [...new Set((data.protocol?.structuredObservations || []).filter(isLawnFindingSelection))]
+    : [];
   // Tree & Shrub V2 adopts the same "lead layout" as lawn V2: the visit timeline +
   // Ask-Waves + products render up top (under Re-entry), not in the generic non-lawn
   // slots lower down. `isV2LeadLayout` is the shared gate for that reordering.
@@ -5938,7 +5941,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-brand-title {
           font-family: ${FONTS.heading};
           font-size: 16px;
-          font-weight: 800;
+          font-weight: 700;
           color: var(--text);
           line-height: 1.1;
           letter-spacing: 0;
@@ -6094,13 +6097,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
           font-family: ${FONTS.heading};
           font-size: 18px;
-          font-weight: 800;
+          font-weight: 700;
         }
         .tech-name {
           color: var(--text);
           font-size: 16px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
         }
         .tech-role {
           margin-top: 4px;
@@ -6211,7 +6214,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #04395E;
           font-size: 14px;
           line-height: 1;
-          font-weight: 800;
+          font-weight: 700;
           white-space: nowrap;
           padding: 8px 12px;
         }
@@ -6287,7 +6290,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 15px;
           line-height: 1.35;
-          font-weight: 800;
+          font-weight: 700;
         }
         .status-timeline-time {
           margin-top: 2px;
@@ -6314,7 +6317,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 16px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
           white-space: nowrap;
         }
         .readiness-facts,
@@ -6360,7 +6363,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 14px;
           line-height: 1.35;
-          font-weight: 800;
+          font-weight: 700;
         }
         .visit-timeline-detail p {
           margin: 3px 0 0;
@@ -6392,7 +6395,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 16px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
           white-space: nowrap;
         }
         .legacy-section-anchor {
@@ -6420,7 +6423,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           font-size: 14px;
           line-height: 1;
-          font-weight: 800;
+          font-weight: 700;
         }
         .service-coverage-chip strong {
           font-size: 14px;
@@ -6466,7 +6469,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 14px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
         }
         .coverage-map-unavailable {
           grid-area: map;
@@ -6732,7 +6735,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           fill: #fff;
           font-family: ${FONT_BODY};
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .coverage-map-label {
@@ -6853,7 +6856,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           justify-content: center;
           flex: 0 0 auto;
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           line-height: 1;
         }
         .zone-service-copy {
@@ -6864,7 +6867,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 15px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
           letter-spacing: 0;
         }
         /* The in-heading activator inherits the h3's look 1:1. */
@@ -6898,7 +6901,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 12px;
         }
         .coverage-status-chip.zone-status-chip {
-          font-weight: 800;
+          font-weight: 700;
         }
         .zone-status-chips {
           display: flex;
@@ -7003,7 +7006,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 15px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .workflow-event-heading time {
@@ -7139,13 +7142,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-width: 1.2;
           vector-effect: non-scaling-stroke;
         }
-        .satellite-application-badge text {
-          fill: #fff;
-          font-family: ${FONT_BODY};
-          font-size: 10px;
-          font-weight: 800;
-          letter-spacing: 0;
-        }
         .sat-pattern-line,
         .sat-pattern-path {
           stroke: #111;
@@ -7162,11 +7158,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke: rgba(255,255,255,.92);
           stroke-width: 1.2;
           vector-effect: non-scaling-stroke;
-        }
-        .satellite-bait-label {
-          fill: #fff;
-          font-size: 10px;
-          font-weight: 800;
         }
         .satellite-flag-circle {
           fill: var(--red);
@@ -7240,7 +7231,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
           font-size: 14px;
           line-height: 1;
-          font-weight: 800;
+          font-weight: 700;
         }
         .treatment-overlay-row-copy {
           min-width: 0;
@@ -7251,7 +7242,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 14px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
           overflow-wrap: anywhere;
         }
         .treatment-overlay-row-copy span {
@@ -7271,7 +7262,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 18px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .treatment-overlay-detail p {
@@ -7346,7 +7337,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .pressure-methodology summary {
           min-height: 44px;
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
         }
         .pressure-methodology p {
           margin: 0;
@@ -7367,34 +7358,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: var(--wash);
           font-size: 14px;
           line-height: 1.5;
-        }
-        /* Ask Waves answer sits in the card's normal flow under the question
-           rows (the old sticky bar's dropdown was absolutely positioned). */
-        .waves-ask-answer {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 12px;
-          margin-top: 4px;
-          border: 1px solid var(--line);
-          border-radius: 10px;
-          background: var(--wash);
-          padding: 12px 14px;
-          color: var(--text);
-          font-size: 15px;
-          line-height: 1.5;
-        }
-        .waves-ask-dismiss {
-          flex: 0 0 auto;
-          min-width: 44px;
-          min-height: 44px;
-          margin: -10px -12px -10px 0;
-          border: 0;
-          background: transparent;
-          color: var(--muted);
-          display: grid;
-          place-items: center;
-          cursor: pointer;
         }
         /* animated weather mark — live only; the media block below parks it */
         .weather-call-icon-animated {
@@ -7456,7 +7419,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 18px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .solution-detail {
@@ -7486,7 +7449,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .solution-product-name {
           color: var(--text);
           font-size: 15px;
-          font-weight: 800;
+          font-weight: 700;
           line-height: 1.35;
         }
         .solution-product-facts {
@@ -7681,7 +7644,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .where-place {
           color: var(--text);
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
         }
         .where-detail {
           color: var(--muted);
@@ -7750,7 +7713,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font: inherit;
           font-size: 14px;
           line-height: 1;
-          font-weight: 800;
+          font-weight: 700;
           text-decoration: none;
           box-shadow: 3px 3px 0 ${B.glassNavy};
           transition: ${docTransition('transform', 'box-shadow')};
@@ -7820,7 +7783,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-bottom: 12px;
         }
         .referral-code {
-          font-weight: 800;
+          font-weight: 700;
           font-size: 18px;
           letter-spacing: 0.12em;
           color: var(--text);
@@ -7833,7 +7796,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding: 7px 12px;
           font: inherit;
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           cursor: pointer;
         }
         .referral-share-row {
@@ -7856,7 +7819,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font: inherit;
           font-size: 14px;
           line-height: 1;
-          font-weight: 800;
+          font-weight: 700;
           text-decoration: none;
           cursor: pointer;
           box-shadow: 3px 3px 0 ${B.glassNavy};
@@ -8022,12 +7985,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .chart-label {
           fill: var(--report-muted);
-          font-size: 10px;
+          font-size: 14px;
         }
         .pressure-value-label {
           fill: ${B.glassNavy};
-          font-size: 10px;
-          font-weight: 800;
+          font-size: 14px;
+          font-weight: 700;
           pointer-events: none;
         }
         .neighborhood-pressure-line {
@@ -8135,7 +8098,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 15px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
         }
         .lawn-assessment-layout {
           display: grid;
@@ -8162,7 +8125,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 34px;
           line-height: 1;
-          font-weight: 800;
+          font-weight: 700;
         }
         .lawn-overall-score strong,
         .lawn-overall-score em {
@@ -8248,7 +8211,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 20px;
           line-height: 1.1;
-          font-weight: 800;
+          font-weight: 700;
         }
         .lawn-photo-strip {
           display: grid;
@@ -8330,7 +8293,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 16px;
           line-height: 1.2;
-          font-weight: 800;
+          font-weight: 700;
         }
         .defense-status-item.status-needs_attention,
         .defense-status-item.status-watched {
@@ -8369,7 +8332,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: block;
           font-size: 18px;
           line-height: 1.1;
-          font-weight: 800;
+          font-weight: 700;
         }
         .bug-file-row + .bug-file-row {
           margin-top: 16px;
@@ -8412,7 +8375,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 16px;
           line-height: 1.35;
-          font-weight: 800;
+          font-weight: 700;
         }
         .customer-action-item p,
         .customer-action-section > p,
@@ -8445,7 +8408,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
           font-size: 14px;
           line-height: 1;
-          font-weight: 800;
+          font-weight: 700;
           text-decoration: none;
           padding: 12px 16px;
         }
@@ -8497,13 +8460,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 24px;
           line-height: 1.1;
-          font-weight: 800;
+          font-weight: 700;
         }
         .map-tap-prompt {
           margin: 8px 0 0;
           color: ${B.glassNavy};
           font-size: 14px;
-          font-weight: 800;
+          font-weight: 700;
           line-height: 1.35;
         }
         .sr-nerd-note {
@@ -8581,7 +8544,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .map-toggle button {
           font-family: ${FONTS.heading};
-          font-weight: 800;
+          font-weight: 700;
         }
         .map-toggle button.is-active {
           background: ${B.glassNavy};
@@ -9094,10 +9057,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             (V2 dashboard, legacy assessment, mowing block) keeps it. */}
         {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !cockroachV2Primary && !typedNarrativeOwnsSummary
           && !(data.isCallback && data.reserviceGateOn && todaysResultCarriesSummary
-            && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight) && (
+            && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight && !lawnFindings.length) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
+            {lawnFindings.length > 0 && (
+              <ul aria-label="Recorded lawn findings">
+                {lawnFindings.map((finding) => <li key={finding}>{finding}</li>)}
+              </ul>
+            )}
             {/* Rodent refresh: the photo evidence the summary narrates renders
                 WITH the summary (owner 2026-07-27) — the bottom Field photos
                 gallery is skipped for these reports so the photos show once.
@@ -9106,7 +9074,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             {data.rodentReportRefresh && (data.photos || []).length > 0 && (
               <>
                 {data.typedReport?.photoSummary && (
-                  <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '16px 0 0' }}>
+                  <p className="sr-ink" style={{ fontSize: 16, color: '#04395E', lineHeight: 1.5, margin: '16px 0 0' }}>
                     {data.typedReport.photoSummary}
                   </p>
                 )}
@@ -9398,7 +9366,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {orderedProofMoments.length > 0 && (
           <section data-glass="card" className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
-            <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
+            <p style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
               {visualProofMomentIntro(orderedProofMoments)}
             </p>
             <div className="sr-grid-3">
@@ -9442,7 +9410,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
-              <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '0 0 16px' }}>
+              <p className="sr-ink" style={{ fontSize: 16, color: '#04395E', lineHeight: 1.5, margin: '0 0 16px' }}>
                 {data.typedReport.photoSummary}
               </p>
             )}
@@ -9530,7 +9498,7 @@ export default function ReportViewPage() {
   // renders never mount the scene, so the Playwright print pipeline and
   // cached artifacts stay byte-identical.
   const glassActive = mode === 'live';
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(glassActive);
 
   useEffect(() => {
     let cancelled = false;

@@ -11,7 +11,7 @@ import Icon from './components/Icon';
 import CustomerDialogHost from './components/brand/CustomerDialogHost';
 
 function CustomerFailureScreen({ title, message, onRetry }) {
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   return (
     <main style={{
       minHeight: '100vh',
@@ -435,7 +435,7 @@ function ProtectedRoute({ children }) {
   const location = useLocation();
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
-  useGlassSurface(loading, 'full');
+  useGlassSurface(loading);
 
   if (loading) {
     return (

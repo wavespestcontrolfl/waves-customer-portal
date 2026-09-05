@@ -3891,6 +3891,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // proof, and passing skipCardRequest for an unowned confirm permanently
     // suppressed the card funnel (customer_confirmed stamps, no retry rail).
     let fieldConfirmVerified = false;
+    // The transition's committed payload — the voice-confirm card below
+    // must name the holder as WRITTEN, not as read.
+    let transition = null;
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -3959,7 +3962,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // (customer:job_update, dispatch:job_update, dispatch:alert_resolved)
         // chain on trx.executionPromise — fire post-commit, suppressed
         // on rollback.
-        await transitionJobStatus({
+        transition = await transitionJobStatus({
           jobId: svc.id,
           fromStatus,
           toStatus,
@@ -4003,6 +4006,25 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // (Voice-agent bookings share this lifecycle via
     // OFFICE_REVIEW_PENDING_SOURCE_ACTIONS: office confirm is what arms
     // reminders for them too.)
+    // A voice-agent booking is inserted SILENT (relay-booking.js: a pending
+    // office-review row is not yet real); the office confirm is when it
+    // becomes a visit on the tech's route, and no assignment write follows —
+    // so the "new visit" card fires here, post-commit. Call-created
+    // office-review rows were announced at insert (call-proc) and stay quiet.
+    // Recipient and schedule come from the COMMITTED row the transition
+    // returned (codex r9 P1): the status CAS pins only the status, so a
+    // reassignment that lands between this route's `svc` read and the
+    // transition confirms the NEW holder's row — the earlier read would
+    // name a technician the write-time guard then drops, leaving the real
+    // holder with no card at all.
+    const confirmedRow = transition?.adminPayload || null;
+    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
+      });
+    }
     if (isOfficeReviewConfirm) {
       const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
       // A technician token alone is NOT a field confirm — only the
@@ -4572,6 +4594,8 @@ const {
   validateSpecialtyAreas,
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
+
+const { LAWN_STRUCTURED_OBSERVATIONS } = require('../../shared/lawn-condition-findings');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -5558,7 +5582,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // with the dynamic actions its older client offered.
     const explicitSpecialtyLane = Boolean(specialtyServiceKey({ serviceKey: completionProfile?.serviceKey }));
     const allowedStructuredObservations = new Set(
-      observationsForSpecialtyService(resolvedSpecialtyServiceKey),
+      reportServiceLine === 'lawn' && !typedFindingsType
+        ? LAWN_STRUCTURED_OBSERVATIONS
+        : observationsForSpecialtyService(resolvedSpecialtyServiceKey),
     );
     // New clients separate controlled dropdown values from free text. For an
     // older specialty client that lacks that field, recover only exact values
@@ -14543,6 +14569,17 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     // committed and permanently skip reminder registration on the retry
     // (codex P2 r6).
     logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile?.findingsType || 'untyped'}) for ${date}`);
+    // Tech-facing "new visit" card (tech-visit-notifications.js): this
+    // writer inserts the assigned row itself, bypassing assignDispatchJob.
+    // Queued FIRST after commit (before the awaited alert resolution and
+    // reminder registration); silent when the booker IS the tech; only a
+    // FRESH booking — the alreadyScheduled returns above announced nothing.
+    if (appointment.technician_id) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: req.technicianId || null,
+        snapshot: { date: appointment.scheduled_date, windowStart: appointment.window_start || null, windowEnd: appointment.window_end || null },
+      });
+    }
     await resolveOpenFollowupAlerts();
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).
@@ -15975,7 +16012,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // rewinds the tracker lifecycle and frees the tech. Terminal states
     // (completed / cancelled / skipped) still 409. The customer-SMS
     // self-serve path (reschedule-sms.js) does NOT get this override.
-    const rescheduleOptions = { allowLive: true };
+    const rescheduleOptions = { allowLive: true, actorId: req.technicianId || null };
     const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
     if (hasTechnicianId) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
