@@ -193,7 +193,7 @@ describe('adapters project onto the canonical shape', () => {
   });
 
   test('call_log: processing_status → lifecycle with the processor heartbeat as the run heartbeat', () => {
-    const base = { id: 'c', direction: 'inbound', duration_seconds: 125, created_at: ago(9e5), processing_started_at: ago(8e5), processing_heartbeat_at: ago(10e3), extraction_attempts: 2 };
+    const base = { id: 'c', direction: 'inbound', duration_seconds: 125, recording_url: 'https://api.twilio.com/rec', created_at: ago(9e5), processing_started_at: ago(8e5), processing_heartbeat_at: ago(10e3), extraction_attempts: 2 };
     const live = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed' });
     // extraction_attempts counts failures: two failed + the pass in flight = 3 attempts; a row whose current state IS the failure counts just the failures; a success after one failure ran twice
     expect(live).toMatchObject({ lifecycle: 'running', lastHeartbeatAt: ago(10e3).toISOString(), attempts: 3, laneId: 'call_extraction', title: 'inbound · 2 min' });
@@ -229,6 +229,15 @@ describe('adapters project onto the canonical shape', () => {
     const retrying = callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: realAgo(864e5) });
     expect(retrying).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'extraction_failed', attempts: 1, maxAttempts: CALL_EXTRACTION_MAX_ATTEMPTS });
     expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: realAgo((EXTRACTION_RETRY_WINDOW_DAYS + 1) * 864e5) }).lifecycle).toBe('terminal');
+    // … only with media the sweep will claim (its gates): a non-empty recording — or a PAN-quarantined MASKED transcript — with real content (over 10 s, or PAN-quarantined); without them nothing retries it, so it is the terminal failure
+    const eligible = { ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: realAgo(864e5) };
+    expect(callLog.fromRow({ ...eligible, recording_url: null }).lifecycle).toBe('terminal');
+    expect(callLog.fromRow({ ...eligible, recording_url: '' }).lifecycle).toBe('terminal');
+    expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: null }).lifecycle).toBe('terminal');
+    expect(callLog.fromRow({ ...eligible, duration_seconds: 8, recording_duration_seconds: 40 }).lifecycle).toBe('queued');
+    expect(callLog.fromRow({ ...eligible, recording_url: null, pan_detected: true, has_transcript: true }).lifecycle).toBe('queued');
+    expect(callLog.fromRow({ ...eligible, recording_url: null, pan_detected: true, has_transcript: false }).lifecycle).toBe('terminal');
+    expect(callLog.fromRow({ ...eligible, duration_seconds: 3, pan_detected: true }).lifecycle).toBe('queued');
     // extraction landed, the lead write did not: the extract step stays done, the link step fails
     const linkFailed = callLog.fromRow({ ...base, processing_status: 'lead_creation_failed', v2_extraction_status: 'valid', transcription_status: 'completed', enriched: true });
     expect(linkFailed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'failed']);
@@ -236,9 +245,15 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
     // no transcription = the processor's known-failed retry state, reclaimed by every sweep with no cap: QUEUED (never a done no-op, never terminal), the last failure as the code, the transcribe step failed, nothing after it attempted
     const noTranscript = callLog.fromRow({ ...base, processing_status: 'no_transcription', transcription_status: 'failed' });
-    expect(noTranscript).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'no_transcription' });
+    // … its retry policy is not the extraction limit: no cap, no count (attempts unknown, maxAttempts null)
+    expect(noTranscript).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'no_transcription', attempts: 0, maxAttempts: null });
     expect(noTranscript.steps.map((s) => s.status)).toEqual(['failed', 'skipped', 'skipped', 'skipped']);
     expect(runIndex.bucketsOf({ ...noTranscript, health: 'healthy', attention: null })).toMatchObject({ active: true, failed: false, done: false });
+    // … and only while a claimable recording is on the row (the sweep's gates; the PAN transcript-only branch does not reclaim this state): otherwise it is an errored transcription nothing will retry
+    expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', recording_url: null })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'no_transcription', maxAttempts: null });
+    expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', recording_url: null, pan_detected: true, has_transcript: true }).lifecycle).toBe('terminal');
+    expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', duration_seconds: 5 }).lifecycle).toBe('terminal');
+    expect(callLog.fromRow({ ...base, processing_status: 'no_transcription', duration_seconds: 5, pan_detected: true }).lifecycle).toBe('queued');
     expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
     // a fresh, never-claimed call (NULL status) is queued work too
     expect(callLog.fromRow({ ...base, processing_status: null }).lifecycle).toBe('queued');

@@ -77,6 +77,9 @@ function defined(fields) {
   return Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
 }
 
+// null = no limit the producer applies (a call's transcription retry has no cap)
+const optionalNumber = (v) => (v == null ? null : Number(v));
+
 function canonicalRun(fields) {
   const f = { ...FIELD_DEFAULTS, ...defined(fields) };
   const source = String(f.source);
@@ -112,7 +115,7 @@ function canonicalRun(fields) {
     progressSequence: Number(f.progressSequence),
     durationMs: f.durationMs == null ? durationBetween(startedAt, f.finishedAt) : Number(f.durationMs),
     attempts: Number(f.attempts ?? (lifecycle === 'queued' ? 0 : 1)),
-    maxAttempts: Number(f.maxAttempts),
+    maxAttempts: optionalNumber(f.maxAttempts),
     stepsDone: Number(f.stepsDone ?? f.steps.filter((s) => s.status === 'done').length),
     stepsTotal: Number(f.stepsTotal ?? f.steps.length),
     toolCalls: Number(f.toolCalls),

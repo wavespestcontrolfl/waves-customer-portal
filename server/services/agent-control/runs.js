@@ -56,6 +56,9 @@ const CODE_RESULT = Object.freeze({ budget_exhausted: 'budget_exhausted' });
 // reject the whole batch insert and lose the valid artifacts beside it.
 const ARTIFACT_KINDS = new Set(['draft', 'report', 'json', 'url', 'record_ref']);
 const CLASS_RESULT = Object.freeze({ timeout: 'timed_out' });
+// Which work_items status (the CHECK vocabulary) a finished run's result
+// settles the linked item on; a result not listed leaves it open.
+const WORK_ITEM_STATUS = Object.freeze({ succeeded: 'done', canceled: 'canceled' });
 const WARN_INTERVAL_MS = 60_000;
 const WORKER_ID = `${os.hostname()}:${process.pid}`.slice(0, 120);
 
@@ -546,7 +549,10 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
       });
       await closeAttempt(trx, res); // after the run row (lock order), stale or not
       if (!Number(n)) return 'stale';
-      if (workItemId && res === 'succeeded') await trx('work_items').where({ id: workItemId }).update({ status: 'done', updated_at: now });
+      // the linked item follows the outcome: done on success, canceled on a
+      // canceled run (Codex r11); an errored / timed-out run leaves it open
+      // for the next attempt
+      if (workItemId && WORK_ITEM_STATUS[res]) await trx('work_items').where({ id: workItemId }).update({ status: WORK_ITEM_STATUS[res], updated_at: now });
       if (rows.length) await trx('run_artifacts').insert(rows);
       await trx('run_events').insert(eventRow(runId, 'finished', null, { result: res, disposition: dispo }));
       if (dispo) await trx('run_events').insert(eventRow(runId, 'disposition', null, { disposition: dispo }));
@@ -656,4 +662,4 @@ async function runManaged(startArgs, fn) {
   }
 }
 
-module.exports = { startRun, runManaged, runGateOn, WORKER_ID, NO_RETRY_CLASSES, ARTIFACT_KINDS };
+module.exports = { startRun, runManaged, runGateOn, WORKER_ID, NO_RETRY_CLASSES, ARTIFACT_KINDS, WORK_ITEM_STATUS };

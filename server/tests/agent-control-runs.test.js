@@ -282,6 +282,21 @@ describe('start / step / finish', () => {
     expect(events(h.id)).toEqual(['started', 'finished', 'disposition']);
   });
 
+  test('finish: a canceled run settles its work item canceled; an errored one leaves it open for the next attempt', async () => {
+    const a = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    await a.finish({ result: 'canceled' });
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'canceled' });
+    expect(store.work_items[0].status).toBe('canceled');
+    // the CHECK vocabulary is the only thing a work item can be set to
+    const migration = require('fs').readFileSync(require('path').join(__dirname, '..', 'models', 'migrations', '20260905000010_agent_runs.js'), 'utf8');
+    const check = migration.match(/work_items_status_chk CHECK \(status IN \(([^)]*)\)\)/)[1].match(/'([a-z_]+)'/g).map((k) => k.replace(/'/g, ''));
+    for (const s of Object.values(runs.WORK_ITEM_STATUS)) expect(check).toContain(s);
+    store.work_items[0].status = 'open';
+    const b = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    await b.finish({ result: 'errored' });
+    expect(store.work_items[0].status).toBe('open');
+  });
+
   test('budget: a step past max_steps records ONE budget_exceeded event and stamps the summary, never stops the caller', async () => {
     const h = await runs.startRun(base);
     const max = policyFor('blog_draft').budget.max_steps;
