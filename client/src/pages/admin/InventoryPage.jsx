@@ -2802,8 +2802,11 @@ function RestockRequestsTab({ showToast, onUpdate }) {
         method: "POST",
         body: JSON.stringify({
           action,
-          quantity: draft.quantity || request.requestedQuantity || null,
-          unit: draft.unit || request.unit || request.inventoryUnit || null,
+          // Only what the admin actually typed: with no draft the server's locked read picks the
+          // figure the automatic order actually bought (packages round up), else the requested
+          // amount — a row loaded before the order placed must not send a stale quantity.
+          quantity: draft.quantity || null,
+          unit: draft.unit || null,
           note: draft.note || null,
         }),
       });
@@ -2893,72 +2896,14 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                       )}
                     </td>
                     <td style={tdS}>
-                      <div>{request.customerName || request.source}</div>
+                      <div>{request.customerName || (request.source === "auto_reorder" ? "Auto-reorder sweep" : request.source)}</div>
                       <div style={{ color: D.muted, fontSize: 12 }}>
                         {request.scheduledDate || request.createdAt?.slice?.(0, 10)} · {request.serviceType || "inventory"}
                       </div>
                       <div style={{ color: D.muted, fontSize: 12 }}>{request.reason}</div>
                     </td>
-                    <td style={tdS}>
-                      <span style={{
-                        padding: "4px 8px",
-                        borderRadius: 999,
-                        border: `1px solid ${request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber}`,
-                        color: request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber,
-                        fontSize: 11,
-                        fontWeight: 700,
-                        textTransform: "uppercase",
-                      }}>
-                        {request.status}
-                      </span>
-                      {request.status === "open" && (
-                        <button
-                          onClick={() => runAction(request, "mark_ordered")}
-                          disabled={receivingId === request.id}
-                          style={{ ...sBtn(D.card, D.text), marginTop: 8, display: "block" }}
-                        >
-                          Mark Ordered
-                        </button>
-                      )}
-                    </td>
-                    <td style={tdS}>
-                      {["open", "ordered"].includes(request.status) ? (
-                        <div style={{ display: "grid", gap: 6, minWidth: 220 }}>
-                          <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 6 }}>
-                            <input
-                              value={draft.quantity ?? request.requestedQuantity ?? ""}
-                              onChange={(e) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), quantity: e.target.value } }))}
-                              style={sInput}
-                              placeholder="Qty"
-                            />
-                            <input
-                              value={draft.unit ?? request.unit ?? request.inventoryUnit ?? ""}
-                              onChange={(e) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), unit: e.target.value } }))}
-                              style={sInput}
-                              placeholder="Unit"
-                            />
-                          </div>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <button
-                              onClick={() => runAction(request, "receive")}
-                              disabled={receivingId === request.id}
-                              style={sBtn(D.green, D.white)}
-                            >
-                              Receive
-                            </button>
-                            <button
-                              onClick={() => runAction(request, "cancel")}
-                              disabled={receivingId === request.id}
-                              style={sBtn(D.card, D.red)}
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <span style={{ color: D.muted }}>Closed</span>
-                      )}
-                    </td>
+                    <RestockStatusCell request={request} receivingId={receivingId} runAction={runAction} />
+                    <RestockActionCell request={request} draft={draft} setReceiveDrafts={setReceiveDrafts} receivingId={receivingId} runAction={runAction} />
                   </tr>
                 );
               })}
@@ -2967,6 +2912,96 @@ function RestockRequestsTab({ showToast, onUpdate }) {
         </div>
       )}
     </div>
+  );
+}
+
+// How an automatic order's outcome reads on the Restock tab: colour + label.
+function autoOrderSummary(order) {
+  if (order.status === "placed") {
+    const number = order.externalOrderNumber ? ` · #${order.externalOrderNumber}` : "";
+    const total = order.amountCents != null ? ` · $${(order.amountCents / 100).toFixed(2)}` : "";
+    return { color: D.green, label: `Ordered automatically${number}${total}` };
+  }
+  if (order.status === "placing") return { color: D.muted, label: "Auto-order in progress" };
+  return { color: D.amber, label: `Auto-order ${order.status === "failed" ? "failed" : "needs review"}` };
+}
+
+// Restock tab — the request's status pill, its automatic-order outcome and
+// the Mark Ordered action, in one cell.
+function RestockStatusCell({ request, receivingId, runAction }) {
+  const pillColor = request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber;
+  const order = request.order;
+  const summary = order ? autoOrderSummary(order) : null;
+  return (
+    <td style={tdS}>
+      <span style={{ padding: "4px 8px", borderRadius: 999, border: `1px solid ${pillColor}`, color: pillColor, fontSize: 11, fontWeight: 700, textTransform: "uppercase" }}>
+        {request.status}
+      </span>
+      {order && (
+        <div style={{ marginTop: 6, fontSize: 12, color: summary.color }}>
+          {summary.label}
+          {order.status !== "placed" && order.error && (
+            <div style={{ color: D.muted, marginTop: 2, maxWidth: 260 }}>{order.error}</div>
+          )}
+        </div>
+      )}
+      {request.status === "open" && order?.status !== "placing" && (
+        <button
+          onClick={() => runAction(request, "mark_ordered")}
+          disabled={receivingId === request.id}
+          style={{ ...sBtn(D.card, D.text), marginTop: 8, display: "block" }}
+        >
+          Mark Ordered
+        </button>
+      )}
+    </td>
+  );
+}
+
+// Restock tab — the receive draft (quantity / unit) and the Receive / Cancel
+// actions; the dispatcher owns a placing request, and a dispatched order that
+// is neither received nor revoked cannot be cancelled (the server 409s both).
+// A received request whose automatic order landed after that receipt gets
+// ONE more receive — the late order's own (the server admits exactly that).
+function RestockActionCell({ request, draft, setReceiveDrafts, receivingId, runAction }) {
+  const setDraft = (patch) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), ...patch } }));
+  if (request.order?.status === "placing") return <td style={tdS}><span style={{ color: D.muted }}>Auto-order in progress</span></td>;
+  const lateOrderReceive = request.status === "received" && !!request.order?.landedAfterReceive;
+  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive) return <td style={tdS}><span style={{ color: D.muted }}>Closed</span></td>;
+  const orderOut = !!request.order?.placedAt && !request.order?.revokedAt;
+  return (
+    <td style={tdS}>
+      <div style={{ display: "grid", gap: 6, minWidth: 220 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 6 }}>
+          <input
+            value={draft.quantity ?? request.order?.orderedQuantity ?? request.requestedQuantity ?? ""}
+            onChange={(e) => setDraft({ quantity: e.target.value })}
+            style={sInput}
+            placeholder="Qty"
+          />
+          <input
+            value={draft.unit ?? request.unit ?? request.inventoryUnit ?? ""}
+            onChange={(e) => setDraft({ unit: e.target.value })}
+            style={sInput}
+            placeholder="Unit"
+          />
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => runAction(request, "receive")} disabled={receivingId === request.id} style={sBtn(D.green, D.white)}>
+            Receive
+          </button>
+          {lateOrderReceive ? (
+            <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Late auto-order — receive it, or revoke</span>
+          ) : orderOut ? (
+            <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Order out — receive, or revoke first</span>
+          ) : (
+            <button onClick={() => runAction(request, "cancel")} disabled={receivingId === request.id} style={sBtn(D.card, D.red)}>
+              Cancel
+            </button>
+          )}
+        </div>
+      </div>
+    </td>
   );
 }
 

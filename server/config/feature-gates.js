@@ -1920,6 +1920,18 @@ const gates = {
   // GATE_AUTO_ORDER.
   autoReorder: gateEnvValue('GATE_AUTO_REORDER'),
 
+  // Vendor order dispatch (runs right after the 6:10 ET reorder sweep): an
+  // open auto_reorder request whose vendor has an adapter is ORDERED —
+  // Sticker Mule reorder API, SiteOne browser bot — under the env spend caps
+  // (AUTO_ORDER_MAX_PER_ORDER_CENTS + AUTO_ORDER_MAX_MONTHLY_CENTS, both
+  // required). Master gate AND the per-vendor gate must be true; all three
+  // are read at CALL time (gateEnvValue), kill = unset any one. Revoke a
+  // placed order: ops/agents/auto-order-revoke.js. Off → the sweep bells
+  // "order manually" exactly as before.
+  autoOrder: gateEnvValue('GATE_AUTO_ORDER'),
+  autoOrderStickerMule: gateEnvValue('GATE_AUTO_ORDER_STICKERMULE'),
+  autoOrderSiteOne: gateEnvValue('GATE_AUTO_ORDER_SITEONE'),
+
   // Auto property-lookup on call-pipeline property creation — each NEWLY
   // created customer_properties row from a call fires one full property
   // lookup (county + LLM trio + satellite vision: real per-call spend) and
