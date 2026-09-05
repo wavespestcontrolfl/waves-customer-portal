@@ -244,7 +244,10 @@ async function cartLines(page) {
     // hidden responsive child or a stale copy must not feed the exact-cart
     // proof (Codex #3853 r20 P2). None shown = unreadable = fails closed.
     const skuEl = (await matches(line, SELECTORS.cartLineSku)).shown[0];
-    const sku = (skuEl ? (await skuEl.textContent().catch(() => '') || '') : '').replace(/\s+/g, ' ').trim();
+    // Attribute-first, like the product page: a row that exposes its code
+    // only through data-product-code shows unrelated text (Codex #3853 r21 P2).
+    const skuAttr = skuEl ? await skuEl.getAttribute('data-product-code').catch(() => null) : null;
+    const sku = (skuAttr || (skuEl ? (await skuEl.textContent().catch(() => '') || '') : '')).replace(/\s+/g, ' ').trim();
     const qtyEl = (await matches(line, SELECTORS.cartLineQty)).shown[0];
     let qtyText = qtyEl ? await qtyEl.inputValue().catch(() => null) : null;
     if (qtyText == null && qtyEl) qtyText = await qtyEl.textContent().catch(() => null);
@@ -360,7 +363,13 @@ async function login(page, creds) {
   // and the same request cannot abort every daily run (Codex PR3 r1 P1).
   const err = (await page.locator(SELECTORS.loginError).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim().slice(0, 120);
   if (lastError && !err) throw runLevel(`siteone login failed: ${String(lastError.message).slice(0, 120)}`);
-  throw new RefusedError('login_rejected', `SiteOne rejected the stored login${err ? `: ${err}` : ''} — check the vendor row's credentials`);
+  // Batch-wide: the same rejected credential must not be submitted once per
+  // request in the run (vendor lockout) — this request parks with its bell
+  // and the dispatcher claims no more SiteOne requests this run (Codex
+  // #3853 r21 P1). The next run retries (the password may be fixed by then).
+  const rejected = new RefusedError('login_rejected', `SiteOne rejected the stored login${err ? `: ${err}` : ''} — check the vendor row's credentials`);
+  rejected.adapterDown = true;
+  throw rejected;
 }
 
 // ---- place() stages ---------------------------------------------------------

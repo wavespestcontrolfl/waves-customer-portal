@@ -405,6 +405,17 @@ test('a run-level failure is scoped to its adapter: that adapter gets no more cl
   expect(mockState.ledgerRows).toHaveLength(ledgerRowsBefore); // no claim written for a dead adapter
 });
 
+test('a rejected login parks its request with the bell AND takes the adapter out of the run — the same credential is never resubmitted for the next request (Codex #3853 r21 P1)', async () => {
+  const rejected = new Error('SiteOne rejected the stored login'); rejected.refuse = 'login_rejected'; rejected.adapterDown = true;
+  const a = mockAdapter({ place: jest.fn(async () => { throw rejected; }) });
+  mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }];
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } }); // not run-level: the run does not go red
+  expect(a.place).toHaveBeenCalledTimes(1); // the second request of the down adapter was never claimed
+  expect(r.results[0]).toMatchObject({ status: 'needs_review', reason: 'login_rejected', adapterDown: 'stickermule' });
+  expect(notify).toHaveBeenCalledTimes(1); // one bell, for the parked request
+  mockState.dispatchable = null;
+});
+
 test('an unscoped run-level error after an adapter-scoped one replaces it and aborts the batch (Codex #3853 r11 P2)', async () => {
   const dbFn = require('../models/db');
   const origTransaction = dbFn.transaction;
