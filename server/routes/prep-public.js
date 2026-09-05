@@ -180,35 +180,35 @@ const VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY = {
 // Read-only. A scheduled-service source carries stampView(): the page
 // route commits the visit's view AFTER a successful render, fenced on the
 // key it rendered (see the handler); the PDF twin never stamps (contract).
-async function resolvePrepSource(token) {
-  const now = new Date();
+async function customerById(id) {
+  return id ? db('customers').where({ id }).first() : null;
+}
 
-  const project = await db('projects').where({ prep_token: token }).first();
-  if (project) {
-    if (project.prep_expires_at && new Date(project.prep_expires_at) < now) return null;
-    const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
-      : null;
-    const templateKey = project.prep_template_key || prepTemplateForProjectType(project.project_type);
-    if (!templateKey) return null;
-    return {
-      customer,
-      templateKey,
-      customerId: project.customer_id,
-      familyType: project.project_type,
-      typeLabel: getProjectType(project.project_type)?.label || project.project_type || 'Waves service',
-      serviceDate: formatDisplayDate(project.project_date || project.created_at, { fallback: '' }),
-      techName: String(project.tech_name || project.technician_name || '').trim() || 'your Waves technician',
-      serviceAddress: null,
-      viewRow: { project_id: project.id },
-      countView: () => db('projects').where({ id: project.id }).update({
-        prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
-        prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
-      }),
-    };
-  }
+// A project's prep page: the token is a project token (expired → null).
+async function projectPrepSource(project, now) {
+  if (project.prep_expires_at && new Date(project.prep_expires_at) < now) return null;
+  const templateKey = project.prep_template_key || prepTemplateForProjectType(project.project_type);
+  if (!templateKey) return null;
+  return {
+    customer: await customerById(project.customer_id),
+    templateKey,
+    customerId: project.customer_id,
+    familyType: project.project_type,
+    typeLabel: getProjectType(project.project_type)?.label || project.project_type || 'Waves service',
+    serviceDate: formatDisplayDate(project.project_date || project.created_at, { fallback: '' }),
+    techName: String(project.tech_name || project.technician_name || '').trim() || 'your Waves technician',
+    serviceAddress: null,
+    viewRow: { project_id: project.id },
+    countView: () => db('projects').where({ id: project.id }).update({
+      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+    }),
+  };
+}
 
-  // A token that is unknown, expired or keyless matches nothing (404).
+// A visit's prep page: the token is a scheduled_services token. A token
+// that is unknown, expired or keyless matches nothing (404).
+async function servicePrepSource(token, now) {
   const service = await db('scheduled_services')
     .where({ prep_token: token })
     .whereNotNull('prep_template_key')
@@ -221,9 +221,7 @@ async function resolvePrepSource(token) {
   const tech = service.technician_id
     ? await db('technicians').where({ id: service.technician_id }).first('name')
     : null;
-  const customer = service.customer_id
-    ? await db('customers').where({ id: service.customer_id }).first()
-    : null;
+  const customer = await customerById(service.customer_id);
   const serviceAddress = service.service_address_line1
     ? [
       service.service_address_line1,
@@ -257,6 +255,12 @@ async function resolvePrepSource(token) {
         prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
       }),
   };
+}
+
+async function resolvePrepSource(token) {
+  const now = new Date();
+  const project = await db('projects').where({ prep_token: token }).first();
+  return project ? projectPrepSource(project, now) : servicePrepSource(token, now);
 }
 
 // Load + interpolate the guide blocks for a resolved source. Shared by the

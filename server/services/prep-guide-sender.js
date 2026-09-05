@@ -257,9 +257,13 @@ async function automationLaneLive(visit, key, customerId) {
   // while it was held would be followed by the same prep on the next tick
   // (GH Codex #3856 r23 P1, superseding r21's enabled-only read). A
   // confirmed manual delivery settles the enrolment instead
-  // (settleHeldEnrollment).
+  // (settleHeldEnrollment). Only an enrolment still AWAITING the prep step
+  // counts: the runner's stampPrepSentForSequence treats step 0 alone as
+  // the prep delivery, so an enrolment advanced onto follow-up steps has
+  // already sent it and must not park a manual re-send (GH Codex #3856
+  // r25 P2).
   const enrollment = await db('automation_enrollments')
-    .where({ customer_id: customerId, template_key: sequenceKey })
+    .where({ customer_id: customerId, template_key: sequenceKey, current_step: 0 })
     .whereIn('status', LIVE_ENROLLMENT_STATUSES)
     .first('id');
   return !!enrollment;
@@ -270,14 +274,15 @@ async function automationLaneLive(visit, key, customerId) {
 // settled — cancelled with a reason, the runner's own cancel shape
 // (cancelEnrollmentForSuppression) — so a held one cannot resume and send
 // the same prep again (GH Codex #3856 r23 P1). automationLaneLive lets the
-// manual send through only when no enrolment is live for the key; this
-// closes the held case, and a lost write is logged, never a failed send.
+// manual send through only when no enrolment still awaits the prep step;
+// this closes the held case (step 0 only — an enrolment on its follow-up
+// steps keeps them), and a lost write is logged, never a failed send.
 async function settleHeldEnrollment(customerId, templateKey) {
   const sequenceKey = SEQUENCE_KEY_BY_PREP_TEMPLATE[templateKey];
   if (!sequenceKey) return;
   try {
     await db('automation_enrollments')
-      .where({ customer_id: customerId, template_key: sequenceKey })
+      .where({ customer_id: customerId, template_key: sequenceKey, current_step: 0 })
       .whereIn('status', LIVE_ENROLLMENT_STATUSES)
       .update({
         status: 'cancelled',

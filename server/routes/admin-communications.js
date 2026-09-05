@@ -2686,6 +2686,67 @@ const REVIEW_LINK_RE = /\/(?:api\/)?rate\/[A-Za-z0-9_-]{6,}/i;
 const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{5,})/gi;
 const REVIEW_LINK_SCHEDULE_ERROR = 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling';
 
+// Links a scheduled text may NOT carry — every one is an immediate-send-only
+// bearer or ask, re-checked only on the /sms path (the scheduler dispatches
+// straight into sendCustomerMessage). The composer refuses client-side;
+// this is the authoritative fence. Returns { status, error } or null.
+async function scheduledSmsLinkRefusal(cleanBody, to) {
+  // An Auto Pay setup link is a 30-day bearer credential with no
+  // schedule-time re-check.
+  const { autopayLinkSendCheck, immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+  const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
+  if (autopayCheck.present) {
+    return { status: 400, error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' };
+  }
+  // Same fence for the other per-row bearers the composer inserts
+  // (contract signing, card request, statement pay, expiring prep pages)
+  // (GH Codex #3844 r1 P1).
+  const immediateOnly = await immediateOnlyLinkSendCheck(cleanBody);
+  if (immediateOnly.present) {
+    return { status: 400, error: `${immediateOnly.label} links are re-checked at delivery — send them now, or remove the link before scheduling` };
+  }
+  // A review ask rides the immediate /sms send only — that path claims and
+  // marks the inline row and emails the Both copy; a scheduled row would
+  // deliver it untracked (invisible to the cap and cooldown) and never
+  // email (GH Codex #3856 r4 P1).
+  if (REVIEW_LINK_RE.test(cleanBody)) return { status: 400, error: REVIEW_LINK_SCHEDULE_ERROR };
+  // A pasted branded short link hides the /rate/ path — ask short_codes
+  // what it points at (GH Codex #3856 r5 P1). Fail closed on a lookup miss.
+  // Lowercased like the public resolver (public-shortlinks.js): short_codes.code
+  // is case-sensitive, and a pasted /l/AbCdE still resolves for the customer
+  // (GH Codex #3856 r12 P1).
+  const shortCodes = [...cleanBody.matchAll(SHORT_LINK_RE)].map((m) => m[1].toLowerCase());
+  if (!shortCodes.length) return null;
+  let reviewCodes;
+  try {
+    reviewCodes = await db('short_codes').whereIn('code', shortCodes).where({ kind: 'review' }).select('code');
+  } catch (lookupErr) {
+    logger.warn(`[communications] short-link kind lookup failed — refusing to schedule: ${lookupErr.message}`);
+    return { status: 503, error: 'Could not verify the links in this message — try again in a moment.' };
+  }
+  return reviewCodes.length ? { status: 400, error: REVIEW_LINK_SCHEDULE_ERROR } : null;
+}
+
+// The customer a scheduled text is linked to: the selected one, whose phone
+// must match `to`; else a digit-normalized, deleted-filtered, ambiguity-aware
+// lookup (a raw exact-string phone match misses formatting variants and can
+// link the scheduled SMS to a soft-deleted or arbitrary duplicate customer).
+// Returns { customerId } or { status, error }.
+async function trustedCustomerForScheduledSms(customerId, to) {
+  if (!customerId) {
+    const fallback = await findSingleCustomerForPhone(to).catch(() => null);
+    return { customerId: fallback ? fallback.id : null };
+  }
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
+  if (!customer) return { status: 404, error: 'customerId not found' };
+  const normalizedTo = normalizePhone(to);
+  const normalizedCustomerPhone = normalizePhone(customer.phone);
+  if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
+    return { status: 400, error: 'to must match the selected customer phone' };
+  }
+  return { customerId: customer.id };
+}
+
 router.post('/schedule-sms', async (req, res, next) => {
   try {
     const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft } = req.body || {};
@@ -2696,51 +2757,8 @@ router.post('/schedule-sms', async (req, res, next) => {
     if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
     }
-    // An Auto Pay setup link is a 30-day bearer credential with no
-    // schedule-time re-check — immediate sends only (the composer refuses
-    // client-side; this is the authoritative fence).
-    {
-      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
-      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
-      if (autopayCheck.present) {
-        return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
-      }
-      // Same fence for the other per-row bearers the composer inserts
-      // (contract signing, card request, statement pay, expiring prep
-      // pages): only the immediate /sms path re-checks them at delivery —
-      // the scheduler dispatches straight into sendCustomerMessage (GH
-      // Codex #3844 r1 P1). The client refusal is transient state; this is
-      // the authoritative one.
-      const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
-      const immediateOnly = await immediateOnlyLinkSendCheck(cleanBody);
-      if (immediateOnly.present) {
-        return res.status(400).json({ error: `${immediateOnly.label} links are re-checked at delivery — send them now, or remove the link before scheduling` });
-      }
-    }
-    // A review ask rides the immediate /sms send only — that path claims and
-    // marks the inline row and emails the Both copy; a scheduled row would
-    // deliver it untracked (invisible to the cap and cooldown) and never
-    // email. The composer refuses client-side; this is the authoritative
-    // fence (GH Codex #3856 r4 P1).
-    if (REVIEW_LINK_RE.test(cleanBody)) {
-      return res.status(400).json({ error: REVIEW_LINK_SCHEDULE_ERROR });
-    }
-    // A pasted branded short link hides the /rate/ path — ask short_codes
-    // what it points at (GH Codex #3856 r5 P1). Fail closed on a lookup miss.
-    // Lowercased like the public resolver (public-shortlinks.js): short_codes.code
-    // is case-sensitive, and a pasted /l/AbCdE still resolves for the customer
-    // (GH Codex #3856 r12 P1).
-    const shortCodes = [...cleanBody.matchAll(SHORT_LINK_RE)].map((m) => m[1].toLowerCase());
-    if (shortCodes.length) {
-      let reviewCodes;
-      try {
-        reviewCodes = await db('short_codes').whereIn('code', shortCodes).where({ kind: 'review' }).select('code');
-      } catch (lookupErr) {
-        logger.warn(`[communications] short-link kind lookup failed — refusing to schedule: ${lookupErr.message}`);
-        return res.status(503).json({ error: 'Could not verify the links in this message — try again in a moment.' });
-      }
-      if (reviewCodes.length) return res.status(400).json({ error: REVIEW_LINK_SCHEDULE_ERROR });
-    }
+    const linkRefusal = await scheduledSmsLinkRefusal(cleanBody, to);
+    if (linkRefusal) return res.status(linkRefusal.status).json({ error: linkRefusal.error });
 
     // ET wall-clock parse — datetime-local strings without offset are
     // interpreted in ET, ISO strings pass through unchanged.
@@ -2753,23 +2771,9 @@ router.post('/schedule-sms', async (req, res, next) => {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
 
-    let trustedCustomerId = null;
-    if (customerId) {
-      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
-      if (!customer) return res.status(404).json({ error: 'customerId not found' });
-      const normalizedTo = normalizePhone(to);
-      const normalizedCustomerPhone = normalizePhone(customer.phone);
-      if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
-        return res.status(400).json({ error: 'to must match the selected customer phone' });
-      }
-      trustedCustomerId = customer.id;
-    } else {
-      // Digit-normalized, deleted-filtered, ambiguity-aware lookup — a raw
-      // exact-string phone match misses formatting variants and can link the
-      // scheduled SMS to a soft-deleted or arbitrary duplicate customer.
-      const fallback = await findSingleCustomerForPhone(to).catch(() => null);
-      if (fallback) trustedCustomerId = fallback.id;
-    }
+    const trusted = await trustedCustomerForScheduledSms(customerId, to);
+    if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
+    const trustedCustomerId = trusted.customerId;
 
     // An Agent Review draft can be scheduled instead of sent now. Carry the
     // verified decision id on the scheduled row so the 5-min dispatch cron

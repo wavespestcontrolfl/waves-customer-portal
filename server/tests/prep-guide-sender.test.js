@@ -54,6 +54,7 @@ let scheduledQueries = [];
 let runRows = [];
 let enrollmentRows = [];
 let enrollmentUpdates = [];
+let enrollmentWheres = [];
 let stepSendRow = null;
 let lastRunsQuery = null;
 // Manual-delivery traces for the abandoned-reservation check: null = none.
@@ -71,13 +72,21 @@ function traceQuery(row) {
 function livenessQuery(rows) {
   let statuses = null;
   let enabledOnly = false; // the enrolment liveness read joins the template and requires t.enabled
+  let stepZeroOnly = false; // the enrolment reads take current_step: 0 (still awaiting the prep step)
   const q = {
     join: jest.fn(() => q),
-    where: jest.fn((col, val) => { if (col === 't.enabled' && val === true) enabledOnly = true; return q; }),
+    where: jest.fn((col, val) => {
+      enrollmentWheres.push(col);
+      if (col === 't.enabled' && val === true) enabledOnly = true;
+      if (col && typeof col === 'object' && col.current_step === 0) stepZeroOnly = true;
+      return q;
+    }),
     whereIn: jest.fn((col, vals) => { if (col === 'status' || col === 'e.status') statuses = vals; return q; }),
     select: jest.fn(async () => rows),
     update: jest.fn(async (patch) => { enrollmentUpdates.push(patch); return rows.filter((r) => !statuses || statuses.includes(r.status)).length; }),
-    first: jest.fn(async () => rows.find((r) => (!statuses || statuses.includes(r.status)) && (!enabledOnly || r.template_enabled !== false)) || undefined),
+    first: jest.fn(async () => rows.find((r) => (!statuses || statuses.includes(r.status))
+      && (!enabledOnly || r.template_enabled !== false)
+      && (!stepZeroOnly || Number(r.current_step || 0) === 0)) || undefined),
   };
   return q;
 }
@@ -146,6 +155,7 @@ beforeEach(() => {
   runRows = [];
   enrollmentRows = [];
   enrollmentUpdates = [];
+  enrollmentWheres = [];
   lastRunsQuery = null;
   stepSendRow = null;
   manualEmailRow = null;
@@ -593,6 +603,18 @@ describe('sendPrepToCustomer', () => {
     expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
     expect(enrollmentUpdates).toEqual([expect.objectContaining({ status: 'cancelled', next_send_at: null, completed_at: expect.any(Date) })]);
     expect(enrollmentUpdates[0].metadata).toEqual({ sql: expect.stringContaining('cancel_reason'), bindings: ['"manual_prep_sent"'] });
+
+    // An enrolment already past step 0 (the prep step — the runner's
+    // stampPrepSentForSequence) has sent the prep: it neither parks the
+    // manual re-send nor gets settled (its follow-up steps keep going;
+    // GH Codex #3856 r25 P2). The settle write itself is step-0 scoped.
+    enrollmentUpdates = [];
+    enrollmentRows = [{ id: 'enr-1', status: 'active', template_enabled: true, current_step: 1 }];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' })).toMatchObject({ ok: true });
+    // The settle write was issued but scoped to current_step 0 — it cannot
+    // touch this advanced enrolment.
+    expect(enrollmentUpdates).toHaveLength(1);
+    expect(enrollmentWheres.filter((w) => w && typeof w === 'object' && w.template_key === 'flea').every((w) => w.current_step === 0)).toBe(true);
 
     // A guide with no sequence (lawn) settles nothing.
     enrollmentUpdates = [];
