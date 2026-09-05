@@ -745,6 +745,7 @@ app.use('/api/integrations/backlink-worker', require('./routes/integrations-back
 // External agent watchdog (Hermes, key hermes_watchdog) — PII-free health
 // snapshot; dark behind GATE_HERMES_WATCHDOG.
 app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watchdog-worker'));
+app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));

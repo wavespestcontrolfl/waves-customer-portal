@@ -742,6 +742,20 @@ external agent watchdog a counts-only health snapshot — no customer data,
 no item titles, no error text (job_health.last_error is only digit-masked),
 no sub-read error messages; adding any free-text field is P0. `reasons` are
 count-free stable keys — a count inside a key re-pages one incident.
+`commitments-worker` (GET `/open`, key `hermes_commitments`, capability
+`commitments_read`, gate `GATE_HERMES_COMMITMENTS`) reads existing open Waves
+call commitments. HMAC only; backlink/watchdog keys and legacy bearer cannot
+read it. Dark gate precedes the 30/minute IP limiter and auth/audit. Privacy
+headers cover every response. Strict offset/limit-only query, max 100 rows
+plus a has-more probe. Response includes obligation description, bounded
+verbatim evidence with source anchors, identifiers, deadlines, record version,
+and selected fulfillment hints; no contact fields, raw transcript, recording
+URL, full customer row, or unrestricted JSON. Quotes may themselves contain
+customer information: private case evidence only, never a shared wiki/log.
+Reads never refresh/extract/fulfill or send; existing HMAC nonce/audit writes
+remain. Failed audit finalization returns 503, not data. Coverage is stored
+open call commitments, not SMS/email completeness or freshly verified state.
+Offset pages are not a snapshot; absence cannot establish completion.
 Customer authentication (`server/routes/auth.js`, mounted at `/api/auth`):
 `POST /send-code`, `/verify-code`, `/refresh`, `/logout` are unauthenticated
 by definition. send-code and verify-code sit behind the `server/index.js`
@@ -794,7 +808,13 @@ confirmation texts link to. Gated by `scheduled_services.reschedule_token`
 minting a second one — plus a 60 req/min router limit and 10 req/min on
 the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
 GET returns the visit summary (service type, date + window_start, the
-server-derived arrival range, plan/one-time flag, confirmed flag) plus
+server-derived arrival range, plan/one-time flag, confirmed flag, and
+`vanScene` — a boolean that is exactly `GATE_VAN_SCENE` in production
+(feature-gates `vanScene`: prod dark, unset = false; every other NODE_ENV
+— local, preview, test — returns true regardless of the variable, so the
+unset kill switch is a PRODUCTION statement) telling the page to render
+the "look for this van" scene under the header card; it carries no visit
+data and no other field changes with it) plus
 decorations that are each individually fail-open: assigned tech first name
 + TTL-presigned photo, a same-tech-as-last-visit flag, and the day's NWS
 rain chance. **NO customer name, and the page greets nobody** —
@@ -815,6 +835,11 @@ bless a replacement slot the customer never saw. It never touches
 date/window/tech and sends NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
 the same visit, UID-stable per visit so re-downloading updates rather
 than duplicates).
+`GET /api/booking/config` (the /book page's public config payload, no token)
+gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
+to show the van scene above the secure-card block. Unset gate = `false`
+in production (non-production envs return true, as above); no other field
+changes.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.
@@ -823,7 +848,13 @@ is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
 GET returns the appointment summary (customer first name, service type,
 current date/window, recurring flag, `missed` flag, and — series visits
 only — the `reanchorPullForwardDays` threshold) + live open slots from the
-/book availability engine. POST is a WRITE with two owner-authorized
+/book availability engine (`availability.days[].slots[]` — every slot
+carries its own `nearby` boolean, true when its detour is within
+`NEARBY_DETOUR_MINUTES`; `days[].nearby` and `availability.nearby` are the
+roll-ups. The per-slot flag is shared by every consumer of that engine:
+`/api/booking/availability`, this GET, re-service, and the find-slots
+searches — added in #3888 so the picker labels each time from its own
+route-fit, not the day's). POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day

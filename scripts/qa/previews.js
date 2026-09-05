@@ -33,6 +33,7 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
     return route.continue();
   });
   let failure = null;
+  const cleanupErrors = [];
   try {
     const response = await page.goto(baseUrl + scenario.url, { waitUntil: 'domcontentloaded' });
     assert.equal(response.status(), 200);
@@ -62,10 +63,12 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
     failure = error.message;
     await page.screenshot({ path: path.join(artifactDir, `${key}-failed.png`), fullPage: true }).catch(() => {});
   } finally {
-    await context.tracing.stop({ path: path.join(artifactDir, `${key}.zip`) });
-    await context.close();
+    await context.tracing.stop({ path: path.join(artifactDir, `${key}.zip`) })
+      .catch((error) => cleanupErrors.push(`Trace: ${error.message}`));
+    await context.close().catch((error) => cleanupErrors.push(`Context: ${error.message}`));
   }
-  return { scenario: scenario.name, viewport: viewportName, passed: !failure, failure, errors };
+  failure ??= cleanupErrors[0] ?? null;
+  return { scenario: scenario.name, viewport: viewportName, passed: !failure, failure, errors, cleanupErrors };
 }
 
 (async () => {

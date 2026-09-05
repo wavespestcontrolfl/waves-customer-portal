@@ -514,6 +514,8 @@ router.get('/config', async (req, res, next) => {
       // Multi-service selector on /book — fail-closed dark-ship flag; the
       // server independently refuses composite service keys while off.
       multi_service: isEnabled('multiServiceBooking'),
+      // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
+      van_scene: isEnabled('vanScene'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -1173,12 +1175,15 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // Default landing keeps the tight 4-per-day cap; a specific-date / AI
     // search opens it up so the customer sees the full block of options.
     const perDayCap = expandOpenDays ? 8 : 4;
-    const cappedSlots = slots.map(s => ({ ...s, is_best_fit: s === best })).slice(0, perDayCap);
+    // "nearby" (route-efficient) is a per-slot fact — the picker labels
+    // each time from its own flag; the day rolls them up for the calendar.
+    const cappedSlots = slots
+      .map(s => ({ ...s, is_best_fit: s === best, nearby: s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES }))
+      .slice(0, perDayCap);
     days.push({
       date,
       ...labels,
-      // A day is "nearby" when at least one of its slots is route-efficient.
-      nearby: cappedSlots.some(s => s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES),
+      nearby: cappedSlots.some(s => s.nearby),
       slots: cappedSlots,
     });
   }

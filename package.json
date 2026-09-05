@@ -65,7 +65,11 @@
     "worktree:stop": "node scripts/dev/worktree.js stop",
     "test:dev-workflow": "node --test scripts/dev/tests/*.test.js",
     "qa:previews": "node scripts/qa/previews.js",
-    "test:qa-workflow": "node --test scripts/qa/tests/*.test.js"
+    "test:qa-workflow": "node --test scripts/qa/tests/*.test.js",
+    "qa:e2e": "node scripts/qa/e2e.js",
+    "qa:seed": "node scripts/qa/e2e.js --seed",
+    "qa:cleanup": "node scripts/qa/e2e.js --cleanup",
+    "qa:database": "node scripts/qa/database.js"
   },
   "lint-staged": {
     "*.{js,jsx,cjs,mjs}": "eslint --fix --cache --cache-location node_modules/.cache/eslint --no-warn-ignored"

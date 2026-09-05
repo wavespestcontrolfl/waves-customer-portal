@@ -5,8 +5,7 @@ jest.mock('../middleware/auth', () => ({
   },
 }));
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
-jest.mock('../services/stripe', () => ({}));
+jest.mock('../services/stripe', () => ({ getPaymentHistory: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/payment-lifecycle-email', () => ({}));
@@ -14,12 +13,11 @@ jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 
 const express = require('express');
 const db = require('../models/db');
-const PaymentRouter = require('../services/payment-router');
+const StripeService = require('../services/stripe');
 const router = require('../routes/billing-v2');
 
 let rawPayments;
 let payerInvoiceIds;
-let historyService;
 
 function thenableBuilder(resolveRows, resolveFirst) {
   const builder = {};
@@ -61,12 +59,9 @@ beforeEach(() => {
     refund_amount: index === 0 ? '10.00' : null,
     refund_status: index === 0 ? 'partial' : null,
   }));
-  historyService = {
-    getPaymentHistory: jest.fn(async (_customerId, limit, offset = 0) => (
-      rawPayments.slice(offset, offset + limit)
-    )),
-  };
-  PaymentRouter.getServiceForCustomer.mockResolvedValue(historyService);
+  StripeService.getPaymentHistory.mockImplementation(async (_customerId, limit, offset = 0) => (
+    rawPayments.slice(offset, offset + limit)
+  ));
   db.mockImplementation((table) => {
     if (table === 'invoices') {
       return thenableBuilder(
@@ -133,5 +128,5 @@ test('rejects unbounded page sizes', async () => {
       error: 'limit must be 1-100 and cursor must be a non-negative integer',
     });
   });
-  expect(historyService.getPaymentHistory).not.toHaveBeenCalled();
+  expect(StripeService.getPaymentHistory).not.toHaveBeenCalled();
 });

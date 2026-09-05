@@ -12,7 +12,8 @@ queries powered by Claude.
 ## Architecture
 
 ```
-⌘K (any admin page) or embedded bar
+GlobalCommandPalette (admin ⌘K / Ctrl+K or Ask AI),
+or a dedicated Agent Estimate / tech workflow
     ↓
 POST /api/admin/intelligence-bar/query
     ↓
@@ -84,9 +85,13 @@ max_tokens for field speed.
   be added to those sets — load the **ib-write-tools skill** for the full
   procedure. With the gate off (local dev), the legacy conversational
   `confirmed: true` two-step applies.
-- **`SEOIntelligenceBar` is the generic reusable wrapper.** Pass a `context`
-  prop. Only build a custom wrapper if you need to inject page-specific
-  React state as `pageData`.
+- **Admin contexts use `GlobalCommandPalette`.** `AdminLayoutV2` mounts
+  the palette; update the palette's route context mapping instead of adding another
+  page-level embed. The former admin embeds were retired. The dedicated
+  `AgentEstimatePage` uses `useIntelligenceBar` with `buildPageData` and
+  imports `AttachIcon` from `IntelligenceBarShell` — retain that hook and
+  shared module. `TechIntelligenceBar` and `WdoIntelligenceBar` remain
+  separate, active surfaces.
 - **Some tools spawn their own Claude calls.** `run_price_lookup`,
   `draft_sms_reply` — they call Claude internally for content generation.
   Flag such tools `sonnetBacked` so contract-test smoke skips them.

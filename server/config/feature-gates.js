@@ -60,6 +60,7 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
@@ -166,11 +167,12 @@ const gates = {
   // switch for every tokenized capture, judged at mint AND completion),
   // instant bank verification only, same save → consent → enroll tail as
   // every other save surface. Operator-initiated only (Customers page
-  // action: copy link, or text it via the card_request purpose with the
+  // action: copy link, text it via the card_request purpose with the
   // autopay_setup_link template, seeded inactive — and the text ALSO needs
   // GATE_AUTOPAY_CUSTOMER_SMS, since the message type classifies as an
   // Auto Pay customer SMS; the action reports autopay_sms_gate_off
-  // otherwise). Gate off: the admin
+  // otherwise — or email it via the payment.autopay_setup_link email
+  // template through the template library). Gate off: the admin
   // action reports gate_off and mints nothing; already-minted links keep
   // working (the gate governs new links). Customer-facing money surface —
   // fail-closed ==='true' in every environment.
@@ -1896,6 +1898,12 @@ const gates = {
   // Consumers read gateEnvValue at CALL time (services/scheduling/travel-gap.js)
   // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
   slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
+
+  // The wrapped-van scene on the appointment page + booking step 4 (owner
+  // 2026-09-03). Rides the existing page payloads (appointment `vanScene`,
+  // booking config `van_scene`) — no extra client fetch. Kill switch: unset
+  // GATE_VAN_SCENE.
+  vanScene: isProd ? process.env.GATE_VAN_SCENE === 'true' : true,
 
   // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
   // before/after photo pair (server/services/vision-delta.js); the verdict

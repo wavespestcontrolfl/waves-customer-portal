@@ -197,6 +197,21 @@ describe('link-worker-auth HMAC', () => {
     expect(res.statusCode).toBe(403); // hermes key: claim/report only
   });
 
+  test('commitments reader is HMAC-only and cannot enter other lanes', async () => {
+    process.env.LINK_WORKER_SECRET_HERMES_COMMITMENTS = 'commitments-test';
+    const url = '/api/integrations/commitments-worker/open?limit=2&offset=0';
+    const headers = signedHeaders({ url, keyId: 'hermes_commitments', secret: 'commitments-test' });
+    expect((await drive(makeReq({ url, headers }), 'commitments_read')).next).toHaveBeenCalledWith();
+    for (const endpoint of ['claim', 'report', 'watchdog', 'vendor_price', 'vendor_login']) {
+      expect((await drive(makeReq({ url, headers }), endpoint)).res.statusCode).toBe(403);
+    }
+    expect((await drive(makeReq({ url, headers: signedHeaders({ url }) }), 'commitments_read')).res.statusCode).toBe(403);
+    expect((await drive(makeReq({ url, headers: { authorization: 'Bearer legacy-bearer' } }), 'commitments_read')).res.statusCode).toBe(403);
+    expect((await drive(makeReq({ url, headers: signedHeaders({ url, keyId: 'hermes_commitments' }) }), 'commitments_read')).res.statusCode).toBe(401);
+    delete process.env.LINK_WORKER_SECRET_HERMES_COMMITMENTS;
+    expect((await drive(makeReq({ url, headers }), 'commitments_read')).res.statusCode).toBe(503);
+  });
+
   test('the hermes_watchdog key reaches ONLY the watchdog endpoint and has its own secret', async () => {
     process.env.LINK_WORKER_SECRET_HERMES_WATCHDOG = 'watchdog-secret';
     const url = '/api/integrations/watchdog-worker/status';

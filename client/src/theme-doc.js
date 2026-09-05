@@ -90,10 +90,10 @@ export function docHeading(level) {
 // conflicting .section-eyebrow rules; this replaces both.)
 export const DOC_EYEBROW = {
   fontFamily: DOC_FONT,
-  fontSize: FS.caption,
-  fontWeight: FW.bold,
+  fontSize: FS.body,
+  fontWeight: FW.semibold,
   lineHeight: LH.heading,
-  letterSpacing: '0.11em',
+  letterSpacing: '0.06em',
   textTransform: 'uppercase',
   color: 'var(--text-muted, #3F4A65)',
   marginBottom: 8,
@@ -122,6 +122,10 @@ export const SP = {
 // needs the width inline.
 export const DOC_COLUMN = 'min(100% - 32px, 760px)';
 export const DOC_COLUMN_MAX = 760;
+// The 640px flow column (chrome audit 2026-09-03): appointment / track /
+// reschedule / re-service — the short transactional flows. Documents
+// (estimates, reports, invoices, notices) use DOC_COLUMN_MAX.
+export const FLOW_COLUMN_MAX = 640;
 export const DOC_PAGE_MARGIN = '28px auto 56px';
 
 // ---------- color roles ----------
