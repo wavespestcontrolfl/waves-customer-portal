@@ -57,7 +57,6 @@ export const FW = {
   medium: 500,
   semibold: 600,
   bold: 700,
-  heavy: 800, // display/eyebrow emphasis only
 };
 
 export const LH = {

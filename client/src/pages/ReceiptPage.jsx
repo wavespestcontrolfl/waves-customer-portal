@@ -122,14 +122,14 @@ function SummaryRow({ label, value, strong, danger }) {
       borderTop: strong ? `1px solid ${DOC.border}` : 'none',
       color: danger ? DOC.danger : strong ? DOC.ink : DOC.muted,
       fontSize: strong ? FS.lead : FS.body,
-      fontWeight: strong ? FW.heavy : danger ? FW.bold : FW.medium,
+      fontWeight: strong || danger ? FW.bold : FW.medium,
       fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
         color: danger ? DOC.danger : DOC.ink,
         fontFamily: DOC_FONT,
-        fontWeight: strong ? FW.heavy : FW.semibold,
+        fontWeight: strong ? FW.bold : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -377,7 +377,7 @@ export default function ReceiptPage() {
           }}>
             <Icon name="warning" size={17} strokeWidth={2} style={{ color: DOC.danger, marginTop: 1, flexShrink: 0 }} />
             <div>
-              <div style={{ fontWeight: FW.heavy, color: DOC.danger, marginBottom: SP.xxs }}>Save-on-file authorization not recorded</div>
+              <div style={{ fontWeight: FW.bold, color: DOC.danger, marginBottom: SP.xxs }}>Save-on-file authorization not recorded</div>
               <div style={{ color: DOC.muted }}>
                 Your payment went through, but we couldn't record your authorization to save this payment method on file. Waves will reach out to confirm before any future charge. Questions: call <HelpPhoneLink tone="dark" inline />.
               </div>
@@ -423,7 +423,7 @@ export default function ReceiptPage() {
           }}>
             <Icon name="refresh" size={17} strokeWidth={2} style={{ color: '#065A8C', marginTop: 1 }} />
             <div>
-              <div style={{ fontWeight: FW.heavy, color: '#065A8C', marginBottom: SP.xxs }}>Partial refund issued</div>
+              <div style={{ fontWeight: FW.bold, color: '#065A8C', marginBottom: SP.xxs }}>Partial refund issued</div>
               <div style={{ color: DOC.muted }}>
                 {fmtCurrency(payment.refundAmount)} refunded
                 {payment.refundedAt ? ` on ${fmtDate(payment.refundedAt)}` : ''}
@@ -474,7 +474,7 @@ export default function ReceiptPage() {
           }}>
             <div>
               <div style={eyebrow}>{processing ? 'Submitted amount' : unpaid ? 'Amount due' : 'Receipt total'}</div>
-              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.heavy, color: DOC.ink, fontFamily: DOC_FONT }}>
+              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.bold, color: DOC.ink, fontFamily: DOC_FONT }}>
                 {fmtCurrency(chargedTotal)}
               </div>
               <div style={{ marginTop: SP.xs, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
@@ -493,7 +493,7 @@ export default function ReceiptPage() {
             <DetailBlock label="Billed to">
               {payer ? (
                 <>
-                  <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
+                  <div style={{ fontWeight: FW.bold }}>{payer.name}</div>
                   {payer.address && <div>{payer.address}</div>}
                   {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                     <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
@@ -502,7 +502,7 @@ export default function ReceiptPage() {
                 </>
               ) : (
                 <>
-                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
                   {customer.email && <div style={{ color: DOC.muted }}>{customer.email}</div>}
@@ -511,7 +511,7 @@ export default function ReceiptPage() {
             </DetailBlock>
             {payer && (
               <DetailBlock label="Service address">
-                <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                 {customer.address && <div>{customer.address}</div>}
                 {locationLine && <div>{locationLine}</div>}
               </DetailBlock>

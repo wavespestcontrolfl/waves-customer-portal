@@ -279,7 +279,7 @@ function AnnualPrepayInvoicePanel({ term }) {
           {annualPrepayStatusLabel(term)}
         </div>
         {term.prepayAmount != null && (
-          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.heavy, color: DOC.ink }}>
+          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.bold, color: DOC.ink }}>
             {fmtCurrency(term.prepayAmount)}
           </div>
         )}
@@ -365,14 +365,14 @@ function SummaryRow({ label, value, strong, muted }) {
       borderTop: strong ? `1px solid ${DOC.border}` : 'none',
       color: strong ? DOC.ink : DOC.muted,
       fontSize: strong ? FS.lead : FS.body,
-      fontWeight: strong ? FW.heavy : FW.medium,
+      fontWeight: strong ? FW.bold : FW.medium,
       fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
         color: muted ? DOC.muted : DOC.ink,
         fontFamily: DOC_FONT,
-        fontWeight: strong ? FW.heavy : FW.semibold,
+        fontWeight: strong ? FW.bold : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -2713,7 +2713,7 @@ export default function PayPageV2() {
               <DetailBlock label="Billed to">
                 {payer ? (
                   <>
-                    <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
+                    <div style={{ fontWeight: FW.bold }}>{payer.name}</div>
                     {payer.address && <div>{payer.address}</div>}
                     {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                       <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
@@ -2722,7 +2722,7 @@ export default function PayPageV2() {
                   </>
                 ) : (
                   <>
-                    <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                    <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                     {customer.address && <div>{customer.address}</div>}
                     {locationLine && <div>{locationLine}</div>}
                   </>
@@ -2730,13 +2730,13 @@ export default function PayPageV2() {
               </DetailBlock>
               {payer && (
                 <DetailBlock label="Service address">
-                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
                 </DetailBlock>
               )}
               <DetailBlock label="Service">
-                <div style={{ fontWeight: FW.heavy }}>{serviceLabel}</div>
+                <div style={{ fontWeight: FW.bold }}>{serviceLabel}</div>
                 {serviceDateLabel && <div>{serviceDateLabel}</div>}
                 {service.techName && <div style={{ color: DOC.muted }}>Technician: {service.techName}</div>}
               </DetailBlock>

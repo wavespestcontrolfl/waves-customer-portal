@@ -110,7 +110,7 @@ export default function ReviewPage() {
           color: COLORS.white, letterSpacing: '0.04em', lineHeight: 1, margin: 0,
           textShadow: '0 2px 8px rgba(0,0,0,0.2)',
         }}>WAVES</h1>
-        <div style={{ position: 'relative', zIndex: 1, fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
       </div>
 
       <div style={{ maxWidth: 440, margin: '0 auto', padding: '0 20px 60px' }}>

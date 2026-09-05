@@ -26,7 +26,7 @@ coherent). Serif accents: `DOC_FONT_SERIF`.
 | Token | px | Use |
 |---|---|---|
 | `FS.body` | 14 | default body, buttons, table cells |
-| `FS.bodyLg` | 15 | primary prose paragraphs |
+| `FS.bodyLg` | 16 | primary prose paragraphs (owner D1 2026-09-05) |
 | `FS.lead` | 16 | lead-ins and ALL text inputs (16 = no iOS focus zoom) |
 | `FS.sub` | 18 | sub-headings, intro lines |
 | `FS.h4/h3/h2/h1` | 16/20/26/40 | headings (see `docHeading(level)`); the glass sheet renders h1 as `clamp(32px, 4vw, 40px)` |
@@ -35,9 +35,10 @@ coherent). Serif accents: `DOC_FONT_SERIF`.
 `glass/glass-theme.css` forces eyebrows and fine print to 14 (owner ruling
 2026-09-03); the scale starts at `FS.body` (14) — `FS.micro` / `FS.caption` are gone
 (the PDF twin keeps its own 8/9 print sizes).
-`check-portal-brand.js` enforces literal 11/13 today. Weights snap to `FW`
-{400, 500, 600, 700}; `FW.heavy` (800) is print-only and 850 never
-appears. Line heights snap to `LH` {1, 1.1, 1.2, 1.35, 1.5}: solid for
+`check-portal-brand.js` refuses every literal under 14 and the retired tokens.
+Weights snap to `FW` {400, 500, 600, 700}; `FW.heavy` (800) is gone and 850
+never appears (the gate refuses weights over 700, ternaries included).
+Line heights snap to `LH` {1, 1.1, 1.2, 1.35, 1.5}: solid for
 buttons/badges, display for h1, heading for h2–h4, snug for dense meta, body
 for prose.
 

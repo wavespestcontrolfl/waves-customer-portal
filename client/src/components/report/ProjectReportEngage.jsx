@@ -68,10 +68,10 @@ export function ProjectAskWaves({ token }) {
   // Ask, the prompts as stacked rows, the answer in flow. The sticky
   // marquee bar this replaced is gone with its CSS.
   return (
-    <section className="waves-ask-card" data-glass="card" aria-label="Waves AI — ask about this report" style={{ position: 'relative' }}>
+    <section className="waves-ask-card" data-glass="card" aria-label="Waves AI — ask about this report">
       <div className="waves-ask-eyebrow" data-gt="eyebrow">Ask Waves</div>
-      <h2 className="waves-ask-title">Questions about this project? Ask anything</h2>
-      <p className="waves-ask-intro">What we found, what was treated, what to do next, or when the next visit is — straight answers in seconds.</p>
+      <h2 className="waves-ask-title">Questions about this project?</h2>
+      <p className="waves-ask-intro">What we found, what was treated, what to do next, or when the next visit is.</p>
       <form
         className="waves-ask-form"
         onSubmit={(event) => { event.preventDefault(); ask(); }}

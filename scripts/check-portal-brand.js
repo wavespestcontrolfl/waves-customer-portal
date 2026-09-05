@@ -8,7 +8,7 @@
  *   1. Raw emoji characters          (use <Icon name="..." /> instead)
  *   2. Hardcoded brand font strings  (import FONTS from theme-brand)
  *   3. Local palette declarations    (import COLORS from theme-brand)
- *   4. Banned font sizes (11, 12, 13) and weights above 700 per the customer glass sheet
+ *   4. Font sizes under 14 (literal or FS token) and weights above 700 per the customer glass sheet
  *
  * Run: `node scripts/check-portal-brand.js` or `npm run check:portal-brand`.
  * Exit code 0 = clean, 1 = violations found.
@@ -70,15 +70,17 @@ const FONT_FAMILY_LITERAL_RX = new RegExp(
 
 const LOCAL_PALETTE_RX = /^(?:\s*(?:export\s+)?)const\s+(W|BRAND|PALETTE|THEME|COLORS|PALLETTE)\s*=\s*\{/;
 
-const BANNED_FONT_SIZE_RX = /fontSize:\s*(11|12|13)\b/;
+// Every literal under the 14px floor (0–13, decimals included).
+const BANNED_FONT_SIZE_RX = /fontSize:\s*((?:\d|1[0-3])(?:\.\d+)?)\b/;
 // Token spellings of the same sizes (FS.micro / FS.caption were 11 / 12 until
-// #3895 deleted them) — a live page must not reach under the floor by name.
+// #3892 deleted them) — a live page must not reach under the floor by name.
 const BANNED_FONT_TOKEN_RX = /fontSize:\s*FS\.(micro|caption)\b/;
 // Customer glass sheet (owner 2026-09-03/05): weights stop at 700. 800/850/900
 // literals render heavier on iPhone than on the Inter/Segoe fallbacks and read
 // as a different face next to the sheet's 600/700; 650/750 are variable-font
-// one-offs that snap unpredictably.
-const HEAVY_WEIGHT_RX = /fontWeight:\s*(6[5-9]\d|7[1-9]\d|[89]\d\d)\b/;
+// one-offs that snap unpredictably. Matched anywhere in the value expression
+// (ternaries included) and by name: FW.heavy (800) was deleted with #3895.
+const HEAVY_WEIGHT_RX = /fontWeight:\s*[^,}\n]*?\b(6[5-9]\d|7[1-9]\d|[89]\d\d|FW\.heavy)\b/;
 
 // =========================================================================
 // Walk
