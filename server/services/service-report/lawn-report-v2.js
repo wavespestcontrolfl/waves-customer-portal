@@ -559,7 +559,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     .toLowerCase()
     .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '')
     // Absence is not evidence of dryness. Keep contrasting affirmative clauses.
-    .replace(/\b(?:no|not|without|free of|absent|none|negative for)\b(?:(?!\b(?:but|however|yet)\b)[^.!?;])*/g, '');
+    .replace(/\b(?:no|not|without|free of|absent|none|negative for)\b(?:(?!\b(?:but|however|yet)\b|,\s*(?:and\b|leaving\b|while\b|whereas\b))[^.!?;])*/g, '');
   // DRY-specific signals only — not generic "stress" (heat/insect).
   // "uneven"/"coverage" need MOISTURE context: the repo uses "uneven" for
   // ordinary color variation and "coverage" for turf density, and a bare

@@ -232,6 +232,8 @@ describe('Lawn water coverage requires affirmative moisture evidence', () => {
   });
   test.each([
     'Dry patches remain near the driveway.',
+    'No disease is visible, and dry patches remain near the driveway.',
+    'No irrigation reaches the west side, leaving dry patches.',
     'No disease is visible, but the west side is dry.',
     'No drought stress in the front; sprinkler coverage is uneven in the back.',
   ])('preserves affirmative evidence in %s', observation => {
