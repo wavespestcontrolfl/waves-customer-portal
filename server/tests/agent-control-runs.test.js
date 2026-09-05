@@ -22,7 +22,7 @@ jest.mock('../models/db', () => {
   const state = { failNext: null, idSeq: 0, ops: [] }; // failNext: table whose next op throws; ops: every write in order (lock-order assertions)
   const uuid = () => `00000000-0000-4000-8000-${String(++state.idSeq).padStart(12, '0')}`;
   const matches = (row, where, whereNot, nulls = [], anyOf = []) => Object.entries(where).every(([k, v]) => String(row[k]) === String(v))
-    && Object.entries(whereNot || {}).every(([k, v]) => String(row[k]) !== String(v))
+    && (whereNot || []).every(([k, v]) => String(row[k]) !== String(v))
     && nulls.every((k) => row[k] == null)
     // a grouped where((q) => q.whereNull(a).orWhere({ b })) — any branch matches
     && anyOf.every((group) => group.some((br) => (br.isNull ? row[br.isNull] == null : Object.entries(br.eq).every(([k, v]) => String(row[k]) === String(v)))));
@@ -46,7 +46,7 @@ jest.mock('../models/db', () => {
       whereNull(col) { st.nulls.push(col); return chain; },
       first() { st.first = true; return chain; },
       update(patch) { st.op = 'update'; st.payload = patch; return chain; },
-      whereNot(col, val) { st.whereNot = { ...(st.whereNot || {}), [col]: val }; return chain; },
+      whereNot(col, val) { st.whereNot = [...(st.whereNot || []), [col, val]]; return chain; },
       max(expr) { st.max = expr; st.first = true; return chain; },
       then(resolve, reject) {
         try {
@@ -415,6 +415,18 @@ describe('a spent handle', () => {
     mark = state.ops.length;
     await b.fail({ error: new Error('x'), errorCode: 'openai_500' });
     expect(order(mark)).toEqual(['agent_runs', 'agent_attempts']);
+  });
+
+  test('a retryable fail racing a finish and another fail on one handle: the run is queued once, the attempt errored once, the others are stale', async () => {
+    const h = await runs.startRun({ ...base, maxAttempts: 3 });
+    const failure = { error: new Error('x'), errorCode: 'openai_500', retryable: true };
+    const [r1, f, r2] = await Promise.all([h.fail(failure), h.finish({ result: 'succeeded' }), h.fail(failure)]);
+    expect(r1.retry).toBe(true);
+    expect(f).toBe(false);
+    expect(r2).toMatchObject({ retry: false, stale: true });
+    expect(runRow()).toMatchObject({ lifecycle: 'queued', attempts: 1, error_code: 'openai_500', result: null });
+    expect(store.agent_attempts[0]).toMatchObject({ result: 'errored', error_code: 'openai_500' });
+    expect(events(h.id)).toEqual(['started', 'retry_scheduled']);
   });
 
   test('runManaged retries a terminal write that rolled back once, then lets the handle go', async () => {

@@ -330,8 +330,11 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   let budgetFlagged = false;
   let progress = 0; // this attempt's count: openAttempt reset the persisted one (a reopen's row is pre-reset)
   // this handle's attempt is the run's current one (see openAttempt) and
-  // the run is still open: a terminal run is changed only by openAttempt
-  const fenced = (conn = db) => conn('agent_runs').where({ id: runId, attempts: attemptNo }).whereNot('lifecycle', 'terminal');
+  // the run is still open: a terminal run is changed only by openAttempt,
+  // and a QUEUED one (a retryable fail) awaits its next attempt — the
+  // handle that queued it is done with it, so a finish / second fail racing
+  // that commit moves nothing (pre-push audit)
+  const fenced = (conn = db) => conn('agent_runs').where({ id: runId, attempts: attemptNo }).whereNot('lifecycle', 'terminal').whereNot('lifecycle', 'queued');
   // one-shot: after finish / fail PERSISTED (or proved stale — a newer
   // attempt owns the run) this handle is spent and every later call is a
   // no-op (a retry goes through startRun → openAttempt). A terminal
