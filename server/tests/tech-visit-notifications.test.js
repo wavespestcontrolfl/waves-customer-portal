@@ -338,6 +338,18 @@ describe('notifyAssignmentChange (both sides of a tech change)', () => {
     expect(db).not.toHaveBeenCalled();
   });
 
+  test('a creation notice handed a caller trx waits for that commit too', async () => {
+    let resolveCommit;
+    const trx = { executionPromise: new Promise((res) => { resolveCommit = res; }) };
+    notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: 'customer_estimate_accept', trx });
+    await Promise.resolve();
+    expect(mockSendTechNotification).not.toHaveBeenCalled();
+    resolveCommit();
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendTechNotification).toHaveBeenCalledWith('tech-1', expect.objectContaining({ type: 'visit_assigned' }));
+    expect(mockSendTechNotification.mock.calls[0][1].payload.actor).toBe('by the customer online');
+  });
+
   test('inside a caller transaction the notice waits for the OUTERMOST commit and is dropped on rollback', async () => {
     prime({ techs: { 'tech-1': TECH, 'tech-2': { ...TECH, id: 'tech-2', name: 'Tech Two' }, [ADAM_ID]: ADAM }, visit: { ...VISIT, technician_id: 'tech-2' } });
     let resolveCommit; let rejectCommit;

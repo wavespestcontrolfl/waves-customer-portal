@@ -4003,6 +4003,18 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // (Voice-agent bookings share this lifecycle via
     // OFFICE_REVIEW_PENDING_SOURCE_ACTIONS: office confirm is what arms
     // reminders for them too.)
+    // A voice-agent booking is inserted SILENT (relay-booking.js: a pending
+    // office-review row is not yet real); the office confirm is when it
+    // becomes a visit on the tech's route, and no assignment write follows —
+    // so the "new visit" card fires here, post-commit. Call-created
+    // office-review rows were announced at insert (call-proc) and stay quiet.
+    if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,
+        snapshot: { date: svc.scheduled_date, windowStart: svc.window_start || null, windowEnd: svc.window_end || null },
+      });
+    }
     if (isOfficeReviewConfirm) {
       const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
       // A technician token alone is NOT a field confirm — only the

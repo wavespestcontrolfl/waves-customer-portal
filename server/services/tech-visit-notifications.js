@@ -358,7 +358,11 @@ async function runNotice(args = {}) {
 async function notifyTechVisitChange(args = {}) {
   if (!enabled()) return { sent: false, skipped: 'gate_off' };
   if (!args.visitId) return { sent: false, skipped: 'no_recipient' };
-  return enqueueForVisit(args.visitId, () => runNotice(args));
+  // args.trx: a creator writing inside a caller-owned transaction hands it
+  // over so the card waits for the OUTERMOST commit (same rule as the
+  // assignment / move / cancel hooks); without one it queues now.
+  const { trx = null, ...notice } = args;
+  return afterCommit(trx, () => runNotice(notice), notice.visitId);
 }
 
 // Notices for one visit apply in the order their changes committed. Two

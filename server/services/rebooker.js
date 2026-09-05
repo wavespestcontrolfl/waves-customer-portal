@@ -1585,6 +1585,9 @@ class SmartRebooker {
         parentServiceId: serviceId,
         fromDate: originalDate,
         toDate: newDateStr,
+        // Same actor and suppression as the parent's own notice above.
+        noticeActorId: options.actorId || initiatedBy || null,
+        suppressTechNotice: options.suppressTechNotice === true,
       });
       if (shifted > 0) {
         logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
@@ -2673,6 +2676,8 @@ class SmartRebooker {
         fromDate: dateOnly(service.scheduled_date),
         toDate: seriesDateStr,
         occupancyHeld: true,
+        // Series-scope moves carry no tech notices in this PR (fan-out).
+        suppressTechNotice: true,
         // The exact rows rung 1 was taken for — a child that changed since
         // is judged against THIS set and skipped, never re-planned onto an
         // unlocked day (codex r12 P1).

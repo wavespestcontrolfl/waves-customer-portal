@@ -6651,6 +6651,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // 'confirmed' for a genuine live move; the row's unchanged
             // status for an evidence-only tracker rewind.
             let liveMoveRefreshStatus = 'confirmed';
+            let bulkTechMoveNotice = null;
             await db.transaction(async (trx) => {
               // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
               // must precede every other lock in this trx — including the
@@ -6940,7 +6941,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // writers advance state, stamps, and SMS guards without
               // touching status. Any of it makes this miss; the batch
               // reports the conflict.
-              const updatedRows = await require('../services/rebooker').applyTrackLifecycleCas(
+              const bulkCommittedRows = await require('../services/rebooker').applyTrackLifecycleCas(
                 trx('scheduled_services')
                   .where({ id })
                   .where('status', String(svc.status))
@@ -6955,12 +6956,28 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   }),
                 svc,
               )
-                .update(updates);
-              if (updatedRows === 0) {
+                .update(updates)
+                // The technician on the COMMITTED row (the CAS does not pin
+                // technician_id): the move notice below goes to them.
+                .returning(['id', 'technician_id']);
+              if (bulkCommittedRows.length === 0) {
                 throw Object.assign(
                   new Error('the visit changed concurrently (status, date, window, or grouping) while the reschedule was pending — re-check and retry'),
                   { isValidation: true },
                 );
+              }
+              {
+                const committedTechId = bulkCommittedRows[0]?.technician_id || null;
+                const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;
+                const nextEndRaw = updates.window_end !== undefined ? updates.window_end : svc.window_end;
+                const slotMoved = prevDate !== bulkTargetDate
+                  || normalizeHHMM(nextStartRaw) !== normalizeHHMM(svc.window_start)
+                  || normalizeHHMM(nextEndRaw) !== normalizeHHMM(svc.window_end);
+                bulkTechMoveNotice = committedTechId && slotMoved ? {
+                  technicianId: committedTechId,
+                  previous: { date: prevDate, windowStart: svc.window_start, windowEnd: svc.window_end },
+                  snapshot: { date: bulkTargetDate, windowStart: nextStartRaw || null, windowEnd: nextEndRaw || null },
+                } : null;
               }
               // Rebooker-parity side effects of the live → confirmed flip.
               // ONLY the job_status_history audit row belongs on the trx (it
@@ -7004,6 +7021,19 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 bulkNoticeStart = normalizeHHMM(nextStart) || null;
               }
             });
+            // Tech-facing move notice (tech-visit-notifications.js): this
+            // writer moves the row itself, bypassing the rebooker. Queued
+            // FIRST after commit, before the awaited side effects below;
+            // best-effort, never awaited; the operator's own move stays silent.
+            if (bulkTechMoveNotice) {
+              void require('../services/tech-visit-notifications').notifyVisitRescheduled({
+                visitId: id,
+                technicianId: bulkTechMoveNotice.technicianId,
+                actorId: req.technicianId || null,
+                previous: bulkTechMoveNotice.previous,
+                snapshot: bulkTechMoveNotice.snapshot,
+              });
+            }
             // Post-commit only: the tech_status release writes on the global
             // db connection and the customer refresh emits a socket, so a
             // rolled-back trx must not have left either behind. Best-effort —
@@ -7083,6 +7113,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 parentServiceId: id,
                 fromDate: callFollowUpShiftFrom,
                 toDate: bulkTargetDate,
+                noticeActorId: req.technicianId || null,
               });
               if (shifted > 0) {
                 logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
@@ -10434,6 +10465,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           parentServiceId: req.params.id,
           fromDate: callFollowUpShiftFrom,
           toDate: updates.scheduled_date,
+          noticeActorId: req.technicianId || null,
         });
         if (shifted > 0) {
           logger.info(`[schedule/update-details] shifted ${shifted} call-created follow-up visit(s) with parent ${req.params.id}`);

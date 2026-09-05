@@ -401,6 +401,9 @@ describe('live-status reschedule override (allowLive)', () => {
       parentServiceId: 'svc-1',
       fromDate: BASE,
       toDate: TARGET,
+      // The child's own move card carries the parent move's actor / suppression.
+      noticeActorId: 'admin',
+      suppressTechNotice: false,
     });
   });
 

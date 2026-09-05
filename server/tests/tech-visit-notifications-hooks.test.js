@@ -253,7 +253,7 @@ describe('direct creators tell the tech (source order)', () => {
     const src = read('../services/call-recording-processor.js');
     const at = src.indexOf('scheduledServiceId = svc.id;');
     const block = src.slice(at, at + 1500);
-    expect(block).toContain('...(!reusedExistingSchedule ? [svc] : [])');
+    expect(block).toContain("...(!reusedExistingSchedule || (reuseAssignedTechId && String(svc.technician_id) === String(reuseAssignedTechId)) ? [svc] : []),");
     expect(block).toContain('...(followUpCreated && followUpCreated.id ? [followUpCreated] : [])');
     expect(block).toContain("kind: 'assigned', technicianId: row.technician_id, actorId: null,");
   });
@@ -287,5 +287,54 @@ describe('cancel-flow plan hold (source order)', () => {
     expect(notice).toBeGreaterThan(compensate);
     // The recipient is the holder on the COMMITTED move (rebooker result).
     expect(src).toContain("movedTechIds.set(String(visit.id), moveResult?.technicianId || null);");
+  });
+});
+
+describe('Codex r6 writers (source order)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('a phone-booking reuse that ASSIGNED the reused row announces it', () => {
+    const src = read('../services/call-recording-processor.js');
+    expect(src).toContain('if (reuseTechId && updatedExisting) reuseAssignedTechId = reuseTechId;');
+    expect(src).toContain("...(!reusedExistingSchedule || (reuseAssignedTechId && String(svc.technician_id) === String(reuseAssignedTechId)) ? [svc] : []),");
+  });
+
+  test('office confirm of a voice-agent booking (pending → confirmed) sends the assigned card, post-commit', () => {
+    const src = read('../routes/admin-dispatch.js');
+    const hook = src.indexOf("if (isOfficeReviewConfirm && fromStatus === 'pending' && svc.technician_id");
+    expect(hook).toBeGreaterThan(-1);
+    expect(src.slice(hook, hook + 700)).toContain("visitId: svc.id, kind: 'assigned', technicianId: svc.technician_id, actorId: req.technicianId || null,");
+    // After the status transaction's catch block, before the activation helper.
+    expect(src.lastIndexOf('await transitionJobStatus({', hook)).toBeGreaterThan(-1);
+    expect(src.indexOf("runOfficeConfirmActivation(db, svc, 'admin-dispatch'", hook)).toBeGreaterThan(hook);
+  });
+
+  test('graduating a reserved estimate slot into a booking announces it on the accept transaction', () => {
+    const src = read('../services/slot-reservation.js');
+    const hook = src.indexOf("visitId: updated.id, kind: 'assigned', technicianId: updated.technician_id, actorId: 'customer_estimate_accept',");
+    expect(hook).toBeGreaterThan(-1);
+    expect(src.slice(hook, hook + 400)).toContain('trx: client,');
+  });
+
+  test('bulk-action reschedule names the committed holder and queues the move card right after commit', () => {
+    const src = read('../routes/admin-schedule.js');
+    expect(src).toContain(".returning(['id', 'technician_id']);\n              if (bulkCommittedRows.length === 0) {");
+    const notice = src.indexOf('if (bulkTechMoveNotice) {');
+    expect(notice).toBeGreaterThan(-1);
+    const trxClose = src.lastIndexOf('            });\n', notice);
+    expect(src.slice(trxClose, notice)).not.toMatch(/await /);
+    expect(src.indexOf('applyLiveMovePostCommitEffects(liveMoveRow', notice)).toBeGreaterThan(notice);
+  });
+
+  test('call-created follow-ups that shift with a parent move get their own card; compensated callers keep them quiet', () => {
+    const src = read('../services/call-booking-catalog.js');
+    expect(src).toContain('noticeActorId = null, suppressTechNotice = false })');
+    expect(src).toContain("if (k.technician_id) noticeRows.push({ id: k.id, technicianId: k.technician_id, fromDay: k.day, toDay: k.new_day,");
+    expect(src).toContain('trx: conn.isTransaction ? conn : null,');
+    const rebooker = read('../services/rebooker.js');
+    expect(rebooker).toContain('noticeActorId: options.actorId || initiatedBy || null,\n        suppressTechNotice: options.suppressTechNotice === true,');
+    expect((read('../routes/admin-schedule.js').match(/noticeActorId: req\.technicianId \|\| null,/g) || []).length).toBe(2);
   });
 });
