@@ -17,7 +17,6 @@ import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroac
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication } from '../lib/product-application';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
-import useStickyStuck from '../hooks/useStickyStuck';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -51,7 +50,6 @@ import {
   docButton,
   docTransition,
 } from '../theme-doc';
-import BrandFooter from '../components/BrandFooter';
 import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -2881,7 +2879,6 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   // 57 = the wrap's sticky `top`. While pinned on a phone the bar collapses
   // to the slim ask row (owner screenshot 2026-07-29: the two-row bar hid a
   // third of the screen while scrolling).
-  const [stuck, sentinelRef] = useStickyStuck(57);
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -2907,62 +2904,55 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
 
   if (mode !== 'live') return null;
 
+  // Estimate = the template (owner 2026-09-03): the bar is the estimate's
+  // Ask Waves card — eyebrow, heading, intro, input + Ask, stacked questions.
   return (
-    <>
-      <div ref={sentinelRef} className="floating-ask-sentinel" aria-hidden="true" />
-      <div className="floating-ask-wrap" data-stuck={stuck ? '' : undefined}>
-      <section data-glass="card" className="floating-ask-bar" aria-label="Waves AI — ask about this report">
-        <span className="floating-ask-title">Waves AI</span>
-
-        {/* marquee: prompts drift slowly left, vanish behind the label edge, and
-            re-enter from the input side; list is doubled for a seamless loop.
-            Hover/focus pauses so a moving pill can be clicked. */}
-        <div className="floating-ask-pills" aria-label="Example questions">
-          <div className="floating-ask-track">
-            {[...prompts, ...prompts].map((prompt, i) => (
-              <button
-                data-glass="chip"
-                type="button"
-                key={`${prompt}-${i}`}
-                className="floating-ask-pill"
-                onClick={() => ask(prompt)}
-                disabled={asking}
-                tabIndex={i < prompts.length ? 0 : -1}
-                aria-hidden={i >= prompts.length}
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="floating-ask-form">
-          <input
-            id="floating-report-question"
-            name="floating_report_question"
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                ask();
-              }
-            }}
-            placeholder="Ask Waves"
-            aria-label="Ask Waves about this service report"
-          />
-          <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
-            {asking ? 'Checking…' : 'Ask'}
-          </button>
-        </div>
-        {answer && (
-          <div className="floating-ask-answer" role="status" data-glass="soft">
-            <span>{answer}</span>
-            <button type="button" className="floating-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">{'\u2715'}</button>
-          </div>
-        )}
-      </section>
+    <section data-glass="card" className="waves-ask-card" aria-label="Waves AI — ask about this report">
+      <div data-gt="eyebrow" className="section-eyebrow waves-ask-eyebrow">Ask Waves</div>
+      <h2 className="waves-ask-title">Questions about today&apos;s service? Ask anything</h2>
+      <p className="waves-ask-intro">What was applied, when it is safe to re-enter, what to watch for, or your next visit — straight answers in seconds.</p>
+      <div className="waves-ask-form">
+        <input
+          id="floating-report-question"
+          name="floating_report_question"
+          value={question}
+          onChange={(event) => setQuestion(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              ask();
+            }
+          }}
+          placeholder="Ask about today's service"
+          aria-label="Ask Waves about this service report"
+        />
+        <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
+          {asking ? 'Checking…' : 'Ask'}
+        </button>
       </div>
-    </>
+      <div data-glass="soft" role="list" className="waves-ask-list" aria-label="Example questions">
+        {prompts.map((prompt, i) => (
+          <div key={prompt} role="listitem">
+          <button
+            type="button"
+            className="waves-ask-row"
+            data-first={i === 0 ? '' : undefined}
+            onClick={() => ask(prompt)}
+            disabled={asking}
+          >
+            <span>{prompt}</span>
+            <span aria-hidden="true" className="waves-ask-go">Ask ›</span>
+          </button>
+          </div>
+        ))}
+      </div>
+      {answer && (
+        <div className="floating-ask-answer" role="status" data-glass="soft">
+          <span>{answer}</span>
+          <button type="button" className="floating-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">{'\u2715'}</button>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -3097,7 +3087,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
             >
               <dt
                 style={{
-                  fontSize: 12,
+                  fontSize: 14,
                   letterSpacing: '0.06em',
                   textTransform: 'uppercase',
                   color: 'var(--muted)',
@@ -5573,7 +5563,7 @@ function NotFoundState({ glass = false }) {
         }}
       >
         <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 15, color: glass ? 'rgba(12, 21, 40, 0.7)' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+        <div style={{ fontSize: 15, color: glass ? '#3F4A65' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
         <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 16 }}>Call Waves</a>
@@ -5595,7 +5585,7 @@ function LegacyReport({ data, token, glass = false }) {
   // two headers (codex P2, PR #2439). Kept for any standalone render.
   const { inShell } = useWavesShell();
   return (
-    <div style={{ minHeight: '100vh', background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
+    <div style={{ flex: 1, background: glass ? 'transparent' : ESTIMATE_BG, fontFamily: FONT_BODY, color: glass ? '#04395E' : ESTIMATE_TEXT, display: 'flex', flexDirection: 'column' }}>
       {!inShell ? (
       <header style={{ background: '#fff', borderBottom: `1px solid ${ESTIMATE_BORDER}` }}>
         <div style={{
@@ -5615,9 +5605,9 @@ function LegacyReport({ data, token, glass = false }) {
       </header>
       ) : null}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      <div style={{ flex: 1, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
-          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
+          <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
@@ -5626,7 +5616,7 @@ function LegacyReport({ data, token, glass = false }) {
           {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
         </div>
         <section data-glass={glass ? 'card' : undefined} style={{ background: glass ? undefined : '#fff', borderRadius: 16, padding: 24, border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}` }}>
-          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
+          <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
           {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
@@ -5650,7 +5640,6 @@ function LegacyReport({ data, token, glass = false }) {
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
       </div>
-      <BrandFooter appBadges={false} />
     </div>
   );
 }
@@ -5955,14 +5944,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-brand-subtitle {
           margin-top: 3px;
-          font-size: 12px;
+          font-size: 14px;
           color: var(--muted);
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
         }
         .sr-shell {
-          max-width: 800px;
+          max-width: ${DOC_COLUMN_MAX}px;
           width: 100%;
           margin: 0 auto;
           padding: 32px 20px 64px;
@@ -5977,7 +5966,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding: 20px 24px;
           background: var(--paper);
           border: 1px solid var(--line);
-          border-radius: 16px;
+          border-radius: 12px;
         }
         .report-action-bar .section-eyebrow {
           margin-bottom: 8px;
@@ -6018,7 +6007,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding: 24px;
           background: var(--paper);
           border: 1px solid var(--line);
-          border-radius: 16px;
+          border-radius: 12px;
           box-shadow: var(--shadow-soft);
         }
         .sr-title {
@@ -6073,7 +6062,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 4px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.5;
           font-weight: 500;
         }
@@ -6165,7 +6154,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .weather-call-icon-label {
           margin-top: 3px;
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.2;
         }
         .hero-conditions-copy p {
@@ -6219,7 +6208,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           background: rgba(4, 57, 94, 0.10);
           color: #04395E;
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 800;
           white-space: nowrap;
@@ -6379,7 +6368,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           line-height: 1.5;
         }
         .visit-timeline-data-source {
-          font-size: 12px;
+          font-size: 14px;
         }
         .visit-progress-summary {
           display: flex;
@@ -6428,7 +6417,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           padding: 8px 12px;
           background: #fff;
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 800;
         }
@@ -6506,7 +6495,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 16px 0 0;
           border: 1px solid var(--line);
           background: var(--line);
-          border-radius: 16px;
+          border-radius: 12px;
           overflow: hidden;
         }
         .sr-metric { background: var(--paper); padding: 16px; min-height: 86px; }
@@ -6515,12 +6504,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-section {
           background: var(--paper);
           border: 1px solid var(--line);
-          border-radius: 16px;
+          border-radius: 12px;
           padding: 24px;
           /* 20px rhythm: the glass hover lift (translateY(-4px) + scale 1.016)
              intrudes ~8px into the gap above a card — at 16px cards read as
              near-collision on hover (owner 2026-07-09). */
-          margin-top: 20px;
+          margin-top: 16px;
           break-inside: avoid;
         }
         /* a nested glass card that closes its host section drops its trailing
@@ -6587,7 +6576,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           gap: 4px;
           justify-items: end;
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.35;
           text-align: right;
           max-width: 220px;
@@ -6748,7 +6737,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-map-label {
           fill: #111827;
           font-family: ${FONT_BODY};
-          font-size: 12px;
+          font-size: 14px;
           font-weight: 700;
           letter-spacing: 0;
           paint-order: stroke;
@@ -6775,7 +6764,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           background: #fff;
           color: var(--text);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 700;
           white-space: nowrap;
@@ -6815,7 +6804,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-legend-item.status-red .coverage-legend-swatch { background: #dc2626; color: #fff; }
         .coverage-legend-item.status-gray .coverage-legend-swatch,
         .coverage-status-chip.status-gray { background: #f1f5f9; border-color: #cbd5e1; color: #334155; }
-        .coverage-legend-item.status-gray .coverage-legend-swatch { background: #64748b; color: #fff; }
+        .coverage-legend-item.status-gray .coverage-legend-swatch { background: #3F4A65; color: #fff; }
         .coverage-summary-list {
           display: grid;
           gap: 8px;
@@ -6900,7 +6889,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-product-line {
           margin-top: 8px;
           color: var(--text);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.35;
           font-weight: 700;
         }
@@ -7126,7 +7115,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .satellite-zone-label {
           fill: #111;
-          font-size: 11px;
+          font-size: 14px;
           font-weight: 600;
           paint-order: stroke;
           stroke: rgba(255,255,255,.9);
@@ -7183,12 +7172,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .satellite-flag-mark {
           fill: #fff;
-          font-size: 12px;
+          font-size: 14px;
           font-weight: 700;
         }
         .satellite-flag-label {
           fill: var(--red);
-          font-size: 11px;
+          font-size: 14px;
           font-weight: 600;
           paint-order: stroke;
           stroke: rgba(255,255,255,.92);
@@ -7204,7 +7193,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: .5px solid rgba(0,0,0,.12);
           border-radius: 6px;
           padding: 3px 6px;
-          font-size: 11px;
+          font-size: 14px;
           line-height: 1.2;
         }
         .treatment-overlay-key {
@@ -7248,7 +7237,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           background: var(--app-color, ${B.blueDark});
           color: #fff;
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 800;
         }
@@ -7266,7 +7255,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .treatment-overlay-row-copy span {
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.35;
         }
         .treatment-overlay-detail {
@@ -7301,7 +7290,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           background: #fff;
           color: var(--text);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 700;
           padding: 6px 8px;
@@ -7312,10 +7301,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-cell-note {
           margin-top: 3px;
           color: var(--muted);
-          font-size: 11px;
+          font-size: 14px;
           line-height: 1.4;
         }
-        .sr-cell-label { font-size: 12px; color: var(--soft); }
+        .sr-cell-label { font-size: 14px; color: var(--soft); }
         .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
@@ -7328,12 +7317,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-row-title { font-size: 15px; font-weight: 700; color: var(--text); }
         .sr-row-detail { margin-top: 4px; color: var(--muted); font-size: 14px; line-height: 1.5; }
-        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: ${B.glassNavy}; background: var(--wash); white-space: nowrap; height: fit-content; }
+        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 14px; color: ${B.glassNavy}; background: var(--wash); white-space: nowrap; height: fit-content; }
         .sr-finding-high { border-left: 3px solid var(--red); }
         .sr-advisory { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
         .sr-advisory strong { font-size: 20px; font-weight: 500; display: block; }
         .sr-advisory span { color: var(--muted); font-size: 14px; }
-        .sr-footer { color: var(--soft); font-size: 12px; line-height: 1.5; padding: 24px 0 0; }
+        .sr-footer { color: var(--soft); font-size: 14px; line-height: 1.5; padding: 24px 0 0; }
         .ai-summary-card h2 {
           color: var(--text);
           font-size: 24px;
@@ -7399,14 +7388,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: center;
           gap: 10px;
           border: 1px solid var(--line);
-          border-radius: 18px;
+          border-radius: 12px;
           background: var(--wash);
           padding: 10px 14px;
         }
         .floating-ask-title {
           grid-area: title;
           color: var(--text);
-          font-size: 12px;
+          font-size: 14px;
           font-weight: 800;
           letter-spacing: 0.08em;
           text-transform: uppercase;
@@ -7531,7 +7520,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               'title form'
               'pills pills';
             grid-template-columns: auto minmax(0, 1fr);
-            border-radius: 16px;
+            border-radius: 12px;
           }
           /* While pinned on a phone, collapse to the slim ask row — the
              two-row bar hid a third of the screen over the report content
@@ -7636,7 +7625,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .solution-product-facts {
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.5;
           font-weight: 700;
         }
@@ -7733,7 +7722,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .product-group-list li span {
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           text-align: right;
         }
         .applied-product-meta {
@@ -7747,7 +7736,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           background: var(--wash);
           color: var(--text);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 700;
           padding: 6px 8px;
@@ -7759,7 +7748,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           border: 1px solid var(--line);
           background: var(--line);
-          border-radius: 16px;
+          border-radius: 12px;
           overflow: hidden;
           break-inside: avoid;
           page-break-inside: avoid;
@@ -7816,7 +7805,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .accordion-action {
           flex: 0 0 auto;
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1;
           border: 1px solid var(--line);
           border-radius: 999px;
@@ -7837,7 +7826,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .report-card {
           background: var(--report-surface);
           border: 1px solid var(--report-border);
-          border-radius: 16px;
+          border-radius: 12px;
           padding: 20px;
           /* matches .sr-section's 20px rhythm — hover-lift headroom */
           margin-top: 20px;
@@ -7851,7 +7840,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .section-eyebrow {
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: ${FS.caption}px;
+          font-size: 14px;
           line-height: ${LH.heading};
           margin-bottom: ${SP.xs}px;
           font-weight: ${FW.bold};
@@ -8192,7 +8181,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           flex-wrap: wrap;
           margin-top: 8px;
           color: var(--report-muted);
-          font-size: 12px;
+          font-size: 14px;
         }
         .pressure-trend-card-embedded {
           margin-top: 16px;
@@ -8322,7 +8311,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-overall-score em {
           margin-top: 2px;
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.2;
         }
         .lawn-profile-line,
@@ -8346,7 +8335,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-mowing-height .lawn-mowing-label {
           text-transform: uppercase;
           letter-spacing: 0.04em;
-          font-size: 11px;
+          font-size: 14px;
           color: var(--muted);
           margin-right: 4px;
         }
@@ -8417,7 +8406,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-photo-strip figcaption {
           padding: 8px 12px;
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.35;
           font-weight: 700;
         }
@@ -8654,13 +8643,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-nerd-note {
           margin-top: 8px;
           color: var(--muted);
-          font-size: 12px;
+          font-size: 14px;
           line-height: 1.5;
         }
         .sr-section,
         .report-card {
           border-color: var(--line);
-          border-radius: 16px;
+          border-radius: 12px;
           box-shadow: var(--shadow-soft);
         }
         .sr-section h2,
@@ -8715,7 +8704,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-cell-label {
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 12px;
+          font-size: 14px;
           font-weight: 700;
           letter-spacing: 0;
           text-transform: uppercase;
@@ -8821,8 +8810,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            this block only remaps the page's own tokens + inner surfaces. */
         html[data-glass-theme] .service-report-v1 {
           --text: #04395E;
-          --muted: rgba(12, 21, 40, 0.7);
-          --soft: rgba(12, 21, 40, 0.7);
+          --muted: #3F4A65;
+          --soft: #3F4A65;
           --line: rgba(4, 57, 94, 0.16);
           --line-strong: rgba(4, 57, 94, 0.24);
           --page: transparent;
@@ -9631,12 +9620,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-        {/* Live (glass) view carries the standard newsletter card + identity
-            footer — same as /track (owner 2026-07-08/09). PDF/static/
-            sms_preview keep the quiet document sign-off so the print
-            pipeline stays byte-identical. */}
-        {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-        <BrandFooter variant={mode === 'live' ? undefined : 'document'} appBadges={false} />
       </div>
     </div>
   );

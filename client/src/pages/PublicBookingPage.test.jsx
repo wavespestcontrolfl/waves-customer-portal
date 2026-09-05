@@ -15,7 +15,7 @@ vi.mock('../components/AddressAutocomplete', () => ({
 vi.mock('../components/brand', () => ({ WavesShell: ({ children }) => <div>{children}</div> }));
 vi.mock('../components/BrandFooter', () => ({ default: () => null }));
 vi.mock('../components/booking/WavesAIScheduleSearch', () => ({ default: () => null }));
-vi.mock('../glass/glass-engine', () => ({ fireGlassConfetti: vi.fn() }));
+vi.mock('../glass/glass-engine', () => ({ fireGlassConfetti: vi.fn(), useGlassSurface: () => {} }));
 vi.mock('../lib/analytics/events', () => ({
   track: vi.fn(),
   FUNNEL_EVENTS: new Proxy({}, { get: (_target, key) => String(key) }),

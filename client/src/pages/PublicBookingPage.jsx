@@ -1,12 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
-import BrandFooter from '../components/BrandFooter';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
-import { fireGlassConfetti } from '../glass/glass-engine';
+import { fireGlassConfetti, useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 import { useAuth } from '../hooks/useAuth';
@@ -101,8 +100,10 @@ function captureBookingAttribution() {
 }
 
 export default function PublicBookingPage() {
-  // Marketing surface — standard wavespestcontrol.com warm chrome; the glass
-  // scene stays on the tokened/portal customer surfaces only.
+  // Glass like every other customer surface (owner 2026-09-03 — supersedes
+  // the 2026-07-21 marketing-chrome exception; the page is no longer
+  // matched to a non-glass marketing context).
+  useGlassSurface(true, 'full');
   const [searchParams] = useSearchParams();
   const source = searchParams.get('source') || 'direct';
   const serviceParam = searchParams.get('service') || 'pest_control';
@@ -1697,7 +1698,6 @@ export default function PublicBookingPage() {
 
         </>)}
 
-        <BrandFooter />
       </div>
     </WavesShell>
   );

@@ -18,7 +18,7 @@
  * because their inline navy fill is what the estimate walker normalizes to an
  * accent anyway, and the accent rules force readable navy-on-gold text.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const DEFAULT_CHIPS = ['Tomorrow morning', 'This weekend', 'Next week afternoon'];
 
@@ -26,7 +26,7 @@ export default function WavesAIScheduleSearch({
   theme,
   title = 'Search by date or time',
   subtitle = 'Tell Waves AI when works — we’ll show what’s open.',
-  placeholder = 'e.g. “anything next Tuesday afternoon”',
+  placeholder = 'Anything next Tuesday afternoon',
   chips = DEFAULT_CHIPS,
   showEyebrow = true,
   onSearch,
@@ -45,6 +45,23 @@ export default function WavesAIScheduleSearch({
   const [query, setQuery] = useState('');
   const [summary, setSummary] = useState('');
   const [asking, setAsking] = useState(false);
+  // Drift the quick-pick strip slowly leftward only when it overflows (phones);
+  // paused while a finger or pointer is on it, off under reduced-motion (CSS).
+  const stripRef = useRef(null);
+  const [drift, setDrift] = useState(false);
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const kids = [...el.children].slice(0, chips.length);
+      const setWidth = kids.reduce((w, k) => w + k.offsetWidth, 0) + 8 * chips.length;
+      el.style.setProperty('--chip-shift', `-${setWidth}px`);
+      setDrift(setWidth > el.clientWidth - 36);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [chips, drift]);
 
   const run = async (prompt) => {
     const q = String(prompt ?? query).trim();
@@ -110,18 +127,33 @@ export default function WavesAIScheduleSearch({
         </button>
       </form>
 
+      {/* One-line quick-pick strip: never wraps, scrolls sideways on phones
+          (bleeds to the card edge so a cut-off chip signals "more"). */}
       {chips && chips.length > 0 ? (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }} aria-label="Example searches">
-          {chips.map((chip) => (
+        <div
+          ref={stripRef}
+          aria-label="Example searches"
+          className={drift ? 'waves-chip-strip waves-chip-strip--drift' : 'waves-chip-strip'}
+          style={{
+            display: 'flex', flexWrap: 'nowrap', gap: 8, overflowX: drift ? 'hidden' : 'auto',
+            margin: '0 -20px', padding: '2px 20px', scrollbarWidth: 'none',
+            WebkitOverflowScrolling: 'touch',
+          }}
+        >
+          {(drift ? [...chips, ...chips] : chips).map((chip, i) => (
             <button
-              key={chip}
+              key={`${chip}-${i}`}
+              aria-hidden={i >= chips.length ? 'true' : undefined}
+              tabIndex={i >= chips.length ? -1 : undefined}
               type="button"
-              data-glass-accent=""
+              data-glass="chip"
+              data-glass-pill=""
               disabled={asking}
               onClick={() => { setQuery(chip); run(chip); }}
               style={{
-                border: 0, background: t.accent, color: t.accentText,
-                borderRadius: 999, padding: '8px 14px', fontSize: 14, fontWeight: 700,
+                flex: '0 0 auto', whiteSpace: 'nowrap', minHeight: 36,
+                border: `1px solid ${t.border}`, background: t.inputBg, color: t.text,
+                borderRadius: 999, padding: '0 14px', fontSize: 14, fontWeight: 600,
                 cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.8 : 1,
               }}
             >

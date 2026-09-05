@@ -11,10 +11,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import BrandFooter from '../components/BrandFooter';
 import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
 import { WavesShell } from '../components/brand';
+import { DOC_COLUMN_MAX } from '../theme-doc';
 import { useGlassSurface } from '../glass/glass-engine';
 import PublicLoadError from '../components/PublicLoadError';
 
@@ -165,10 +165,10 @@ export default function NewsletterArchivePage() {
 
   return (
     <WavesShell variant="customer" topBar="solid">
-    <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }}>
+    <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1 }}>
       {/* Header strip */}
       <div style={{ background: B.glassNavy, color: '#fff', padding: '16px 24px' }}>
-        <div style={{ maxWidth: 760, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ maxWidth: DOC_COLUMN_MAX, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
           {/* Portal /newsletter landing retired 2026-07-09 — the astro site
               is the single newsletter landing. */}
           <a
@@ -192,7 +192,7 @@ export default function NewsletterArchivePage() {
       </div>
 
       {/* Subject + preview */}
-      <div style={{ maxWidth: 760, margin: '0 auto', padding: '40px 24px 16px' }}>
+      <div style={{ maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '40px 24px 16px' }}>
         <h1 style={{
           fontFamily: FONTS.serif,
           fontSize: 34,
@@ -216,7 +216,7 @@ export default function NewsletterArchivePage() {
       </div>
 
       {/* Body — sandboxed render of the email HTML */}
-      <div style={{ maxWidth: 760, margin: '0 auto', padding: '0 24px' }}>
+      <div style={{ maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '0 24px' }}>
         <div data-glass="card" style={{
           background: '#fff',
           border: `1px solid ${BORDER}`,
@@ -228,7 +228,7 @@ export default function NewsletterArchivePage() {
       </div>
 
       {/* Inline signup CTA */}
-      <div style={{ maxWidth: 760, margin: '0 auto', padding: '36px 24px 8px' }}>
+      <div style={{ maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '36px 24px 40px' }}>
         <div data-glass="card" style={{
           background: '#fff',
           border: `1px solid ${BORDER}`,
@@ -245,9 +245,6 @@ export default function NewsletterArchivePage() {
         </div>
       </div>
 
-      <div style={{ maxWidth: 760, margin: '0 auto', padding: '0 24px 40px' }}>
-        <BrandFooter />
-      </div>
     </div>
     </WavesShell>
   );

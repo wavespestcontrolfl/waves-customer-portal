@@ -19,8 +19,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { FLOW_COLUMN_MAX } from '../theme-doc';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
@@ -68,9 +68,8 @@ const PRIMARY_CTA = {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
         {children}
-        <BrandFooter />
       </div>
     </WavesShell>
   );
@@ -159,20 +158,6 @@ const STATE_COPY = {
   not_available: { title: "We can't show this appointment", body: 'This link may be out of date. Text or call and our team will help.' },
 };
 
-function StatusPill({ label }) {
-  return (
-    <div data-glass="chip" data-glass-pill="" style={{
-      display: 'inline-block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase',
-      color: WEATHER_BLUE, background: `${WEATHER_BLUE}1A`, padding: '6px 12px', borderRadius: 9999,
-    }}>
-      <span style={{
-        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-        background: WEATHER_BLUE, marginRight: 8, verticalAlign: 'middle',
-      }} />
-      {label}
-    </div>
-  );
-}
 
 function WeatherChip({ weather }) {
   if (!weather || weather.rainChance == null) return null;
@@ -423,8 +408,7 @@ export default function AppointmentPage() {
   return (
     <Page>
       <Card style={{ borderTop: `3px solid ${WEATHER_BLUE}` }}>
-        <StatusPill label={data.confirmed ? 'Confirmed' : (isTomorrow ? 'Tomorrow' : 'Upcoming')} />
-        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 14, lineHeight: 1.3 }}>
+        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
           {/* No greeting by name. The token is per-VISIT, not per-recipient:
               appointment notifications fan out to a spouse, tenant, buyer or
               other service contact, each SMS personalized to THAT contact,
@@ -528,6 +512,9 @@ export default function AppointmentPage() {
           </a>
         ) : null}
       </Card>
+
+      {/* GATE_VAN_SCENE: the van to look for, under the header card. The
+          technician block above already names the tech, so no tech pill. */}
 
       {data.rescheduleToken ? (
         <Card>

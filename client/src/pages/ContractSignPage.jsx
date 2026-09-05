@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import {
   WavesShell,
@@ -10,7 +9,6 @@ import {
   HelpPhoneLink,
 } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
-import { CUSTOMER_SURFACE } from '../theme-customer';
 import { DOC, DOC_COLUMN, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docInput } from '../theme-doc';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -22,53 +20,14 @@ function fmtDate(value) {
   return date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 }
 
-function StatusPill({ tone = 'neutral', children }) {
-  const tones = {
-    neutral: { bg: DOC.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
-    ready: { bg: 'var(--brand-soft)', color: DOC.brand, border: 'var(--brand-ring)' },
-    signed: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
-  };
-  const t = tones[tone] || tones.neutral;
-  // Neutral is a flat warm wash — let the glass scene through. Ready/signed
-  // tones carry meaning and keep their colors.
-  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
-  return (
-    <span {...glassClear} style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 6,
-      minHeight: 28,
-      padding: '4px 8px',
-      borderRadius: RADIUS.input,
-      background: t.bg,
-      border: `1px solid ${t.border}`,
-      color: t.color,
-      fontSize: FS.caption,
-      fontWeight: FW.heavy,
-      textTransform: 'uppercase',
-      whiteSpace: 'nowrap',
-    }}>
-      {children}
-    </span>
-  );
-}
 
-function Field({ label, value }) {
-  return (
-    <div style={{ minWidth: 0, padding: '12px 0', borderBottom: `1px solid ${DOC.border}` }}>
-      <div style={{ ...DOC_EYEBROW, marginBottom: SP.xxs }}>{label}</div>
-      <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.snug, fontWeight: FW.semibold }}>{value || 'Not set'}</div>
-    </div>
-  );
-}
 
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
       <div role="alert" className="waves-contract-page waves-contract-single" style={{ width: DOC_COLUMN }}>
         <BrandCard padding={28}>
-          <StatusPill>Contract unavailable</StatusPill>
-          <SerifHeading style={{ marginTop: SP.md, marginBottom: SP.sm }}>{title}</SerifHeading>
+          <SerifHeading style={{ marginTop: 0, marginBottom: SP.sm }}>{title}</SerifHeading>
           <p style={{ margin: 0, color: DOC.ink, lineHeight: LH.body }}>
             {message} Give us a call and we can help - <HelpPhoneLink tone="dark" inline />.
           </p>
@@ -265,9 +224,12 @@ export default function ContractSignPage() {
 
   const isAutopay = contract.contractType === 'autopay_authorization';
   const needsSignature = contract.requiresSignature !== false;
-  const signedLabel = signed ? 'Signed' : needsSignature ? 'Ready to sign' : 'Ready to view';
   const documentTitle = contract.title || (isAutopay ? 'AutoPay Authorization' : 'Document');
   const documentKind = isAutopay ? 'authorization' : 'document';
+  // Eyebrow: the human label for the template key — never the raw
+  // "service_agreement" value (owner 2026-09-03).
+  const rawKind = String(contract.documentTemplateKey || contract.contractType || '').replace(/[_-]+/g, ' ').trim();
+  const documentKindLabel = rawKind ? rawKind.charAt(0).toUpperCase() + rawKind.slice(1) : 'Document';
   const termsLabel = isAutopay ? 'Authorization terms' : needsSignature ? 'Document terms' : 'Document details';
 
   return (
@@ -275,8 +237,8 @@ export default function ContractSignPage() {
       <div className="waves-contract-page" style={{ width: DOC_COLUMN }}>
         <div className="waves-flow-header">
           <div>
-            <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
-            <SerifHeading style={{ marginTop: SP.md, marginBottom: SP.xs }}>{documentTitle}</SerifHeading>
+            <div style={{ ...DOC_EYEBROW, marginBottom: SP.xs }}>{documentKindLabel}</div>
+            <SerifHeading style={{ marginTop: 0, marginBottom: SP.xs }}>{documentTitle}</SerifHeading>
             <p style={{ margin: 0, color: DOC.muted, fontSize: FS.lead, lineHeight: LH.body, maxWidth: 660 }}>
               {isAutopay
                 ? 'Review the saved-payment authorization, then sign electronically to keep AutoPay active for approved Waves services.'
@@ -301,32 +263,20 @@ export default function ContractSignPage() {
 
         <div className="waves-contract-grid">
           <BrandCard padding={28}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: SP.md, marginBottom: SP.lg }}>
-              {/* Decorative document icon tile removed (owner 2026-07-09 —
-                  no decorative icons on customer document pages). */}
-              <div>
-                <div style={{ fontSize: FS.sub, fontWeight: FW.heavy, color: DOC.ink }}>{documentTitle}</div>
-                <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>Waves Pest Control</div>
-              </div>
-              <StatusPill tone={signed ? 'signed' : 'ready'}>{signedLabel}</StatusPill>
-            </div>
-
-            <div className="waves-contract-fields">
-              <Field label="Recipient" value={contract.recipientName} />
-              {isAutopay ? (
-                <>
-                  <Field label="Payment Method" value={contract.paymentMethodLabel} />
-                  <Field label="Renewal Date" value={fmtDate(contract.renewalDate)} />
-                  <Field label="Cancellation Deadline" value={fmtDate(contract.cancellationDeadline)} />
-                </>
-              ) : (
-                <>
-                  <Field label="Document Type" value={contract.documentTemplateKey || contract.contractType} />
-                  <Field label="Service" value={contract.serviceName || 'Waves service'} />
-                  <Field label="Requested" value={fmtDate(contract.sharedAt || contract.createdAt)} />
-                </>
-              )}
-            </div>
+            {/* Stacked contact block, same as the estimate / report header
+                (owner 2026-09-03): one line each, no label grid. */}
+            {(() => {
+              const lines = isAutopay
+                ? [contract.recipientName, contract.paymentMethodLabel ? `Payment method: ${contract.paymentMethodLabel}` : null, contract.renewalDate ? `Renews ${fmtDate(contract.renewalDate)}` : null, contract.cancellationDeadline ? `Cancel by ${fmtDate(contract.cancellationDeadline)}` : null]
+                : [contract.recipientName, contract.serviceName || 'Waves service', `Requested ${fmtDate(contract.sharedAt || contract.createdAt)}`];
+              return (
+                <div style={{ display: 'grid', gap: SP.xxs }}>
+                  {lines.filter(Boolean).map((line, i) => (
+                    <div key={line} style={{ fontSize: FS.bodyLg, color: i === 0 ? DOC.ink : DOC.muted, fontWeight: i === 0 ? FW.semibold : FW.regular, lineHeight: LH.body }}>{line}</div>
+                  ))}
+                </div>
+              );
+            })()}
 
             <div style={{ marginTop: SP.xl }}>
               <div style={DOC_EYEBROW}>{termsLabel}</div>
@@ -428,9 +378,6 @@ export default function ContractSignPage() {
           </BrandCard>
         </div>
 
-        {/* Newsletter signup lives only on the newsletter pages (owner
-            2026-07-09, supersedes same-day card ruling). */}
-        <BrandFooter />
       </div>
     </WavesShell>
   );

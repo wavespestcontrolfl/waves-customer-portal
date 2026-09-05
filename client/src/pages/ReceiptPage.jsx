@@ -45,7 +45,6 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -100,37 +99,6 @@ function cityStateZip(customer = {}) {
   return [customer.city, region].filter(Boolean).join(customer.city && region ? ', ' : '');
 }
 
-function StatusPill({ tone = 'neutral', children }) {
-  const tones = {
-    paid: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
-    processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    refunded: { bg: 'rgba(200,16,46,0.08)', color: DOC.danger, border: 'rgba(200,16,46,0.22)' },
-    partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    neutral: { bg: CUSTOMER_SURFACE.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
-  };
-  const t = tones[tone] || tones.neutral;
-  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
-  return (
-    <span {...glassClear} style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 6,
-      minHeight: 28,
-      padding: '4px 8px',
-      borderRadius: RADIUS.input,
-      background: t.bg,
-      border: `1px solid ${t.border}`,
-      color: t.color,
-      fontSize: FS.caption,
-      fontWeight: FW.heavy,
-      letterSpacing: 0,
-      textTransform: 'uppercase',
-      whiteSpace: 'nowrap',
-    }}>
-      {children}
-    </span>
-  );
-}
 
 function DetailBlock({ label, children }) {
   return (
@@ -316,26 +284,6 @@ export default function ReceiptPage() {
   // bounced post-redirect) — the old neutral state still said "Receipt /
   // Total charged / keep this for your records" for money never collected.
   const unpaid = !paid && !processing && invoice.status !== 'refunded' && !refundState;
-  const statusTone = refundState === 'fully_refunded'
-    ? 'refunded'
-    : refundState === 'partially_refunded'
-      ? 'partial'
-      : processing
-        ? 'processing'
-        : paid
-          ? 'paid'
-          : 'neutral';
-  const statusLabel = refundState === 'fully_refunded'
-    ? 'Refunded'
-    : refundState === 'partially_refunded'
-      ? 'Partial refund'
-      : processing
-        ? 'Processing'
-        : paid
-          ? 'Paid'
-          : unpaid
-            ? 'Not paid'
-            : 'Receipt';
   const heading = processing
     ? 'Bank payment submitted'
     : paid
@@ -491,7 +439,7 @@ export default function ReceiptPage() {
           pdfFileName="Waves_Receipt.pdf"
           shareTitle="Waves receipt"
         />
-        <BrandCard className="waves-print-card" padding={28} style={{ marginBottom: SP.lg }}>
+        <BrandCard className="waves-print-card" padding={24} style={{ marginBottom: SP.lg }}>
           <div style={{
             display: 'flex',
             justifyContent: 'space-between',
@@ -513,7 +461,6 @@ export default function ReceiptPage() {
                 </p>
               </div>
             </div>
-            <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
           </div>
 
           <div data-glass-clear="" style={{
@@ -706,12 +653,6 @@ export default function ReceiptPage() {
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
-        </div>
-        {/* Newsletter signup lives only on the newsletter pages (owner
-            2026-07-09, supersedes the 2026-07-08 glass-footer ruling).
-            Hidden from the receipt printout via waves-no-print. */}
-        <div className="waves-no-print">
-          <BrandFooter />
         </div>
       </div>
     </WavesShell>

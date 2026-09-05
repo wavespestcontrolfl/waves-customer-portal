@@ -3,7 +3,6 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
-import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -713,7 +712,7 @@ export default function RatePage() {
 
 function Page({ children }) {
   return (
-    <div data-glass-clear="" style={{ minHeight: '100dvh', background: PAGE_BG, display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
+    <div data-glass-clear="" style={{ flex: 1, paddingBottom: 40, background: PAGE_BG, display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
       <div data-glass="card" style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 8, border: `1px solid ${CARD_BORDER}`, boxShadow: 'none', overflow: 'hidden', marginTop: 'clamp(20px, 8dvh, 64px)' }}>
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${CARD_BORDER}`, display: 'flex', justifyContent: 'center' }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, display: 'block' }} />
@@ -721,11 +720,6 @@ function Page({ children }) {
         <div style={{ padding: '28px clamp(12px, 5vw, 22px) 24px' }}>
           {children}
         </div>
-      </div>
-      {/* Footer lives OUTSIDE the overflow:hidden card so tall states (AI
-          review writer, feedback form) scroll instead of clipping it. */}
-      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, paddingBottom: 24 }}>
-        <BrandFooter />
       </div>
       {/* Anton / Montserrat / Inter load globally via client/index.html */}
     </div>
