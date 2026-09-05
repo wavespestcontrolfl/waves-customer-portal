@@ -40,7 +40,7 @@ Dispatch caller retains its series scope.
 
 - 142 server tests passed across eight relevant suites, including new real-Knex
   SQL compilation tests with an in-memory transport (no database socket).
-- 18 client tests passed across the admin shell, customer page, Dispatch
+- 19 client tests passed across the admin shell, customer page, Dispatch
   completion predicate, and pending-card regression suites.
 - Client production build passed.
 - `check:portal-brand` and `check:domain-rules` passed.
@@ -60,7 +60,10 @@ Dispatch caller retains its series scope.
 
 No deployment, production writes, customer messages, or gate flips were performed.
 The address action uses the prerequisite's default-off `GATE_EDIT_APPT_ADDRESS`;
-activation remains an owner release decision. No migration was added or run.
+activation remains an owner release decision. No migration was added.
+The full existing migration history is being verified in a newly created,
+private synthetic database on Railway codex-dev. Database test results are
+pending; this report does not yet claim database verification.
 A dev/preview database is still required for end-to-end schema and concurrent
 transaction verification; mocked transaction tests do not establish that evidence.
 No live model call was used to claim a measured change in conversational behavior.
@@ -70,3 +73,13 @@ address-edit prerequisite. Do not ship an older copy over later changes on that
 branch. This local branch includes the prerequisite's Dispatch UI/API changes,
 which were not independently browser-exercised here; their shared writer tests
 and this branch's production build passed.
+
+## PR preparation
+
+Reconciled with origin/main at `11e21a852` and address prerequisite review fixes
+at `dbd362c19`. The IB writer now acquires technician-day fences explicitly
+and locks the selected property before service rows, matching the updated
+shared writer. Frozen grouped visits remain subject to the shared guard.
+An opt-in PostgreSQL integration suite exercises real migrated tables, the
+shared address writer and audit insert inside rollback-only synthetic fixtures;
+CI runs it against its dedicated `waves_test` database.

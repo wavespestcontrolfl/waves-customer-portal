@@ -1,3 +1,4 @@
+jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn() }));
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn() }));
 jest.mock('../models/db', () => {
   const db = jest.fn();
