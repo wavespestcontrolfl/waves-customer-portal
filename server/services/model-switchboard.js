@@ -103,6 +103,7 @@ const POLICY_SELECTOR = {
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   visionAnalysis: { primary: 'VISION', fallback: 'OPENAI_BALANCED' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
+  jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
 };
 
@@ -267,6 +268,7 @@ const LANES = [
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
+  L('job_card_paragraph', 'Job card customer paragraph', 'job-card.js', 'voice', P('jobCardParagraph', 'primary'), P('jobCardParagraph', 'fallback'), { note: 'GATE_JOB_CARD, dark' }),
   L('voice_relay', 'Voice relay + collections calls', 'voice-agent/relay-conversation.js, collections/outbound-voice/collections-conversation.js', 'voice', E('VOICE_RELAY_MODEL', T('VOICE')), null, { note: 'one env for both call flows' }),
   L('outreach_drafter', 'Backlink outreach drafting', 'seo/backlink-outreach-drafter.js', 'voice', E('MODEL_OUTREACH_DRAFTER', T('WORKHORSE'))),
 
@@ -433,6 +435,7 @@ const LANE_AREA = {
   completion_recap: 'reports',
   lawn_visit_narratives: 'reports',
   previsit_brief: 'reports',
+  job_card_paragraph: 'reports',
   invoice_summary: 'reports',
   wdo_appt_brief: 'reports',
   email_classify: 'email',
@@ -559,6 +562,7 @@ const LANE_DESCRIBE = {
   completion_recap: 'Writes the short recap the customer gets',
   lawn_visit_narratives: 'Writes lawn and visit summaries',
   previsit_brief: 'Briefs the tech before a visit',
+  job_card_paragraph: 'Writes the job card\'s customer paragraph',
   invoice_summary: 'Summarises an invoice in plain words',
   wdo_appt_brief: 'Briefs a WDO appointment',
   email_classify: 'Sorts inbound email',
