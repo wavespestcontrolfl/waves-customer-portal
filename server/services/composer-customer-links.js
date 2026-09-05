@@ -730,7 +730,12 @@ function shortRowDestination(row, hosts) {
   if (appointment) return { kind: 'appointment', token: appointment };
   const report = canonicalPortalToken(target, hosts, REPORT_TOKEN_RE, ANY_SCHEME);
   if (report) return { kind: 'service_report', token: report };
-  if (row.kind === 'appointment' || row.kind === 'service_report') return { kind: row.kind, token: null };
+  // Receipt delivery shortens /receipt/<token> (pre-push Codex P1 on r9) —
+  // a code pasted from message history is judged by its target like the
+  // long form.
+  const receipt = canonicalPortalToken(target, hosts, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME);
+  if (receipt) return { kind: 'receipt', token: receipt };
+  if (['appointment', 'service_report', 'receipt'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
 }
 // /l/:code answers 410 past expires_at (public-shortlinks) — the same
@@ -753,6 +758,9 @@ const PROJECT_REPORT_PATH_RE = /^\/report\/project\/([^/]+)$/i;
 const PROJECT_REPORT_RUN_RE = /\/report\/project\//i;
 // price-change-notices.js mints notice_token as 16 random bytes, hex.
 const PRICE_CHANGE_TOKEN_RE = /^\/price-change\/([a-f0-9]{32})$/i;
+// /receipt/<invoices.token> — the permanent receipt URL; receipt delivery
+// (invoice-email.js) also shortens it to /l/<code> of kind 'receipt'.
+const RECEIPT_TOKEN_PATH_RE = /^\/receipt\/([A-Za-z0-9_-]{16,})$/i;
 
 // Appointment page links (GH Codex #3844 r2 P1): every /appointment route
 // 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
@@ -780,6 +788,7 @@ async function immediateOnlyLinkSendCheck(body) {
   const shortRows = await shortCodeRows(runs, ANY_SCHEME);
   if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Appointment page' };
   if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Service report' };
+  if (shortRows.some((row) => row.kind === 'receipt')) return { present: true, label: 'Receipt' };
   return { present: false };
 }
 
@@ -1165,10 +1174,9 @@ async function checkAccountBoundLinks(ctx) {
   return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
     || (await checkReportLinks(ctx, shortRows, onRecipientAccount))
     || (await checkProjectReportLinks(ctx, onRecipientAccount))
-    || checkReceiptLinks(ctx, onRecipientAccount);
+    || checkReceiptLinks(ctx, shortRows, onRecipientAccount);
 }
 
-const RECEIPT_TOKEN_PATH_RE = /^\/receipt\/([A-Za-z0-9_-]{16,})$/i;
 // Receipt links (permanent invoice token): the builder's own predicate
 // re-run — a settled self-pay invoice whose receipt the receipt lifecycle
 // already delivered — bound to the recipient's account, and the RECIPIENT's
@@ -1177,10 +1185,8 @@ const RECEIPT_TOKEN_PATH_RE = /^\/receipt\/([A-Za-z0-9_-]{16,})$/i;
 // 'conversational' and never runs the payment_receipt policy itself) —
 // pre-push Codex P1 on r9. The recipient is the trusted customer, else the
 // one live row on the number; an ambiguous number refuses, like the insert.
-async function checkReceiptLinks(ctx, onRecipientAccount) {
-  for (const run of linkRuns(ctx.runs, /\/receipt\//i)) {
-    const token = canonicalPortalToken(run, ctx.hosts, RECEIPT_TOKEN_PATH_RE);
-    if (!token) return refuseSend('A receipt link in this message is not on the Waves portal — remove it before sending.');
+async function checkReceiptLinks(ctx, shortRows, onRecipientAccount) {
+  const vet = async (token) => {
     const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id', 'receipt_sent_at');
     if (!invoice || !RECEIPT_INVOICE_STATUSES.includes(String(invoice.status || '')) || invoice.payer_id || !invoice.receipt_sent_at) {
       return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
@@ -1192,6 +1198,21 @@ async function checkReceiptLinks(ctx, onRecipientAccount) {
     const blocked = await receiptTextBlockedReason(recipientId);
     if (blocked) return refuseSend(`${blocked} — remove the receipt link before sending.`);
     ctx.bearers += 1;
+    return null;
+  };
+  for (const run of linkRuns(ctx.runs, /\/receipt\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, RECEIPT_TOKEN_PATH_RE);
+    if (!token) return refuseSend('A receipt link in this message is not on the Waves portal — remove it before sending.');
+    const bad = await vet(token);
+    if (bad) return bad;
+  }
+  // The shortened form receipt delivery texts (kind 'receipt', or any code
+  // whose target is a receipt page), judged by its target.
+  for (const row of shortRows.filter((r) => r.kind === 'receipt')) {
+    if (expiredShortRow(row)) return refuseSend('This receipt link has expired — remove it and insert a fresh one.');
+    if (!row.token) return refuseSend('This receipt short link does not open a receipt — remove it and insert a fresh one.');
+    const bad = await vet(row.token);
+    if (bad) return bad;
   }
   return null;
 }

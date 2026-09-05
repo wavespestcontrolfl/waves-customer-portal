@@ -1366,6 +1366,12 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
     expect(await immediateOnlyLinkSendCheck(`Receipt: portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`)).toEqual({ present: true, label: 'Receipt' });
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`)).toEqual({ present: true, label: 'Receipt' });
+    // The shortened form receipt delivery texts (invoice-email.js) — pasted
+    // from message history — is the same page (pre-push Codex P1 on r9).
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}` } }) };
+    expect(await immediateOnlyLinkSendCheck('Your receipt: wavespest.co/l/rc1')).toEqual({ present: true, label: 'Receipt' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rc2', kind: 'other', target_url: `https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}` } }) };
+    expect(await immediateOnlyLinkSendCheck('Your receipt: wavespest.co/l/rc2')).toEqual({ present: true, label: 'Receipt' });
     // An explicit http:// owned link is still a protected link (fence reads presence).
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
     expect(await immediateOnlyLinkSendCheck(`evil.example/price-change/${'a'.repeat(32)}`)).toEqual({ present: false });
@@ -2073,6 +2079,10 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         wireReceipt({ recipientRows: [acct('c1')] });
         expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, customerId: 'c1' });
         expect(loadContactState).toHaveBeenLastCalledWith({ customerId: 'c1' });
+        // The shortened form receipt delivery texts, judged by its target.
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}` } });
+        expect(await bearerLinkSendCheck('Your receipt: wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(mockBuilders.invoices.where).toHaveBeenCalledWith({ token: TOKEN });
       });
 
       test('an undelivered, open, or payer-billed receipt, a vanished token, another account, or a recipient without receipt-text consent refuses', async () => {
@@ -2091,6 +2101,15 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         wireReceipt();
         checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'CHANNEL_EMAIL_ONLY' });
         expect((await send()).error).toMatch(/receipts by email only — remove the receipt link/);
+        // Short forms: an expired code, a receipt-kind code whose target is
+        // not a receipt page, and a consent refusal through the short form.
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}`, expires_at: '2020-01-01T00:00:00Z' } });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/receipt link has expired/);
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/does not open a receipt/);
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}` } });
+        checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'PURPOSE_OPTED_OUT' });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/opted out of receipt texts — remove the receipt link/);
         expect((await bearerLinkSendCheck(`https://evil.example/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
       });
     });
