@@ -235,7 +235,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
       // a document-wide loginSubmit read is what a hidden responsive login form ahead of the visible one would poison.
       const submit = el({ count: 1, visible: true, onClick: () => { if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
-      const loginForm = el({ count: 1, sub: (sub) => (sub === S.loginSubmit ? (st.formSubmitCount === 0 ? el() : submit) : el()) });
+      // Models Playwright's descendant matching from the form: a selector that itself starts with `form` would
+      // look for a NESTED form and miss the button (r18 P1) — only a form-relative control selector resolves it.
+      const loginForm = el({ count: 1, sub: (sub) => (sub === S.loginSubmit && !/^\s*form\b/.test(sub) ? (st.formSubmitCount === 0 ? el() : submit) : el()) });
       const passField = el({ count: 1, visible: true, sub: (sub) => (sub === 'xpath=ancestor::form[1]' ? loginForm : el()), onPress: async (key) => { st.pressed = [...(st.pressed || []), key]; if (key === 'Enter') await submit.click(); } });
       if (sel === S.loginPass) return st.loggedIn ? (st.loginPassHiddenAfterLogin ? el({ count: 1, visible: false }) : el()) : passField;
       if (sel === S.loginSubmit) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenSubmitClicked = (st.hiddenSubmitClicked || 0) + 1; } }) : submit) });
@@ -401,6 +403,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
     expect(st.loggedIn).toBe(true);
     expect(st.hiddenSubmitClicked || 0).toBe(0); // the document-wide first submit (hidden) was never used
+    expect(st.pressed || []).toEqual([]); // the form's own submit control was clicked — no Enter fallback (r18 P1)
   });
 
   test('a visible login form without its own submit control is submitted with Enter on the password field (r16 P1)', async () => {

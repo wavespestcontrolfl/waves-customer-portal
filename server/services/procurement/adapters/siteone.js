@@ -66,7 +66,10 @@ try { ({ chromium } = require('playwright')); } catch { chromium = null; }
 const SELECTORS = Object.freeze({
   loginUser: 'input[name="username"], input[name="email"], input[type="email"], input#username, input#j_username',
   loginPass: 'input[name="password"], input[type="password"]',
-  loginSubmit: 'form:has(input[type="password"]) button[type="submit"], form:has(input[type="password"]) input[type="submit"]',
+  // Relative to the resolved login form (login() scopes it to the visible
+  // password field's form) — a form-prefixed selector applied inside that
+  // form would look for a NESTED form and never find the button (r18 P1).
+  loginSubmit: 'button[type="submit"], input[type="submit"]',
   loginError: '.alert-danger, .error-message, [role="alert"]',
   searchInput: 'input[name="text"], input[type="search"], input#js-site-search-input, input[placeholder*="Search"]',
   productLink: '.product-item a.name, .product-item-name a, a.product-name, .product-tile a',
