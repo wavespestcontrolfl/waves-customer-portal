@@ -1215,7 +1215,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     await expect(jobCard._test.loadAddons(dbh, 'svc1')).rejects.toMatchObject({ statusCode: 503 });
     const ok = () => { const chain = {}; for (const m of ['leftJoin', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = async () => [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }, { service_name: 'Bee/Wasp removal', category: null }]; return chain; };
     ok.raw = (sql) => sql;
-    expect(await jobCard._test.loadAddons(ok, 'svc1')).toEqual([{ name: 'Tree & Shrub Care', category: 'tree_shrub' }, { name: 'Bee/Wasp removal', category: null }]);
+    // The booking's service key rides along (null when neither snapshot nor catalog row has one).
+    expect(await jobCard._test.loadAddons(ok, 'svc1')).toEqual([{ name: 'Tree & Shrub Care', category: 'tree_shrub', serviceKey: null }, { name: 'Bee/Wasp removal', category: null, serviceKey: null }]);
   });
 
   test('a searched product booked through a non-lawn add-on is judged under that add-on, not the lawn plan (r2 P2)', async () => {
@@ -1239,7 +1240,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(buildPlan).not.toHaveBeenCalled();
     expect(out.context).toEqual({ line: 'Quarterly Pest Control', conditional: false });
     expect(out.planBlocks).toEqual([]);
-    expect(out.amount).toBe(0.2);
+    // The protocol line's 0.4 fl oz/gal narrows the 0.2-0.8 label band (r5 P1).
+    expect(out).toMatchObject({ amount: 0.4, amountMax: null, rateSource: 'protocol' });
   });
 
   test('a product the add-on protocol lists as "if needed" is withheld in the tank search, not dosed off the catalog (r3 P1)', async () => {
@@ -1270,7 +1272,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     protocols.tree_shrub.visits[0] = { visit: 9, month: 'Sep', primary: 'Headway 0.75 fl oz/gal foliar', secondary: '' };
     const selected = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(selected.context).toEqual({ line: 'Tree & Shrub Care', conditional: false });
-    expect(selected.amount).toBe(0.5);
+    // The line's 0.75 fl oz/gal inside the 0.5-1 label band is the dose (r5 P1).
+    expect(selected).toMatchObject({ amount: 0.75, rateSource: 'protocol' });
     // The same guard on the PRIMARY non-lawn visit (hook P1): a Tree & Shrub
     // visit's own "if needed" Headway is withheld, its selected Talus doses.
     rows.scheduled_services = [{ ...visit, service_type: 'Tree & Shrub Care', service_category: 'tree_shrub' }];
@@ -1332,5 +1335,102 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const later = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { getHourly }, now: new Date('2026-09-03T14:00:00Z') });
     expect(later.sprayCheck).toEqual({ verdict: 'unknown', reason: 'Judged on the visit day' });
     expect(later.amount).toBe(6.215);
+  });
+
+  test('a termite add-on resolves the visit its catalog service key names, never the inspection its name falls to (r5 P1)', async () => {
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] },
+      termite: { visits: [
+        { visit: 1, month: 'Any', primary: 'Inspect foundation, plumbing penetrations and moisture areas' },
+        { visit: 2, month: 'Any', primary: 'Recruit HD bait cartridges per station' },
+        { visit: 3, month: 'Any', primary: 'Termidor SC trench and rod per label' },
+        { visit: 4, month: 'Any', primary: 'Termidor Foam into active galleries' },
+      ] },
+    };
+    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'r', name: 'Recruit HD' }, { id: 'sc', name: 'Termidor SC' }, { id: 'foam', name: 'Termidor Foam' }];
+    const facts = {
+      isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04',
+      addons: [
+        { name: 'Termite Spot Treatment Service', category: 'termite', serviceKey: 'termite_spot_treatment' },
+        { name: 'Termite Pretreatment Service', category: 'termite', serviceKey: 'termite_pretreatment' },
+        { name: 'Termite Installation Setup', category: 'termite', serviceKey: 'termite_installation_setup' },
+      ],
+    };
+    const out = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}) });
+    expect(out.addons).toEqual([
+      { name: 'Termite Spot Treatment Service', products: 1, visit: { number: 4, month: 'Any' }, note: null },
+      { name: 'Termite Pretreatment Service', products: 1, visit: { number: 3, month: 'Any' }, note: null },
+      { name: 'Termite Installation Setup', products: 1, visit: { number: 2, month: 'Any' }, note: null },
+    ]);
+    expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['d', null], ['foam', 'Termite Spot Treatment Service'], ['sc', 'Termite Pretreatment Service'], ['r', 'Termite Installation Setup']]);
+    // A legacy add-on row without a key keeps the name path: visit 1, no products.
+    const legacy = await jobCard.resolveVisitLines({ facts: { ...facts, addons: [{ name: 'Termite Spot Treatment Service', category: 'termite' }] }, protocols, catalog, dbh: () => ({}) });
+    expect(legacy.addons).toEqual([{ name: 'Termite Spot Treatment Service', products: 0, visit: { number: 1, month: 'Any' }, note: null }]);
+    // The primary line follows its own key the same way.
+    const primary = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Termite Spot Treatment Service', serviceCategory: 'termite', serviceKey: 'termite_spot_treatment', scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
+    expect(primary.visit.visit).toBe(4);
+    expect(primary.lines.map((l) => l.product.id)).toEqual(['foam']);
+  });
+
+  test('a protocol line\'s rate band is read from its unconditional clauses; a standard portion beside a condition is base work (r5 P1 + P2)', () => {
+    const { lineRate, isConditionalLine, linesFromProtocolText } = jobCard._test;
+    expect(lineRate('Distance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs or crawlers ($16.52)')).toEqual({ lo: 0.06, hi: 0.08, unit: 'fl_oz' });
+    expect(lineRate('Conserve SC 0.1-0.2 fl oz/gal for caterpillars where labeled ($4.05)')).toEqual({ lo: 0.1, hi: 0.2, unit: 'fl_oz' });
+    expect(lineRate('Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 non-neonic systemic ($13.52)')).toEqual({ lo: 0.017, hi: 0.034, unit: 'fl_oz' });
+    expect(lineRate('KPHITE 7LP: 1-2 qt/100 gal foliar')).toEqual({ lo: 0.32, hi: 0.64, unit: 'fl_oz' });
+    expect(lineRate('Liquid copper (Southern Ag 27.15%): 1-2 tsp/gal, separate from oil ($11.35)')).toEqual({ lo: 0.16667, hi: 0.33333, unit: 'fl_oz' });
+    expect(lineRate('Headway 0.75 fl oz/gal foliar')).toEqual({ lo: 0.75, hi: 0.75, unit: 'fl_oz' });
+    // The standard portion, never the conditional step-up.
+    const tritek = 'TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)';
+    expect(lineRate(tritek)).toEqual({ lo: 1.28, hi: 1.28, unit: 'fl_oz' });
+    expect(isConditionalLine(tritek)).toBe(false);
+    expect(linesFromProtocolText({ primary: tritek, secondary: '' }, [{ id: 't', name: 'TriTek' }]).map((l) => [l.product.id, l.role, l.selected])).toEqual([['t', 'base', true]]);
+    // "standard" inside the conditional clause itself does not lift the condition.
+    expect(isConditionalLine('TriTek spray oil: 1.0% only if safe ($6.08)')).toBe(true);
+    expect(isConditionalLine('Escalate structural or wildlife issue if evidence does not match standard rodent pressure')).toBe(true);
+    // No per-gallon rate on the line → nothing to narrow with.
+    for (const raw of [
+      'Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)',
+      'Celsius WG 1 oz',
+      'Celsius WG 0.113 oz per 1,000 sq ft',
+      'Headway G 3 lbs/1000 broadcast',
+      'Snapshot 2.5TG Q3: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)',
+      '8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where ordinance allows ($5.31)',
+    ]) expect([raw, lineRate(raw)]).toEqual([raw, null]);
+  });
+
+  test('the tank search doses inside the matched protocol line\'s band, never the wider catalog band (r5 P1)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    // Catalog label band 0.06-0.12 fl oz/gal; March's protocol says 6-8 fl oz/100 gal.
+    const product = { id: 'dist', name: 'Distance IGR', default_rate: '0.06-0.12', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-03-10', service_type: 'WaveGuard Lawn Care' };
+    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], scheduled_service_addons: [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }], product_aliases: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const buildPlan = jest.fn();
+    const protocols = { tree_shrub: { visits: [{ visit: 3, month: 'Mar', primary: 'Distance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs or crawlers ($16.52)', secondary: '' }] } };
+    const run = () => jobCard.mixForProduct('dist', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-03-09T14:00:00Z') });
+    const out = await run();
+    expect(buildPlan).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ amount: 6.6, amountMax: 8.8, unit: 'fl_oz', ratePerGallon: { lo: 0.06, hi: 0.08, unit: 'fl_oz' }, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false } });
+    // A protocol band outside the verified label band leaves the label band standing.
+    protocols.tree_shrub.visits[0].primary = 'Distance IGR: 20-30 fl oz/100 gal for whitefly/scale nymphs';
+    expect(await run()).toMatchObject({ amount: 6.6, amountMax: 13.2, rateSource: 'catalog' });
+    // "label rate" on the line → the label band.
+    protocols.tree_shrub.visits[0].primary = 'Distance IGR: label rate for whitefly/scale nymphs';
+    expect(await run()).toMatchObject({ amount: 6.6, amountMax: 13.2, rateSource: 'catalog' });
+    // The standard portion of a standard-plus-conditional line doses; the step-up does not (P2).
+    rows.products_catalog = [{ id: 'tri', name: 'TriTek', default_rate: '1-2', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' }];
+    protocols.tree_shrub.visits[0].primary = 'TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)';
+    const tritek = await jobCard.mixForProduct('tri', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-03-09T14:00:00Z') });
+    expect(tritek).toMatchObject({ amount: 1.28, amountMax: null, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false } });
   });
 });

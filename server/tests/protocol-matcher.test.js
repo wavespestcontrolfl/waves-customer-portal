@@ -186,3 +186,31 @@ describe('protocol matcher specialty routing', () => {
     });
   });
 });
+
+describe('catalog service keys', () => {
+  const byKey = (serviceType, serviceKey) => {
+    const r = matchServiceProtocol(protocols, serviceType, { serviceKey });
+    return [r.programKey, r.matchedVisit?.visit, r.reason];
+  };
+
+  test('a booking\'s termite service key fixes the visit; the display name is not consulted (job card r5 P1)', () => {
+    expect(byKey('Termite Spot Treatment Service', 'termite_spot_treatment')).toEqual(['termite', 4, 'foam_drill']);
+    expect(byKey('Termite Pretreatment Service', 'termite_pretreatment')).toEqual(['termite', 3, 'liquid_perimeter']);
+    expect(byKey('Slab Pre-Treat Termite Service', 'termite_slab_pretreat')).toEqual(['termite', 3, 'liquid_perimeter']);
+    expect(byKey('Termite Installation Setup', 'termite_installation_setup')).toEqual(['termite', 2, 'bait_monitoring']);
+    expect(byKey('Termite Bait Station Cartridge Replacement', 'termite_cartridge_replacement')).toEqual(['termite', 2, 'bait_monitoring']);
+    expect(byKey('Quarterly Pest + Termite Bait Station', 'pest_termite_bait_quarterly')).toEqual(['termite', 2, 'bait_monitoring']);
+    expect(byKey('Termite Bond (5-Year Term)', 'termite_bond_5yr')).toEqual(['termite', 6, 'renewal_inspection']);
+    expect(byKey('Termite Inspection Service', 'termite_inspection')).toEqual(['termite', 1, 'termite_inspection']);
+    // A short name that classifies as pest by itself still follows its key.
+    expect(byKey('Spot Treat', 'termite_spot_treatment')).toEqual(['termite', 4, 'foam_drill']);
+  });
+
+  test('without a claimed key the name path is unchanged', () => {
+    // These names carry no foam / station term and fall to the inspection visit by name.
+    expect(match('Termite Spot Treatment Service')).toEqual({ programKey: 'termite', visit: 1, reason: 'termite_inspection' });
+    expect(match('Termite Installation Setup')).toEqual({ programKey: 'termite', visit: 1, reason: 'termite_inspection' });
+    // An unclaimed key changes nothing.
+    expect(matchServiceProtocol(protocols, 'Quarterly Pest Control', { serviceKey: 'pest_quarterly' })).toEqual(matchServiceProtocol(protocols, 'Quarterly Pest Control'));
+  });
+});
