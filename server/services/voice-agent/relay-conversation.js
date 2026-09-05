@@ -1901,7 +1901,7 @@ class RelayConversation {
     // older socket closing after a reconnect never replaces the record.
     const recoveryOn = process.env.GATE_VOICE_RELAY_RECOVERY === 'true';
     let segmentAppended = false;
-    let segment = null; // this socket's close record — composed in even when its append was unconfirmed (hook r27 P1)
+    let segment = null; // this socket's close record; only confirmed, scrubbed appends may finalize
     // Only a socket that legitimately HELD this call's claim may append (hook
     // P1): verification IS that proof (the claim is won inside the caller
     // resolution, verified callers only), and the statement re-checks it —
@@ -1933,20 +1933,19 @@ class RelayConversation {
           slotRefs: [...this._slotRefs],
         });
         const appended = await withTimeout(
-          db('call_log').where('twilio_call_sid', this.callSid)
-            .where((q) => q
-              .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [this.sessionKey || ''])
-              .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [this.sessionGeneration || 0]))
-            .update(segmentStore.appendSegmentPatch(db, segment)),
+          segmentStore.appendSegment(db, this.callSid, segment),
           WRITE_DRAIN_TIMEOUT_MS,
           0,
         );
         segmentAppended = Number(appended) > 0;
-        if (!segmentAppended) logger.warn(`[voice-relay] segment NOT appended callSid=${maskSid(this.callSid)} (no row / timeout) — the column write carries this socket's text alone`);
+        if (!segmentAppended) logger.warn(`[voice-relay] segment NOT appended callSid=${maskSid(this.callSid)} (no row / timeout) — transcript finalization deferred`);
       } catch (err) {
         logger.warn(`[voice-relay] segment append failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       }
     }
+    // An unconfirmed append cannot safely union local text with older legs:
+    // only the transaction has scrubbed their cross-socket turn sequence.
+    if (segment && !segmentAppended) return;
     const supersededAtClose = await this._sessionSuperseded().catch(() => false);
     if (supersededAtClose) {
       logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
@@ -2077,12 +2076,10 @@ class RelayConversation {
         // salvage / stash below use it as the relay_transcript stash.)
         let composedTranscription = null;
         let composedFromRowOnly = null; // PR 2B: a resumed socket with NO turns of its own still owns the composition
-        // An UNCONFIRMED append (timeout / error / 0 rows) still composes:
-        // the row's durable earlier segments plus this socket's own record,
-        // deduplicated by session key should the append land after all —
-        // never this socket's text alone over a reconnected call (hook r27 P1).
+        // The confirmed append scrubbed the entire ordered call under its
+        // row lock. Compose exclusively from that durable representation.
         if (recoveryOn && segment && hasTranscript) {
-          composedTranscription = db.raw('COALESCE(?, ?)', [segmentStore.composeSegmentsSql(db, segmentAppended ? null : segment), transcriptUpdate.transcription]);
+          composedTranscription = db.raw('COALESCE(?, ?)', [segmentStore.composeSegmentsSql(db), transcriptUpdate.transcription]);
           try {
             const tm = JSON.parse(transcriptUpdate.transcription_metadata);
             tm.segments = { this_generation: this.sessionGeneration, appended: segmentAppended };
