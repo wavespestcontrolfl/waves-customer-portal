@@ -90,6 +90,6 @@ describe('relay session → owed commitments', () => {
     const recordAt = conversation.indexOf("await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });");
     expect(guardAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(guardAt);
-    expect(conversation).toContain("await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });"); // the ROW's latest promises, never the superseded socket's map
+    expect(conversation).toContain("sessionKey: owner || this.sessionKey, promises });"); // the ROW's latest promises, never the superseded socket's map
   });
 });

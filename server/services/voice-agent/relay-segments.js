@@ -56,10 +56,19 @@ function nonEmptyFields(fields) {
   return Object.keys(kept).length ? kept : null;
 }
 
+/** Match the claim's generation/nonce total order (nonce tokens are ASCII). */
+function compareSegments(a, b) {
+  const generation = (Number(a.generation) || 0) - (Number(b.generation) || 0);
+  if (generation) return generation;
+  const left = String(a.session_key || '');
+  const right = String(b.session_key || '');
+  return left === right ? 0 : (left < right ? -1 : 1);
+}
+
 /** Scrub the ordered turn sequence before rendering socket boundaries. */
 function scrubStoredSegments(segments) {
   const { scrubTurnsForStorage, CALLER_LABEL, AGENT_LABEL } = require('./relay-transcript');
-  const ordered = [...segments].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0));
+  const ordered = [...segments].sort(compareSegments);
   const lines = ordered.flatMap((segment, index) => String(segment.text || '').split('\n').map((line) => {
     const caller = line.startsWith(`${CALLER_LABEL}: `);
     const agent = line.startsWith(`${AGENT_LABEL}: `);
@@ -132,7 +141,7 @@ function composeSegmentsSql(db, segment = null) {
     ? `${keyed ? `(SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(${rowSegments}) e WHERE COALESCE(e->>'session_key', '') <> ?)` : rowSegments} || ?::jsonb`
     : rowSegments;
   return db.raw(
-    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
+    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, COALESCE(seg->>'session_key', ''), ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
     segment ? [SEGMENT_SEPARATOR, ...(keyed ? [String(segment.session_key)] : []), JSON.stringify([segment])] : [SEGMENT_SEPARATOR],
   );
 }
@@ -209,7 +218,7 @@ const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S
 function segmentsText(segments = []) {
   return [...(Array.isArray(segments) ? segments : [])]
     .filter((s) => s && String(s.text || '').trim())
-    .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0))
+    .sort(compareSegments)
     .map((s) => String(s.text))
     .join(SEGMENT_SEPARATOR);
 }
@@ -230,7 +239,7 @@ function generationFenceSql(q, generation) {
 function latestPromises(segments) {
   const ordered = [...(Array.isArray(segments) ? segments : [])]
     .filter((seg) => seg && typeof seg === 'object')
-    .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0));
+    .sort(compareSegments);
   const byKind = new Map();
   for (const seg of ordered) {
     for (const p of (Array.isArray(seg.promises) ? seg.promises : [])) {

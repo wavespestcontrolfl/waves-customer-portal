@@ -1561,8 +1561,8 @@ function deriveRelayCommitments({ transcript = '', estimateQueued = null, estima
 }
 
 // Called from the relay session's end() after its reconcile UPDATE landed.
-// No claim fence: relay rows never carry processing_token, and the session
-// that owns the record is the only writer at close. Never throws.
+// Relay rows have no processing_token; the session-owner fence below
+// protects their commitment transaction. Never throws.
 function relayClaimOwner(metadata) {
   try {
     const meta = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
@@ -1593,6 +1593,18 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
       if (sessionKey) {
         const owner = relayClaimOwner(call.metadata);
         if (owner && owner !== String(sessionKey)) return { ...summary, superseded: true };
+      }
+      // Segment-backed calls must derive evidence from this locked snapshot.
+      // A late socket may have read an earlier expectation under the SAME
+      // owner; ownership alone does not make that pre-read current.
+      const metadata = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+      if (Array.isArray(metadata.relay_segments) && metadata.relay_segments.length) {
+        const { segmentsText, latestPromises } = require('./voice-agent/relay-segments');
+        transcript = segmentsText(metadata.relay_segments);
+        const estimate = latestPromises(metadata.relay_segments).find((p) => p.kind === 'send_estimate');
+        estimateQueued = estimate ? estimate.verdict : null;
+        estimateExpectation = estimate?.expectation || null;
+        estimatePromisedAt = estimate?.at || null;
       }
       const items = deriveRelayCommitments({ transcript, estimateQueued, estimateExpectation, estimatePromisedAt })
         .map((item) => ({ ...item, evidence: anchorEvidence(item.evidence, { transcript }) }));

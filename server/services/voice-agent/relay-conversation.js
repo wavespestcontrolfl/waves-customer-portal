@@ -1901,6 +1901,7 @@ class RelayConversation {
     // older socket closing after a reconnect never replaces the record.
     const recoveryOn = process.env.GATE_VOICE_RELAY_RECOVERY === 'true';
     let segmentAppended = false;
+    let segmentWrite = null;
     let segment = null; // this socket's close record; only confirmed, scrubbed appends may finalize
     // Only a socket that legitimately HELD this call's claim may append (hook
     // P1): verification IS that proof (the claim is won inside the caller
@@ -1932,8 +1933,9 @@ class RelayConversation {
           lookupResults: this._lookupResults,
           slotRefs: [...this._slotRefs],
         });
+        segmentWrite = segmentStore.appendSegment(db, this.callSid, segment);
         const appended = await withTimeout(
-          segmentStore.appendSegment(db, this.callSid, segment),
+          segmentWrite,
           WRITE_DRAIN_TIMEOUT_MS,
           0,
         );
@@ -1946,49 +1948,20 @@ class RelayConversation {
     // An unconfirmed append cannot safely union local text with older legs:
     // only the transaction has scrubbed their cross-socket turn sequence.
     const deferTranscript = Boolean(segment && !segmentAppended);
+    if (deferTranscript && segmentWrite) {
+      // The deadline bounds end(), not the database transaction. A confirmed
+      // late write still owns a finalization pass after this socket closes.
+      void segmentWrite.then(async (rows) => {
+        if (Number(rows) > 0) await this._reconcileLateSegment();
+      }).catch((err) => logger.warn(`[voice-relay] late segment failed callSid=${maskSid(this.callSid)}: ${err.message}`));
+    }
     const supersededAtClose = await this._sessionSuperseded().catch(() => false);
     if (supersededAtClose) {
       logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
       // …except that this socket's segment may just have RECOMPOSED a call
       // the replacement already finalized (appendSegmentPatch): the unified
       // message row follows it. Bounded, best-effort.
-      if (segmentAppended) {
-        // …and the replacement's commitments pass may already have run on a
-        // transcript without this segment: reconcile once more, on the
-        // PERSISTED composed transcript, under the row's CURRENT owner (the
-        // write is idempotent per call). Bounded read; fail-soft.
-        try {
-          const row = await withTimeout(
-            db('call_log').where('twilio_call_sid', this.callSid).first('transcription', 'metadata').catch(() => null),
-            2000,
-            null,
-          );
-          const meta = row ? ((typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) || {}) : {};
-          const owner = meta.relay_session_claim_owner || null;
-          if (row && typeof row.transcription === 'string' && row.transcription) {
-            // The ROW's latest promise per kind (the just-appended segment
-            // included) — never this superseded socket's own map, which
-            // could overwrite a deadline the resumed leg gave (hook P1).
-            const promises = new Map(segmentStore.latestPromises(meta.relay_segments)
-              .map((p) => [p.kind, { verdict: p.verdict, expectation: p.expectation, at: p.at ? new Date(p.at) : null }]));
-            await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });
-          }
-          // …and the replacement's capture floor may have run before this
-          // segment landed, with no caller turns to summarise (hook r22 P1).
-          await this._refreshFloorLeadSummary(meta);
-          // …and its call_summary likewise (codex r5 P2): a deterministic
-          // summary (or none) is rebuilt from the whole call's caller lines;
-          // a model-written one is left alone.
-          await this._refreshCallSummary(meta);
-        } catch (err) {
-          logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
-        }
-        // Copy the repaired whole-call duration and summary into the inbox.
-        // Still sync the appended transcript if any best-effort repair failed.
-        try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
-          logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
-        }
-      }
+      if (segmentAppended) await this._reconcileLateSegment();
       return;
     }
 
@@ -2239,13 +2212,49 @@ class RelayConversation {
 
   }
 
+  /** Shared repair for a superseded close and an append confirmed after end's deadline. */
+  async _reconcileLateSegment() {
+    try {
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
+        .first('transcription', 'metadata'), 2000, null);
+      if (!row) return;
+      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+      const owner = meta.relay_session_claim_owner || null;
+      // A never-reconnected call's late append does not claim an empty
+      // transcript. Only its still-current owner can complete that write.
+      if (owner && owner === this.sessionKey) {
+        const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
+        await db('call_log').where('twilio_call_sid', this.callSid)
+          .whereRaw("metadata->>'relay_session_claim_owner' = ?", [this.sessionKey])
+          .where((q) => q.whereNull('call_outcome').orWhereIn('call_outcome', ['ai_handled', 'relay_failed', 'ai_transferred']))
+          .where((q) => q.whereNull('transcription_provider').orWhere('transcription_provider', TRANSCRIPTION_PROVIDER))
+          .whereRaw('? IS NOT NULL', [segmentStore.composeSegmentsSql(db)])
+          .update({ transcription: segmentStore.composeSegmentsSql(db), transcription_provider: TRANSCRIPTION_PROVIDER,
+            transcription_status: 'completed', updated_at: new Date() });
+      }
+      // recordRelayCommitments re-reads the segments/promises under its own
+      // row lock; these arguments are only the non-segment fallback.
+      const promises = new Map(segmentStore.latestPromises(meta.relay_segments).map((p) => [p.kind, p]));
+      await this._recordCommitments({ transcript: segmentStore.segmentsText(meta.relay_segments) || row.transcription,
+        sessionKey: owner || this.sessionKey, promises });
+      await this._refreshFloorLeadSummary(meta);
+      await this._refreshCallSummary(meta);
+    } catch (err) {
+      logger.warn(`[voice-relay] late segment reconciliation failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+    } finally {
+      try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (err) {
+        logger.warn(`[voice-relay] late segment message sync failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      }
+    }
+  }
+
   /**
    * PR 2B (codex r5 P2) — the late segment's call_summary refresh: the
    * replacement finalized before this socket's segment landed, so its summary
    * (a deterministic one from its own turns, or none at all) misses the
    * caller's pre-drop lines. Rebuilt from EVERY segment's caller lines; a
    * summary the model wrote (capture_lead's) is never replaced. Bounded,
-   * compare-and-set on the deterministic prefix.
+   * compare-and-set on explicit deterministic provenance.
    */
   async _refreshCallSummary(meta) {
     if (!this.callSid) return false;
@@ -2266,8 +2275,10 @@ class RelayConversation {
       const summary = buildCallSummary({ turns: callerTurns.map((text) => ({ role: 'caller', text })), leadCaptured });
       const rows = await withTimeout(
         db('call_log').where('twilio_call_sid', this.callSid)
-          .where((q) => q.whereNull('call_summary').orWhere('call_summary', 'like', 'AI phone assistant%'))
-          .update({ call_summary: summary, updated_at: new Date() }),
+          .where((q) => q.whereNull('call_summary').orWhereRaw("transcription_metadata->>'summary_source' = ?", ['deterministic']))
+          .update({ call_summary: summary,
+            transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'deterministic')"),
+            updated_at: new Date() }),
         WRITE_DRAIN_TIMEOUT_MS,
         0,
       );

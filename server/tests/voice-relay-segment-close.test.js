@@ -17,7 +17,7 @@ afterEach(() => { delete process.env.GATE_VOICE_RELAY_RECOVERY; delete process.e
 
 function primeDb({ firstRow = null, updateImpl, db = require('../models/db') } = {}) {
   const updates = [];
-  const guardQ = { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
+  const guardQ = { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhereIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
   const builder = {
     update: updateImpl || jest.fn(async (patch) => { updates.push(patch); return 1; }),
     where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
@@ -89,6 +89,35 @@ describe('the conversation side', () => {
     expect(update).toHaveBeenCalledTimes(2);
     expect(update.mock.calls[1][0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
     expect(update.mock.calls[1][0]).not.toHaveProperty('transcription');
+  });
+
+  test('a never-reconnected append confirmed after the deadline still finalizes and records promises', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const row = { transcription: null, metadata: { relay_session_claim_owner: 'nonce-1' } };
+    const { updates } = primeDb({ firstRow: row });
+    let settle;
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockImplementationOnce(async (_db, _sid, segment) => {
+      await new Promise((resolve) => { settle = resolve; });
+      row.metadata.relay_segments = [segment];
+      return 1;
+    });
+    const convo = convoWithTurns();
+    convo._promises.set('send_estimate', { verdict: true, expectation: 'about_15_minutes', at: new Date() });
+    const repair = jest.spyOn(convo, '_reconcileLateSegment');
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const closing = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(10010);
+      await closing;
+      expect(updates.find((u) => u.call_outcome === 'ai_handled')).not.toHaveProperty('transcription');
+      expect(recordRelayCommitments).not.toHaveBeenCalled();
+      settle();
+      await jest.advanceTimersByTimeAsync(0);
+      await repair.mock.results[0].value;
+      expect(updates.some((u) => u.transcription_status === 'completed' && u.transcription)).toBe(true);
+      expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sessionKey: 'nonce-1', estimateQueued: true }));
+    } finally { append.mockRestore(); jest.useRealTimers(); }
   });
 
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {

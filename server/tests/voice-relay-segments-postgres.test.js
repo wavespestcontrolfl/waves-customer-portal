@@ -1,7 +1,14 @@
+let mockFixtureDb;
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockFixtureDb(...args);
+  proxy.raw = (...args) => mockFixtureDb.raw(...args);
+  return proxy;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 /** Isolated loopback PostgreSQL only; creates and drops its own fixture schema. */
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { buildSegment, appendSegment } = require('../services/voice-agent/relay-segments');
+const { buildSegment, appendSegment, segmentsText, latestPromises } = require('../services/voice-agent/relay-segments');
 const connection = process.env.VOICE_RECOVERY_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `relay_segments_${randomUUID().replaceAll('-', '')}`;
@@ -13,18 +20,27 @@ postgres('atomic relay segment append and composition', () => {
     if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(connection).hostname)) throw new Error('Use an isolated loopback PostgreSQL fixture');
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
-    db = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 3 } });
+    db = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 3 } });
+    mockFixtureDb = db;
     await db.schema.createTable('call_log', (t) => {
       t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.text('transcription');
       t.text('transcription_provider'); t.text('transcription_status');
-      t.text('call_outcome'); t.jsonb('transcript_structured'); t.timestamp('updated_at');
+      t.text('call_summary'); t.jsonb('transcription_metadata'); t.integer('duration_seconds'); t.timestamp('created_at').defaultTo(db.fn.now());
+      t.text('source'); t.text('call_outcome'); t.jsonb('transcript_structured'); t.timestamp('updated_at');
+    });
+    await db.schema.createTable('call_commitments', (t) => {
+      t.increments('id');
+      for (const key of ['call_log_id', 'commitment_key', 'party', 'kind', 'description', 'channel', 'due_basis', 'source', 'extractor_version', 'recording_sid', 'status', 'human_state']) t.text(key);
+      t.timestamp('due_at'); t.timestamp('updated_at'); t.float('confidence'); t.jsonb('evidence');
+      t.integer('processing_generation'); t.integer('last_seen_generation');
+      t.unique(['call_log_id', 'commitment_key']);
     });
   });
   afterAll(async () => {
     if (db) await db.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
-  beforeEach(async () => { await db('call_log').delete(); });
+  beforeEach(async () => { await db('call_commitments').delete(); await db('call_log').delete(); });
 
   test('concurrent closes retain both segments and compose by generation', async () => {
     await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: { relay_reconnects: 1, relay_reconnect_ms: 3 } });
@@ -81,6 +97,65 @@ postgres('atomic relay segment append and composition', () => {
       await expect(appendSegment(db, 'CA-fixture', buildSegment({ generation: 1, sessionKey: 'session-1', text: 'Caller: 4111 1111' }))).rejects.toThrow('scrub unavailable');
       expect(await db('call_log').first()).toEqual(before);
     } finally { scrub.mockRestore(); }
+  });
+
+  test('same-generation late closes follow the claim nonce order for text and promises', async () => {
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: { relay_reconnects: 1, relay_reconnect_ms: 3 } });
+    for (const key of ['b', 'a']) await appendSegment(db, 'CA-fixture', buildSegment({ generation: 1, sessionKey: key, text: `Caller: ${key}`,
+      promises: [{ kind: 'send_estimate', verdict: true, expectation: key }] }));
+    const row = await db('call_log').first();
+    expect(row.transcription).toBe('Caller: a\n\n[Reconnected]\nCaller: b');
+    expect(segmentsText(row.metadata.relay_segments)).toBe(row.transcription);
+    expect(latestPromises(row.metadata.relay_segments)[0].expectation).toBe('b');
+  });
+
+  test('a commitment pass waiting on the call lock uses the latest same-owner promise', async () => {
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    const at = new Date();
+    const old = buildSegment({ generation: 1, sessionKey: 'a', text: 'Agent: I will send you an estimate.',
+      promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at }] });
+    const newer = buildSegment({ generation: 2, sessionKey: 'b', text: 'Agent: I will send you an estimate when the office opens.',
+      promises: [{ kind: 'send_estimate', verdict: true, expectation: 'when_office_opens', at }] });
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', transcription: old.text,
+      metadata: { relay_session_claim_owner: 'b', relay_segments: [old] } });
+    const trx = await db.transaction();
+    let pass;
+    try {
+      await trx('call_log').where('id', 'fixture').forUpdate().first();
+      pass = recordRelayCommitments(db, { callSid: 'CA-fixture', sessionKey: 'b', transcript: old.text,
+        estimateQueued: true, estimateExpectation: 'about_15_minutes', estimatePromisedAt: at });
+      let blocked = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const activity = await db.raw('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = ? AND cardinality(pg_blocking_pids(pid)) > 0) AS blocked', [schema]);
+        if (activity.rows[0].blocked) { blocked = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      // The stale arguments survive the race; the transaction must replace
+      // them with the row state visible once its lock is acquired.
+      await trx('call_log').where('id', 'fixture').update({ transcription: segmentsText([old, newer]),
+        metadata: { relay_session_claim_owner: 'b', relay_segments: [old, newer] } });
+      await trx.commit();
+      expect(await pass).toMatchObject({ written: 1 });
+      const owed = await db('call_commitments').where('kind', 'send_estimate').first();
+      expect(owed.due_at).toBeNull();
+      expect(owed.due_basis).not.toBe('stated');
+    } finally { if (!trx.isCompleted()) await trx.rollback(); if (pass) await pass; }
+  });
+
+  test.each([true, false])('summary repair uses explicit provenance, model-written=%s', async (modelWritten) => {
+    const { buildTranscriptUpdate } = require('../services/voice-agent/relay-transcript');
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const modelSummary = modelWritten ? 'AI phone assistant discussed a termite follow-up.' : null;
+    const patch = buildTranscriptUpdate({ modelSummary, turns: [{ role: 'caller', text: 'first leg' }] });
+    const meta = { relay_segments: [buildSegment({ generation: 1, text: 'Caller: first leg' }), buildSegment({ generation: 2, text: 'Caller: second leg' })] };
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: meta,
+      call_summary: patch.call_summary, transcription_metadata: patch.transcription_metadata });
+    const refreshed = await RelayConversation.prototype._refreshCallSummary.call({ callSid: 'CA-fixture' }, meta);
+    const row = await db('call_log').first();
+    expect(refreshed).toBe(!modelWritten);
+    if (modelWritten) expect(row.call_summary).toBe(modelSummary);
+    else expect(row.call_summary).toContain('first leg | second leg');
   });
 
 });
