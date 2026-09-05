@@ -254,6 +254,9 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     isLawn: serviceLine === 'lawn',
     trackKey: turf ? (TRACK_MAP[turf.track_key] || turf.track_key || turf.grass_type || null) : null,
     lawnSqft: turf?.lawn_sqft != null ? Number(turf.lawn_sqft) : null,
+    // Canonical tier for the plan engine's PREMIUM_ONLY selection; the strip
+    // carries the display string.
+    waveguardTier: svc.waveguard_tier || null,
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     access: { codes: accessCodes(prefs) },
     coords: coords ? { ...coords, source: 'property' } : { ...OFFICE_COORDS, source: 'office' },
@@ -472,21 +475,22 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
     const missing = [];
     // A limit can only pass when EVERY hour it is judged over carries the
     // measurement; a null reading is "unknown", never a pass.
-    const judge = ({ rows, key, label, limit, reason }) => {
-      if (rows.some((h) => h[key] == null)) { missing.push(label); return; }
-      if (rows.some((h) => h[key] > limit)) reasons.push(reason);
+    // A known breach in any hour is a Hold even when another hour's reading
+    // is missing; a limit only PASSES when every hour of the interval is
+    // present and carries the measurement.
+    const judge = ({ rows, hours, key, label, limit, reason }) => {
+      if (rows.some((h) => h[key] != null && h[key] > limit)) { reasons.push(reason); return; }
+      if (!covers(rows, hours) || rows.some((h) => h[key] == null)) missing.push(label);
     };
     if (limits.maxTempF != null) {
-      judge({ rows: window, key: 'temperatureF', label: 'temperature', limit: limits.maxTempF, reason: `over ${limits.maxTempF}°F` });
+      judge({ rows: window, hours: SPRAY_WINDOW_HOURS, key: 'temperatureF', label: 'temperature', limit: limits.maxTempF, reason: `over ${limits.maxTempF}°F` });
     }
     if (limits.maxWindMph != null) {
-      judge({ rows: window, key: 'windMph', label: 'wind', limit: limits.maxWindMph, reason: `wind over ${limits.maxWindMph} mph` });
+      judge({ rows: window, hours: SPRAY_WINDOW_HOURS, key: 'windMph', label: 'wind', limit: limits.maxWindMph, reason: `wind over ${limits.maxWindMph} mph` });
     }
     if (limits.rainFreeHours != null) {
       const label = `rain ${limits.rainFreeHours} h`;
-      const rainRows = hoursAhead(limits.rainFreeHours);
-      if (!covers(rainRows, limits.rainFreeHours)) missing.push(label);
-      else judge({ rows: rainRows, key: 'rainChance', label, limit: RAIN_HOLD_PCT - 1, reason: `rain likely inside ${limits.rainFreeHours} h` });
+      judge({ rows: hoursAhead(limits.rainFreeHours), hours: limits.rainFreeHours, key: 'rainChance', label, limit: RAIN_HOLD_PCT - 1, reason: `rain likely inside ${limits.rainFreeHours} h` });
     }
     if (reasons.length) return { productId: product.id, verdict: 'hold', reason: reasons.join(', ') };
     if (missing.length) return { productId: product.id, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast` };
@@ -586,6 +590,21 @@ function buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000, gallons }) {
   return { amount: Math.round(amount * 100) / 100, unit: rateUnit || null, gallons: gal, coversSqft: Math.round((gal / carrier) * 1000), reason: null };
 }
 
+/**
+ * Only a product that goes in the spray tank gets a tank amount. Mirrors the
+ * dispatch closeout's method inference (admin-dispatch.js): an explicit
+ * granular / bait / station / injection method, a granular category or name,
+ * or a dry-weight rate unit means "apply as labeled", not "mix in water".
+ */
+function isTankMixable(product = {}) {
+  const method = String(product.application_method || '').toLowerCase();
+  if (/granul|bait|gel|glue|station|trunk|inject/.test(method)) return false;
+  const text = `${product.category || ''} ${product.name || ''}`.toLowerCase();
+  if (/granul/.test(text) || /\bg\b$/.test(String(product.name || '').trim().toLowerCase())) return false;
+  if (/\blbs?\b/.test(String(product.rate_unit || '').toLowerCase())) return false;
+  return true;
+}
+
 function precautionText(product) {
   const parts = [clean(product.customer_safety_summary, 160), clean(product.reentry_text, 100)].filter(Boolean);
   const ppe = parseJson(product.ppe_required);
@@ -605,7 +624,7 @@ function resolveVisitProducts({ facts, protocols, catalog, month }) {
     const visit = track?.visits?.find((v) => v.month === month);
     if (!visit) return { visit: null, lines: [] };
     const lines = [...parseProtocolLines(visit.primary, 'base'), ...parseProtocolLines(visit.secondary, 'conditional')];
-    const resolved = resolveProtocolItems(lines, catalog, { plan: facts.strip.program });
+    const resolved = resolveProtocolItems(lines, catalog, { plan: facts.waveguardTier });
     return { visit, lines: resolved.filter((l) => l.product) };
   }
   const match = matchServiceProtocol(protocols, facts.serviceType);
@@ -647,7 +666,7 @@ async function buildProductCards({ facts, lines, tank, verdicts, packSizes, dbh 
     let planned = null;
     let plannedMix = null;
     if (facts.isLawn && facts.lawnSqft && tank.calibrated && line.selected !== false) {
-      const areaFactor = effectiveAreaFactor(line, { plan: facts.strip.program });
+      const areaFactor = effectiveAreaFactor(line, { plan: facts.waveguardTier });
       const mix = calculateProductAmount({ product: p, lawnSqft: facts.lawnSqft, carrierGalPer1000: tank.carrierGalPer1000, areaFactor, ...nutrientTargets });
       if (mix?.amount > 0) {
         plannedMix = mix;
@@ -745,20 +764,24 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
  */
 async function mixForProduct(productId, gallons, { dbh = db, now = new Date() } = {}) {
   const [product, calibration] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).select('id', 'name', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
+    dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
     getActiveCalibration(dbh),
   ]);
   if (!product) return null;
   const tank = tankFromCalibration(calibration, now);
   // An expired calibration keeps its carrier number for display, but no
   // mix is computed from it — the same withholding the lawn-mix route does.
-  const mix = buildMixAmount({ ratePer1000: product.default_rate_per_1000, rateUnit: product.rate_unit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
+  const tankMixable = isTankMixable(product);
+  const mix = tankMixable
+    ? buildMixAmount({ ratePer1000: product.default_rate_per_1000, rateUnit: product.rate_unit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons })
+    : { amount: null, unit: product.rate_unit || null, reason: 'Not a tank mix — apply as labeled' };
   const packSizes = await loadPackSizes(dbh, [product.id]);
   return {
     productId: product.id,
     name: product.name,
     ratePer1000: product.default_rate_per_1000 != null ? Number(product.default_rate_per_1000) : null,
     rateVerified: Boolean(product.label_verified_at),
+    tankMixable,
     ...mix,
     tank,
     order: {
@@ -784,5 +807,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable },
 };

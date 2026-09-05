@@ -174,7 +174,8 @@ describe('buildSprayCheck', () => {
   });
 
   test('rain-free interval longer than the forecast coverage → unknown, never ok', () => {
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly, now });
+    // Four clean hours cannot vouch for a six-hour interval.
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly: hourly.slice(0, 4), now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 6 h forecast' });
   });
 
@@ -191,6 +192,21 @@ describe('buildSprayCheck', () => {
     // A breach on the other limit still wins over the gap.
     const windy = gappy.map((h, i) => (i === 2 ? { ...h, windMph: 25 } : h));
     expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: windy, now }).verdicts[0].verdict).toBe('hold');
+  });
+
+  test('a known breach wins over a missing reading on the same limit (Codex r1 P1)', () => {
+    const mixed = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : i === 2 ? { ...h, temperatureF: 95 } : h));
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: mixed, now });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'over 90°F' });
+  });
+
+  test('temperature / wind need the whole 4 h window present to pass', () => {
+    const oneHour = [hour(0)];
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: oneHour, now });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature / wind forecast' });
+    // A breach inside the one hour still holds.
+    const hotHour = [hour(0, { temperatureF: 99 })];
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: hotHour, now }).verdicts[0].verdict).toBe('hold');
   });
 
   test('no forecast → unknown with reason', () => {
@@ -256,6 +272,37 @@ describe('access codes never enter the model-safe facts', () => {
   });
 });
 
+describe('resolveVisitProducts passes the canonical tier, not the display program (Codex r1 P1)', () => {
+  const catalog = [{ id: 'hyd', name: 'Hydretain ES Plus', default_rate_per_1000: 6, rate_unit: 'fl oz', cost_per_unit: 1 }];
+  const protocols = { lawn: { A: { visits: [{ month: 'Sep', visit: 9, primary: '', secondary: 'Premium only: Hydretain ES Plus 6 oz' }] } } };
+  const facts = (tier) => ({ isLawn: true, trackKey: 'A', waveguardTier: tier, strip: { program: `Lawn Care · WaveGuard ${tier}` } });
+
+  test('platinum customer → the premium line is selected', () => {
+    const { lines } = jobCard.resolveVisitProducts({ facts: facts('platinum'), protocols, catalog, month: 'Sep' });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ scope: 'PREMIUM_ONLY', selected: true, product: { id: 'hyd' } });
+  });
+
+  test('bronze customer → the premium line is not selected', () => {
+    const { lines } = jobCard.resolveVisitProducts({ facts: facts('bronze'), protocols, catalog, month: 'Sep' });
+    expect(lines[0]).toMatchObject({ scope: 'PREMIUM_ONLY', selected: false });
+  });
+});
+
+describe('isTankMixable', () => {
+  const { isTankMixable } = jobCard._test;
+  test('granular, bait and dry-weight products stay out of the tank', () => {
+    expect(isTankMixable({ name: 'Headway G', rate_unit: 'lb' })).toBe(false);
+    expect(isTankMixable({ name: 'Headway G', rate_unit: 'oz' })).toBe(false);
+    expect(isTankMixable({ name: 'Espoma Palm-tone', category: 'fertilizer', application_method: 'granular', rate_unit: 'oz' })).toBe(false);
+    expect(isTankMixable({ name: 'Advion Ant Gel', category: 'bait', application_method: 'bait_placement', rate_unit: 'g' })).toBe(false);
+  });
+  test('liquids and wettable granules mix', () => {
+    expect(isTankMixable({ name: 'Celsius WG', category: 'herbicide', rate_unit: 'oz' })).toBe(true);
+    expect(isTankMixable({ name: 'LESCO K-Flow 0-0-25', category: 'fertilizer', rate_unit: 'fl oz' })).toBe(true);
+  });
+});
+
 describe('mixForProduct', () => {
   // Generic knex-chain stub: every builder method returns the chain, the
   // terminal (.first / await) resolves the table's fixture.
@@ -279,12 +326,21 @@ describe('mixForProduct', () => {
     expect(out).toMatchObject({ amount: null, reason: 'Rig not calibrated', tank: { calibrated: false, reason: 'Rig calibration expired' } });
   });
 
+  test('granular product → no tank amount even on a live rig (Codex r1 P1)', async () => {
+    const dbh = makeDb({
+      products_catalog: [{ id: 'hg', name: 'Headway G', default_rate_per_1000: 3, rate_unit: 'lb', label_verified_at: null }],
+      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
+    });
+    const out = await jobCard.mixForProduct('hg', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') });
+    expect(out).toMatchObject({ amount: null, tankMixable: false, reason: 'Not a tank mix — apply as labeled', tank: { calibrated: true } });
+  });
+
   test('live calibration → amount for 110 gal', async () => {
     const dbh = makeDb({
       products_catalog: [product],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
     const out = await jobCard.mixForProduct('p1', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') });
-    expect(out).toMatchObject({ amount: 6.22, unit: 'oz', gallons: 110, rateVerified: false });
+    expect(out).toMatchObject({ amount: 6.22, unit: 'oz', gallons: 110, rateVerified: false, tankMixable: true });
   });
 });
