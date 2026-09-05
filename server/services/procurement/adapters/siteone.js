@@ -838,7 +838,10 @@ async function preClickOrderBaseline(page, refuse) {
   const texts = new Set();
   const ids = new Set();
   try {
-    for (const node of (await matches(page, SELECTORS.orderNumber, { strict: true })).shown) {
+    // EVERY match, hidden ones included (Codex #3900 r2 P2): a hidden
+    // pre-click node the responsive rerender around the click reveals must
+    // not read as a fresh confirmation.
+    for (const node of (await matches(page, SELECTORS.orderNumber, { strict: true })).all) {
       const text = String(await node.textContent() || '').replace(/\s+/g, ' ');
       texts.add(text);
       for (const id of orderNumbersIn(text)) ids.add(id.toUpperCase()); // case-insensitive: a rerender that only recases so-12345 → SO-12345 is the same node (r8 P2)
@@ -981,7 +984,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
 // nodes left standing alone after a rejected click (r7 P2), nor a retained
 // reference node beside the confirmation the SPA appended (r17 P2). Nested
 // matches (an h1 wrapping the strong that carries the number) are one
-// identifier (r12 P2); two DIFFERENT new identifiers stay ambiguous. A node's
+// identifier (r12 P2); two DIFFERENT new identifiers are ambiguous at once. A node's
 // first render ("Processing order…", an empty element) is not the outcome:
 // polling continues until a text yields a number (Codex #3876 r4 P2); a
 // timeout returns null and leaves the ambiguous path to decide.
@@ -1002,6 +1005,11 @@ async function waitForNewOrderNumber(page, baseline, timeout) {
       // baseline id first and the new one after it (Codex #3876 r18 P2).
       for (const number of orderNumbersIn(text)) if (!baseline.ids.has(number.toUpperCase())) fresh.set(number.toUpperCase(), number);
     }
+    // Two different NEW identifiers on one poll is ambiguity that waiting
+    // cannot resolve — one of them disappearing later would let the other
+    // settle and be recorded (Codex #3900 r2 P2): null at once, the
+    // ambiguous path decides.
+    if (fresh.size > 1) return null;
     const sole = fresh.size === 1 ? fresh.values().next().value : null;
     if (sole && candidate && sole.toUpperCase() === candidate.toUpperCase()) return sole;
     candidate = sole;

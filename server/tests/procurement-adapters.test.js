@@ -374,6 +374,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // orderNumberDuringLoop: a reference node appears only once the Place Order stage's re-checks are under way (after the loop's first total read) (r6 P2)
       // orderNumberBaselineUnreadable: the pre-click node's visibility read throws; orderNumbersBeforeClick: N shown reference nodes before the click (r7 P2)
       if (sel === S.orderNumber && !st.placeClicked && st.atClick) st.baselineSampled = true;
+      // orderNumberHiddenThenShown: a HIDDEN pre-click confirmation node the rerender around the click reveals, same old identifier, nothing new (r2 P2 on #3900)
+      if (sel === S.orderNumber && st.orderNumberHiddenThenShown) return el({ count: 1, get visible() { return !!st.placeClicked; }, text: st.orderNumberHiddenThenShown });
       if (sel === S.orderNumber && !st.placeClicked && st.orderNumberBaselineUnreadable) return el({ count: 1, isVisibleThrows: true });
       if (sel === S.orderNumber && !st.placeClicked && st.orderNumbersBeforeClick) return el({ count: st.orderNumbersBeforeClick.length, nth: (i) => el({ count: 1, visible: true, text: st.orderNumbersBeforeClick[i] }) });
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
@@ -676,6 +678,17 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumbersIn('Order ref SO-000001 · Order # SO-778899 · Confirmation # SO-778899')).toEqual(['SO-000001', 'SO-778899']);
     const twoNew = fakeSiteOne({ orderNumberBeforeClick: 'Order ref SO-000001', orderNumberText: 'Order ref SO-000001 · Order # SO-778899 · Order # SO-999999', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), twoNew.deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 }); // two new ids stay ambiguous
+  });
+
+  test('a HIDDEN pre-click confirmation node revealed by the rerender around the click is baseline, not a placement — ambiguous (r2 P2 on #3900)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberHiddenThenShown: 'Order # SO-000001', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('two different NEW identifiers on one poll are ambiguous at once — one of them vanishing later never lets the other settle as the order number (r2 P2 on #3900)', async () => {
+    const { deps } = fakeSiteOne({ orderNumberSequence: ['Order # SO-778899 · Order # SO-999999', 'Order # SO-778899', 'Order # SO-778899'], checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
   });
 
   test('the confirmation identifier must settle: a reference value rendered a tick before the order number is never recorded — the settled number is (r1 P2 on #3900)', async () => {
