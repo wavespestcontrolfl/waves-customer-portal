@@ -49,6 +49,10 @@ export default function WavesAIScheduleSearch({
   // paused while a finger or pointer is on it, off under reduced-motion (CSS).
   const stripRef = useRef(null);
   const [drift, setDrift] = useState(false);
+  // Keyboard focus anywhere in the strip ends the drift for good: a focused
+  // chip must stay inside the clipped strip, and a plain scrollable strip
+  // lets the browser scroll each focused choice into view (GH Codex P1).
+  const [keyboard, setKeyboard] = useState(false);
   useEffect(() => {
     const el = stripRef.current;
     if (!el) return undefined;
@@ -59,12 +63,12 @@ export default function WavesAIScheduleSearch({
       // Reduced motion: no drift, so the overflowing set stays a plain
       // scrollable strip instead of a clipped one (GH Codex pre-push P1).
       const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      setDrift(!reduced && setWidth > el.clientWidth - 36);
+      setDrift(!reduced && !keyboard && setWidth > el.clientWidth - 36);
     };
     measure();
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
-  }, [chips, drift]);
+  }, [chips, drift, keyboard]);
 
   const run = async (prompt) => {
     const q = String(prompt ?? query).trim();
@@ -136,6 +140,7 @@ export default function WavesAIScheduleSearch({
         <div
           ref={stripRef}
           aria-label="Example searches"
+          onFocus={() => setKeyboard(true)}
           className={drift ? 'waves-chip-strip waves-chip-strip--drift' : 'waves-chip-strip'}
           style={{
             display: 'flex', flexWrap: 'nowrap', gap: 8, overflowX: drift ? 'hidden' : 'auto',
