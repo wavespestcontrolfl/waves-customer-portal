@@ -1030,9 +1030,10 @@ describe('buildReceiptLink', () => {
     mockBuilders = { invoices: chainBuilder({ firstRow: { id: 'inv-1', customer_id: 'c2', token: 'r'.repeat(64), invoice_number: 'INV-1042', status: 'paid', total: '85.00', paid_at: '2026-08-30T15:00:00Z' } }) };
     const r = await buildReceiptLink(['c1', 'c2']);
     expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
-    // Settled statuses only: an in-flight ACH has no receipt yet, an open
-    // invoice is the pay link's.
-    expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('status', ['paid', 'prepaid', 'refunded', 'partially_refunded']);
+    // Exactly the statuses the receipt viewer renders: a 'prepaid' close-out
+    // shows "Payment not completed" and its PDF 409s (pre-push Codex P1), an
+    // in-flight ACH has no receipt yet, an open invoice is the pay link's.
+    expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('status', ['paid', 'refunded']);
     expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('token');
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
     expect(r.line).toBe(`Here is your receipt for invoice INV-1042: ${r.url}\n\n`);

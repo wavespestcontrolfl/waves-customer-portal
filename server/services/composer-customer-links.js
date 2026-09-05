@@ -1872,11 +1872,13 @@ async function buildContractSigningLink(customerIds) {
 }
 
 // Receipts are records, not actions: /receipt/:token reuses the permanent
-// invoice token with no TTL (receipt-v2.js), and the page renders a settled
-// payment — paid or prepaid (a close-out), or a refund against it. An
-// in-flight ACH ('processing') has no receipt yet, and an open invoice is
-// the pay link's business (buildPayBalanceLink).
-const RECEIPT_INVOICE_STATUSES = ['paid', 'prepaid', 'refunded', 'partially_refunded'];
+// invoice token with no TTL (receipt-v2.js). The viewer renders a receipt
+// for exactly two invoice statuses — 'paid', and 'refunded' (the PDF route's
+// own allow-list; a partial refund is a derived state of a 'paid' row). A
+// 'prepaid' close-out renders as "Payment not completed" and its PDF 409s
+// (pre-push Codex P1), an in-flight ACH ('processing') has no receipt yet,
+// and an open invoice is the pay link's business (buildPayBalanceLink).
+const RECEIPT_INVOICE_STATUSES = ['paid', 'refunded'];
 
 /**
  * Receipt link — the account's most recently settled invoice (a household
