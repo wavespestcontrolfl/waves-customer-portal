@@ -277,25 +277,28 @@ async function loadAddons(dbh, serviceId) {
   return rows.map((r) => ({ name: clean(r.service_name, 80), category: r.category || null })).filter((a) => a.name);
 }
 
-// Catalog category → the treatment programs it may resolve to (first = the
-// category's default; the matcher's pick is honoured only inside this set,
-// so "Initial German Roach Knockdown" under pest_control resolves the
-// cockroach program while "Pest Inspection Service" — inspection by
-// identity, pest by name — resolves nothing). Inspection / specialty /
-// other and an unknown category resolve no products.
+// Catalog category → the treatment programs it may resolve to (the
+// matcher's pick is honoured only inside `any`, else the category's
+// `fallback`), so "Initial German Roach Knockdown" under pest_control
+// resolves the cockroach program while "Pest Inspection Service" —
+// inspection by identity, pest by name — resolves nothing. Specialty is a
+// grab-bag (tick, wildlife, bee/wasp, the general appointment …) whose one
+// treatment protocol is bed bug: named only, no category default.
+// Inspection / other and an unknown category resolve no products.
 const ADDON_PROGRAMS = Object.freeze({
-  pest_control: ['pest', 'cockroach', 'bed_bug'],
-  lawn_care: ['lawn'],
-  mosquito: ['mosquito'],
-  termite: ['termite'],
-  rodent: ['rodent'],
-  tree_shrub: ['tree_shrub', 'palm_injection'],
+  pest_control: { any: ['pest', 'cockroach', 'bed_bug'], fallback: 'pest' },
+  lawn_care: { any: ['lawn'], fallback: 'lawn' },
+  mosquito: { any: ['mosquito'], fallback: 'mosquito' },
+  termite: { any: ['termite'], fallback: 'termite' },
+  rodent: { any: ['rodent'], fallback: 'rodent' },
+  tree_shrub: { any: ['tree_shrub', 'palm_injection'], fallback: 'tree_shrub' },
+  specialty: { any: ['bed_bug'], fallback: null },
 });
 function addonProgramKey(category, name, protocols) {
-  const allowed = ADDON_PROGRAMS[category];
-  if (!allowed) return null;
+  const rule = ADDON_PROGRAMS[category];
+  if (!rule) return null;
   const picked = matchServiceProtocol(protocols, name)?.programKey;
-  return allowed.includes(picked) ? picked : allowed[0];
+  return rule.any.includes(picked) ? picked : rule.fallback;
 }
 
 /**
@@ -1056,12 +1059,22 @@ function linesFromLineMeta(visit, catalog) {
     const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
     if (!product || lines.some((l) => l.product.id === product.id)) continue;
     // Conditional when the line sits in the visit's secondary text OR is
-    // phrased as a condition ("… if crawlers are present") — the parser's
-    // own rule (parseProtocolLines), applied to lineMeta lines too.
-    const conditional = Boolean(raw && (secondary.includes(raw) || /^if\b/i.test(raw) || /\bif\b/i.test(raw)));
+    // phrased as a condition (isConditionalLine).
+    const conditional = Boolean(raw && (secondary.includes(raw) || isConditionalLine(raw)));
     lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
   }
   return lines;
+}
+
+// A protocol line that hangs on a diagnosis or a judgement call — "if
+// rotation calls for IRAC 7C", "only when plant/weather safe", "where
+// root/oomycete risk is justified", "for labeled leaf spot", "premium
+// accounts only", "where target pest fits". Placement and legality
+// phrasing ("where label allows", "where ordinance allows", "where pets
+// rest") is how base work is described, not a condition on it.
+const CONDITIONAL_LINE_RE = /\b(?:if|only|as needed|where (?:needed|appropriate|justified|[^,;()]*?\b(?:justif\w*|fits?|supports?|warrants?|exists?))|for (?:confirmed|documented|diagnosed|labell?ed)|when [^,;()]*?\b(?:active|present|safe|justif\w*|fits?|supports?|warrants?))\b/i;
+function isConditionalLine(raw) {
+  return CONDITIONAL_LINE_RE.test(String(raw || ''));
 }
 
 function linesFromProtocolText(visit, catalog) {
@@ -1069,10 +1082,10 @@ function linesFromProtocolText(visit, catalog) {
   const out = [];
   for (const line of parsed) {
     const product = matchCatalogProduct(line, catalog);
-    // The parser's own condition flag: a primary line phrased "if …"
-    // (Distance IGR "if rotation calls for IRAC 7C") is conditional work,
-    // never selected base work — the same rule the plan engine applies.
-    const conditional = Boolean(line.conditional);
+    // The parser's own flag (secondary text, "if …") plus the wider
+    // condition phrasing the protocols use: a primary line the tech has to
+    // justify is conditional work, never selected base work.
+    const conditional = Boolean(line.conditional) || isConditionalLine(line.raw);
     if (product && !out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
   }
   return out;
@@ -1348,6 +1361,9 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   const withheld = [
     [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
     [productBlocks.length > 0, clean(productBlocks[0]?.message, 160)],
+    // The add-on's protocol lists this product as "if needed": no dose
+    // until the call is made, exactly as the card withholds its amount.
+    [addonLine?.selected === false, `Listed as "if needed" on ${addonLine?.name} — confirm the call before mixing`],
     [!tankMixable, 'Not a tank mix — apply as labeled'],
     [!product.label_verified_at, 'Label rate not yet verified'],
     [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
@@ -1368,7 +1384,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
     sprayCheck,
-    context: addonLine ? { line: addonLine } : { line: null },
+    context: addonLine ? { line: addonLine.name, conditional: !addonLine.selected } : { line: null },
     ...mix,
     planBlocks,
     tank,
@@ -1379,8 +1395,10 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
 /**
  * The add-on (by catalog identity) whose treatment protocol names this
  * product, if any: the product is matched the way the card matched it
- * (name + aliases against that program's visit). Null when the product is
- * not an add-on line's, or the visit has no add-ons.
+ * (name + aliases against that program's visit), and `selected` says
+ * whether that line is booked work or the visit's "if needed" (a selected
+ * line on any add-on wins over a conditional one). Null when the product
+ * is not an add-on line's, or the visit has no add-ons.
  */
 async function addonLineForProduct(dbh, serviceId, product, scheduledDate, deps = {}) {
   const addons = await loadAddons(dbh, serviceId);
@@ -1392,11 +1410,15 @@ async function addonLineForProduct(dbh, serviceId, product, scheduledDate, deps 
   const aliases = await dbh('product_aliases').where({ product_id: product.id }).select('alias_name')
     .catch((err) => { throw unavailable('Product catalog unavailable', err); });
   const catalog = [{ ...product, aliases: aliases.map((r) => r.alias_name) }];
+  let conditional = null;
   for (const addon of candidates) {
     const { lines } = resolveProtocolLines(addon.name, scheduledDate, protocols, catalog, { programKey: addon.programKey });
-    if (lines.some((l) => l.product.id === product.id)) return addon.name;
+    const hit = lines.find((l) => l.product.id === product.id);
+    if (!hit) continue;
+    if (hit.selected !== false) return { name: addon.name, selected: true };
+    conditional = conditional || { name: addon.name, selected: false };
   }
-  return null;
+  return conditional;
 }
 
 function perGallonRate(product) {
@@ -1432,5 +1454,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine },
 };

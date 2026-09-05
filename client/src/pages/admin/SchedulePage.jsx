@@ -5045,7 +5045,7 @@ function JobCardTank({ tank, serviceId, D }) {
             {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
               <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
             )}
-            {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}</div>}
+            {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}{mix.context.conditional ? " · if needed" : ""}</div>}
             {busy ? (
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (

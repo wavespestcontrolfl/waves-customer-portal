@@ -924,12 +924,20 @@ describe('PR review r8', () => {
 
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
   test('the primary line is gated by catalog identity too; legacy rows keep the name match (hook P1)', async () => {
-    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, cockroach: { visits: [{ visit: 1, month: 'Any', primary: 'Advion Gel 1 tube' }] } };
-    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'a', name: 'Advion Gel' }];
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, cockroach: { visits: [{ visit: 1, month: 'Any', primary: 'Advion Gel 1 tube' }] }, bed_bug: { visits: [{ visit: 1, month: 'Any', primary: 'CrossFire 13 fl oz/gal' }] } };
+    const catalog = [{ id: 'd', name: 'Demand CS' }, { id: 'a', name: 'Advion Gel' }, { id: 'x', name: 'CrossFire' }];
     const run = (serviceType, serviceCategory) => jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType, serviceCategory, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
     const inspection = await run('Pest Inspection Service', 'inspection');
     expect(inspection.lines).toEqual([]);
     expect(inspection.note).toBe('No treatment protocol for this service (inspection)');
+    // Specialty (r3 P2): the bed-bug treatment's catalog category is
+    // `specialty`; its name resolves the bed-bug program, while the rest of
+    // the grab-bag (wildlife, tick, the general appointment) has no default.
+    expect((await run('Bed Bug Treatment', 'specialty')).lines.map((l) => l.product.id)).toEqual(['x']);
+    const wildlife = await run('Wildlife Trapping Service', 'specialty');
+    expect(wildlife.lines).toEqual([]);
+    expect(wildlife.note).toBe('No treatment protocol for this service (specialty)');
+    expect((await run('Bed Bug Inspection', 'inspection')).lines).toEqual([]);
     expect((await run('Initial German Roach Knockdown', 'pest_control')).lines.map((l) => l.product.id)).toEqual(['a']);
     expect((await run('Quarterly Pest Control', 'pest_control')).lines.map((l) => l.product.id)).toEqual(['d']);
     // No identity (legacy row) → the name match as before.
@@ -965,6 +973,34 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       lineMeta: { 'Celsius WG 1 oz': { catalogProductHints: ['Celsius WG'] }, 'TriTek 1 gal only if crawlers are present': { catalogProductHints: ['TriTek'] } },
     };
     expect(jobCard._test.linesFromLineMeta(visit, catalog).map((l) => [l.product.id, l.role, l.selected])).toEqual([['c', 'base', true], ['t', 'conditional', false]]);
+  });
+
+  test('non-"if" conditions on primary lines are conditional too; placement and legality phrasing is not (r3 P2)', () => {
+    const { isConditionalLine, linesFromProtocolText, linesFromLineMeta } = jobCard._test;
+    for (const raw of [
+      'KPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified ($4.68)',
+      'Liquid copper (Southern Ag 27.15%): 1-2 tsp/gal for labeled leaf spot/bacterial disease, separate from oil ($11.35)',
+      'TriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)',
+      'Fe/Mn micros: label rate where deficiency symptoms justify ($2.85)',
+      'Mainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)',
+      'Kelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)',
+      '13-0-13 ornamental fertilizer: 0.25-0.50 lb N/1,000 sq ft equivalent where needed ($4.32)',
+      'Floramite for confirmed mites ($6.02)',
+      'Spot treat cracks, crevices, or harborages as needed',
+    ]) expect([raw, isConditionalLine(raw)]).toEqual([raw, true]);
+    for (const raw of [
+      'Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)',
+      'Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 ($13.52)',
+      'IGR where label allows',
+      '8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where ordinance allows ($5.31)',
+      'Interior crack/edge treatment where pets rest',
+      'Snapshot 2.5TG Q3: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)',
+    ]) expect([raw, isConditionalLine(raw)]).toEqual([raw, false]);
+    const catalog = [{ id: 'k', name: 'KPHITE 7LP' }, { id: 'l', name: 'Liquid copper' }, { id: 't', name: 'Talus IGR' }];
+    const visit = { primary: 'Talus IGR: label rate for whitefly/scale nymphs\nKPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified\nLiquid copper: 1-2 tsp/gal for labeled leaf spot', secondary: '' };
+    expect(linesFromProtocolText(visit, catalog).map((l) => [l.product.id, l.role, l.selected])).toEqual([['t', 'base', true], ['k', 'conditional', false], ['l', 'conditional', false]]);
+    const meta = { ...visit, lineMeta: { 'KPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified': { catalogProductHints: ['KPHITE 7LP'] }, 'Talus IGR: label rate for whitefly/scale nymphs': { catalogProductHints: ['Talus IGR'] } } };
+    expect(linesFromLineMeta(meta, catalog).map((l) => [l.product.id, l.selected])).toEqual([['k', false], ['t', true]]);
   });
 
   test('a primary protocol line phrased "if …" stays conditional (hook P1)', () => {
@@ -1067,9 +1103,40 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] } };
     const out = await jobCard.mixForProduct('d', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(buildPlan).not.toHaveBeenCalled();
-    expect(out.context).toEqual({ line: 'Quarterly Pest Control' });
+    expect(out.context).toEqual({ line: 'Quarterly Pest Control', conditional: false });
     expect(out.planBlocks).toEqual([]);
     expect(out.amount).toBe(0.2);
+  });
+
+  test('a product the add-on protocol lists as "if needed" is withheld in the tank search, not dosed off the catalog (r3 P1)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const product = { id: 'h', name: 'Headway', default_rate: '0.5-1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' };
+    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], scheduled_service_addons: [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }], product_aliases: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const buildPlan = jest.fn();
+    // September's Headway line is secondary: "only for labeled ornamental disease and only if FRAC history allows".
+    const protocols = { tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Talus IGR: label rate for whitefly/scale nymphs', secondary: 'Headway only for labeled ornamental disease and only if FRAC history allows' }] } };
+    const out = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(buildPlan).not.toHaveBeenCalled();
+    expect(out.context).toEqual({ line: 'Tree & Shrub Care', conditional: true });
+    expect(out.amount).toBeNull();
+    expect(out.reason).toBe('Listed as "if needed" on Tree & Shrub Care — confirm the call before mixing');
+    expect(out.ratePerGallon).toBeNull();
+    // The same product as a selected primary line doses normally.
+    protocols.tree_shrub.visits[0] = { visit: 9, month: 'Sep', primary: 'Headway 0.75 fl oz/gal foliar', secondary: '' };
+    const selected = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(selected.context).toEqual({ line: 'Tree & Shrub Care', conditional: false });
+    expect(selected.amount).toBe(0.5);
   });
 
   test('the tank search runs the spray check at the property: a Hold withholds the dose', async () => {
