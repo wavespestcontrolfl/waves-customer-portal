@@ -662,8 +662,10 @@ async function verifyCheckoutLines(page, { vendorSku, qty, evidence, upload }) {
 // unresolved, `count: null`, and every caller refuses on it.
 // `nested: true`: the identity readings have no parsed value — shown matches
 // are one reading when every text is CONTAINED in the longest (a wrapper
-// around its child), innermost returned; unrelated texts stay ambiguous
-// (Codex #3876 r24 P2).
+// around its child); the LONGEST text is the reading, never the innermost —
+// a wrapper "Account # 12345 Branch 01" around a "12345" child carries the
+// subaccount the child drops (pre-push hook P1 on 85f4bd1ae); unrelated
+// texts stay ambiguous (Codex #3876 r24 P2).
 const NESTED = (texts) => {
   const norm = texts.map((t) => String(t).replace(/\s+/g, ' ').trim().toLowerCase());
   const longest = norm.reduce((a, b) => (b.length > a.length ? b : a), '');
@@ -683,7 +685,8 @@ async function readExactlyOne(page, selector, { same, nested = false } = {}) {
     if (texts.some((t) => t == null)) return { ambiguous: shown.length };
     const values = new Set(nested ? [NESTED(texts)] : texts.map(same));
     if (values.size !== 1 || values.has(null)) return { ambiguous: shown.length };
-    return { target: shown[texts.reduce((best, t, i) => (t.length < texts[best].length ? i : best), 0)] };
+    const better = nested ? (a, b) => a.length > b.length : (a, b) => a.length < b.length; // identity: the longest (complete) text; totals: the innermost figure
+    return { target: shown[texts.reduce((best, t, i) => (better(t, texts[best]) ? i : best), 0)] };
   };
   const first = await pick({ all, shown });
   if (first.ambiguous) return { count: first.ambiguous, text: '', visible: false };

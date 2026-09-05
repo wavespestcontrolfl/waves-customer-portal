@@ -437,6 +437,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['ship_to_unverified', { shipToText: null }],
     ['account_ambiguous', { identityTexts: { checkoutAccount: ['Account # 12345', 'Account # 99999'] } }], // two unrelated readings
     ['ship_to_ambiguous', { identityTexts: { checkoutShipTo: ['Ship to: 123 Example Ave, Bradenton, FL 34205', 'Ship to: 9 Other Rd, Venice, FL 34285'] } }],
+    ['account_mismatch', { identityTexts: { checkoutAccount: ['Account # 12345 Branch 01', '12345'] } }], // the wrapper's subaccount is the reading, not the child's bare parent number (hook P1)
     ['account_mismatch', { accountText: 'Account # 12345 - 01' }], // spaced separator = subaccount 1234501, never 12345 (r19 P2)
     ['account_mismatch', { accountText: 'Account # 12345 Branch 01' }], // a short subaccount component is part of the account (r21 P2)
     ['account_unverified', { appendsMidRead: 'checkoutAccount' }], // a node appended mid-read = the reading changed (r21 P2)
