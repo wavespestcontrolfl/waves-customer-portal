@@ -118,6 +118,27 @@ describe("ProtocolPanel independent request failures", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("retains mix and calibration when the annual program fails, then restores the calendar on retry", async () => {
+    let failProgram = true;
+    fetch.mockImplementation((url) => url.includes("/programs") && failProgram
+      ? reply({}, 503) : reply(fixture(url)));
+    render(<ProtocolPanel service={service} onClose={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load: Lawn protocol.");
+    expect(screen.getByText("Lawn protocol unavailable")).toBeVisible();
+    expect(screen.getByText("Current mix product")).toBeVisible();
+    expect(screen.getByText("2.9 oz")).toBeVisible();
+    expect(screen.getByText("5.8 oz/tank")).toBeVisible();
+    expect(screen.getByText(/Fixture calibrated rig/)).toBeVisible();
+    expect(screen.queryByText("Annual Protocol Calendar")).not.toBeInTheDocument();
+
+    failProgram = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading" }));
+    expect(await screen.findByText("Annual Protocol Calendar")).toBeVisible();
+    expect(screen.getByText("Current mix product")).toBeVisible();
+    expect(screen.queryByText("Lawn protocol unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("withholds failed mix quantities while retaining the program and equipment", async () => {
     fetch.mockImplementation((url) => url.includes("/lawn-mix")
       ? Promise.reject(new Error("Fixture network failure")) : reply(fixture(url)));

@@ -5012,54 +5012,56 @@ export function ProtocolPanel({ service, onClose }) {
                     Set the customer turf type to St. Augustine, Bermuda,
                     Zoysia, or Bahia to show the correct protocol.
                   </div>
-                ) : !lawnProtocol ? (
-                  <div
-                    style={{
-                      color: D.muted,
-                      fontSize: 13,
-                      padding: 20,
-                      textAlign: "center",
-                    }}
-                  >
-                    Lawn protocol unavailable
-                  </div>
                 ) : (
                   <>
                     {" "}
-                    <div
-                      style={{
-                        background: D.bg,
-                        borderRadius: 10,
-                        padding: 14,
-                        border: `1px solid ${D.border}`,
-                        marginBottom: 12,
-                      }}
-                    >
-                      {" "}
+                    {!lawnProtocol ? (
                       <div
                         style={{
+                          color: D.muted,
                           fontSize: 13,
-                          fontWeight: 500,
-                          color: D.heading,
-                          marginBottom: 6,
+                          padding: 20,
+                          textAlign: "center",
                         }}
                       >
-                        {lawnProtocol.name}
+                        Lawn protocol unavailable
                       </div>
-                      {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                    ) : (
+                      <div
+                        style={{
+                          background: D.bg,
+                          borderRadius: 10,
+                          padding: 14,
+                          border: `1px solid ${D.border}`,
+                          marginBottom: 12,
+                        }}
+                      >
+                        {" "}
                         <div
-                          key={i}
                           style={{
-                            fontSize: 11,
-                            color: note.startsWith("") ? D.red : D.text,
-                            lineHeight: 1.45,
-                            marginBottom: 4,
+                            fontSize: 13,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 6,
                           }}
                         >
-                          {note}
+                          {lawnProtocol.name}
                         </div>
-                      ))}
-                    </div>
+                        {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              fontSize: 11,
+                              color: note.startsWith("") ? D.red : D.text,
+                              lineHeight: 1.45,
+                              marginBottom: 4,
+                            }}
+                          >
+                            {note}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {!lawnContext.lawnSqft && (
                       <div
                         style={{
@@ -5281,89 +5283,93 @@ export function ProtocolPanel({ service, onClose }) {
                         )}
                       </div>
                     )}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 500,
-                        color: D.heading,
-                        marginBottom: 8,
-                      }}
-                    >
-                      Annual Protocol Calendar
-                    </div>
-                    {(lawnProtocol.visits || []).map((v) => (
-                      <div
-                        key={v.visit}
-                        style={{
-                          background: D.bg,
-                          borderRadius: 10,
-                          padding: 12,
-                          border: `1px solid ${D.border}`,
-                          marginBottom: 8,
-                        }}
-                      >
-                        {" "}
+                    {lawnProtocol && (
+                      <>
                         <div
                           style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 10,
-                            marginBottom: 6,
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 8,
                           }}
                         >
-                          {" "}
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 500,
-                              color: D.heading,
-                            }}
-                          >
-                            Visit {v.visit} · {v.month}
-                          </div>{" "}
-                          <div style={{ fontSize: 11, color: D.muted }}>
-                            Legacy mat: ${v.material_cost || "—"}
-                          </div>{" "}
-                        </div>{" "}
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: D.text,
-                            whiteSpace: "pre-wrap",
-                            lineHeight: 1.45,
-                          }}
-                        >
-                          {v.primary}
+                          Annual Protocol Calendar
                         </div>
-                        {v.secondary && (
+                        {(lawnProtocol.visits || []).map((v) => (
                           <div
+                            key={v.visit}
                             style={{
-                              fontSize: 11,
-                              color: D.muted,
-                              whiteSpace: "pre-wrap",
-                              lineHeight: 1.45,
-                              marginTop: 6,
+                              background: D.bg,
+                              borderRadius: 10,
+                              padding: 12,
+                              border: `1px solid ${D.border}`,
+                              marginBottom: 8,
                             }}
                           >
-                            {v.secondary}
+                            {" "}
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                marginBottom: 6,
+                              }}
+                            >
+                              {" "}
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 500,
+                                  color: D.heading,
+                                }}
+                              >
+                                Visit {v.visit} · {v.month}
+                              </div>{" "}
+                              <div style={{ fontSize: 11, color: D.muted }}>
+                                Legacy mat: ${v.material_cost || "—"}
+                              </div>{" "}
+                            </div>{" "}
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: D.text,
+                                whiteSpace: "pre-wrap",
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {v.primary}
+                            </div>
+                            {v.secondary && (
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: D.muted,
+                                  whiteSpace: "pre-wrap",
+                                  lineHeight: 1.45,
+                                  marginTop: 6,
+                                }}
+                              >
+                                {v.secondary}
+                              </div>
+                            )}
+                            {stripLegacyBoilerplate(v.notes) && (
+                              <div
+                                style={{
+                                  fontSize: 10,
+                                  color: D.muted,
+                                  lineHeight: 1.4,
+                                  marginTop: 6,
+                                  paddingTop: 6,
+                                  borderTop: `1px solid ${D.border}`,
+                                }}
+                              >
+                                {stripLegacyBoilerplate(v.notes)}
+                              </div>
+                            )}
                           </div>
-                        )}
-                        {stripLegacyBoilerplate(v.notes) && (
-                          <div
-                            style={{
-                              fontSize: 10,
-                              color: D.muted,
-                              lineHeight: 1.4,
-                              marginTop: 6,
-                              paddingTop: 6,
-                              borderTop: `1px solid ${D.border}`,
-                            }}
-                          >
-                            {stripLegacyBoilerplate(v.notes)}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                        ))}
+                      </>
+                    )}
                   </>
                 )}
               </div>
