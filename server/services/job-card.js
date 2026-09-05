@@ -427,6 +427,7 @@ async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
 function productLimits(product) {
   const num = (v) => (v == null || v === '' ? null : Number(v));
   return {
+    minTempF: num(product.min_temp_f),
     maxTempF: num(product.max_temp_f),
     maxWindMph: num(product.max_wind_mph),
     // rainfast_minutes is the canonical label interval (rain_free_hours is
@@ -481,7 +482,7 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
 
   const verdicts = products.map((product) => {
     const limits = productLimits(product);
-    const hasLimits = [limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
+    const hasLimits = [limits.minTempF, limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
     if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: 'No limit on file' };
     if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
     const reasons = [];
@@ -491,10 +492,14 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
     // A known breach in any hour is a Hold even when another hour's reading
     // is missing; a limit only PASSES when every hour of the interval is
     // present and carries the measurement.
-    const judge = ({ rows, hours, key, label, limit, reason }) => {
-      if (rows.some((h) => h[key] != null && h[key] > limit)) { reasons.push(reason); return; }
-      if (!covers(rows, hours) || rows.some((h) => h[key] == null)) missing.push(label);
+    const judge = ({ rows, hours, key, label, limit, floor, reason }) => {
+      const breach = floor != null ? (v) => v < floor : (v) => v > limit;
+      if (rows.some((h) => h[key] != null && breach(h[key]))) { reasons.push(reason); return; }
+      if (!covers(rows, hours) || rows.some((h) => h[key] == null)) { if (!missing.includes(label)) missing.push(label); }
     };
+    if (limits.minTempF != null) {
+      judge({ rows: window, hours: SPRAY_WINDOW_HOURS, key: 'temperatureF', label: 'temperature', floor: limits.minTempF, reason: `under ${limits.minTempF}°F` });
+    }
     if (limits.maxTempF != null) {
       judge({ rows: window, hours: SPRAY_WINDOW_HOURS, key: 'temperatureF', label: 'temperature', limit: limits.maxTempF, reason: `over ${limits.maxTempF}°F` });
     }
@@ -528,7 +533,7 @@ const PRODUCT_COLUMNS = [
   'mixing_order_category', 'mixing_instructions', 'rainfast_minutes', 'rei_hours',
   'labeled_turf_species', 'excluded_turf_species', 'requires_surfactant', 'allows_surfactant',
   'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
-  'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_required', 'reentry_text',
+  'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_required', 'reentry_text',
   'customer_safety_summary', 'pet_kid_guidance_text', 'service_report_summary',
   'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
   'best_price_amount_cached', 'best_price_updated_at',

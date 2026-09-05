@@ -230,6 +230,14 @@ describe('buildSprayCheck', () => {
     expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly, now }).verdicts[0]).toMatchObject({ verdict: 'hold', reason: 'rain likely inside 6 h' });
   });
 
+  test('min_temp_f is a lower bound: cold hour holds, missing coverage is unknown once (Codex r7 P1)', () => {
+    const cold = hourly.map((h, i) => (i === 2 ? { ...h, temperatureF: 45 } : h));
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', min_temp_f: 50 }], hourly: cold, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'under 50°F' });
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', min_temp_f: 50, max_temp_f: 90 }], hourly, now }).verdicts[0].verdict).toBe('ok');
+    const gappy = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : h));
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', min_temp_f: 50, max_temp_f: 90 }], hourly: gappy, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
+  });
+
   test('no forecast → unknown with reason', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: null, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast' });
