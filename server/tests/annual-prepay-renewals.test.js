@@ -60,6 +60,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'orWhereRaw',
     'orWhereNot',
     'orWhereIn',
+    'orWhereNotIn',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -312,7 +313,8 @@ describe('annual prepay renewal helpers', () => {
     // The status skip is re-asserted IN the UPDATE (#3878 r5): a visit
     // cancelled between the eligibility read and this write is never
     // stamped — the predicate rides the same statement as the write.
-    expect(updateTwo.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['cancelled', 'no_show', 'skipped', 'completed']));
+    expect(updateTwo.whereNull).toHaveBeenCalledWith('status');
+    expect(updateTwo.orWhereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['cancelled', 'no_show', 'skipped', 'completed']));
   });
 
   test('a visit cancelled between the eligibility read and the stamp write is not counted as stamped (0-row update, #3878 r5)', async () => {
@@ -351,7 +353,7 @@ describe('annual prepay renewal helpers', () => {
     );
   });
 
-  test('a visit COMPLETED between the eligibility read and the stamp write is a pending-window completion, not a shortfall — no exception filed (hook P1)', async () => {
+  test('a visit COMPLETED between the eligibility read and the stamp write is not a cancellation shortfall — it files its own completion-race exception (hook P1 + Codex r2 P1)', async () => {
     const rows = [
       { id: 'svc-1', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'on_site' },
     ];
@@ -359,7 +361,10 @@ describe('annual prepay renewal helpers', () => {
     const rowsQuery = query({ rows });
     const racedUpdate = query({ returning: [] });
     const reread = query({ rows: [{ id: 'svc-1', status: 'completed' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, racedUpdate, reread] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, racedUpdate, reread],
+      notifications: [query({ first: undefined })],
+    });
     const { notifyAdmin } = require('../services/notification-service');
     notifyAdmin.mockClear();
 
@@ -370,7 +375,11 @@ describe('annual prepay renewal helpers', () => {
     });
     expect(result.stampedCount).toBe(0);
     expect(result.racedRowIds).toEqual([]);
-    expect(notifyAdmin).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert', expect.any(String), expect.stringContaining('completed while the annual prepay was being applied'),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'stamp_raced_completion', annual_prepay_term_id: 'term-1' }) }),
+    );
   });
 
   test('a term whose owner moved under the comms fence (merge-undo) defers every seed — no visits on the stale kept owner', async () => {

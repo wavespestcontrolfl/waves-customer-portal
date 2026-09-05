@@ -2230,6 +2230,11 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         // cancelled / no-show / skipped visit's invoice takes no credit —
         // the cancel voids it (restoring credit); consuming credit against
         // it here would race that void (#3878 r2).
+        // Lock order customer → visit (same as recordManualPayment and the
+        // rest of the repo): postCreditMovement locks the customer below, so
+        // fencing the visit first would invert the order and deadlock against
+        // a customer→visit transaction (Codex r2 P2).
+        await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
         {
           const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
           if (neverRan) {

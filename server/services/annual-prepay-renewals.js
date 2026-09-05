@@ -1614,8 +1614,10 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   // row: a never-ran status (cancelled / no_show / skipped) is a shortfall
   // the operator must hear about (the earlier coverage_shortfall check runs
   // on target dates and cannot see this race); a COMPLETED-in-between row
-  // is the pending-window completion that reconcilePendingWindowCompletions
-  // already handles, and files nothing here.
+  // is a pending-window completion whose invoice may not exist yet when
+  // reconcilePendingWindowCompletions runs right after this, so it files
+  // its own exception (Codex r2 P1) — the daily sweep settles it, the alert
+  // covers the window in which the visit could be paid twice.
   const unmatchedRowIds = [];
 
   for (let index = 0; index < rows.length; index++) {
@@ -1652,9 +1654,11 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     // The status skip above read a pre-transaction row; re-assert it IN the
     // UPDATE so a visit cancelled between that read and this write (a
     // series cancel committing mid-activation, #3878 r5) is never stamped.
+    // A NULL status is a live visit (service-cadence convention) — a bare
+    // NOT IN would evaluate unknown and skip it (Codex r2 P1).
     const updated = await conn('scheduled_services')
       .where({ id: row.id })
-      .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
+      .where((q) => q.whereNull('status').orWhereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES]))
       .update(updates)
       .returning(['id']);
     if (Array.isArray(updated) ? updated.length > 0 : updated) stampedCount++;
@@ -1662,10 +1666,17 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   }
 
   let racedRowIds = [];
+  let completedRaceIds = [];
   if (unmatchedRowIds.length > 0) {
     const current = await conn('scheduled_services').whereIn('id', unmatchedRowIds).select('id', 'status');
     const statusById = new Map(current.map((r) => [r.id, String(r.status || '').toLowerCase()]));
     racedRowIds = unmatchedRowIds.filter((id) => COVERAGE_EXCLUDED_STATUSES.has(statusById.get(id)) || !statusById.has(id));
+    completedRaceIds = unmatchedRowIds.filter((id) => statusById.get(id) === 'completed');
+  }
+  if (completedRaceIds.length > 0) {
+    logger.warn(`[annual-prepay] term ${term.id}: ${completedRaceIds.length} covered visit(s) completed while the prepaid stamp ran (${completedRaceIds.join(', ')}) — left unstamped for pending-window reconciliation`);
+    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_completion',
+      `${completedRaceIds.length} paid visit(s) completed while the annual prepay was being applied and are not yet marked as covered. If a completion invoice was issued for that visit, it bills the customer separately until the coverage sweep settles it — check the invoice and settle it as covered or void it.`);
   }
   if (racedRowIds.length > 0) {
     // Durable operator exception (Codex #3882 r1 P1): callers discard this

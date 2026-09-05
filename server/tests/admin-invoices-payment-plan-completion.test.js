@@ -107,7 +107,7 @@ describe('active payment plans auto-complete when the invoice settles', () => {
   let trx;
   let trxInvoices;
   let trxPayments;
-  let trxPlans;
+  let trxPlans, trxCustomers;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -121,10 +121,14 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     });
     trxPayments = makeRecorder();
     trxPlans = makeRecorder();
+    trxCustomers = makeRecorder({ first: jest.fn(async () => ({ id: INVOICE.customer_id })) });
     trx = jest.fn((table) => {
       if (table === 'invoices') return trxInvoices;
       if (table === 'payments') return trxPayments;
       if (table === 'payment_plans') return trxPlans;
+      // apply-credit locks the customer (customer → visit lock order) before
+      // the visit fence and the credit movement.
+      if (table === 'customers') return trxCustomers;
       // completeActivePlansForInvoice also releases plan-owned dunning stops.
       if (table === 'invoice_followup_sequences') return makeRecorder();
       throw new Error(`unexpected trx table ${table}`);
@@ -180,11 +184,15 @@ describe('active payment plans auto-complete when the invoice settles', () => {
       if (table === 'activity_log') return makeRecorder();
       throw new Error(`unexpected table ${table}`);
     });
+    const lockOrder = [];
+    trxCustomers.forUpdate.mockImplementation(() => { lockOrder.push('customers'); return trxCustomers; });
+    trxVisits.forUpdate.mockImplementation(() => { lockOrder.push('scheduled_services'); return trxVisits; });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
       });
       expect(res.status).toBe(409);
+      expect(lockOrder).toEqual(['customers', 'scheduled_services']);
       const body = await res.json();
       expect(body.error).toMatch(/visit is cancelled/);
       expect(trxVisits.forUpdate).toHaveBeenCalled();
