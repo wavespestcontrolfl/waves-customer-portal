@@ -340,6 +340,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       // The group count (name="tender") is what a named radio is judged by; an unnamed radio has no countable group (r18 P1)
       if (sel === 'input[type="radio"][name="tender"]:checked') return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      // unreadableFirst: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — a candidate whose visibility read THROWS (detached mid-enumeration) precedes the one visible reading (r19 P2)
+      if (st.unreadableFirst && sel === S[st.unreadableFirst]) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, isVisibleThrows: true, text: 'x' }) : el({ count: 1, visible: true, text: { checkoutAccount: 'Account # 12345', checkoutShipTo: 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', checkoutTotal: 'Order total $99.00' }[st.unreadableFirst] })) });
       // accountAtClick: a delayed rerender swaps the displayed billing account once the Place Order stage has begun (r5 P1)
       // accountAtTrial: the swap lands during the trial click's wait (r6 P1)
       if (sel === S.checkoutAccount) return el({ count: st.accountCount ?? 1, visible: st.accountVisible ?? true, text: st.accountAtTrial && st.trialDone ? st.accountAtTrial : st.accountAtClick && st.atClick ? st.accountAtClick : st.accountText === undefined ? 'Account # 12345' : st.accountText });
@@ -423,6 +425,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['ship_to_mismatch', { shipToText: 'Ship to: 9 Other Rd, Venice, FL 34285' }],
     ['ship_to_unverified', { shipToText: null }],
     ['account_ambiguous', { accountCount: 2 }],
+    ['account_mismatch', { accountText: 'Account # 12345 - 01' }], // spaced separator = subaccount 1234501, never 12345 (r19 P2)
+    ['account_unverified', { unreadableFirst: 'checkoutAccount' }], // an unreadable candidate is unresolved, not hidden (r19 P2)
+    ['ship_to_unverified', { unreadableFirst: 'checkoutShipTo' }],
+    ['checkout_total_unreadable', { unreadableFirst: 'checkoutTotal' }],
     ['terms_unreadable', { termsUnreadable: true }], // unknown ≠ accepted (r4 P2)
     ['account_hidden', { accountVisible: false }], // a hidden node carrying the right number is not what the checkout shows
     ['ship_to_hidden', { shipToVisible: false }],
