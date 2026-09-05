@@ -61,8 +61,12 @@ function fromRow(run, steps = []) {
   });
 }
 
-// Sort / page key = the run's startedAt in fromRow, at ms precision.
-const START = () => db.raw("date_trunc('milliseconds', COALESCE(r.started_at, r.created_at))");
+// Sort / page key = the run's startedAt in fromRow. No date_trunc here: the
+// writer stamps started_at AND created_at from JS Dates (ms precision), so
+// the cursor compares exactly, and the bare expression is what
+// agent_runs_start_idx indexes (date_trunc on timestamptz is not
+// IMMUTABLE, so it could not be) (Codex r9).
+const START = () => db.raw('COALESCE(r.started_at, r.created_at)');
 const ID = 'r.id';
 // Step / tool-call counts are the CURRENT attempt's (attempt_no = r.attempts):
 // health.js reads them against the per-run budget, and a retry starts

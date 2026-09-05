@@ -216,11 +216,17 @@ describe('adapters project onto the canonical shape', () => {
     const parseFailed = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed', v2_extraction_status: 'schema_failed' });
     expect(parseFailed.steps[1]).toMatchObject({ status: 'failed', detail: 'schema_failed' });
     // extraction_failed: the class follows the recorded v2 status — model output (incomplete) vs provider — and a bare one (any thrown exception: key, network) is infrastructure
-    const extractionFailed = callLog.fromRow({ ...base, processing_status: 'extraction_failed', v2_extraction_status: 'schema_failed' });
-    expect(extractionFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
+    const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../config/call-extraction-retry');
+    const exhausted = { ...base, extraction_attempts: CALL_EXTRACTION_MAX_ATTEMPTS };
+    const extractionFailed = callLog.fromRow({ ...exhausted, processing_status: 'extraction_failed', v2_extraction_status: 'schema_failed' });
+    expect(extractionFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete', maxAttempts: CALL_EXTRACTION_MAX_ATTEMPTS, attempts: CALL_EXTRACTION_MAX_ATTEMPTS });
     expect(extractionFailed.steps[1].status).toBe('failed');
-    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed', v2_extraction_status: 'api_unavailable' }).failureClass).toBe('provider');
-    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' }).failureClass).toBe('infrastructure');
+    expect(callLog.fromRow({ ...exhausted, processing_status: 'extraction_failed', v2_extraction_status: 'api_unavailable' }).failureClass).toBe('provider');
+    expect(callLog.fromRow({ ...exhausted, processing_status: 'extraction_failed' }).failureClass).toBe('infrastructure');
+    // … but a failure still inside the processor's retry limits is QUEUED work its sweep will claim again (the last failure stays as the code)
+    const retrying = callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago(864e5) });
+    expect(retrying).toMatchObject({ lifecycle: 'queued', result: null, errorCode: 'extraction_failed', attempts: 1, maxAttempts: CALL_EXTRACTION_MAX_ATTEMPTS });
+    expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed', extraction_attempts: 1, created_at: ago((EXTRACTION_RETRY_WINDOW_DAYS + 1) * 864e5) }).lifecycle).toBe('terminal');
     // extraction landed, the lead write did not: the extract step stays done, the link step fails
     const linkFailed = callLog.fromRow({ ...base, processing_status: 'lead_creation_failed', v2_extraction_status: 'valid', transcription_status: 'completed', enriched: true });
     expect(linkFailed.steps.map((s) => s.status)).toEqual(['done', 'done', 'done', 'failed']);

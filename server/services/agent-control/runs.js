@@ -187,6 +187,9 @@ async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
       worker_id: WORKER_ID,
       leased_at: now,
       lease_expires_at: lease,
+      // ms-precision JS Dates for BOTH (not the DB default's µs): the read
+      // adapter pages on COALESCE(started_at, created_at) with a JS cursor
+      created_at: now,
       started_at: now,
       last_heartbeat_at: now,
       last_progress_at: now,
@@ -563,7 +566,9 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     // anything else is classified from the code / message like an omission
     const klass = FAILURE_CLASS.includes(failureClass) ? failureClass : classifyFailure(code ?? message);
     const canRetry = [retryable, attemptNo < Number(run.max_attempts), run.idempotency_key, !NO_RETRY_CLASSES.has(policy.side_effect_class)].every(Boolean);
-    const result = CODE_RESULT[code] ?? CLASS_RESULT[klass] ?? 'errored';
+    // own properties only: an error code named like a prototype member
+    // ('constructor') must not resolve to a function (the taxonomy rule)
+    const result = (Object.hasOwn(CODE_RESULT, code) ? CODE_RESULT[code] : null) ?? CLASS_RESULT[klass] ?? 'errored';
     const transition = canRetry
       ? { lifecycle: 'queued', result: null, finished_at: null, event: 'retry_scheduled' }
       : { lifecycle: 'terminal', result, finished_at: now, event: 'failed' };

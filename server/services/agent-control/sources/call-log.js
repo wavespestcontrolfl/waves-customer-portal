@@ -8,6 +8,9 @@
 const db = require('../../../models/db');
 const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 const { whereNotSandboxCall } = require('../../voice-agent/relay-protocol');
+// the processor's retry limits (one config): an extraction_failed call still
+// inside them is queued work its sweep will claim again, not a failure (Codex r9)
+const { CALL_EXTRACTION_MAX_ATTEMPTS, EXTRACTION_RETRY_WINDOW_DAYS } = require('../../../config/call-extraction-retry');
 
 const SOURCE = 'call_log';
 const LANE = 'call_extraction';
@@ -46,6 +49,15 @@ const STATUS_MAP = Object.freeze({
 // (tests/agent-control-run-index drift-checks the map against the
 // processor's vocabulary).
 const UNKNOWN_STATUS = Object.freeze({ lifecycle: 'terminal', result: null });
+// an extraction failure the sweep will retry: queued, its last failure kept as the code
+const QUEUED_RETRY = Object.freeze({ lifecycle: 'queued' });
+const RETRY_WINDOW_MS = Number(EXTRACTION_RETRY_WINDOW_DAYS) * 864e5;
+
+function retryEligible(c, status, now = Date.now()) {
+  return status === 'extraction_failed'
+    && Number(c.extraction_attempts || 0) < Number(CALL_EXTRACTION_MAX_ATTEMPTS)
+    && new Date(c.created_at).getTime() > now - RETRY_WINDOW_MS;
+}
 
 // The processor's own stage vocabularies (call-recording-processor.js,
 // drift-tested): transcription_status 'completed' | 'summary_only' carry a
@@ -116,7 +128,8 @@ function stepsFor(c, status, map) {
 
 function fromRow(c) {
   const status = c.processing_status || 'pending';
-  const map = STATUS_MAP[status] || UNKNOWN_STATUS;
+  const retry = retryEligible(c, status);
+  const map = retry ? QUEUED_RETRY : STATUS_MAP[status] || UNKNOWN_STATUS;
   const beat = c.processing_heartbeat_at || c.processing_started_at;
   return canonicalRun({
     source: SOURCE,
@@ -126,13 +139,14 @@ function fromRow(c) {
     subtitle: [humanize(c.classification), humanize(c.call_outcome || c.disposition)].filter(Boolean).join(' · ') || humanize(status),
     ...map,
     failureClass: failureClassFor(c, status, map),
-    errorCode: map.result === 'errored' ? status : null,
+    errorCode: map.result === 'errored' || retry ? status : null,
     createdAt: c.created_at,
     startedAt: c.processing_started_at || c.created_at,
     finishedAt: map.lifecycle === 'terminal' ? c.updated_at : null,
     lastHeartbeatAt: beat,
     lastProgressAt: beat,
     attempts: attemptsFor(c, status),
+    maxAttempts: Number(CALL_EXTRACTION_MAX_ATTEMPTS),
     steps: stepsFor(c, status, map),
     link: `/admin/communications?tab=calls&call=${c.id}`,
     entity: { type: 'call_log', id: c.id },
@@ -155,6 +169,10 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .where((q) => {
         // queued (NULL / pending) and in-flight calls stay listed however old (a stuck queue is the point)
         q.whereNull('processing_status').orWhereIn('processing_status', ['pending', 'processing']);
+        // … and so does an extraction failure the sweep will retry (its limits)
+        q.orWhere((r) => r.where('processing_status', 'extraction_failed')
+          .whereRaw('COALESCE(extraction_attempts, 0) < ?', [Number(CALL_EXTRACTION_MAX_ATTEMPTS)])
+          .where('created_at', '>', db.raw(`NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'`)));
         q.orWhere(START(), '>=', from);
       }), { source: SOURCE, idColumn: 'call_log.id' }), { start: START(), id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
@@ -174,4 +192,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, LANE, STATUS_MAP, TRANSCRIBED, V2_VALID, list, get, fromRow };
+module.exports = { SOURCE, LANE, STATUS_MAP, TRANSCRIBED, V2_VALID, retryEligible, list, get, fromRow };

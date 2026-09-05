@@ -528,6 +528,13 @@ describe('fail and retry', () => {
     expect(mockWarn.mock.calls.some((c) => /lane mismatch/.test(c[0]))).toBe(true);
   });
 
+  test('an error code named like a prototype member resolves no result table entry', async () => {
+    const h = await runs.startRun(base);
+    const r = await h.fail({ error: new Error('x'), errorCode: 'constructor' });
+    expect(r.result).toBe('errored');
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'errored', error_code: 'constructor' });
+  });
+
   test('an explicit failure class outside the taxonomy is classified from the code instead', async () => {
     const h = await runs.startRun({ ...base, sourceRunId: 'fc' });
     expect((await h.fail({ errorCode: 'openai_500', failureClass: 'typo' })).failureClass).toBe('provider');
