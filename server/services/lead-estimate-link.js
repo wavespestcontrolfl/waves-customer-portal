@@ -104,9 +104,15 @@ const sameContactIdentity = (read, current) => ['customer_id', 'phone', 'email']
 // judged first; an unlinked repeat carries none of its own, and reading only
 // the repeat's link let root A take the funnel row of a deposit on estimate
 // B (pre-push P1 on 1ea5d47).
-async function settleRepeatFunnelRow(database, leadId, { customerId = null, estimateId = null } = {}) {
+async function settleRepeatFunnelRow(database, leadId, { customerId: suppliedCustomerId = null, estimateId = null } = {}) {
   const repeat = await database('leads').where('id', leadId).first();
   if (!duplicateMarkerOf(repeat) || repeat.lead_type !== 'quote_wizard') return null;
+  // The customer is the repeat's OWN, as read (and locked below) — the
+  // conversion wrote it; a caller's argument is only the fallback for an
+  // unlinked row. A stale argument (staff re-assigned the repeat after the
+  // caller read it) would otherwise book the old customer's root and drop
+  // the new customer's row (pre-push P1 on d511af9).
+  const customerId = repeat.customer_id || suppliedCustomerId || null;
   const { root } = await resolveAncestry(database, repeat);
   const scope = estimateId || repeat.estimate_id;
   const rootOurs = !!root && !root.deleted_at && OPEN_LEAD_STATUSES.includes(root.status)

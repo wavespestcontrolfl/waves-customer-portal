@@ -1535,6 +1535,15 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       expect(stampLeadFunnelRow).not.toHaveBeenCalled();
     });
 
+    test('the settlement judges ownership by the repeat\'s OWN customer, not a stale argument: a repeat re-assigned to c2 does not book c1\'s root, and its rebuilt row carries c2 (pre-push P1 on d511af9)', async () => {
+      const rows = { rep: repeat('rep', { customer_id: 'c2' }), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead' });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(stampLeadFunnelRow).toHaveBeenCalledWith(database, rows.rep, expect.objectContaining({ customerId: 'c2', funnelStage: 'booked' }));
+      expect(database._deleted).toEqual([]);
+    });
+
     test('a root row ALREADY at booked (a replayed conversion: the monotonic bridge updates 0 rows) is settled — the repeat is not rebuilt into a second row (codex r28 P1)', async () => {
       const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
       bridgeLeadFunnelStage.mockResolvedValueOnce({ updated: 0 });
