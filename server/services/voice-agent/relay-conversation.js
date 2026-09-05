@@ -2256,6 +2256,7 @@ class RelayConversation {
           estimateFields: this._estimateFields || null,
           startedAt: this._startedAt,
           lookupsUsed: this._lookupsUsed,
+          writesInFlight: [...this._inFlightWrites.keys()],
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)
@@ -2663,6 +2664,14 @@ class RelayConversation {
     // still writing is that lead, so suppress rather than race it.
     if (this._inFlightWrites.has('capture_lead')) {
       logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — capture_lead is still in flight past the drain bound (never race a second lead write)`);
+      return;
+    }
+    // …and the same across the reconnect (hook r37 P1): a write the EARLIER
+    // leg's close left in flight is that call's artifact committing; this
+    // leg's floor must not race it either. The segment carries the names.
+    const priorInFlight = (this._resume && Array.isArray(this._resume.writesInFlight)) ? this._resume.writesInFlight : [];
+    if (priorInFlight.includes('capture_lead') || priorInFlight.includes('request_reservice')) {
+      logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — an earlier leg's ${priorInFlight.includes('capture_lead') ? 'capture_lead' : 'request_reservice'} was still in flight at its close (never race a second artifact across the reconnect)`);
       return;
     }
     // ⭐ A SLOW request_reservice OUTRANKS THE FLOOR TOO. A filed re-service is
