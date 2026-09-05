@@ -227,6 +227,15 @@ test('the claim retires the request\'s manual bell in its own transaction; a fai
   } finally { mockState.bellRetireThrows = false; }
 });
 
+test('master gate off with an automatic order already OUT for the product → no "order manually" hand-off bell (hook r27 P0/P1)', async () => {
+  process.env.GATE_AUTO_ORDER = 'false';
+  mockState.liveAutoOrder = { status: 'needs_review', external_order_number: null, vendor_name: 'Sticker Mule' }; // an ambiguous-submit park left the request open
+  const r = await run(mockAdapter());
+  expect(r).toEqual({ requestId: 'req-1', skipped: 'gated', autoOrderLive: true });
+  expect(notify).not.toHaveBeenCalled();
+  expect(mockState.ledgerRows).toHaveLength(0);
+});
+
 test('a handback (gate off after the claim marked the bell read) reopens the deduped bell (Codex r20 P2)', async () => {
   mockState.vendor = { ...mockState.vendor, active: false };
   const r = await run(mockAdapter());

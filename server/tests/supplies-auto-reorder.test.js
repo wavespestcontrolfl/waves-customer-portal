@@ -305,6 +305,19 @@ test('an open auto request still re-rings when the product\'s reorder quantity w
   expect(notify).toHaveBeenCalledTimes(1);
 });
 
+test('a low product whose received request carries a late automatic order (landedAfterReceive) gets NO fresh request and no bell (hook r27 P1)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = null; // the received request is not a live request
+  mockState.liveAutoOrder = { status: 'needs_review', external_order_number: 'S1-9', vendor_name: 'SiteOne' };
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.created).toEqual([]);
+    expect(r.deduped).toEqual([expect.objectContaining({ productId: 'prod-sign', reason: 'auto_order_live' })]);
+    expect(notify).not.toHaveBeenCalled();
+  } finally { mockState.liveAutoOrder = null; }
+});
+
 test('an open auto request with an automatic order already OUT (ambiguous submit / stale recovery park) is NOT re-belled "order manually" when the dispatcher no longer orders — the ledger bell owns it (hook r27 P0)', async () => {
   mockState.candidates = [lowSign];
   mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Sticker Mule', metadata: { vendorId: 'vend-sm' } };

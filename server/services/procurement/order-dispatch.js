@@ -1141,6 +1141,11 @@ const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigur
 async function bellUndispatchable(conn, requestId, notify) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
   if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return { requestClosed: true };
+  // An automatic order already out for the product (this request's own
+  // ambiguous / stale park, or a late order on a received sibling): the
+  // ledger bell says do-not-reorder; a gate closed since must not hand the
+  // office an "order manually" bell beside it (hook r27 P0/P1).
+  if (await findLiveAutoOrder(conn, request.product_id)) return { autoOrderLive: true };
   const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
   if (!product) return { bellLost: true };
   // notifyAdmin resolves null when it could not persist the row: a null
