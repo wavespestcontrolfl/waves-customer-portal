@@ -73,7 +73,7 @@ const TIPS = Object.freeze([
   // ── Moisture ──────────────────────────────────────────────────────────
   {
     id: 'moisture_ac_drip', group: 'moisture', label: 'A/C condensate line',
-    keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest', 'lawn'], season: 'all',
+    keywords: ['ac', 'condensate', 'drip', 'slab', 'ants'], lines: ['pest'], season: 'all',
     copy: "Your A/C condensate line runs all summer, and where it drips the soil against the slab never dries. Ants and roaches follow that moisture gradient straight to the foundation. If the line ends at the wall, a short extension that carries it a couple of feet into the bed makes that strip dry again.",
   },
   {
@@ -340,9 +340,8 @@ function registryLineFor(serviceLine) {
 }
 
 /**
- * The picker payload for one visit: every tip, grouped, with the visit's
- * service line first and the season's group order. Nothing is filtered out —
- * the season and line only decide what leads; search still reaches everything.
+ * The picker payload for one visit: tips for the visit’s service line, grouped in seasonal order.
+ * Out-of-season tips remain available within that line.
  */
 function tipsForVisit({ serviceLine, date = new Date() } = {}) {
   const line = registryLineFor(serviceLine);
@@ -351,12 +350,11 @@ function tipsForVisit({ serviceLine, date = new Date() } = {}) {
   const groups = GROUP_ORDER[season]
     .map((groupId) => {
       const group = TIP_GROUPS.find((g) => g.id === groupId);
-      const tips = TIPS.filter((tip) => tip.group === groupId)
+      const tips = TIPS.filter((tip) => tip.group === groupId && tip.lines.includes(line))
         .sort((a, b) => Number(inSeason(b)) - Number(inSeason(a)));
       return { ...group, primary: tips.some((tip) => tip.lines.includes(line)), tips };
     })
-    // Primary groups (any tip tagged to the visit's line) lead; the rest fold below.
-    .sort((a, b) => Number(b.primary) - Number(a.primary));
+    .filter((group) => group.tips.length > 0);
   return { line, season, groups };
 }
 

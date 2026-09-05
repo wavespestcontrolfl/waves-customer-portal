@@ -35,6 +35,69 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const INVOICE_TERMINAL_PAYMENT_STATUSES = INVOICE_UNCOLLECTIBLE_STATUSES.filter(s => s !== 'processing');
+const OBSERVABLE_SETUP_INTENT_BRANCHES = new Set([
+  'estimate_card_hold',
+  'appointment_card_request',
+  'autopay_setup_link',
+  'estimate_recurring_card',
+  'covered_capture',
+  'portal_add_method',
+  'unknown',
+]);
+const OBSERVABLE_SETUP_INTENT_RETRY_CLASSES = new Set(['expected_retry', 'unexpected_failure']);
+
+function safeSetupIntentBranchToken(value) {
+  const token = safeErrorToken(value);
+  return token && OBSERVABLE_SETUP_INTENT_BRANCHES.has(token) ? token : null;
+}
+
+function safeSetupIntentRetryClass(value) {
+  const token = safeErrorToken(value);
+  return token && OBSERVABLE_SETUP_INTENT_RETRY_CLASSES.has(token) ? token : null;
+}
+
+function annotateSetupIntentWebhookError(err, { handlerBranch = null, retryClass = null, reasonCode = null } = {}) {
+  if (!err || typeof err !== 'object') return err;
+  const branchToken = safeSetupIntentBranchToken(handlerBranch);
+  if (branchToken) err.handlerBranch = branchToken;
+  const retryToken = safeSetupIntentRetryClass(retryClass);
+  if (retryToken) err.retryClass = retryToken;
+  const reasonToken = safeErrorToken(reasonCode);
+  if (reasonToken) err.code = reasonToken;
+  return err;
+}
+
+function stripeWebhookSentryContext(event, err, safeName) {
+  const context = {
+    tags: { area: 'stripe-webhook' },
+    extra: {
+      eventType: event.type,
+      eventId: event.id,
+      errorName: safeName,
+      errorCode: safeErrorToken(err.code) ?? undefined,
+    },
+    fingerprint: ['stripe-webhook-handler', event.type, safeName],
+  };
+  if (event.type !== 'setup_intent.succeeded') return context;
+
+  const setupIntentPurpose = safeSetupIntentBranchToken(event.data?.object?.metadata?.purpose) || 'unknown';
+  const handlerBranch = safeSetupIntentBranchToken(err.handlerBranch) || setupIntentPurpose;
+  const retryClass = safeSetupIntentRetryClass(err.retryClass) || 'unexpected_failure';
+  const reasonCode = safeErrorToken(err.code) ?? undefined;
+
+  context.tags.setupIntentPurpose = setupIntentPurpose;
+  context.tags.handlerBranch = handlerBranch;
+  context.tags.retryClass = retryClass;
+  context.extra.setupIntentPurpose = setupIntentPurpose;
+  context.extra.handlerBranch = handlerBranch;
+  context.extra.retryClass = retryClass;
+  context.fingerprint.push(setupIntentPurpose, retryClass);
+  if (reasonCode) {
+    context.extra.reasonCode = reasonCode;
+    context.fingerprint.push(reasonCode);
+  }
+  return context;
+}
 
 // Build a "First Last" string from a customer row, falling back to phone
 // then a generic 'customer'. Used to fill the body of the bell + push
@@ -976,11 +1039,7 @@ router.post(
       // A synthetic stack would point at THIS catch block for every
       // failure — misleading noise, so send none.
       syntheticErr.stack = `${safeName}: ${syntheticErr.message}`;
-      Sentry.captureException(syntheticErr, {
-        tags: { area: 'stripe-webhook' },
-        extra: { eventType: event.type, eventId: event.id, errorName: safeName, errorCode: safeErrorToken(err.code) ?? undefined },
-        fingerprint: ['stripe-webhook-handler', event.type, safeName],
-      });
+      Sentry.captureException(syntheticErr, stripeWebhookSentryContext(event, err, safeName));
 
       // Record error and return 500 so Stripe retries (handlers are idempotent)
       await db('stripe_webhook_events')
@@ -4580,7 +4639,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     const AppointmentCardRequests = require('../services/appointment-card-request');
     const result = await AppointmentCardRequests.completeSecureCardCaptureFromWebhook(setupIntent);
     if (result?.code === 'completion_failed' || result?.code === 'completion_in_progress') {
-      throw new Error(`appointment card capture ${setupIntent.id} ${result.code} — retry`);
+      throw annotateSetupIntentWebhookError(
+        new Error(`appointment card capture ${setupIntent.id} ${result.code} — retry`),
+        { handlerBranch: 'appointment_card_request', retryClass: 'expected_retry', reasonCode: result.code },
+      );
     }
     return;
   }
@@ -4596,7 +4658,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     // (pre-push Codex P1). bank_not_allowed / intent_mismatch /
     // no_longer_needed are permanent and ack.
     if (['completion_failed', 'completion_in_progress', 'verification_failed'].includes(result?.code)) {
-      throw new Error(`autopay setup capture ${setupIntent.id} ${result.code} — retry`);
+      throw annotateSetupIntentWebhookError(
+        new Error(`autopay setup capture ${setupIntent.id} ${result.code} — retry`),
+        { handlerBranch: 'autopay_setup_link', retryClass: 'expected_retry', reasonCode: result.code },
+      );
     }
     return;
   }
@@ -4639,7 +4704,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     if (estimate.status !== 'accepted') {
       const { isEstimateAcceptActive } = require('./estimate-public');
       if (isEstimateAcceptActive(estimate)) {
-        throw new Error(`recurring card capture for estimate ${estimate.id} is awaiting accept — retry later`);
+        throw annotateSetupIntentWebhookError(
+          new Error(`recurring card capture for estimate ${estimate.id} is awaiting accept — retry later`),
+          { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'awaiting_accept' },
+        );
       }
       return; // terminal estimate — abandoned capture, nothing to enroll
     }
@@ -4695,7 +4763,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         try {
           pmType = (await require('../services/stripe').retrievePaymentMethod(typeof pmRef === 'string' ? pmRef : pmRef.id))?.type || null;
         } catch (err) {
-          throw new Error(`recurring-cof backstop: captured method lookup failed (${err.message}) — retry`);
+          throw annotateSetupIntentWebhookError(
+            new Error(`recurring-cof backstop: captured method lookup failed (${err.message}) — retry`),
+            { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'payment_method_lookup_failed' },
+          );
         }
       }
       if (pmType !== 'card' && (await RecurringCards.resolveRecurringCaptureTender(estimate)) !== 'card_or_bank') {
@@ -4715,7 +4786,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     }
     const PayerService = require('../services/payer');
     let appt = await findLinkedUpcomingAppointment(estimate).catch((err) => {
-      throw new Error(`recurring-cof backstop: linked-appointment lookup failed (${err.message}) — retry`);
+      throw annotateSetupIntentWebhookError(
+        new Error(`recurring-cof backstop: linked-appointment lookup failed (${err.message}) — retry`),
+        { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'linked_appointment_lookup_failed' },
+      );
     });
     if (!appt?.id) {
       // This durable backstop can fire AFTER the accepted visit left the
@@ -4733,13 +4807,20 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           .orderBy('scheduled_date', 'desc')
           .first('id');
       } catch (err) {
-        throw new Error(`recurring-cof backstop: accepted-service lookup failed (${err.message}) — retry`);
+        throw annotateSetupIntentWebhookError(
+          new Error(`recurring-cof backstop: accepted-service lookup failed (${err.message}) — retry`),
+          { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'accepted_service_lookup_failed' },
+        );
       }
     }
     const payer = await PayerService.resolveForInvoice({
       customerId: estimate.customer_id,
       scheduledServiceId: appt?.id ? String(appt.id) : null,
       throwOnError: true,
+    }).catch((err) => {
+      throw annotateSetupIntentWebhookError(err, {
+        handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'payer_lookup_failed',
+      });
     });
     if (payer?.payerId) return; // payer-billed — permanent skip
     const stripePmId = typeof setupIntent.payment_method === 'string'
@@ -4758,7 +4839,12 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     // ach_blocked) stay acked: retries can't change them and the office
     // alert already fired inside the enrollment routine.
     if (!enrollment.enrolled && enrollment.transient) {
-      throw new Error(`recurring-cof webhook enrollment transient failure (${enrollment.reason}) — retry`);
+      throw annotateSetupIntentWebhookError(
+        new Error(`recurring-cof webhook enrollment transient failure (${enrollment.reason}) — retry`),
+        // enrollment.reason may contain a raw exception message, even one
+        // word that passes safeErrorToken. Never promote it to Sentry.
+        { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'enrollment_transient' },
+      );
     }
     return;
   }
@@ -4870,6 +4956,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // swallowed transient error would leave a required-save signup
       // prepaid with nothing chargeable, permanently.
       logger.error(`[stripe-webhook] covered-capture completion failed for SI ${setupIntent.id} (Stripe will retry): ${err.message}`);
+      annotateSetupIntentWebhookError(err, { handlerBranch: 'covered_capture', retryClass: 'unexpected_failure' });
       throw err;
     }
     return;
@@ -4984,7 +5071,12 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // retry re-enters safely. Only a CONFIRMED payer-billed result
       // returns successfully (that skip is correct and permanent).
       const resolvedPayer = await require('../services/payer')
-        .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true });
+        .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true })
+        .catch((err) => {
+          throw annotateSetupIntentWebhookError(err, {
+            handlerBranch: 'portal_add_method', retryClass: 'expected_retry', reasonCode: 'payer_lookup_failed',
+          });
+        });
       if (resolvedPayer?.payerId) {
         await require('../services/notification-service').notifyAdmin(
           'billing',
@@ -5016,6 +5108,9 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // Re-throw so Stripe retries: for the micro-deposit flow this event
       // is the only completion path, and every step above is idempotent.
       logger.error(`[stripe-webhook] portal-add-method completion failed for SI ${setupIntent.id} (Stripe will retry): ${err.message}`);
+      // Preserve anticipated retry annotations; unclassified errors default
+      // to unexpected_failure in stripeWebhookSentryContext.
+      annotateSetupIntentWebhookError(err, { handlerBranch: 'portal_add_method' });
       throw err;
     }
     return;

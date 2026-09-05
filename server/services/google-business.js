@@ -623,7 +623,8 @@ class GoogleBusinessService {
    * GATE_REVIEW_CLICK_AUTOLINK: link an unlinked review to the ONE customer
    * whose tracked review-link click confidently explains it (sole clicker in
    * the correlation window, location match, tight before-window — see
-   * findConfidentClickMatch). Runs from the deferred end-of-batch phase so
+   * findConfidentClickMatch; its surname rung additionally needs
+   * GATE_REVIEW_CLICK_AUTOLINK_SURNAME). Runs from the deferred end-of-batch phase so
    * the sole-clicker exclusion sees the whole batch's links, and re-reads
    * the live row so a manual match landed mid-sync always wins.
    *
@@ -683,20 +684,21 @@ class GoogleBusinessService {
           // One click must correspond to ONE eligible review (pre-push P1
           // r6): if another unlinked review also sits inside the click's
           // forward window, the click can't say which of them the customer
-          // wrote — whichever processed first would steal it. Every match
-          // holds a trusted click stamped for THIS location, so the check
-          // scopes to this GBP (a location-less legacy pair, whose window
-          // must span every location, is the carved-out surname rung's
-          // concern — GH codex r2 P1). JS-side id filter so mocked whereNot
-          // can't drop the guard.
+          // wrote — whichever processed first would steal it. A trusted,
+          // location-matched click scopes the check to this GBP; a
+          // location-less legacy click (the surname rung) could have landed
+          // on ANY location's form, so its window spans every location —
+          // otherwise the first location to sync would claim the customer
+          // over a same-surname review elsewhere (GH codex r2 P1). JS-side
+          // id filter so mocked whereNot can't drop the guard.
           const clickedAtMs = new Date(match.clickedAt).getTime();
-          const windowQuery = trx('google_reviews')
+          let windowQuery = trx('google_reviews')
             .whereNull('customer_id')
             .whereNull('missing_since')
             .whereRaw("(reviewer_name IS NULL OR reviewer_name != '_stats')")
             .where('review_created_at', '>=', new Date(clickedAtMs))
-            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS))
-            .where('location_id', live.location_id);
+            .where('review_created_at', '<=', new Date(clickedAtMs + AUTO_LINK_MAX_BEFORE_MS));
+          if (match.locationTrusted === true) windowQuery = windowQuery.where('location_id', live.location_id);
           const windowRows = await windowQuery.limit(10).select('id');
           if (windowRows.some((r) => r.id !== live.id)) return { nomatch: true };
           // Conditional-write guards (pre-push P1 r2): a manual match or a

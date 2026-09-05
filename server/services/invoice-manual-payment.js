@@ -63,7 +63,7 @@ const InvoiceService = require('./invoice');
 const PaymentPlans = require('./payment-plans');
 const { guardOpenPaymentIntentForPrepaid } = require('./prepaid-pi-guard');
 const { etDateString } = require('../utils/datetime-et');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement, lockVisitForSettlement } = require('./invoice-helpers');
 
 const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 const VALID_RECEIPT_CHANNELS = ['email', 'sms', 'both'];
@@ -240,15 +240,27 @@ async function recordManualPayment(id, {
       // point at (an inactive payer resolves as self-pay; a concurrent
       // re-activation must wait) so no reassignment can commit between this
       // read and the paid flip. Lock order: invoice → customer → visit → payer.
+      // The visit lock is NOWAIT (Codex #3882 r4 P2): this is the first
+      // visit acquisition on the self-pay path, so a blocking wait here
+      // would recreate the invoice↔visit cycle the fence below avoids.
       const cust = await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id', 'payer_id');
       const visit = locked.scheduled_service_id
-        ? await trx('scheduled_services').where({ id: locked.scheduled_service_id }).forUpdate().first('id', 'payer_id')
+        ? await lockVisitForSettlement(trx, locked.scheduled_service_id, ['id', 'payer_id'])
         : null;
       const payerIds = [...new Set([cust?.payer_id, visit?.payer_id].filter(Boolean))];
       if (payerIds.length) await trx('payers').whereIn('id', payerIds).orderBy('id', 'asc').forUpdate().select('id');
       const { rowIsSelfPayDue } = require('./open-balance');
       const selfPay = !locked.payer_id && !locked.payer_statement_id && await rowIsSelfPayDue(locked.customer_id, locked, { database: trx });
       if (!selfPay) return { notSelfPay: true };
+    }
+    // Visit fence under the same lock (after the invoice → customer → visit
+    // → payer order above; the visit row is re-locked, never taken earlier):
+    // an invoice whose visit is cancelled / no-show / skipped takes no
+    // money. The cancel voids it post-commit; a payment that raced that
+    // void would otherwise sit on a visit that never happens (#3878 r2).
+    {
+      const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
+      if (neverRan) return { visitNeverRan: neverRan };
     }
     if (settlementFence && !(await settlementFence(trx))) return { fenceLost: true };
     const [row] = await trx('invoices')
@@ -333,6 +345,9 @@ async function recordManualPayment(id, {
   }
   if (updatedInvoice?.fenceLost) {
     throw refusal(409, 'The settlement claim was lost before the payment could be recorded (the notice was reclaimed) — nothing was recorded');
+  }
+  if (updatedInvoice?.visitNeverRan) {
+    throw refusal(409, `This invoice's visit is ${updatedInvoice.visitNeverRan.replace('_', '-')} — nothing was recorded. Void or reissue the invoice, or record the money as account credit.`, { visitNeverRan: updatedInvoice.visitNeverRan });
   }
   if (updatedInvoice?.notSelfPay) {
     throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');

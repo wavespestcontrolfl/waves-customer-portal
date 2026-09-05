@@ -28,6 +28,7 @@
  */
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
+const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
@@ -1116,9 +1117,10 @@ function buildAsapCapacitySlotsForTechs({
 }
 
 async function buildAsapCapacitySlots(options = {}) {
-  const techs = await db('technicians')
-    .where({ active: true })
-    .select('id', 'name');
+  // Same pool as find-time: assignable staff only, so an office-only or
+  // prospective row never produces an offer that reserveSlot then rejects.
+  const techs = await applyAssignable(db('technicians'))
+    .select('technicians.id', 'technicians.name');
   // ASAP capacity enumerates its own dates (it deliberately skips the
   // route-aware find-time path), so owner blackout days are excluded here —
   // selection happens after all dates have been checked. Fail-open helper.

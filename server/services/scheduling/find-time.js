@@ -19,6 +19,7 @@ const logger = require('../logger');
 const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
+const { applyAssignable } = require('../technician-eligibility');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -117,11 +118,14 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  // Load techs
-  let techQuery = db('technicians').where({ active: true }).select('id', 'name');
-  if (technicianId) techQuery = techQuery.where('id', technicianId);
-  const techs = await techQuery;
-  if (!techs.length) return { slots: [], evaluated: 0, note: 'No active technicians found' };
+  // Load techs — only assignable ones (active employment AND field-dispatchable).
+  // Every slot consumer (booking, estimate availability, reschedule, re-service,
+  // voice relay, auto-dispatch) inherits this filter, so a prospective
+  // placeholder or an office-only account never contributes a day.
+  let techQuery = applyAssignable(db('technicians'));
+  if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
+  const techs = await techQuery.select('id', 'name');
+  if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
   // Load all scheduled services in date range, per tech, with coords
   const services = await db('scheduled_services')

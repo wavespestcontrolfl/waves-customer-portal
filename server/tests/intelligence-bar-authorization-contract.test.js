@@ -332,14 +332,14 @@ test('move_stops_to_day: a live stop discloses the field-workflow reset, and its
   expect(live.preview_fingerprint).not.toBe(calm.preview_fingerprint);
 });
 
-test('update_restock_request: receive discloses the readiness-alert recheck; cancel does not (codex r7)', () => {
+test('update_restock_request: stock actions no longer advertise retired readiness side effects', () => {
   const receive = buildContract({
     toolName: 'update_restock_request',
     params: { request_id: 'r1', action: 'receive' },
     displayParams: { request_id: 'r1', action: 'receive' },
     preview: { preview: true, action: 'receive', new_status: 'received', stock_before: 2, adds: 3, stock_after: 5 },
   });
-  expect(receive.effects.map((e) => e.label)).toContainEqual(expect.stringContaining('re-checks WaveGuard lawn-protocol readiness'));
+  expect(receive.effects.some(e => e.label.includes('lawn-protocol readiness'))).toBe(false);
   const cancel = buildContract({
     toolName: 'update_restock_request',
     params: { request_id: 'r1', action: 'cancel' },

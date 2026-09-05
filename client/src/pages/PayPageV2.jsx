@@ -23,7 +23,6 @@
 //                                               event dispatch)
 //   server/services/billing-cron.js            (monthly billing,
 //                                               retry ladder Day 1/3/5)
-//   server/services/payment-router.js          (processor abstraction)
 //
 // Customer-facing styling (CLAUDE.md): warm tone, Luckiest Guy /
 // Baloo 2, gold pill, mascot. Do NOT apply admin monochrome rules.
@@ -93,7 +92,6 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
@@ -254,36 +252,6 @@ function cityStateZip(customer = {}) {
   return [customer.city, region].filter(Boolean).join(customer.city && region ? ', ' : '');
 }
 
-function StatusPill({ tone = 'neutral', children }) {
-  const tones = {
-    neutral: { bg: CUSTOMER_SURFACE.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
-    due: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    overdue: { bg: 'rgba(200,16,46,0.08)', color: DOC.danger, border: 'rgba(200,16,46,0.22)' },
-    secure: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
-  };
-  const t = tones[tone] || tones.neutral;
-  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
-  return (
-    <span {...glassClear} style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 6,
-      minHeight: 28,
-      padding: '4px 8px',
-      borderRadius: RADIUS.input,
-      background: t.bg,
-      border: `1px solid ${t.border}`,
-      color: t.color,
-      fontSize: FS.caption,
-      fontWeight: FW.heavy,
-      letterSpacing: 0,
-      textTransform: 'uppercase',
-      whiteSpace: 'nowrap',
-    }}>
-      {children}
-    </span>
-  );
-}
 
 function annualPrepayStatusLabel(term = {}) {
   const status = String(term.status || '').toLowerCase();
@@ -311,7 +279,7 @@ function AnnualPrepayInvoicePanel({ term }) {
           {annualPrepayStatusLabel(term)}
         </div>
         {term.prepayAmount != null && (
-          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.heavy, color: DOC.ink }}>
+          <div style={{ fontFamily: DOC_FONT, fontSize: FS.body, fontWeight: FW.bold, color: DOC.ink }}>
             {fmtCurrency(term.prepayAmount)}
           </div>
         )}
@@ -363,12 +331,12 @@ function CoverageVisitsList({ visits, status }) {
               {v.amount != null && (
                 <span style={{ fontFamily: DOC_FONT, color: DOC.muted }}>{fmtCurrency(v.amount)}</span>
               )}
-              <span style={{ ...eyebrow, fontSize: FS.micro, color: prepaid ? DOC.success : '#9A6200' }}>{tag}</span>
+              <span style={{ ...eyebrow, fontSize: FS.body, color: prepaid ? DOC.success : '#9A6200' }}>{tag}</span>
             </span>
           </li>
         ))}
       </ul>
-      <div style={{ marginTop: SP.xs, fontSize: FS.caption, lineHeight: LH.snug, color: DOC.muted }}>
+      <div style={{ marginTop: SP.xs, fontSize: FS.body, lineHeight: LH.snug, color: DOC.muted }}>
         Target dates — your actual visits follow your regular service route.
       </div>
     </>
@@ -397,14 +365,14 @@ function SummaryRow({ label, value, strong, muted }) {
       borderTop: strong ? `1px solid ${DOC.border}` : 'none',
       color: strong ? DOC.ink : DOC.muted,
       fontSize: strong ? FS.lead : FS.body,
-      fontWeight: strong ? FW.heavy : FW.medium,
+      fontWeight: strong ? FW.bold : FW.medium,
       fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
         color: muted ? DOC.muted : DOC.ink,
         fontFamily: DOC_FONT,
-        fontWeight: strong ? FW.heavy : FW.semibold,
+        fontWeight: strong ? FW.bold : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -464,7 +432,7 @@ const goldChipButton = {
   ...docButton('chip'),
   minHeight: 40,
   padding: '0 10px',
-  fontSize: FS.caption,
+  fontSize: FS.body,
   fontWeight: FW.semibold,
   border: '1px solid rgba(255,238,180,0.92)',
   background: 'rgba(240,165,0,0.38)',
@@ -626,7 +594,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // on Zelle's find-your-bank page.
   const rowStyle = narrow ? PAY_ROW_GRID_NARROW : PAY_ROW_GRID;
   return (
-    <div data-glass-clear="" className="waves-no-print" style={{ marginTop: SP.lg }}>
+    <div data-glass="soft" className="waves-no-print" style={{ marginTop: SP.lg }}>
       <button
         type="button"
         data-glass="soft"
@@ -682,7 +650,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
                 <div style={{ display: 'flex', alignItems: 'center', gap: SP.xs, fontSize: FS.body, fontWeight: FW.semibold, color: DOC.ink }}>
                   Zelle
                   <span style={{
-                    fontSize: FS.micro,
+                    fontSize: FS.body,
                     fontWeight: FW.bold,
                     letterSpacing: '0.08em',
                     textTransform: 'uppercase',
@@ -712,9 +680,9 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
             <CopyValueButton value={value} label="Zelle address" disabled={validating} />
           </div>
           {staleNotice && (
-            <p role="status" style={{ margin: `0 0 ${SP.sm}px`, fontSize: FS.caption, color: DOC.danger, lineHeight: LH.body }}>{staleNotice}</p>
+            <p role="status" style={{ margin: `0 0 ${SP.sm}px`, fontSize: FS.body, color: DOC.danger, lineHeight: LH.body }}>{staleNotice}</p>
           )}
-          <p style={{ margin: 0, paddingTop: SP.sm, borderTop: '1px solid rgba(4,57,94,0.12)', fontSize: FS.caption, color: DOC.muted, lineHeight: LH.body }}>
+          <p style={{ margin: 0, paddingTop: SP.sm, borderTop: '1px solid rgba(4,57,94,0.12)', fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
             Put invoice <span style={{ color: DOC.ink, fontWeight: FW.semibold }}>{invoiceNumber}</span> in the memo.
             We mark the invoice paid once the money reaches our account — until then it stays open here.
           </p>
@@ -768,7 +736,7 @@ function PayFaq({ enabled, cardSurchargeRate, zelle, saveRequired, thirdPartyBil
   const rate = Number(cardSurchargeRate);
   const pct = Number(((Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_CARD_SURCHARGE_RATE) * 100).toFixed(2)).toString();
   return (
-    <div data-glass-clear="" className="waves-no-print" style={{ marginTop: SP.lg }}>
+    <div data-glass="soft" className="waves-no-print" style={{ marginTop: SP.lg }}>
       <div style={{ ...eyebrow, marginBottom: SP.xs }}>Common questions</div>
       <div data-glass="soft" role="region" aria-label="Payment questions" style={{ position: 'relative', padding: `0 ${SP.sm}px`, ...PAY_BOX }}>
         <PayFaqItem question="Why is there a card fee, and how do I avoid it?">
@@ -1614,7 +1582,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           twice right above a button that states it again (owner
           2026-08-31: the price appeared 6-7 times on one page). */}
       {(isCardFamily && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit'))) && (
-      <div data-glass-clear="" style={{
+      <div data-glass="soft" style={{
         padding: SP.md,
         borderRadius: RADIUS.input,
         background: CUSTOMER_SURFACE.page,
@@ -1870,7 +1838,7 @@ export default function PayPageV2() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
   // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const { token } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -2644,10 +2612,8 @@ export default function PayPageV2() {
   const serviceLabel = service.date
     ? rawServiceLabel.replace(/\s+[—–-]+\s+[A-Z][a-z]+ \d{4}$/, '')
     : rawServiceLabel;
-  const dueLabel = invoice.dueDate ? fmtDate(invoice.dueDate) : null;
   const serviceDateLabel = service.date ? fmtDate(service.date) : null;
   const locationLine = cityStateZip(customer);
-  const invoiceStatusLabel = isOverdue ? 'Overdue' : dueLabel ? `Due ${dueLabel}` : 'Due now';
   const prepayCalloutText = annualPrepayCalloutText(invoice.annualPrepay);
 
   return (
@@ -2690,19 +2656,22 @@ export default function PayPageV2() {
           pdfFileName="Waves_Invoice.pdf"
           shareTitle={`Waves invoice ${invoice.invoiceNumber || ''}`.trim()}
         />
-        <BrandCard padding={28}>
-          {/* Status pill sits left, ABOVE the heading (owner 2026-08-31:
-              badges left-aligned, status first). */}
+        <BrandCard padding={24}>
+          {/* No status chip (owner 2026-09-04) — the due panel below carries
+              the due / overdue state. */}
           <div style={{ marginBottom: SP.lg }}>
-            <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: SP.sm }}>
-              <StatusPill tone={isOverdue ? 'overdue' : 'due'}>
-                {invoiceStatusLabel}
-              </StatusPill>
-            </div>
             <div style={{ ...eyebrow, marginBottom: SP.xs }}>
               Invoice · {invoice.invoiceNumber}
             </div>
             <SerifHeading style={{ marginBottom: SP.xs }}>Review and pay</SerifHeading>
+            {invoice.dueDate ? (
+              <div style={{ fontSize: FS.body, color: isOverdue ? DOC.danger : DOC.muted, fontWeight: isOverdue ? FW.bold : FW.regular }}>
+                {isOverdue ? 'Was due ' : 'Due '}{formatInvoiceDate(invoice.dueDate)}
+              </div>
+            ) : (
+              /* No due date = payable now (the retired chip's fallback). */
+              <div style={{ fontSize: FS.body, color: DOC.muted }}>Due now</div>
+            )}
           </div>
 
           {/* Amount-due hero removed (owner 2026-08-31: the figure already
@@ -2744,7 +2713,7 @@ export default function PayPageV2() {
               <DetailBlock label="Billed to">
                 {payer ? (
                   <>
-                    <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
+                    <div style={{ fontWeight: FW.bold }}>{payer.name}</div>
                     {payer.address && <div>{payer.address}</div>}
                     {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                       <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
@@ -2753,7 +2722,7 @@ export default function PayPageV2() {
                   </>
                 ) : (
                   <>
-                    <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                    <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                     {customer.address && <div>{customer.address}</div>}
                     {locationLine && <div>{locationLine}</div>}
                   </>
@@ -2761,13 +2730,13 @@ export default function PayPageV2() {
               </DetailBlock>
               {payer && (
                 <DetailBlock label="Service address">
-                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
                 </DetailBlock>
               )}
               <DetailBlock label="Service">
-                <div style={{ fontWeight: FW.heavy }}>{serviceLabel}</div>
+                <div style={{ fontWeight: FW.bold }}>{serviceLabel}</div>
                 {serviceDateLabel && <div>{serviceDateLabel}</div>}
                 {service.techName && <div style={{ color: DOC.muted }}>Technician: {service.techName}</div>}
               </DetailBlock>
@@ -2777,7 +2746,7 @@ export default function PayPageV2() {
               <div style={{ marginBottom: SP.lg }}>
                 <div style={{ ...eyebrow, marginBottom: SP.xs }}>Invoice items</div>
                 <div style={{ border: `1px solid ${DOC.border}`, borderRadius: RADIUS.input, overflow: 'hidden' }}>
-                  <div data-glass-clear="" style={{
+                  <div data-glass="soft" style={{
                     ...eyebrow,
                     display: 'grid',
                     gridTemplateColumns: '1fr auto auto',
@@ -2854,7 +2823,7 @@ export default function PayPageV2() {
                         }}>
                           {attachment.fileName}
                         </span>
-                        <span style={{ display: 'block', fontSize: FS.caption, color: DOC.muted, marginTop: 2 }}>
+                        <span style={{ display: 'block', fontSize: FS.body, color: DOC.muted, marginTop: 2 }}>
                           {fmtFileSize(attachment.fileSizeBytes)}
                         </span>
                       </span>
@@ -2886,12 +2855,10 @@ export default function PayPageV2() {
               // items shows no figure at all and multiple items show only
               // per-item prices — both keep Total due (Codex P2, round 5).
               const needsTotalFallback = visibleLineItems.length !== 1;
-              if (!hasAdjustments && !combinedPreviewPossible && !needsTotalFallback) return null;
+              /* token-sheet preview: totals always render */
               return (
-            <div data-glass-clear="" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
-              {hasAdjustments && (
-                <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
-              )}
+            <div data-glass="soft" style={{ ...subtlePanel, padding: SP.md, marginBottom: SP.xl }}>
+              <SummaryRow label="Subtotal" value={fmtCurrency(invoice.subtotal)} />
               {invoice.discountAmount > 0 && (
                 <SummaryRow label={invoice.discountLabel || 'Discount'} value={`− ${fmtCurrency(invoice.discountAmount)}`} />
               )}
@@ -2904,9 +2871,7 @@ export default function PayPageV2() {
               {Number(invoice.creditApplied) > 0 && (
                 <SummaryRow label="Account credit applied" value={`− ${fmtCurrency(invoice.creditApplied)}`} />
               )}
-              {(hasAdjustments || needsTotalFallback) && (
-                <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
-              )}
+              <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
               {(() => {
                 // Combined balance payment (server-gated): itemize the other
                 // open invoices this payment also settles. Once /setup has
@@ -2956,7 +2921,7 @@ export default function PayPageV2() {
             })()}
 
             {invoice.notes && (
-              <div data-glass-clear="" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
+              <div data-glass="soft" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
                 <div style={{ ...eyebrow, marginBottom: SP.xs }}>Notes</div>
                 <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body, whiteSpace: 'pre-wrap' }}>
                   {invoice.notes}
@@ -2966,21 +2931,9 @@ export default function PayPageV2() {
 
             <div className="waves-pay-payment-panel">
             {/* "Pay securely / amount / status" header removed (owner
-                2026-08-31: the Pay button already states the charge, the
-                top pill the status). The Secure badge stays as the
-                section's trust marker. */}
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'flex-start',
-              gap: SP.sm,
-              marginBottom: SP.md,
-            }}>
-              <StatusPill tone="secure">
-                <Icon name="lock" size={13} strokeWidth={2} />
-                Secure
-              </StatusPill>
-            </div>
+                2026-08-31: the Pay button already states the charge); the
+                Secure badge went with every other status chip (owner
+                2026-09-04). */}
 
             {paymentError && (
               <div role="alert" style={{
@@ -3067,12 +3020,6 @@ export default function PayPageV2() {
           </BrandCard>
 
         {/* "Questions about this invoice?" help line removed (owner 2026-07-09). */}
-        {/* Newsletter signup lives only on the newsletter pages (owner
-            2026-07-09, supersedes the 2026-07-08 glass-footer ruling).
-            Hidden from the invoice printout via waves-no-print. */}
-        <div className="waves-no-print">
-          <BrandFooter />
-        </div>
       </div>
     </WavesShell>
   );

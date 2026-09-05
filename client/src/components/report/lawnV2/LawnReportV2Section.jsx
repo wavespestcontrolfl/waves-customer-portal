@@ -31,10 +31,12 @@ export default function LawnReportV2Section({ data, print = false }) {
   return (
     <PrintContext.Provider value={print}>
     <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
-      {data.snapshot ? <LawnSnapshotHero snapshot={data.snapshot} /> : null}
+      {data.snapshot ? <LawnSnapshotHero snapshot={data.snapshot}>
+        {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} embedded /> : null}
+      </LawnSnapshotHero> : null}
       {data.followUp?.scheduled ? <LawnFollowUpCard followUp={data.followUp} /> : null}
       {data.insights?.length ? <LawnInsightCards insights={data.insights} /> : null}
-      {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} /> : null}
+      {!data.snapshot && (data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} /> : null}
       {data.progression?.length >= 2 ? <LawnProgressionSlider frames={data.progression} note={data.progressionNote} /> : null}
       {data.diagnosis?.length ? <VisualDiagnosisCards categories={data.diagnosis} /> : null}
       {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} /> : null}

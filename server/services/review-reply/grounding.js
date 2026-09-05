@@ -66,6 +66,11 @@ const TOPIC_MATCHERS = [
   { key: 'pest', re: /\b(pests?|bugs?|roach\w*|ants?|spiders?|wasps?|fleas?|ticks?|silverfish|palmetto bugs?)\b/i },
 ];
 
+// Provider sentinels for authorless reviews ("A Google User", "Anonymous")
+// and generic handles — one token each; a display name made only of these
+// names nobody. Shared with the surname matcher in review-click-correlation.
+const PROVIDER_SENTINEL_TOKEN_RE = /^(a|an|the|google|user|local|guide|anonymous|anon|unknown|guest|customer|reviewer|someone)$/i;
+
 function reviewerFirstName(reviewerName) {
   const raw = String(reviewerName || '').trim();
   if (!raw) return null;
@@ -78,7 +83,7 @@ function reviewerFirstName(reviewerName) {
   if (first.length < 2 || first.length > 14) return null;
   // Provider sentinels for authorless reviews ("Anonymous") and generic
   // handles get the generic greeting, never "Hi Anonymous,".
-  if (/^(a|an|the|google|user|local|guide|anonymous|anon|unknown|guest|customer|reviewer|someone)$/i.test(first)) return null;
+  if (PROVIDER_SENTINEL_TOKEN_RE.test(first)) return null;
   if (first === first.toUpperCase() && first.length > 3) return null;
   return first[0].toUpperCase() + first.slice(1);
 }
@@ -295,6 +300,7 @@ module.exports = {
   loadActiveTechFirstNames,
   loadAccountFacts,
   accountFingerprint,
+  PROVIDER_SENTINEL_TOKEN_RE,
   // exported for tests
   reviewerFirstName,
   detectTopics,

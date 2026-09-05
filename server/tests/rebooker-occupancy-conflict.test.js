@@ -50,6 +50,18 @@ const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${etDateString(
 const BASE = dayOffset(10);
 const TARGET = dayOffset(12);
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed row (the reschedule writer reads the
+// committed technician_id off the CAS write).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : [])),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -67,7 +79,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -103,7 +115,7 @@ function service(overrides = {}) {
 
 function wireRescheduleMocks(svc) {
   const serviceLookup = chain({ first: jest.fn().mockResolvedValue(svc) });
-  const trxScheduled = chain({ update: jest.fn().mockResolvedValue(1) });
+  const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
   const historyInsert = chain();
   const logInsert = chain();
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
@@ -453,8 +465,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
-    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
+    const sibUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
 
@@ -515,8 +527,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
-    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
+    const sibUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
 
@@ -578,15 +590,15 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
-    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
+    const sibUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
 
     // Reminder pre-closure for the windowless occurrence: armed-row read,
     // then the marker update (both on appointment_reminders).
     const reminderRead = chain({ first: jest.fn().mockResolvedValue({ id: 'ar-2', customer_id: 'cust-1', appointment_time: new Date('2026-12-01T13:00:00Z') }) });
-    const reminderUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const reminderUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const reminderQueue = [reminderRead, reminderUpdate];
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
@@ -664,8 +676,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
-    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
+    const sibUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
 
@@ -720,9 +732,9 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
-    const parentUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const parentUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const logInsert = chain();
 
     // Month-based order: siblings SELECT, parent UPDATE, seriesClash probe,
@@ -813,12 +825,12 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
 
   test('a CAS miss that finds the row grouped surfaces VISIT_MEMBERSHIP_CHANGED; a plain miss keeps the generic 409', async () => {
     let { trxScheduled } = wireRescheduleMocks(service());
-    trxScheduled.update.mockResolvedValue(0);
+    trxScheduled.update.mockImplementation(() => updateResult(0));
     trxScheduled.first.mockImplementation(async () => (trxScheduled.update.mock.calls.length ? { visit_id: 'v9' } : undefined));
     await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin'))
       .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
     ({ trxScheduled } = wireRescheduleMocks(service()));
-    trxScheduled.update.mockResolvedValue(0);
+    trxScheduled.update.mockImplementation(() => updateResult(0));
     trxScheduled.first.mockImplementation(async () => (trxScheduled.update.mock.calls.length ? { visit_id: null } : undefined));
     const err = await SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin').catch((e) => e);
     expect(err).toMatchObject({ statusCode: 409 });

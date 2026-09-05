@@ -41,7 +41,7 @@ function serviceQuery(input) {
 function wire(rows) {
   db.raw = sql => sql;
   db.mockImplementation(table => table === 'technicians'
-    ? { where: () => ({ select: async () => [{ id: 'tech-1' }] }) }
+    ? { where() { return this; }, select: async () => [{ id: 'tech-1' }] }
     : serviceQuery(rows));
 }
 

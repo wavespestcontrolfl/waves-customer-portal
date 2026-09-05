@@ -1,13 +1,4 @@
-@import "@fontsource/inter/400.css";
-@import "@fontsource/inter/500.css";
-@import "@fontsource/inter/600.css";
-@import "@fontsource/inter/700.css";
-@import "@fontsource/inter/800.css";
-/* Self-host Roboto (the admin's forced font) so it loads reliably on iPhone
-   instead of falling back to the system font when Google Fonts is slow/blocked. */
-@import "@fontsource/roboto/400.css";
-@import "@fontsource/roboto/500.css";
-@import "@fontsource/roboto/700.css";
+@import "./fonts.css";
 @import "./styles/design-tokens.css";
 @import "./styles/buttons.css";
 @import "./styles/tokens.css";
@@ -447,7 +438,7 @@ button, input, select, textarea, optgroup {
 
 .waves-receipt-page {
   width: min(100% - 32px, 760px);
-  margin: 28px auto 56px;
+  margin: 32px auto 56px;
 }
 
 .waves-customer-help {
@@ -482,12 +473,21 @@ button, input, select, textarea, optgroup {
   margin-bottom: 22px;
 }
 
-.waves-onboarding-grid,
-.waves-contract-grid {
+.waves-onboarding-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
   gap: 20px;
   align-items: start;
+}
+
+/* Contract = one 760 document column like every other customer document
+   (estimate is the template, owner 2026-09-03): terms card, then sign card. */
+.waves-contract-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  width: min(100%, 760px);
+  margin: 0 auto;
 }
 
 .waves-onboarding-single,
@@ -518,11 +518,6 @@ button, input, select, textarea, optgroup {
   white-space: nowrap;
 }
 
-.waves-contract-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 18px;
-}
 
 
 @media (max-width: 820px) {
@@ -568,11 +563,16 @@ button, input, select, textarea, optgroup {
     position: static !important;
   }
 
-  .waves-contract-fields {
-    grid-template-columns: 1fr;
-  }
 
   .help-phone-full {
     display: none;
   }
 }
+
+/* Quick-pick chip strip (WavesAIScheduleSearch): slow leftward drift when the
+   chips overflow the card. The chip set is rendered twice so the loop is
+   seamless; a touch, pointer or focus pauses it. */
+.waves-chip-strip--drift > * { animation: waves-chip-drift 22s linear infinite; }
+.waves-chip-strip--drift:hover > *, .waves-chip-strip--drift:active > *, .waves-chip-strip--drift:focus-within > * { animation-play-state: paused; }
+@keyframes waves-chip-drift { from { transform: translateX(0); } to { transform: translateX(var(--chip-shift, -100%)); } }
+@media (prefers-reduced-motion: reduce) { .waves-chip-strip--drift > * { animation: none; } }

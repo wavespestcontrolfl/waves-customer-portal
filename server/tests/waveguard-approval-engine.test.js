@@ -243,6 +243,18 @@ describe('waveguard approval engine', () => {
       .toContain('Older Celsius WG');
   });
 
+  test('strict mode throws on a failed read instead of reading it as "nothing to block" (job-card hook P1)', async () => {
+    const failing = () => ({ catch: (fn) => Promise.resolve().then(() => fn(new Error('db down'))) });
+    const knex = (table) => {
+      if (table === 'products_catalog') return { whereIn: () => failing() };
+      return { where: () => ({ first: () => failing() }) };
+    };
+    const input = { customerId: 'c1', service: {}, plan: {}, products: [{ productId: 'p1', rate: 1, rateUnit: 'oz' }], serviceDate: '2026-09-04' };
+    await expect(evaluateWaveGuardManagerApprovals(knex, { ...input, strict: true })).rejects.toThrow('db down');
+    // The lenient default (closeout, plan engine) is unchanged.
+    await expect(evaluateWaveGuardManagerApprovals(knex, input)).resolves.toMatchObject({ blocks: [] });
+  });
+
   test('manager approval summary stores actor and block metadata only', () => {
     const summary = managerApprovalSummary(
       { reasonCode: 'label_review_completed', note: 'Reviewed by manager' },

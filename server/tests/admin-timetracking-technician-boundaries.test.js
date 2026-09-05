@@ -47,8 +47,8 @@ const {
 function makeChain({ rows = [], first, returning = [] } = {}) {
   const chain = {};
   for (const method of [
-    'insert', 'orderBy', 'select', 'update', 'where', 'whereNot',
-    'whereIn', 'whereNotNull', 'whereRaw', 'forUpdate',
+    'insert', 'orderBy', 'orderByRaw', 'select', 'update', 'where', 'whereNot',
+    'whereIn', 'whereNotIn', 'whereNotNull', 'whereRaw', 'forUpdate', 'leftJoin',
   ]) {
     chain[method] = jest.fn(() => chain);
   }
@@ -85,12 +85,22 @@ function installTransaction(chains, { activeTimer } = {}) {
   const activeTimers = makeChain({ first: activeTimer });
   const trx = jest.fn((table) => {
     if (table === 'time_entries') return activeTimers;
+    if (table === 'scheduled_services as s') return makeChain({ rows: [] });
+    if (table === 'scheduled_services' || table === 'service_records' || table === 'review_incentive_payouts') return makeChain({ first: undefined });
+    if (table === 'technician_capabilities') {
+      // createTechnician seeds the five dispatch categories on the same trx.
+      const seed = makeChain();
+      seed.onConflict = jest.fn(() => seed);
+      seed.ignore = jest.fn(async () => undefined);
+      return seed;
+    }
     if (table !== 'technicians') throw new Error(`Unexpected transaction table: ${table}`);
     const chain = queue.shift();
     if (!chain) throw new Error('Unexpected technicians query');
     return chain;
   });
   trx.raw = jest.fn(async () => undefined);
+  trx.fn = { now: jest.fn(() => 'NOW') };
   db.transaction = jest.fn(async (callback) => callback(trx));
   return { activeTimers, trx, remaining: () => queue };
 }
@@ -115,6 +125,8 @@ const rawTechnician = {
   email: 'casey@example.com',
   role: 'technician',
   active: true,
+  employment_status: 'active',
+  field_dispatchable: true,
   auto_flip_enabled: true,
   pay_rate: '42.50',
   address: '100 Private Way',
@@ -140,6 +152,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
 
   test('list responses use positive allowlists for admins and technicians', async () => {
     db.mockReturnValueOnce(makeChain({ rows: [rawTechnician] }));
+    db.mockReturnValueOnce(makeChain({ rows: [] })); // capability summary read
     const admin = await invoke(listTechnicians, {
       technician: { id: 'admin-1', role: 'admin' },
     });
@@ -156,6 +169,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
     }
 
     db.mockReturnValueOnce(makeChain({ rows: [rawTechnician] }));
+    db.mockReturnValueOnce(makeChain({ rows: [] })); // capability summary read
     const tech = await invoke(listTechnicians, {
       technician: { id: 'tech-2', role: 'technician' },
     });
@@ -315,6 +329,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
     const existing = {
       ...rawTechnician,
       active: false,
+      employment_status: 'inactive',
       email: 'casey@example.com',
       auth_token_version: 8,
     };
@@ -352,7 +367,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
     ['activating', false, true],
     ['deactivating', true, false],
   ])('PUT rotates credentials when %s a technician', async (_label, wasActive, active) => {
-    const existing = { ...rawTechnician, active: wasActive, auth_token_version: 8 };
+    const existing = { ...rawTechnician, active: wasActive, employment_status: wasActive ? 'active' : 'inactive', auth_token_version: 8 };
     const target = makeChain({ first: existing });
     const write = makeChain();
     const reread = makeChain({ first: { ...existing, active, auth_token_version: 9 } });
@@ -484,6 +499,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
     const patch = write.update.mock.calls[0][0];
     expect(patch).toEqual({
       active: false,
+      employment_status: 'inactive',
       auth_token_version: 9,
       password_reset_token_hash: null,
       password_reset_expires_at: null,

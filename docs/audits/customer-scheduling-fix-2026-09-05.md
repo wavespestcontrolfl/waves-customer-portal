@@ -1,8 +1,8 @@
-**Customer scheduling fixes — implemented locally**
+**Customer scheduling fixes — release verification**
 
 Branch: `fix/customer-scheduling-availability`.
 Worktree: `/private/tmp/waves-customer-scheduling-fix`, based on `a2bb0bc49`.
-The original checkout's unrelated edits were preserved. No push, merge, deployment, production access, customer message, or appointment mutation was performed.
+The original checkout's unrelated edits were preserved. Release verification is underway. No production database access, customer message, or live appointment mutation was performed.
 
 All ten findings from the September 5 availability audit are addressed:
 
@@ -23,8 +23,8 @@ Working hours, closures, travel buffers, seasonal restrictions, south-zone polic
 
 Verification:
 
-- 33 server suites, 729 tests passed. Includes reservations, voice booking, rebooking, weather alternatives, booking caps, occupancy, estimate filtering, and new lifecycle regressions.
-- 10 estimate picker client tests passed, including HTTP/network failure and retry.
+- 33 server suites, 741 tests passed. Includes reservations, voice booking, rebooking, weather alternatives, booking caps, occupancy, estimate filtering, and new lifecycle regressions.
+- 43 client tests passed across the shared picker, estimate picker, reschedule and re-service flows, including HTTP/network failure and retry.
 - Production client build passed, including blog-schema/affiliate vendor verification, portal-brand and domain-rule gates.
 - ESLint passed with zero errors; existing large-function/depth warnings remain in touched legacy modules. Whitespace checks passed.
 - Desktop (1440) and mobile (390) browser verification used the actual reschedule page and estimate picker with synthetic API responses. Checked truthful recommendation labels, 1 PM selection and confirmation request, lookup failure, retry recovery, and mobile layout. Screenshots were inspected visually. The estimate component fixture used the application's reset and typography, not the complete estimate/payment page.
@@ -37,4 +37,6 @@ Local visual evidence (not included in a production bundle):
 - [Estimate error mobile](../../.verification/estimate-error-390.png), [desktop](../../.verification/estimate-error-1440.png).
 - [Estimate retry mobile](../../.verification/estimate-retry-390.png), [desktop](../../.verification/estimate-retry-1440.png).
 
-Release remains unperformed. This is a local implementation, not a claim that the live portal has changed.
+Merged current main into the task branch and carried the label/error fixes onto its shared SchedulePicker and ScheduleFlowPage architecture. The retired ReschedulePage was not restored. Rechecked the build and desktop/mobile interactions after integration.
+
+Deployment remains unperformed; PR review and isolated preview database checks are next.

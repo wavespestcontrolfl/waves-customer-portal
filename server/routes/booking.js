@@ -4,6 +4,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
@@ -514,6 +515,8 @@ router.get('/config', async (req, res, next) => {
       // Multi-service selector on /book — fail-closed dark-ship flag; the
       // server independently refuses composite service keys while off.
       multi_service: isEnabled('multiServiceBooking'),
+      // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
+      van_scene: isEnabled('vanScene'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -1168,14 +1171,13 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     slots.sort((a, b) => a.start_time.localeCompare(b.start_time));
     const best = slots.reduce((acc, s) => (acc == null || s.rank < acc.rank ? s : acc), null);
     const labels = dateLabels(date);
-    // The day panel is also used to validate reschedules and callbacks.
-    // Keep every feasible start; only the recommendation list is curated.
-    const daySlots = slots.map(s => ({ ...s, is_best_fit: s === best }));
+    // Keep every feasible start for selection and confirmation; recommendations
+    // remain curated separately. Route proximity is a per-slot fact.
+    const daySlots = slots.map(s => ({ ...s, is_best_fit: s === best, nearby: s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES }));
     days.push({
       date,
       ...labels,
-      // A day is "nearby" when at least one of its slots is route-efficient.
-      nearby: daySlots.some(s => s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES),
+      nearby: daySlots.some(s => s.nearby),
       slots: daySlots,
     });
   }
@@ -1953,9 +1955,12 @@ async function createSelfBooking(payload = {}) {
     if (technician_id) {
       const techIdStr = String(technician_id);
       const tech = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(techIdStr)
-        ? await db('technicians').where('id', techIdStr).first('id', 'active')
+        ? await db('technicians').where('id', techIdStr).first('id', 'employment_status', 'field_dispatchable')
         : null;
-      if (!tech || tech.active === false) {
+      // Assignability (active employment AND field-dispatchable), not just the
+      // legacy active flag — a tech who went prospective/office-only between
+      // the offer and the confirm must not take the visit.
+      if (!isAssignable(tech)) {
         return { ok: false, status: 400, error: 'That time slot is no longer available. Please pick another.' };
       }
     }
@@ -2670,6 +2675,18 @@ async function createSelfBooking(payload = {}) {
         if (keptGuardError) logger.warn(`[booking:confirm] in-booking duplicate-series guard failed (post-commit guard decides): ${keptGuardError.message}`);
         if (keptMatches.length > 0) pestDuplicateKeptAtBooking = keptMatches[0];
       }
+      // Re-asserted FOR SHARE on the writing trx (the pre-transaction check
+      // above is the fast path): an offboarding cannot commit in between. A
+      // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
+      // recovery below (just-created profile rolled back, generic message).
+      try {
+        await assertAssignableTechnician(technician_id || null, { conn: trx });
+      } catch (eligErr) {
+        if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+        const err = new Error('That time slot is no longer available. Please pick another.');
+        err.code = 'SLOT_TAKEN';
+        throw err;
+      }
       const [scheduledRow] = await trx('scheduled_services').insert({
         ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
         ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
@@ -2849,6 +2866,18 @@ async function createSelfBooking(payload = {}) {
         return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };
       }
       throw txErr;
+    }
+
+    // Tech-facing notice (tech-visit-notifications.js): a self-booking that
+    // landed on a tech's route is a "new visit" to them. Post-commit,
+    // gate-dark, never awaited; a double-submit replay returns { existing }
+    // with no serviceRow and sends nothing.
+    if (txResult?.serviceRow?.technician_id) {
+      const row = txResult.serviceRow;
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: 'customer_self_serve',
+        snapshot: { date: row.scheduled_date, windowStart: row.window_start, windowEnd: row.window_end },
+      });
     }
 
     // New bookings mark their recovery intents converted INSIDE the transaction

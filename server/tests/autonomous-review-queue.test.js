@@ -17,6 +17,11 @@ const {
 } = require('../services/content/autonomous-review-queue');
 
 describe('autonomous-review-queue read model helpers', () => {
+  test('review controls follow the routed action instead of the provisional opportunity type', () => {
+    expect(reviewActions({ opportunity: { status: 'pending_review', action_type: 'refresh_existing_page' }, run: { action_type: 'new_supporting_blog' } }).can_requeue).toBe(false);
+    expect(reviewActions({ opportunity: { status: 'pending_review', action_type: 'new_supporting_blog' }, run: { action_type: 'refresh_existing_page' } }).can_requeue).toBe(true);
+  });
+
   test('normalizes public query controls', () => {
     expect(normalizeStatus('pending_review')).toBe('pending_review');
     expect(normalizeStatus('not-real')).toBe('pending_review');
@@ -145,8 +150,8 @@ describe('autonomous-review-queue read model helpers', () => {
     });
     expect(item.draft.title).toBe('Draft');
     expect(item.review_actions).toMatchObject({
-      can_requeue: true,
-      can_dismiss: true,
+      can_requeue: false,
+      can_dismiss: false,
       can_approve_trust_build: false,
     });
   });
@@ -347,6 +352,12 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     const { oppUpdates, run } = mockReplacedRun({ decision: 'approve_trust_build' });
     await expect(run()).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer run replaced/) });
     expect(oppUpdates.find((u) => u.status === 'done')).toBeFalsy(); // opportunity untouched
+  });
+
+  test('requeue rejects a replacement under the row lock', async () => {
+    const { oppUpdates, run } = mockReplacedRun({ decision: 'requeue' });
+    await expect(run()).rejects.toMatchObject({ statusCode: 409 });
+    expect(oppUpdates).toEqual([]);
   });
 
   test('dismiss 409s instead of skipping a replacement the reviewer never saw', async () => {

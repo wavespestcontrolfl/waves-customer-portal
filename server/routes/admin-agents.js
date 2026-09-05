@@ -6,6 +6,9 @@ const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
 const agentActivity = require('../services/agent-activity');
 const modelSwitchboard = require('../services/model-switchboard');
+const hubRead = require('../services/agent-control/hub-read');
+const runIndex = require('../services/agent-control/run-index');
+const agentRuns = require('../services/agent-control/runs');
 const modelDiscovery = require('../services/model-discovery');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -1050,9 +1053,71 @@ function opsQueueGateOn() {
 // ops-queue gate. Cheap by design: no ledger read, no DB.
 router.get('/control/hub', (_req, res) => {
   res.json({
-    features: { queue: opsQueueGateOn(), ledger: false, runs: false, cost: false, verification: false },
+    features: { queue: opsQueueGateOn(), ledger: hubRead.readGateOn(), runs: agentRuns.runGateOn(), cost: false, verification: false },
     areas: modelSwitchboard.AREAS,
   });
+});
+
+// Control center reads (GATE_AGENT_CONTROL_READ; off → 404 like /queue so a
+// dark gate is indistinguishable from an unshipped route). Both read the
+// call ledger through services/agent-control/hub-read.js; a bad
+// ?window / ?area / ?status is a 400 from the service.
+router.get('/control/areas', async (req, res, next) => {
+  try {
+    if (!hubRead.readGateOn()) return res.status(404).json({ error: 'Not found' });
+    return res.json(await hubRead.readAreas({ window: req.query.window || undefined }));
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    return next(err);
+  }
+});
+
+router.get('/control/lanes', async (req, res, next) => {
+  try {
+    if (!hubRead.readGateOn()) return res.status(404).json({ error: 'Not found' });
+    return res.json(await hubRead.readLanes({
+      area: req.query.area || null,
+      window: req.query.window || undefined,
+      status: req.query.status || undefined,
+    }));
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    return next(err);
+  }
+});
+
+// Runs (S3): every run ledger — the canonical agent_runs family plus the
+// legacy ledgers projected through services/agent-control/sources — behind
+// the same read gate as the other control reads (404 while off). The hub
+// probe's features.runs says whether canonical rows are being WRITTEN
+// (GATE_AGENT_RUNS); the reads work on legacy rows alone.
+router.get('/control/runs', async (req, res, next) => {
+  try {
+    if (!hubRead.readGateOn()) return res.status(404).json({ error: 'Not found' });
+    return res.json(await runIndex.listRuns({
+      lane: req.query.lane || null,
+      area: req.query.area || null,
+      status: req.query.status || undefined,
+      window: req.query.window || undefined,
+      cursor: req.query.cursor || null,
+      limit: req.query.limit || undefined,
+    }));
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    return next(err);
+  }
+});
+
+router.get('/control/runs/:source/:id', async (req, res, next) => {
+  try {
+    if (!hubRead.readGateOn()) return res.status(404).json({ error: 'Not found' });
+    const detail = await runIndex.getRun(req.params.source, req.params.id);
+    if (!detail) return res.status(404).json({ error: 'Run not found' });
+    return res.json(detail);
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    return next(err);
+  }
 });
 
 router.get('/queue', async (_req, res, next) => {

@@ -273,6 +273,14 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FAST }),
   }),
+  jobCardParagraph: Object.freeze({
+    name: 'jobCardParagraph',
+    // Job card customer paragraph (services/job-card.js): a 1–3 sentence
+    // plain-English rewrite of deterministic portal facts, never analysis —
+    // FAST tier both legs, same shape as fastStructured but text mode.
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FAST }),
+  }),
   balancedAnswer: Object.freeze({
     name: 'balancedAnswer',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),

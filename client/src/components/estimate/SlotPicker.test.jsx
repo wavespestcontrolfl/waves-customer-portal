@@ -94,7 +94,7 @@ describe('SlotPicker (glass stale-selection sweep)', () => {
           refreshSignal={0}
         />,
       );
-      await screen.findByText(/Arrival window:/);
+      await screen.findByText('Monday, June 1');
       expect(onSelect).not.toHaveBeenCalledWith(null);
       // The tech chip stays up for the held selection.
       expect(screen.getByText(/Your technician/)).toBeInTheDocument();
@@ -126,7 +126,7 @@ describe('SlotPicker (glass stale-selection sweep)', () => {
 });
 
 describe('SlotPicker', () => {
-  it('renders the date finder inside the booking card, above the slot list', async () => {
+  it('renders the search above the shared picker and the 90-day date finder below it', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2026-06-01')], expander: [] }));
@@ -147,9 +147,9 @@ describe('SlotPicker', () => {
     const heading = screen.getByText('Search by date or time \u2014 no calling, no hold music, no back-and-forth');
     const finderLabel = screen.getByText(/pick one that works for you/i);
 
-    // Order: heading → finder → slot windows (matches the SSR booking card).
-    expect(heading.compareDocumentPosition(finderLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(finderLabel.compareDocumentPosition(firstSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Order: heading → picker (day title) → date finder (same order as /book).
+    expect(heading.compareDocumentPosition(firstSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(firstSlot.compareDocumentPosition(finderLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('shows a 2-hour arrival window from the slot start, not the job block', async () => {
