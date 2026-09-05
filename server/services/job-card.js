@@ -647,15 +647,28 @@ function precautionText(product) {
  * overrides, assigned calibration) so the card never disagrees with the
  * plan; other lines come from the matched protocol visit's catalog hints.
  */
+const PLAN_UNAVAILABLE = { code: 'plan_unavailable', message: 'Lawn plan unavailable right now.' };
+
+/** { plan } or { plan: null, error } — a failed build is its own block. */
+async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date() } = {}) {
+  try {
+    return { plan: await (deps.buildPlan || buildPlanForService)(serviceId, { db: dbh, now }) };
+  } catch (err) {
+    logger.warn(`[job-card] plan unavailable for ${serviceId}: ${err.message}`);
+    return { plan: null, error: err };
+  }
+}
+
+function planBlocksOf({ plan }) {
+  if (!plan) return [PLAN_UNAVAILABLE];
+  return (plan.propertyGate?.blocks || []).map((b) => ({ code: b.code || null, message: clean(b.message, 200) })).filter((b) => b.message);
+}
+
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
   if (facts.isLawn) {
-    let plan;
-    try {
-      plan = await (deps.buildPlan || buildPlanForService)(facts.serviceId, { db: dbh, now });
-    } catch (err) {
-      logger.warn(`[job-card] plan unavailable for ${facts.serviceId}: ${err.message}`);
-      return { visit: null, lines: [], blocks: [{ code: 'plan_unavailable', message: 'Lawn plan unavailable right now.' }] };
-    }
+    const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now });
+    const plan = loaded.plan;
+    if (!plan) return { visit: null, lines: [], blocks: planBlocksOf(loaded) };
     const items = [...(plan?.mixCalculator?.items || []), ...(plan?.mixCalculator?.conditionalOptions || [])];
     const lines = [];
     for (const item of items) {
@@ -674,7 +687,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     // The plan's blocking conditions (ordinance blackout, calibration,
     // inventory, missing profile / area, PGR on stressed turf) ride along:
     // a blocked plan shows its products but no amounts.
-    const blocks = (gate.blocks || []).map((b) => ({ code: b.code || null, message: clean(b.message, 200) })).filter((b) => b.message);
+    const blocks = planBlocksOf(loaded);
     return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
   }
   const match = matchServiceProtocol(protocols, facts.serviceType);
@@ -806,29 +819,39 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
  * product for 110 or 1 gallons of water on the visit's rig (the
  * appointment's assigned equipment, else the one active rig).
  */
-async function mixForProduct(productId, gallons, { serviceId, dbh = db, now = new Date() } = {}) {
+async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date() } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).select('id', 'name', 'category', 'application_method', 'default_rate_per_1000', 'rate_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at').first().catch(() => null),
-    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
+    serviceId ? dbh('scheduled_services').where({ id: serviceId }).select('service_type', 'assigned_equipment_system_id', 'assigned_calibration_id').first().catch(() => null) : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
   const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), now);
-  // An expired calibration keeps its carrier number for display, but no
-  // mix is computed from it — the same withholding the lawn-mix route does.
+  // A lawn visit's plan governs the search too: its blocks withhold the dose
+  // exactly as they withhold the card's amounts, and a product the plan
+  // already resolved (substitution rate override, nutrient-target rate)
+  // is dosed at the plan's rate, never the catalog default.
+  const plan = detectServiceLine(svc.service_type) === 'lawn' ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
+  const planBlocks = plan ? planBlocksOf(plan) : [];
+  const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
+  const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
+  const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
   const tankMixable = isTankMixable(product);
-  const mix = tankMixable
-    ? buildMixAmount({ ratePer1000: product.default_rate_per_1000, rateUnit: product.rate_unit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons })
-    : { amount: null, unit: product.rate_unit || null, reason: 'Not a tank mix — apply as labeled' };
+  let mix;
+  if (planBlocks.length) mix = { amount: null, unit: rateUnit || null, reason: 'Lawn plan blocked — amounts withheld' };
+  else if (!tankMixable) mix = { amount: null, unit: rateUnit || null, reason: 'Not a tank mix — apply as labeled' };
+  else mix = buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: tank.calibrated ? tank.carrierGalPer1000 : null, gallons });
   const packSizes = await loadPackSizes(dbh, [product.id]);
   return {
     productId: product.id,
     name: product.name,
-    ratePer1000: product.default_rate_per_1000 != null ? Number(product.default_rate_per_1000) : null,
+    ratePer1000: ratePer1000 != null ? Number(ratePer1000) : null,
+    rateSource: planned ? 'plan' : 'catalog',
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
     ...mix,
+    planBlocks,
     tank,
     order: {
       packSize: packSizes[product.id] || null,

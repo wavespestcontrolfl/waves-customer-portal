@@ -385,7 +385,36 @@ describe('mixForProduct', () => {
   };
   const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: null };
 
-  const visit = { assigned_equipment_system_id: null, assigned_calibration_id: null };
+  const visit = { service_type: 'Quarterly Pest Control', assigned_equipment_system_id: null, assigned_calibration_id: null };
+  const lawnVisit = { ...visit, service_type: 'WaveGuard Lawn Care' };
+  const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' };
+  const at = { now: new Date('2026-09-04T12:00:00Z') };
+
+  test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
+    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] } });
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at });
+    expect(out).toMatchObject({ amount: null, reason: 'Lawn plan blocked — amounts withheld', planBlocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] });
+    // A plan that fails to build is a block too.
+    buildPlan.mockRejectedValue(new Error('boom'));
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at })).planBlocks[0].code).toBe('plan_unavailable');
+    // A pest visit never builds the plan.
+    const pest = makeDb({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] });
+    buildPlan.mockClear();
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: pest, deps: { buildPlan }, ...at })).amount).toBe(6.215);
+    expect(buildPlan).not.toHaveBeenCalled();
+  });
+
+  test('a product the lawn plan resolved is dosed at the plan\'s rate, not the catalog default (Codex r12 P1)', async () => {
+    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    // Saved substitution override: 0.2 oz/1,000 instead of the catalog's 0.113.
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [{ product: { id: 'p1' }, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at });
+    expect(out).toMatchObject({ amount: 11, ratePer1000: 0.2, rateSource: 'plan' });
+    // Not on the plan → catalog rate.
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [], conditionalOptions: [] } });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan }, ...at })).toMatchObject({ amount: 6.215, rateSource: 'catalog' });
+  });
 
   test('no visit row → null, never a dose from an unassigned rig (Codex r9 P1)', async () => {
     const dbh = makeDb({
