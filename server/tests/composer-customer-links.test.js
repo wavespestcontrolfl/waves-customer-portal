@@ -1034,6 +1034,10 @@ describe('buildReceiptLink', () => {
     // shows "Payment not completed" and its PDF 409s (pre-push Codex P1), an
     // in-flight ACH has no receipt yet, an open invoice is the pay link's.
     expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('status', ['paid', 'refunded']);
+    // Self-pay only: a payer-billed invoice's receipt is the payer's AP
+    // inbox's (it shows the payer's address, AP email and payment method) —
+    // never a homeowner quick link (pre-push Codex P0).
+    expect(mockBuilders.invoices.whereNull).toHaveBeenCalledWith('payer_id');
     expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('token');
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
     expect(r.line).toBe(`Here is your receipt for invoice INV-1042: ${r.url}\n\n`);

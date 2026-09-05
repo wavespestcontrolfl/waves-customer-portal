@@ -1884,13 +1884,18 @@ async function buildContractSigningLink(customerIds) {
 const RECEIPT_INVOICE_STATUSES = ['paid', 'refunded'];
 
 /**
- * Receipt link — the account's most recently settled invoice (a household
- * shares its bills, like the pay link). Raw permanent URL, nothing minted.
+ * Receipt link — the account's most recently settled SELF-PAY invoice (a
+ * household shares its bills, like the pay link). A third-party payer-billed
+ * invoice (payer_id) is the payer's AP inbox's alone: its receipt shows the
+ * payer's billing address, AP email and payment method, and receipt delivery
+ * already suppresses the homeowner text for it (pre-push Codex P0) — never
+ * selected here. Raw permanent URL, nothing minted.
  */
 async function buildReceiptLink(customerIds) {
   const invoice = await db('invoices')
     .whereIn('customer_id', customerIds)
     .whereIn('status', RECEIPT_INVOICE_STATUSES)
+    .whereNull('payer_id')
     .whereNotNull('token')
     // Settled most recently first; a row settled without a paid_at stamp
     // falls back to its creation order, id last for a stable tie-break.
