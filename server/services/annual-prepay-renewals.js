@@ -1672,8 +1672,10 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     // result, so the shortfall must be filed HERE. Same dedupe + bell as the
     // other coverage exceptions; the operator schedules the replacement
     // visit(s) — nothing is re-seeded automatically on a cancelled slot.
+    // Filed after the caller's transaction commits (hook P1): a rollback must
+    // not leave a false alert that also dedupes the retry's real one for 7d.
     logger.warn(`[annual-prepay] term ${term.id}: ${racedRowIds.length} covered visit(s) were cancelled while the prepaid stamp ran (${racedRowIds.join(', ')}) — ${stampedCount} of ${coverageVisitCount} sold visits stamped; needs replacement scheduling`);
-    await fileCoverageException(term, 'stamp_raced_cancel',
+    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_cancel',
       `${racedRowIds.length} paid visit(s) were cancelled while the annual prepay was being applied, so only ${stampedCount} of ${coverageVisitCount} sold visits are covered on the calendar. Schedule the replacement visit(s) or adjust the term.`);
   }
 
