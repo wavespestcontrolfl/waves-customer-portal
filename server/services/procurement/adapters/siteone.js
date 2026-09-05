@@ -694,10 +694,17 @@ async function readExactlyOne(page, selector, { same } = {}) {
   try { again = await matches(page, selector, { strict: true }); }
   catch { return { count: null, text: '', visible: false }; }
   if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return { count: null, text: '', visible: false };
+  // The re-read is ONE element snapshot: text and visibility both from the
+  // second target's handle, so a node swapped after the re-enumeration for a
+  // hidden one carrying the same text reads as hidden, never as the
+  // displayed reading (Codex #3876 r23 P2).
   const second = await pick(again);
-  const reread = second.target ? await second.target.textContent().catch(() => null) : null;
+  const handle2 = second.target ? await second.target.elementHandle({ timeout: 1500 }).catch(() => null) : null;
+  if (!handle2) return { count: null, text: '', visible: false };
+  const reread = await handle2.textContent().catch(() => null);
+  const visible2 = await handle2.isVisible().catch(() => false);
   if (reread == null || String(reread).replace(/\s+/g, ' ').trim() !== String(text || '').replace(/\s+/g, ' ').trim()) return { count: null, text: '', visible: false };
-  return { count: 1, text: String(text || ''), visible: isVisible };
+  return { count: 1, text: String(text || ''), visible: isVisible && visible2 };
 }
 
 // The bill-to selector unions radio inputs and their labels, so ordinary

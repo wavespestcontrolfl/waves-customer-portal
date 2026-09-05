@@ -343,6 +343,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       // The group count (name="tender") is what a named radio is judged by; an unnamed radio has no countable group (r18 P1)
       if (sel === 'input[type="radio"][name="tender"]:checked') return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      // hiddenAfterReread: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — after the re-enumeration the node is swapped for a HIDDEN one carrying the same text (r23 P2)
+      if (st.hiddenAfterReread && sel === S[st.hiddenAfterReread]) return el({ count: 1, get visible() { return (st.hrReads || 0) < 2; }, text: { checkoutAccount: 'Account # 12345', checkoutShipTo: 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', checkoutTotal: 'Order total $99.00' }[st.hiddenAfterReread], onRead: () => { st.hrReads = (st.hrReads || 0) + 1; } });
       // replacesAfterRead: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — the node is replaced in place after its text is read: same count, same visibility, a different value on the re-read (r22 P2)
       if (st.replacesAfterRead && sel === S[st.replacesAfterRead]) return el({ count: 1, visible: true, get text() { return (st.replReads || 0) > 1 ? { checkoutAccount: 'Account # 99999', checkoutShipTo: 'Ship to: 9 Other Rd, Venice, FL 34285', checkoutTotal: 'Order total $999.00' }[st.replacesAfterRead] : { checkoutAccount: 'Account # 12345', checkoutShipTo: 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', checkoutTotal: 'Order total $99.00' }[st.replacesAfterRead]; }, onRead: () => { st.replReads = (st.replReads || 0) + 1; } });
       // appendsMidRead: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — a replacement node is appended while the one reading's text is read, the old not yet removed (r21 P2)
@@ -444,6 +446,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['account_unverified', { replacesAfterRead: 'checkoutAccount' }], // replaced in place after the read: the re-read differs (r22 P2)
     ['ship_to_unverified', { replacesAfterRead: 'checkoutShipTo' }],
     ['checkout_total_unreadable', { replacesAfterRead: 'checkoutTotal' }],
+    ['account_hidden', { hiddenAfterReread: 'checkoutAccount' }], // the re-read's visibility comes from the same snapshot as its text (r23 P2)
+    ['ship_to_hidden', { hiddenAfterReread: 'checkoutShipTo' }],
+    ['checkout_total_hidden', { hiddenAfterReread: 'checkoutTotal' }],
     ['account_unverified', { unreadableFirst: 'checkoutAccount' }], // an unreadable candidate is unresolved, not hidden (r19 P2)
     ['ship_to_unverified', { unreadableFirst: 'checkoutShipTo' }],
     ['checkout_total_unreadable', { unreadableFirst: 'checkoutTotal' }],
