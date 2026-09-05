@@ -1609,11 +1609,14 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
   const now = new Date();
   let stampedCount = 0;
-  // Rows read as eligible whose stamp UPDATE then matched nothing — a
-  // cancel committed in between (#3878 r5). Surfaced below: the term stays
-  // paid with fewer stamped visits than sold, and the earlier
-  // coverage_shortfall check (target dates) cannot see this race.
-  const racedRowIds = [];
+  // Rows read as eligible whose stamp UPDATE then matched nothing — the
+  // status moved in between (#3878 r5). Classified below by re-reading the
+  // row: a never-ran status (cancelled / no_show / skipped) is a shortfall
+  // the operator must hear about (the earlier coverage_shortfall check runs
+  // on target dates and cannot see this race); a COMPLETED-in-between row
+  // is the pending-window completion that reconcilePendingWindowCompletions
+  // already handles, and files nothing here.
+  const unmatchedRowIds = [];
 
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
@@ -1655,9 +1658,15 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
       .update(updates)
       .returning(['id']);
     if (Array.isArray(updated) ? updated.length > 0 : updated) stampedCount++;
-    else racedRowIds.push(row.id);
+    else unmatchedRowIds.push(row.id);
   }
 
+  let racedRowIds = [];
+  if (unmatchedRowIds.length > 0) {
+    const current = await conn('scheduled_services').whereIn('id', unmatchedRowIds).select('id', 'status');
+    const statusById = new Map(current.map((r) => [r.id, String(r.status || '').toLowerCase()]));
+    racedRowIds = unmatchedRowIds.filter((id) => COVERAGE_EXCLUDED_STATUSES.has(statusById.get(id)) || !statusById.has(id));
+  }
   if (racedRowIds.length > 0) {
     // Durable operator exception (Codex #3882 r1 P1): callers discard this
     // result, so the shortfall must be filed HERE. Same dedupe + bell as the

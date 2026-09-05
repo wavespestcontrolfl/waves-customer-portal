@@ -324,8 +324,10 @@ describe('annual prepay renewal helpers', () => {
     // The row read as 'pending' was cancelled before the UPDATE ran: the
     // status predicate matches nothing and returning() is empty.
     const racedUpdate = query({ returning: [] });
+    // Re-read of the unmatched row classifies the race: it is now cancelled.
+    const reread = query({ rows: [{ id: 'svc-1', status: 'cancelled' }] });
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, racedUpdate],
+      scheduled_services: [columnQuery, rowsQuery, racedUpdate, reread],
       notifications: [query({ first: undefined })], // coverage-exception dedupe probe: none open
     });
     const { notifyAdmin } = require('../services/notification-service');
@@ -347,6 +349,28 @@ describe('annual prepay renewal helpers', () => {
       expect.stringMatching(/1 paid visit\(s\) were cancelled while the annual prepay was being applied.*0 of 1 sold visits/),
       expect.objectContaining({ metadata: expect.objectContaining({ reason: 'stamp_raced_cancel', annual_prepay_term_id: 'term-1' }) }),
     );
+  });
+
+  test('a visit COMPLETED between the eligibility read and the stamp write is a pending-window completion, not a shortfall — no exception filed (hook P1)', async () => {
+    const rows = [
+      { id: 'svc-1', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'on_site' },
+    ];
+    const columnQuery = query({ columnInfo: { prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {} } });
+    const rowsQuery = query({ rows });
+    const racedUpdate = query({ returning: [] });
+    const reread = query({ rows: [{ id: 'svc-1', status: 'completed' }] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, racedUpdate, reread] });
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm({
+      id: 'term-1', customer_id: 'customer-1', prepay_amount: 200,
+      term_start: '2026-06-15', term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 1,
+    });
+    expect(result.stampedCount).toBe(0);
+    expect(result.racedRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('a term whose owner moved under the comms fence (merge-undo) defers every seed — no visits on the stale kept owner', async () => {
