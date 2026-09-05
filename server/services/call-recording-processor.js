@@ -13335,6 +13335,14 @@ const CallRecordingProcessor = {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
                     insertData.technician_id = null;
+                    // The staff-visible note was built before this recheck; an
+                    // unassigned visit must not claim a technician owns it.
+                    if (defaultTechnicianName && typeof insertData.notes === 'string') {
+                      insertData.notes = insertData.notes
+                        .replace(`Auto-assigned technician: ${defaultTechnicianName}.`, '')
+                        .replace(/\s{2,}/g, ' ')
+                        .trim();
+                    }
                   }
                 }
                 const [created] = await trx('scheduled_services')

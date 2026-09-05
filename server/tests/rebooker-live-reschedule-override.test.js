@@ -765,7 +765,7 @@ describe('live-status reschedule override (allowLive)', () => {
   // only the date lock, which slot-reservation writers never take, so both
   // could commit an overlap under READ COMMITTED. The gate span is now
   // derived BEFORE the guard (stored end wins, else duration-or-60).
-  function wireNullEndAnchorSeries({ techGuardRuns = true } = {}) {
+  function wireNullEndAnchorSeries({ techGuardRuns = true, techRow = { id: 't2', employment_status: 'active', field_dispatchable: true } } = {}) {
     const anchorFull = {
       ...liveService('confirmed'),
       window_end: null,
@@ -801,7 +801,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
-      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue(techRow) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -818,6 +818,16 @@ describe('live-status reschedule override (allowLive)', () => {
     });
     return { trx, techOverlapProbe, anchorUpdate };
   }
+
+  test('a caller-chosen tech who became ineligible since availability is refused as SLOT_TAKEN (customer re-picks), never as an internal 422 naming staff', async () => {
+    const { anchorUpdate } = wireNullEndAnchorSeries({ techRow: { id: 'tech-5', name: 'Tech Five', employment_status: 'inactive', field_dispatchable: true } });
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: null }, 'customer_request', 'customer_self_serve',
+      { technicianId: 'tech-5' },
+    )).rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409, message: expect.not.stringContaining('Tech Five') });
+    expect(anchorUpdate.update).not.toHaveBeenCalled();
+  });
 
   test('a null-end series anchor with a caller-chosen tech takes the tech lock and probes the derived span', async () => {
     const { trx, techOverlapProbe } = wireNullEndAnchorSeries();

@@ -34,7 +34,11 @@ exports.up = async function (knex) {
       ADD CONSTRAINT technicians_employment_status_check
       CHECK (employment_status IN (${STATUSES.map((s) => `'${s}'`).join(', ')}))
     `);
-    await knex('technicians').where({ active: false }).update({ employment_status: 'inactive' });
+    // Legacy `active` is nullable: NULL was never accepted by login, so it
+    // maps to inactive too (active=true → active, else inactive).
+    await knex('technicians')
+      .where(function () { this.where({ active: false }).orWhereNull('active'); })
+      .update({ employment_status: 'inactive' });
   }
   if (!(await knex.schema.hasColumn('technicians', 'field_dispatchable'))) {
     await knex.schema.alterTable('technicians', (t) => {

@@ -3235,7 +3235,7 @@ export function TeamTab({ showToast }) {
                       onClick={() => (
                         t.active ? handleDeactivate(t) : handleActivate(t)
                       )}
-                      title={t.employment_status === "prospective" ? "Marks this hire as started (they still need credentials via register)" : undefined}
+                      title={t.employment_status === "prospective" ? "Marks this hire as started. They set their password with Forgot password on the admin login (needs their email on this row)." : undefined}
                       style={{
                         padding: "4px 10px",
                         background: "transparent",
