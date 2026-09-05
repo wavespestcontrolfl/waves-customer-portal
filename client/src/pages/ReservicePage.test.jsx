@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import ReservicePage from './ReservicePage';
+import ScheduleFlowPage from './ScheduleFlowPage';
 
 vi.mock('../components/brand', () => ({
   WavesShell: ({ children }) => <div>{children}</div>,
@@ -55,7 +55,7 @@ function renderPage() {
   return render(
     <MemoryRouter initialEntries={['/reservice/deadbeef']}>
       <Routes>
-        <Route path="/reservice/:token" element={<ReservicePage />} />
+        <Route path="/reservice/:token" element={<ScheduleFlowPage flow="reservice" />} />
       </Routes>
     </MemoryRouter>
   );

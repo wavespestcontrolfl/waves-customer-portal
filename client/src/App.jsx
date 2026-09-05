@@ -397,8 +397,8 @@ const StatementPayPage = lazyWithRetry(() => import('./pages/StatementPayPage'))
 const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
-const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
-const ReservicePage = lazyWithRetry(() => import('./pages/ReservicePage'));
+// One page for both self-serve scheduling flows (owner 2026-09-04).
+const ScheduleFlowPage = lazyWithRetry(() => import('./pages/ScheduleFlowPage'));
 const AppointmentPage = lazyWithRetry(() => import('./pages/AppointmentPage'));
 const SecureAppointmentPage = lazyWithRetry(() => import('./pages/SecureAppointmentPage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
@@ -515,8 +515,8 @@ export default function App() {
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
-          <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
-          <Route path="/reservice/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReservicePage /></Suspense>} />
+          <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage flow="reschedule" /></Suspense>} />
+          <Route path="/reservice/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ScheduleFlowPage flow="reservice" /></Suspense>} />
           <Route path="/appointment/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><AppointmentPage /></Suspense>} />
           <Route path="/secure/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><SecureAppointmentPage /></Suspense>} />
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
