@@ -181,15 +181,6 @@ async function matches(page, selector) {
   return { all, shown };
 }
 
-// The ONE visible control for a click: a hidden responsive copy ahead of the
-// visible button would time out and park the one-shot claim as failed
-// (Codex #3853 r14 P2). Refuses BEFORE clicking — nothing has been sent.
-async function visibleControl(page, selector, what, evidence) {
-  const { shown } = await matches(page, selector);
-  if (shown.length !== 1) throw new RefusedError(shown.length ? `${what}_ambiguous` : `no_${what}`, `${shown.length} visible ${what.replace(/_/g, ' ')} controls — expected exactly one`, evidence);
-  return shown[0];
-}
-
 // Wait (bounded) until at least one match is SHOWN — the login form's
 // password field behind a hidden responsive duplicate (pre-push P1).
 async function waitForAnyShown(page, selector, timeout) {
