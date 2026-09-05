@@ -234,20 +234,27 @@ async function listRuns(params = {}) {
   };
 }
 
+// The detail's call ledger: the NEWEST calls up to the cap (the terminal
+// failure under investigation is at the end), oldest first, with `capped`
+// saying older calls exist beyond it (Codex r8).
+const CALLS_CAP = 500;
+const NO_CALLS = Object.freeze({ calls: [], capped: false });
+
 async function loadCalls({ canonicalId = null, sessionId = null }) {
-  if (!canonicalId && !sessionId) return [];
+  if (!canonicalId && !sessionId) return NO_CALLS;
   try {
-    return await db('llm_dispatch_log')
+    const rows = await db('llm_dispatch_log')
       .select(CALL_COLUMNS)
       .whereIn('row_kind', ['call', 'session_turn'])
       .where((q) => {
         if (canonicalId) q.where('run_id', canonicalId);
         if (sessionId) q.orWhere({ provider_ref: sessionId });
       })
-      .orderBy('created_at', 'asc')
-      .limit(500);
+      .orderBy([{ column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+      .limit(CALLS_CAP + 1);
+    return { calls: rows.slice(0, CALLS_CAP).reverse(), capped: rows.length > CALLS_CAP };
   } catch (err) {
-    if (isMissingSchema(err)) return [];
+    if (isMissingSchema(err)) return NO_CALLS;
     throw err;
   }
 }
@@ -285,7 +292,7 @@ async function getRun(source, id, { now = new Date() } = {}) {
   // the run's own — the current attempt's for a canonical run
   const run = annotate({ ...primary.run, steps }, now);
   const detail = canonical || NO_CANONICAL;
-  const calls = await loadCalls({ canonicalId: canonical ? canonical.run.id : null, sessionId: legacySource === managedSessions ? legacy.run.id : null });
+  const { calls, capped } = await loadCalls({ canonicalId: canonical ? canonical.run.id : null, sessionId: legacySource === managedSessions ? legacy.run.id : null });
   return {
     run,
     workItem: detail.workItem,
@@ -296,7 +303,7 @@ async function getRun(source, id, { now = new Date() } = {}) {
     evaluations: [],
     humanReviews: [],
     events: detail.events,
-    trace: { id: run.traceId, calls: calls.length },
+    trace: { id: run.traceId, calls: calls.length, capped },
     legacy: legacy && canonical ? { source: legacySource.SOURCE, id: legacy.run.id } : null,
   };
 }

@@ -124,7 +124,8 @@ function fromRow(d) {
     startedAt: decided ? decided.startedAt : d.created_at,
     finishedAt: outcome.finishedAt,
     lastProgressAt: outcome.lastProgressAt,
-    durationMs: draftMs,
+    // the drafting time — unless a live decision replaced the span (then the span's own)
+    durationMs: decided && decided.lifecycle !== 'terminal' ? null : draftMs,
     steps: [
       { key: 'inbound', label: kind === 'proactive' ? 'Trigger' : 'Inbound text', status: 'done', detail: null, ms: null, toolName: null },
       { key: 'draft', label: 'Draft reply', status: 'done', detail: modelLabel(d), ms: draftMs, toolName: null },

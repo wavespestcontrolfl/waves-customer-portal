@@ -130,7 +130,7 @@ describe('adapters project onto the canonical shape', () => {
     expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'pending_review' }).steps[2]).toMatchObject({ status: 'running', detail: 'Suggested in the thread' });
     // the owner scheduled it: the draft waits on the SEND from the decision's span (its scheduling transition / due time), not on the owner
     const scheduled = messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'scheduled', decision_at: ago(2e3), decision_active_from: ago(-600e3) });
-    expect(scheduled).toMatchObject({ lifecycle: 'waiting_external', startedAt: ago(-600e3).toISOString(), lastProgressAt: ago(2e3).toISOString(), finishedAt: null });
+    expect(scheduled).toMatchObject({ lifecycle: 'waiting_external', startedAt: ago(-600e3).toISOString(), lastProgressAt: ago(2e3).toISOString(), finishedAt: null, durationMs: null });
     expect(scheduled.steps[2]).toMatchObject({ status: 'running', detail: 'scheduled' });
     expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'sending', decision_at: ago(1e3), decision_active_from: ago(1e3) })).toMatchObject({ lifecycle: 'running', startedAt: ago(1e3).toISOString() });
     const sentAsIs = messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'accepted', decision_verdict: 'accepted', decision_at: ago(1e3) });
@@ -452,7 +452,14 @@ describe('getRun', () => {
     expect(d.attempts).toHaveLength(1);
     expect(d.calls).toHaveLength(1);
     expect(d.legacy).toEqual({ source: 'call_log', id: uid(1) });
-    expect(d.trace).toEqual({ id: null, calls: 1 });
+    expect(d.trace).toEqual({ id: null, calls: 1, capped: false });
+    // more calls than the cap: the newest 500 (oldest first), and the truncation is stated
+    fixtures.llm_dispatch_log = Array.from({ length: 501 }, (_, i) => ({ id: 501 - i, row_kind: 'call' })); // the query orders newest first
+    const big = await runIndex.getRun('call_log', uid(1), { now: NOW });
+    expect(big.calls).toHaveLength(500);
+    expect(big.calls[0].id).toBe(2);
+    expect(big.calls[499].id).toBe(501);
+    expect(big.trace).toEqual({ id: null, calls: 500, capped: true });
   });
 
   test('opening a canonical run by its own id folds in the legacy row it mirrors (steps, session calls)', async () => {

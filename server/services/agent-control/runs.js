@@ -132,6 +132,7 @@ function inertHandle(args = {}) {
     laneId,
     workflowId: args.workflowId || null,
     agentVersionId: args.agentVersionId || null,
+    isOpen: () => false,
     heartbeat: noop,
     wait: noop,
     resume: noop,
@@ -238,6 +239,12 @@ async function openAttempt(conn, run, policy, now) {
   // the work item is open again while a new attempt runs at it
   if (run.work_item_id) await conn('work_items').where({ id: run.work_item_id }).update({ status: 'open', updated_at: now });
   const attemptNo = Number(updated && updated.attempts != null ? updated.attempts : updated);
+  // a prior attempt still open here belongs to a handle that never closed
+  // it (a crashed worker): stamp it superseded so the history holds one
+  // open attempt at most — its handle, should it come back, may still
+  // replace the placeholder with its real outcome (closeAttempt) (Codex r8)
+  await conn('agent_attempts').where({ run_id: run.id }).whereNull('finished_at')
+    .update({ finished_at: now, result: 'canceled', error_code: 'superseded', error_message: 'superseded by a new attempt' });
   const [attempt] = await conn('agent_attempts')
     .insert({ run_id: run.id, attempt_no: attemptNo, worker_id: WORKER_ID, started_at: now })
     .returning('id');
@@ -481,10 +488,13 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
 
   // The attempt row closes in the SAME transaction as the run's transition
   // (atomic: never a closed attempt on a still-running run); a stale handle
-  // closes its own attempt row and nothing else.
+  // closes its own attempt row and nothing else. Fenced on the row being
+  // open — or holding openAttempt's superseded placeholder — so a second
+  // finish / fail racing on one handle cannot rewrite a recorded outcome
+  // (Codex r8).
   function closeAttempt(trx, result, failure = {}) {
     if (!attemptId) return null;
-    return trx('agent_attempts').where({ id: attemptId }).update({
+    return trx('agent_attempts').where({ id: attemptId }).where((q) => q.whereNull('finished_at').orWhere({ error_code: 'superseded' })).update({
       finished_at: new Date(),
       result,
       failure_class: failure.failureClass || null,
@@ -587,6 +597,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     laneId,
     workflowId,
     agentVersionId,
+    isOpen: () => !closed, // false once finish / fail persisted or proved stale
     heartbeat,
     step,
     wait,
@@ -617,13 +628,18 @@ async function runManaged(startArgs, fn) {
     workflowId: handle.workflowId,
   }, () => fn(handle));
   const body = () => (handle.laneId ? context.runInLane(handle.laneId, scoped) : scoped());
+  // a terminal write that rolled back leaves the handle open: one more try
+  // before the wrapper lets go of it (Codex r8) — still never a throw
   try {
     const value = await body();
     const shaped = value && typeof value === 'object' && !Array.isArray(value) && ('result' in value || 'disposition' in value || 'summary' in value || 'artifacts' in value);
-    await handle.finish(shaped ? value : {});
+    const outcome = shaped ? value : {};
+    if (!(await handle.finish(outcome)) && handle.isOpen()) await handle.finish(outcome);
     return value;
   } catch (err) {
-    await handle.fail({ error: err, errorCode: err && err.code, retryable: !!(err && err.retryable) });
+    const failure = { error: err, errorCode: err && err.code, retryable: !!(err && err.retryable) };
+    const r = await handle.fail(failure);
+    if (r && r.persisted === false && handle.isOpen()) await handle.fail(failure);
     throw err;
   }
 }

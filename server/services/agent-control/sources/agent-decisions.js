@@ -21,7 +21,10 @@ const SOURCE = 'agent_decisions';
 // `t` = the agent_decisions alias (message-drafts projects the same span
 // onto a suggested draft through its linked decision).
 function activeFrom(t) {
-  const scheduledSend = `(SELECT s.scheduled_for FROM sms_log s WHERE s.status IN ('scheduled', 'sending') AND (s.metadata::jsonb ->> 'agent_decision_id') = ${t}.id::text ORDER BY s.scheduled_for DESC LIMIT 1)`;
+  // the send links its decision as agent_decision_id, and every sibling it
+  // parked (parkThreadSuggestions → 'scheduled') in parked_decision_ids —
+  // both are live links (sms-suggest-mode's orphan recovery; Codex r8)
+  const scheduledSend = `(SELECT s.scheduled_for FROM sms_log s WHERE s.status IN ('scheduled', 'sending') AND ((s.metadata::jsonb ->> 'agent_decision_id') = ${t}.id::text OR jsonb_exists(COALESCE(s.metadata::jsonb -> 'parked_decision_ids', '[]'::jsonb), ${t}.id::text)) ORDER BY s.scheduled_for DESC LIMIT 1)`;
   return `CASE WHEN ${t}.status = 'scheduled' THEN GREATEST(${t}.updated_at, COALESCE(${scheduledSend}, ${t}.updated_at)) ELSE ${t}.created_at END`;
 }
 const ACTIVE_FROM = activeFrom('agent_decisions');

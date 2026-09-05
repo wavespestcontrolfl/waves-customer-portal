@@ -21,17 +21,29 @@ jest.mock('../models/db', () => {
   const store = {};
   const state = { failNext: null, idSeq: 0 }; // failNext: table whose next op throws
   const uuid = () => `00000000-0000-4000-8000-${String(++state.idSeq).padStart(12, '0')}`;
-  const matches = (row, where, whereNot) => Object.entries(where).every(([k, v]) => String(row[k]) === String(v))
-    && Object.entries(whereNot || {}).every(([k, v]) => String(row[k]) !== String(v));
+  const matches = (row, where, whereNot, nulls = [], anyOf = []) => Object.entries(where).every(([k, v]) => String(row[k]) === String(v))
+    && Object.entries(whereNot || {}).every(([k, v]) => String(row[k]) !== String(v))
+    && nulls.every((k) => row[k] == null)
+    // a grouped where((q) => q.whereNull(a).orWhere({ b })) — any branch matches
+    && anyOf.every((group) => group.some((br) => (br.isNull ? row[br.isNull] == null : Object.entries(br.eq).every(([k, v]) => String(row[k]) === String(v)))));
   const db = (table) => {
     if (!store[table]) store[table] = [];
-    const st = { where: {}, whereNot: null, max: null, op: null, payload: null, returning: null, ignore: false, first: false };
+    const st = { where: {}, whereNot: null, nulls: [], anyOf: [], max: null, op: null, payload: null, returning: null, ignore: false, first: false };
     const chain = {
       insert(rows) { st.op = 'insert'; st.payload = rows; return chain; },
       onConflict() { return chain; },
       ignore() { st.ignore = true; return chain; },
       returning(col) { st.returning = col; return chain; },
-      where(obj) { if (typeof obj === 'object') Object.assign(st.where, obj); return chain; },
+      where(obj) {
+        if (typeof obj === 'function') {
+          const group = [];
+          const sub = { whereNull(col) { group.push({ isNull: col }); return sub; }, orWhere(eq) { group.push({ eq }); return sub; } };
+          obj(sub);
+          st.anyOf.push(group);
+        } else if (typeof obj === 'object') Object.assign(st.where, obj);
+        return chain;
+      },
+      whereNull(col) { st.nulls.push(col); return chain; },
       first() { st.first = true; return chain; },
       update(patch) { st.op = 'update'; st.payload = patch; return chain; },
       whereNot(col, val) { st.whereNot = { ...(st.whereNot || {}), [col]: val }; return chain; },
@@ -55,7 +67,7 @@ jest.mock('../models/db', () => {
           } else if (st.op === 'update') {
             out = 0;
             for (const r of rows) {
-              if (!matches(r, st.where, st.whereNot)) continue;
+              if (!matches(r, st.where, st.whereNot, st.nulls, st.anyOf)) continue;
               for (const [k, v] of Object.entries(st.payload)) {
                 if (v && typeof v === 'object' && v.__merge) r[k] = { ...(r[k] || {}), ...v.__merge };
                 else if (v && typeof v === 'object' && v.__inc) r[k] = Number(r[k] || 0) + 1;
@@ -63,13 +75,13 @@ jest.mock('../models/db', () => {
               }
               out += 1;
             }
-            if (st.returning) out = rows.filter((r) => matches(r, st.where, st.whereNot)).map((r) => ({ [st.returning]: r[st.returning] }));
+            if (st.returning) out = rows.filter((r) => matches(r, st.where, st.whereNot, st.nulls, st.anyOf)).map((r) => ({ [st.returning]: r[st.returning] }));
           } else if (st.max) {
             const [col, alias] = String(st.max).split(' as ');
-            const found = rows.filter((r) => matches(r, st.where, st.whereNot));
+            const found = rows.filter((r) => matches(r, st.where, st.whereNot, st.nulls, st.anyOf));
             out = { [alias]: found.length ? Math.max(...found.map((r) => Number(r[col] || 0))) : null };
           } else {
-            const found = rows.filter((r) => matches(r, st.where, st.whereNot));
+            const found = rows.filter((r) => matches(r, st.where, st.whereNot, st.nulls, st.anyOf));
             out = st.first ? found[0] || null : found;
           }
           resolve(out);
@@ -371,6 +383,31 @@ describe('a spent handle', () => {
     // … and the retry can be recorded on the next call
     expect((await b.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: true })).retry).toBe(true);
     expect(row.lifecycle).toBe('queued');
+  });
+
+  test('a reopen supersedes a crashed attempt (one open attempt at most); the old handle may still replace the placeholder, but a recorded outcome is never rewritten', async () => {
+    const a = await runs.startRun(base);
+    const b = await runs.startRun(base); // a never finished: its worker crashed
+    expect(store.agent_attempts[0]).toMatchObject({ result: 'canceled', error_code: 'superseded' });
+    expect(store.agent_attempts[0].finished_at).toBeInstanceOf(Date);
+    expect(store.agent_attempts[1].finished_at).toBeUndefined();
+    // the crashed handle comes back: its real outcome replaces the placeholder (nothing else moves)
+    expect(await a.finish({ result: 'succeeded' })).toBe(false);
+    expect(store.agent_attempts[0]).toMatchObject({ result: 'succeeded', error_code: null });
+    // a second terminal call racing on one handle: the first outcome stands
+    const [f1, f2] = await Promise.all([b.finish({ result: 'succeeded' }), b.fail({ error: new Error('late'), errorCode: 'openai_500' })]);
+    expect(f1).toBe(true);
+    expect(f2).toMatchObject({ stale: true });
+    expect(store.agent_attempts[1]).toMatchObject({ result: 'succeeded', error_code: null });
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded' });
+  });
+
+  test('runManaged retries a terminal write that rolled back once, then lets the handle go', async () => {
+    await runs.runManaged(base, async () => { state.failNext = 'run_events'; return 1; });
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded' });
+    expect(events(runRow().id)).toEqual(['started', 'finished']);
+    await expect(runs.runManaged({ ...base, sourceRunId: 'r2', maxAttempts: 3 }, async () => { state.failNext = 'run_events'; const e = new Error('x'); e.code = 'openai_500'; e.retryable = true; throw e; })).rejects.toThrow('x');
+    expect(store.agent_runs.find((r) => r.source_run_id === 'r2')).toMatchObject({ lifecycle: 'queued', error_code: 'openai_500' });
   });
 
   test('a stale handle stepping past the budget stamps nothing and writes no budget event on the newer attempt', async () => {
