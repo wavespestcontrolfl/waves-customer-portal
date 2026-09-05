@@ -105,6 +105,9 @@ const WRITE_TOOL_IN_FLIGHT_TEXT =
 // capture latch) before the capture floor decides whether to write a lead, but
 // a wedged one must never hold the socket-close handler open forever.
 const WRITE_DRAIN_TIMEOUT_MS = 10000;
+// The capture floor's summary when the caller said nothing this session could
+// see — the exact text the late-segment refresh below replaces (hook r22 P1).
+const FLOOR_NO_TRANSCRIPT = 'No transcript captured.';
 const RESUME_RELOAD_ATTEMPTS = 3; // PR 2B: turns on which a resumed session re-reads a not-yet-appended earlier segment
 
 /** Resolve `promise`, or `fallback` after `ms`. The loser is never awaited. */
@@ -2191,6 +2194,9 @@ class RelayConversation {
               .map((p) => [p.kind, { verdict: p.verdict, expectation: p.expectation, at: p.at ? new Date(p.at) : null }]));
             await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });
           }
+          // …and the replacement's capture floor may have run before this
+          // segment landed, with no caller turns to summarise (hook r22 P1).
+          await this._refreshFloorLeadSummary(meta);
         } catch (err) {
           logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
         }
@@ -2423,6 +2429,39 @@ class RelayConversation {
   }
 
   /**
+   * PR 2B (hook r22 P1) — the late segment's lead refresh. The resumed socket
+   * can close (silently) before this superseded socket's segment lands — its
+   * capture floor then saw no earlier caller turns and wrote this call's lead
+   * with the no-transcript summary. Now that the segment IS on the row, the
+   * whole call's caller lines are known: the floor lead of THIS call whose
+   * summary is still that placeholder gets the real summary, in one
+   * compare-and-set UPDATE (a lead capture_lead wrote, or a floor that saw
+   * the turns, matches nothing). Bounded, best-effort, never on the sandbox.
+   */
+  async _refreshFloorLeadSummary(meta) {
+    if (this.sandbox || !this.callSid) return false;
+    const recovery = require('./relay-recovery');
+    const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
+    if (!callerTurns.length) return false;
+    try {
+      const { scrubForStorage } = require('./relay-transcript');
+      const rows = await withTimeout(
+        db('leads')
+          .where({ twilio_call_sid: this.callSid })
+          .where('transcript_summary', 'like', `%${FLOOR_NO_TRANSCRIPT}`)
+          .update({ transcript_summary: floorSummary(callerTurns, scrubForStorage), updated_at: new Date() }),
+        WRITE_DRAIN_TIMEOUT_MS,
+        0,
+      );
+      if (Number(rows) > 0) logger.info(`[voice-relay] floor lead summary refreshed from the late segment callSid=${maskSid(this.callSid)}`);
+      return Number(rows) > 0;
+    } catch (err) {
+      logger.warn(`[voice-relay] floor lead summary refresh failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
    * Capture floor: if the model never managed to call capture_lead but we have
    * a real caller number, write a minimal lead so this call still produces a
    * follow-up. Runs BEFORE the call_log reporting stamp so the transcript's
@@ -2479,12 +2518,9 @@ class RelayConversation {
     // a caller who explained everything before the drop and hung up right
     // after the reconnect must not produce a "No transcript captured" lead.
     const callerTurns = [...((this._resume && this._resume.callerTurns) || []), ...this._userTurns];
-    const spokenSoFar = callerTurns.length
-      ? `Caller said: ${scrubForStorage(callerTurns.join(' | ')).slice(0, 600)}`
-      : 'No transcript captured.';
     const write = createLeadFromExtraction(
       {
-        call_summary: `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`,
+        call_summary: floorSummary(callerTurns, scrubForStorage),
         requested_service: null,
       },
       {
@@ -2552,6 +2588,14 @@ class RelayConversation {
       logger.warn(`[voice-relay] capture-floor still writing past ${WRITE_DRAIN_TIMEOUT_MS}ms callSid=${this.callSid} — finalizing the call_log without waiting`);
     }
   }
+}
+
+/** The capture floor's summary: the caller's lines (scrubbed, capped) or the no-transcript placeholder. */
+function floorSummary(callerTurns, scrub) {
+  const spokenSoFar = callerTurns.length
+    ? `Caller said: ${scrub(callerTurns.join(' | ')).slice(0, 600)}`
+    : FLOOR_NO_TRANSCRIPT;
+  return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
 module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

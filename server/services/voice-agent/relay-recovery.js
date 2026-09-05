@@ -269,8 +269,7 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
       if (reconnects <= 0) return null;
       const full = segmentsText(meta.relay_segments);
       const promises = latestPromises(meta.relay_segments);
-      const callerLabel = `${require('./relay-transcript').CALLER_LABEL}: `;
-      const callerTurns = full.split('\n').filter((line) => line.startsWith(callerLabel)).map((line) => line.slice(callerLabel.length).trim()).filter(Boolean);
+      const callerTurns = callerTurnsFromText(full);
       const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments.filter((seg) => seg && typeof seg === 'object') : [];
       const latest = [...legs].sort((a, b) => (Number(b.generation) || 0) - (Number(a.generation) || 0))[0] || null;
       return {
@@ -300,6 +299,12 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The caller's lines of a played-text transcript (the capture floor's summary is built from these). */
+function callerTurnsFromText(text) {
+  const callerLabel = `${require('./relay-transcript').CALLER_LABEL}: `;
+  return String(text || '').split('\n').filter((line) => line.startsWith(callerLabel)).map((line) => line.slice(callerLabel.length).trim()).filter(Boolean);
 }
 
 /** The latest promise per kind across a row's segments, in generation order. */
@@ -374,6 +379,7 @@ module.exports = {
   loadResumeState,
   readReconnectState,
   latestPromises,
+  callerTurnsFromText,
   providerFailurePolicy,
   RESUME_SEED_MAX_CHARS,
 };

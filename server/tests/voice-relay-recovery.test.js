@@ -296,6 +296,23 @@ describe('the conversation side', () => {
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-rec');
   });
 
+  test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { db, builder, updates } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
+    const convo = convoWithTurns();
+    convo._sessionSuperseded = jest.fn(async () => true);
+    await convo.end('ws_close');
+    expect(db).toHaveBeenCalledWith('leads');
+    expect(builder.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-rec' });
+    expect(builder.where).toHaveBeenCalledWith('transcript_summary', 'like', '%No transcript captured.');
+    const refresh = updates.find((u) => typeof u.transcript_summary === 'string');
+    expect(refresh.transcript_summary).toBe('Inbound voice call (auto-captured on hangup). Caller said: my ants are back');
+    // no caller lines on the row ⇒ nothing to refresh; sandbox ⇒ never
+    primeDb({ firstRow: { transcription: 'Agent: hello', metadata: { relay_session_claim_owner: 'nonce-2', relay_segments: [{ generation: 1, text: 'Agent: hello' }] } } });
+    expect(await convoWithTurns()._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Agent: hello' }] })).toBe(false);
+    expect(await convoWithTurns({ sandbox: true })._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Caller: hi' }] })).toBe(false);
+  });
+
   test('a resumed socket the caller never spoke on still composes the earlier segment(s) onto the columns at its close (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { updates, builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: first leg' }] }, transcription: 'Caller: first leg' } });
