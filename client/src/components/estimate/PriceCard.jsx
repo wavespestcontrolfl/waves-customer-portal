@@ -587,7 +587,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   and the struck anchor above already say these come off. */}
               <strong style={{
                 color: W.blueDeeper,
-                fontWeight: 800,
+                fontWeight: 700,
                 whiteSpace: 'nowrap',
                 fontVariantNumeric: 'tabular-nums',
               }}>
@@ -638,7 +638,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
           background: W.successWash,
           color: W.green,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
           lineHeight: 1.35,
         }}>
           <span>{manualDiscount.label || 'Discount'}</span>
@@ -696,7 +696,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' }}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, lineHeight: 1.35 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: W.blueDeeper, lineHeight: 1.35 }}>
                   {row.label || 'Service application'}
                 </div>
                 {/* Single-service glass cards quote ONE price — the header
@@ -706,7 +706,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                     breakdowns keep per-row prices — there the split IS the
                     information. */}
                 {glass && treatmentRows.length === 1 ? null : (
-                  <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: W.blueDeeper, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
                     {row.displayPrice > 0
                       ? <>{fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span></>
                       : <>{fmtMoney(row.monthlyPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ month</span></>}
@@ -714,7 +714,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                 )}
               </div>
               {subLabelParts.length ? (
-                <div style={{ marginTop: 4, fontSize: 12, color: W.textCaption, lineHeight: 1.35 }}>
+                <div style={{ marginTop: 4, fontSize: 14, color: W.textCaption, lineHeight: 1.35 }}>
                   {subLabelParts.join(glass ? ' · ' : ' - ')}
                 </div>
               ) : null}
@@ -722,7 +722,7 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   (bedroom-band) row: the quote is interior-only and says so
                   before accept — never implied by the inclusions list. */}
               {row.scopeNote ? (
-                <div data-testid="row-scope-note" style={{ marginTop: 6, fontSize: 12, color: W.textCaption, lineHeight: 1.4 }}>
+                <div data-testid="row-scope-note" style={{ marginTop: 6, fontSize: 14, color: W.textCaption, lineHeight: 1.4 }}>
                   {row.scopeNote}
                 </div>
               ) : null}

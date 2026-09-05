@@ -23,6 +23,7 @@
  */
 
 const db = require('../models/db');
+const { assertAssignableTechnician } = require('./technician-eligibility');
 
 const OPEN_STATUSES = ['open'];
 // Row-status vocabularies live in the canonical visit-context module.
@@ -2456,7 +2457,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
-        if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+        if (options.technicianId !== undefined) {
+          await assertAssignableTechnician(options.technicianId || null, { conn: t });
+          patch.technician_id = options.technicianId || null;
+        }
         // Mirror the normal retarget's lifecycle reset (codex r43): a
         // repaired LIVE move (allowLive) or date change must not leave the
         // parent marked underway with its tracker one-shots consumed at
@@ -2987,7 +2991,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         patch.stop_base_key = newKey;
         patch.stop_seq = await nextStopSeq(t, newKey);
       }
-      if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+      if (options.technicianId !== undefined) {
+        await assertAssignableTechnician(options.technicianId || null, { conn: t });
+        patch.technician_id = options.technicianId || null;
+      }
       if (plan.anyLive || newDateStr !== plan.oldDate) {
         // The members' lifecycle was rewound by the rebooker; the visit's
         // must follow, and the day's tracker one-shots re-arm.

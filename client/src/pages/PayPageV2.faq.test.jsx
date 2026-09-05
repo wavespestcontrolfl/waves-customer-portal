@@ -93,7 +93,7 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
   it('renders nothing when the server omits payFaq (gate off)', async () => {
     stubFetch(payload({ manualPayOptions: { zelle: { recipient: '9415551234' } } }));
     renderPage();
-    await screen.findByText('Secure');
+    await screen.findByText('Review and pay');
     expect(FAQ()).toBeNull();
     expect(screen.queryByText('Common questions')).not.toBeInTheDocument();
   });
@@ -101,7 +101,7 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
   it('renders the card-fee, bank-timing and saved-card questions with the derived surcharge percent', async () => {
     stubFetch(payload({ payFaq: true }));
     renderPage();
-    await screen.findByText('Secure');
+    await screen.findByText('Review and pay');
     expect(FAQ()).not.toBeNull();
     const pct = Number((DEFAULT_CARD_SURCHARGE_RATE * 100).toFixed(2)).toString();
     expect(screen.getByText('Why is there a card fee, and how do I avoid it?')).toBeInTheDocument();
@@ -120,7 +120,7 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
   it('adds the Zelle question only when the server offers Zelle', async () => {
     stubFetch(payload({ payFaq: true, manualPayOptions: { zelle: { recipient: '9415551234' } } }));
     renderPage();
-    await screen.findByText('Secure');
+    await screen.findByText('Review and pay');
     expect(screen.getByText('Can I pay by Zelle?')).toBeInTheDocument();
     expect(screen.getByText(/Zelle has no fees/)).toBeInTheDocument();
     const faq = FAQ();
@@ -134,14 +134,14 @@ describe('pay page — FAQ under the Pay button (GATE_PAY_PAGE_FAQ)', () => {
     body.invoice.saveRequired = true;
     stubFetch(body);
     renderPage();
-    await screen.findByText('Secure');
+    await screen.findByText('Review and pay');
     expect(screen.getByText(/required for recurring service, so this one is saved/)).toBeInTheDocument();
   });
 
   it('drops the saved-card question on a third-party (payer) billed invoice', async () => {
     stubFetch(payload({ payFaq: true, payer: { name: 'Acme HOA', email: 'ap@example.com' } }));
     renderPage();
-    await screen.findByText('Secure');
+    await screen.findByText('Review and pay');
     expect(FAQ()).not.toBeNull();
     expect(screen.queryByText('Is my card saved?')).not.toBeInTheDocument();
   });

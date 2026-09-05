@@ -46,10 +46,13 @@ wiki/              Dispatch/service protocols (seeded into the in-app knowledge 
 ## Development
 
 ```bash
-npm install          # also wires the Codex pre-push hook (core.hooksPath)
-cp .env.example .env # DATABASE_URL is required — `predev` runs migrations
-npm run dev          # API :3001 + Vite :5173
+npm ci
+npm run worktree:setup
+npm run dev:managed-client # assigned frontend port; no database needed
 ```
+
+For isolated backend setup, explicit migrations, debugging and worktree commands,
+see [docs/development.md](docs/development.md).
 
 Key commands:
 

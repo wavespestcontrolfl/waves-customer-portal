@@ -10,6 +10,7 @@
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
+const { isAssignable } = require('./technician-eligibility');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
@@ -5442,6 +5443,19 @@ const EstimateConverter = {
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
+              // The same-trip parent inherits the reserved start's technician. If
+              // that tech can no longer take work (offboarded / office-only since
+              // the reserve), insert it unassigned; FOR SHARE on this trx so the
+              // change cannot commit underneath. Insert line below is frozen by
+              // the booking insert-site contract and stays untouched.
+              if (standaloneRow.technician_id) {
+                const parentTech = await trx('technicians').where({ id: standaloneRow.technician_id }).forShare()
+                  .first('id', 'employment_status', 'field_dispatchable');
+                if (!isAssignable(parentTech)) {
+                  logger.warn(`[estimate-converter] technician ${standaloneRow.technician_id} is not assignable; inserting standalone parent unassigned`);
+                  delete standaloneRow.technician_id;
+                }
+              }
               const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
               // Visit groups (visit-group-scope.md §2): a same-trip row and
               // the reserved start share one physical stop — stamp them at

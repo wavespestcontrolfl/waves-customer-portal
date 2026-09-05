@@ -115,6 +115,20 @@ function buildStaleLeadUpdate(qb, { now, cutoff, excludeSoftDeleted = false }) {
         .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled', 'skipped', 'no_show'])
         .whereRaw("scheduled_services.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day'");
     })
+    // A lead whose own funnel row already carries the deal — booked, or
+    // completed — is won in everything but its status: a wizard repeat's
+    // conversion settles its win onto the open root's funnel row and leaves
+    // the root's lead row open for the office to merge (funnel writes are
+    // funnel-table only). The exemption above cannot see it — the root is
+    // often unlinked, and the settlement writes no activity on it — and the
+    // 'unresponsive' bridge would demote that booked row to lost (codex
+    // #3834 r37 P1). Same rule as the scheduled_services clause: pending
+    // won-conversion, not unresponsive.
+    .whereNotExists(function () {
+      this.select(1).from('ad_service_attribution')
+        .whereRaw('ad_service_attribution.lead_id = leads.id')
+        .whereIn('ad_service_attribution.funnel_stage', ['booked', 'completed']);
+    })
     .update({ status: 'unresponsive', updated_at: now })
     .returning('id');
 }

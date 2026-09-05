@@ -24,13 +24,13 @@ beforeEach(() => db.mockReset());
 
 describe('verifyStaffBearer', () => {
   it('returns the technician row for an active admin', async () => {
-    const tech = { id: 7, active: true, role: 'admin', auth_token_version: 1 };
+    const tech = { id: 7, active: true, employment_status: 'active', role: 'admin', auth_token_version: 1 };
     mockTechLookup(tech);
     await expect(verifyStaffBearer(reqWith(`Bearer ${sign({ technicianId: 7, type: 'access', tokenVersion: 1 })}`))).resolves.toBe(tech);
   });
 
   it('returns the technician row for an active technician (matches requireTechOrAdmin)', async () => {
-    const tech = { id: 9, active: true, role: 'technician', auth_token_version: 3 };
+    const tech = { id: 9, active: true, employment_status: 'active', role: 'technician', auth_token_version: 3 };
     mockTechLookup(tech);
     await expect(verifyStaffBearer(reqWith(`Bearer ${sign({ technicianId: 9, type: 'access', tokenVersion: 3 })}`))).resolves.toBe(tech);
   });
@@ -68,22 +68,22 @@ describe('verifyStaffBearer', () => {
   it('rejects a missing or inactive technician row', async () => {
     mockTechLookup(undefined);
     await expect(verifyStaffBearer(reqWith(`Bearer ${sign({ technicianId: 7, type: 'access', tokenVersion: 1 })}`))).resolves.toBeNull();
-    mockTechLookup({ id: 7, active: false, role: 'admin', auth_token_version: 1 });
+    mockTechLookup({ id: 7, active: false, employment_status: 'inactive', role: 'admin', auth_token_version: 1 });
     await expect(verifyStaffBearer(reqWith(`Bearer ${sign({ technicianId: 7, type: 'access', tokenVersion: 1 })}`))).resolves.toBeNull();
   });
 
   it('rejects non-staff roles', async () => {
-    mockTechLookup({ id: 7, active: true, role: 'viewer', auth_token_version: 1 });
+    mockTechLookup({ id: 7, active: true, employment_status: 'active', role: 'viewer', auth_token_version: 1 });
     await expect(verifyStaffBearer(reqWith(`Bearer ${sign({ technicianId: 7, type: 'access', tokenVersion: 1 })}`))).resolves.toBeNull();
   });
 
   it('rejects revoked and forced-password-change staff sessions', async () => {
-    mockTechLookup({ id: 7, active: true, role: 'admin', auth_token_version: 2 });
+    mockTechLookup({ id: 7, active: true, employment_status: 'active', role: 'admin', auth_token_version: 2 });
     await expect(verifyStaffBearer(reqWith(`Bearer ${sign({ technicianId: 7, type: 'access', tokenVersion: 1 })}`))).resolves.toBeNull();
 
     mockTechLookup({
       id: 7,
-      active: true,
+      active: true, employment_status: 'active',
       role: 'admin',
       auth_token_version: 2,
       must_change_password: true,
@@ -98,7 +98,7 @@ describe('verifyStaffBearer', () => {
 
 describe('adminAuthenticate token type', () => {
   it('redacts provider recording URLs from authenticated JSON responses', async () => {
-    mockTechLookup({ id: 7, active: true, role: 'admin', auth_token_version: 4 });
+    mockTechLookup({ id: 7, active: true, employment_status: 'active', role: 'admin', auth_token_version: 4 });
     const req = reqWith(`Bearer ${sign({ technicianId: 7, type: 'access', tokenVersion: 4 })}`);
     const rawJson = jest.fn();
     const res = { json: rawJson };
@@ -169,7 +169,7 @@ describe('adminAuthenticate token type', () => {
   });
 
   it('rejects a stale token version', async () => {
-    mockTechLookup({ id: 7, active: true, role: 'admin', auth_token_version: 4 });
+    mockTechLookup({ id: 7, active: true, employment_status: 'active', role: 'admin', auth_token_version: 4 });
     const req = reqWith(`Bearer ${sign({ technicianId: 7, type: 'access', tokenVersion: 3 })}`);
     const json = jest.fn();
     const res = { status: jest.fn(() => ({ json })) };
@@ -185,7 +185,7 @@ describe('adminAuthenticate token type', () => {
   it('allows only /me and /change-password while rotation is required', async () => {
     const tech = {
       id: 7,
-      active: true,
+      active: true, employment_status: 'active',
       role: 'admin',
       auth_token_version: 2,
       must_change_password: true,

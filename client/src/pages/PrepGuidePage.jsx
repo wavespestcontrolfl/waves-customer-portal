@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import PublicLoadError from '../components/PublicLoadError';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -39,7 +38,7 @@ const SURFACE = {
 const PRINT_STYLE = `
 @media print {
   body { background: white !important; }
-  .prep-no-print { display: none !important; }
+  .prep-no-print, [data-brand-footer] { display: none !important; }
   .prep-card { box-shadow: none !important; border: none !important; }
 }
 `;
@@ -56,7 +55,7 @@ function BlockRenderer({ blocks }) {
         );
       case 'heading':
         return (
-          <h2 key={i} style={{
+          <h2 key={i} className="waves-print-h2" style={{
             fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.semibold,
             color: SURFACE.text, margin: `28px 0 ${SP.md}px`, lineHeight: LH.heading,
           }}>
@@ -218,7 +217,7 @@ function NotFound() {
 
 export default function PrepGuidePage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null); // null | notfound | temporary
   const [loading, setLoading] = useState(true);
@@ -268,17 +267,15 @@ export default function PrepGuidePage() {
               padding: '28px 24px 32px',
             }}
           >
-            <h1 style={{
+            <div data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: SURFACE.muted, marginBottom: SP.xs }}>
+              Prep guide{data.projectTypeLabel ? ` · ${data.projectTypeLabel}` : ''}
+            </div>
+            <h1 className="waves-print-h2" style={{
               fontFamily: DOC_FONT_SERIF, fontSize: FS.h2, fontWeight: FW.bold,
               color: SURFACE.text, margin: `0 0 ${SP.xxs}px`, lineHeight: LH.heading,
             }}>
               {data.projectTypeLabel} Prep Guide
             </h1>
-            {data.technicianName && (
-              <p style={{ fontSize: FS.body, color: SURFACE.muted, margin: `0 0 ${SP.xxs}px` }}>
-                Your technician: {data.technicianName}
-              </p>
-            )}
             {(() => {
               // Contact block (owner 2026-07-13): names and address only,
               // one line each, empties dropped — account holder's name,
@@ -293,9 +290,12 @@ export default function PrepGuidePage() {
               ].map((line) => String(line || '').trim()).filter(Boolean))];
               return contactLines.length ? (
                 <div style={{ margin: `${SP.sm}px 0 ${SP.xl}px`, display: 'grid', gap: SP.xxs }}>
-                  {contactLines.map((line) => (
-                    <div key={line} style={{ fontSize: FS.body, color: SURFACE.muted, letterSpacing: '0.04em', textTransform: 'uppercase', lineHeight: LH.body }}>{line}</div>
+                  {contactLines.map((line, i) => (
+                    <div key={line} style={{ fontSize: FS.bodyLg, color: i === 0 ? SURFACE.text : SURFACE.muted, fontWeight: i === 0 ? FW.semibold : FW.regular, lineHeight: LH.body }}>{line}</div>
                   ))}
+                  {data.technicianName ? (
+                    <div style={{ fontSize: FS.bodyLg, color: SURFACE.muted, lineHeight: LH.body }}>Your technician: {data.technicianName}</div>
+                  ) : null}
                 </div>
               ) : <div style={{ marginBottom: SP.lg }} />;
             })()}
@@ -324,13 +324,8 @@ export default function PrepGuidePage() {
       <style>{PRINT_STYLE}</style>
       <meta name="robots" content="noindex, nofollow" />
       <WavesShell variant="customer" topBar="solid">
-        <div data-glass-clear="" style={{ flex: 1, minHeight: '100vh', background: SURFACE.page }}>
+        <div data-glass-clear="" style={{ flex: 1, background: SURFACE.page }}>
           {content}
-          <div className="prep-no-print" style={{ maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', padding: `0 ${SP.md}px 40px`, fontFamily: DOC_FONT }}>
-            {/* Newsletter signup lives only on the newsletter pages
-                (owner 2026-07-09, supersedes same-day card ruling). */}
-            <BrandFooter />
-          </div>
         </div>
       </WavesShell>
     </>

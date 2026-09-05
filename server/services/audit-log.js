@@ -498,8 +498,28 @@ function uaFromReq(req) {
   return req.headers?.['user-agent'] || null;
 }
 
+/**
+ * Automatic vendor order (procurement/order-dispatch.js). One row per ledger
+ * transition that matters for money: placed, failed, needs_review, and the
+ * operator revoke. critical:true on the caller's ledger transaction — a
+ * placed order without its audit row must not commit.
+ */
+async function auditVendorOrder({ vendor_order_id, restock_request_id, vendor_id, adapter, outcome, amount_cents = null, external_order_number = null, reason = null, actor_type = 'system', actor_id = null, trx = null }) {
+  return recordAuditEvent({
+    actor_type,
+    actor_id,
+    action: `procurement.vendor_order.${outcome}`,
+    resource_type: 'vendor_order',
+    resource_id: vendor_order_id,
+    metadata: { restock_request_id, vendor_id, adapter, amount_cents, external_order_number, reason },
+    critical: true,
+    trx,
+  });
+}
+
 module.exports = {
   recordAuditEvent,
+  auditVendorOrder,
   auditTerminalHandoffMint,
   auditTerminalHandoffRateLimited,
   auditTerminalHandoffValidate,

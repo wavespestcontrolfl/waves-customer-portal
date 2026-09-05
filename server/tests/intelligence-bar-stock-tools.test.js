@@ -59,7 +59,7 @@ function makeRecordingDb(seed = {}) {
 
   const db = (table) => makeBuilder(table);
   db.raw = (...args) => ({ __raw: args });
-  db.transaction = async (cb) => cb((table) => makeBuilder(table));
+  db.transaction = async (cb) => { const trx = (table) => makeBuilder(table); trx.raw = db.raw; return cb(trx); };
   return { db, mutations };
 }
 
@@ -274,6 +274,36 @@ describe('update_restock_request', () => {
     });
     expect(result.error).toMatch(/already received/);
     expect(mutations).toEqual([]);
+  });
+
+  test('ONE more receive is admitted on a received request whose automatic order landed after that receipt — and settles the marker (Codex r27 P1)', async () => {
+    const mutations = useDb({
+      products_catalog: [TRACKED_PRODUCT],
+      product_restock_requests: [{ ...OPEN_REQUEST, status: 'received' }],
+      vendor_orders: [{ id: 'vo-9', status: 'needs_review', placed_at: new Date(), external_order_number: 'S1-9', evidence: { landedAfterReceive: '2026-09-05T01:00:00Z' } }],
+    });
+    const result = await executeProcurementTool('update_restock_request', {
+      request_id: 'req-1', action: 'receive', confirmed: true,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.success).toBe(true);
+    expect(result.stock_after).toBe(192);
+    const movement = mutations.find(m => m.table === 'product_inventory_movements' && m.op === 'insert');
+    expect(movement.args[0].metadata).toMatchObject({ secondReceive: true });
+    expect(mutations.some(m => m.table === 'vendor_orders' && m.op === 'update')).toBe(true); // evidence.landedAfterReceive comes off in the same transaction
+  });
+
+  test('a completed action retires the request\'s ledger bell; a refused receive (card amounts changed) keeps it (Codex r28 P2 + hook P1)', async () => {
+    const ledger = { id: 'vo-3', status: 'needs_review', placed_at: null, evidence: {} };
+    let mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [OPEN_REQUEST], vendor_orders: [ledger] });
+    let result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'mark_ordered', confirmed: true });
+    expect(result.success).toBe(true);
+    expect(mutations.some(m => m.table === 'notifications' && m.op === 'update')).toBe(true);
+
+    mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [OPEN_REQUEST], vendor_orders: [ledger] });
+    result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', confirmed: true, _verified_receive: { adds: 1, unit: 'fl_oz', stock_before: 64 } });
+    expect(result.preview_changed).toBe(true);
+    expect(mutations.some(m => m.table === 'notifications')).toBe(false);
   });
 
   test('a concurrent receive landing between pre-check and transaction is caught by the locked re-check (Codex P1)', async () => {

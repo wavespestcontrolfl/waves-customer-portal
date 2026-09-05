@@ -968,12 +968,14 @@ async function createRestockRequest(knex, req, serviceId) {
     err.statusCode = 400;
     throw err;
   }
-  // One transaction, product row LOCKED before the insert, then the SHARED
-  // any-source live-request check under that lock: every restock creator
+  // One transaction, product row LOCKED before the insert, then — under that
+  // lock — the dispatcher's live-order check (409 while an automatic order is
+  // placing/placed: the Restock tab carries the order line, pre-push P0) and
+  // the SHARED any-source live-request check every restock creator runs
   // (this route, the forecast route, the Intelligence Bar tool, the
-  // auto-reorder sweep) runs the same read under the same row lock, so a
-  // writer that resumes after a concurrent commit hands back the request
-  // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
+  // auto-reorder sweep), so a writer that resumes after a concurrent commit
+  // hands back the request that already exists instead of raising its twin
+  // (Codex r8 P1, r9 P1).
   return knex.transaction(async (trx) => {
     const service = await trx('scheduled_services').where({ id: serviceId }).first();
     if (!service) {
@@ -987,6 +989,7 @@ async function createRestockRequest(knex, req, serviceId) {
       err.statusCode = 400;
       throw err;
     }
+    await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
     const live = await findLiveRestockRequest(trx, product.id);
     if (live) return { ...live, existing: true, productName: product.name, productCategory: product.category || null };
     const [row] = await trx('product_restock_requests')
