@@ -12720,6 +12720,10 @@ const CallRecordingProcessor = {
                   parentWindowStart: windowStart || '09:00',
                 });
               let reusedExistingSchedule = false;
+              // The reuse branch below may assign the default tech to an
+              // unassigned reused row — that row was never announced (it had
+              // no tech at insert), so it is "new" to them now.
+              let reuseAssignedTechId = null;
               // Set when the call was ATTACHED to a live booking made by a
               // human through another channel (see the attach guard below):
               // the id drives the distinct log line, and the skipped-plan
@@ -13013,6 +13017,7 @@ const CallRecordingProcessor = {
                         .update({ technician_id: reuseTechId, route_order: null, updated_at: new Date() })
                         .returning('*')
                       : [existing];
+                    if (reuseTechId && updatedExisting) reuseAssignedTechId = reuseTechId;
                     primaryRow = updatedExisting || existing;
                     // Visit-group seam (visit-group-scope.md §2; codex #3590
                     // r12): this direct assignment bypasses assignDispatchJob,
@@ -13622,6 +13627,27 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              // Tech-facing "new visit" cards (tech-visit-notifications.js):
+              // a phone booking inserts its assigned rows directly, bypassing
+              // assignDispatchJob, so it tells the tech itself — the fresh
+              // primary (never a reused row: the original insert already
+              // announced it) and a fresh follow-up child. Post-commit,
+              // best-effort, never awaited; gate-dark; system actor.
+              {
+                const techNotices = require('./tech-visit-notifications');
+                const freshRows = [
+                  // A reused row that this run ASSIGNED is new to that tech too.
+                  ...(!reusedExistingSchedule || (reuseAssignedTechId && String(svc.technician_id) === String(reuseAssignedTechId)) ? [svc] : []),
+                  ...(followUpCreated && followUpCreated.id ? [followUpCreated] : []),
+                ];
+                for (const row of freshRows) {
+                  if (!row.technician_id) continue;
+                  void techNotices.notifyTechVisitChange({
+                    visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: null,
+                    snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
+                  });
+                }
+              }
               if (scheduleWasReused) {
                 // The reused row can be a LEGACY outbound-review booking
                 // (created pending before the 2026-08-11 hold removal): the
