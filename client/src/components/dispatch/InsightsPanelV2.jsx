@@ -43,9 +43,13 @@ export default function InsightsPanelV2() {
   const techs = data?.techMetrics || [];
   const forecast = data?.forecast || [];
 
-  const driveAlert = (s.avgDrivePct || 0) > 25;
-  const callbackAlert = (s.callbackRate || 0) > 6;
-  const revenueNegative = s.revenueVariance != null && s.revenueVariance < 0;
+  const summaryMetrics = [
+    { label: 'Rev / route hr', value: s.avgRevPerHr, prefix: '$', hint: 'target $100+' },
+    { label: 'Avg drive time', value: s.avgDrivePct, suffix: '%', hint: 'target <25%', alert: s.avgDrivePct > 25 },
+    { label: 'Completion rate', value: s.completionRate, suffix: '%', hint: `last ${days} days` },
+    { label: 'Callback rate', value: s.callbackRate, suffix: '%', hint: 'target <5%', alert: s.callbackRate > 6 },
+  ];
+  const revenueNegative = s.revenueVariance < 0;
 
   return (
     <div>
@@ -80,48 +84,20 @@ export default function InsightsPanelV2() {
       ) : <>
       {/* Summary metrics */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5">
-        <Card>
-          <CardBody className="p-4">
-            <div className="u-label text-ink-secondary">Rev / route hr</div>
-            <div className="u-nums text-22 font-medium tracking-tight text-ink-primary mt-2 leading-none">
-              ${s.avgRevPerHr ?? '—'}
-            </div>
-            <div className="text-11 text-ink-tertiary mt-1">target $100+</div>
-          </CardBody>
-        </Card>
-        <Card>
-          <CardBody className="p-4">
-            <div className="u-label text-ink-secondary">Avg drive time</div>
-            <div className={cn(
-              'u-nums text-22 font-medium tracking-tight mt-2 leading-none',
-              driveAlert ? 'text-alert-fg' : 'text-ink-primary'
-            )}>
-              {s.avgDrivePct ?? '—'}%
-            </div>
-            <div className="text-11 text-ink-tertiary mt-1">target &lt;25%</div>
-          </CardBody>
-        </Card>
-        <Card>
-          <CardBody className="p-4">
-            <div className="u-label text-ink-secondary">Completion rate</div>
-            <div className="u-nums text-22 font-medium tracking-tight text-ink-primary mt-2 leading-none">
-              {s.completionRate ?? '—'}%
-            </div>
-            <div className="text-11 text-ink-tertiary mt-1">last {days} days</div>
-          </CardBody>
-        </Card>
-        <Card>
-          <CardBody className="p-4">
-            <div className="u-label text-ink-secondary">Callback rate</div>
-            <div className={cn(
-              'u-nums text-22 font-medium tracking-tight mt-2 leading-none',
-              callbackAlert ? 'text-alert-fg' : 'text-ink-primary'
-            )}>
-              {s.callbackRate ?? '—'}%
-            </div>
-            <div className="text-11 text-ink-tertiary mt-1">target &lt;5%</div>
-          </CardBody>
-        </Card>
+        {summaryMetrics.map(metric => (
+          <Card key={metric.label}>
+            <CardBody className="p-4">
+              <div className="u-label text-ink-secondary">{metric.label}</div>
+              <div className={cn(
+                'u-nums text-22 font-medium tracking-tight mt-2 leading-none',
+                metric.alert ? 'text-alert-fg' : 'text-ink-primary'
+              )}>
+                {metric.prefix}{metric.value ?? '—'}{metric.suffix}
+              </div>
+              <div className="text-11 text-ink-tertiary mt-1">{metric.hint}</div>
+            </CardBody>
+          </Card>
+        ))}
         <Card>
           <CardBody className="p-4">
             <div className="u-label text-ink-secondary">Actual revenue</div>

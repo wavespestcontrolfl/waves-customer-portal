@@ -47,3 +47,19 @@ it('ignores a response from a prior unmounted instance',async () => {
  await act(async () => {release(ok(7));});
  expect(screen.queryByText('$7')).not.toBeInTheDocument();
 });
+
+it.each([
+ { drive: 25, callback: 6, alert: false },
+ { drive: 26, callback: 7, alert: true },
+])('preserves summary alert thresholds for drive=$drive and callback=$callback', async ({ drive, callback, alert }) => {
+ fetch.mockResolvedValue({ok:true,json:async () => ({summary:{avgDrivePct:drive,callbackRate:callback},techMetrics:[],forecast:[]})});
+ render(<InsightsPanelV2 />);
+ const driveValue=await screen.findByText(`${drive}%`);
+ const callbackValue=screen.getByText(`${callback}%`);
+ for (const value of [driveValue, callbackValue]) {
+  expect(value).toHaveClass(alert ? 'text-alert-fg' : 'text-ink-primary');
+  expect(value).not.toHaveClass(alert ? 'text-ink-primary' : 'text-alert-fg');
+ }
+ expect(screen.getByText('target <25%')).toBeInTheDocument();
+ expect(screen.getByText('target <5%')).toBeInTheDocument();
+});
