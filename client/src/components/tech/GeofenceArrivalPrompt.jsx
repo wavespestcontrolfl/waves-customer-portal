@@ -208,6 +208,14 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     }
   }
 
+  // "Got it" on a visit card: optimistic, but a dismiss the network lost
+  // must not hide the card for the rest of the session — the server still
+  // lists it, so forgetting the id lets the next poll bring it back.
+  function dismissVisitCard(id) {
+    setActive((prev) => prev.filter((n) => n.id !== id));
+    apiPost(`/api/tech/notifications/${id}/dismiss`).catch(() => { seenIds.current.delete(id); });
+  }
+
   async function handleStart(n, pick) {
     const pos = await getPosition();
     const body = pick
@@ -255,7 +263,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
             <StopToast n={n} onUndo={() => handleUndo(n)} onDismiss={() => removeCard(n.id, { silent: true })} />
           )}
           {VISIT_TYPES.has(n.type) && (
-            <VisitCard n={n} onDismiss={() => removeCard(n.id)} />
+            <VisitCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
           {n.type === 'storm_watch_alert' && (
             <StormCard

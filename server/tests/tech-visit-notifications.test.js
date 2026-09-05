@@ -164,6 +164,20 @@ describe('notifyTechVisitChange', () => {
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
+  test('a voice-agent booking still pending office review is silent to everyone — reassigned, moved, or cancelled; once confirmed it announces', async () => {
+    prime({ visit: { ...VISIT, status: 'pending', source_action: 'voice_agent' } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    prime({ visit: { ...VISIT, status: 'pending', source_action: 'voice_agent', technician_id: ADAM_ID } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
+    expect(mockWriteCard).not.toHaveBeenCalled();
+    // A pending row from any OTHER creator (announced at insert) still notifies.
+    prime({ visit: { ...VISIT, status: 'pending', source_action: 'outbound_callback' } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: true });
+    prime({ visit: { ...VISIT, status: 'confirmed', source_action: 'voice_agent' } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: true });
+  });
+
   test('a failed feed insert means NO push for that card (a push with no card behind it sends the tech to an empty feed)', async () => {
     mockWriteCard.mockResolvedValueOnce(false);
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });

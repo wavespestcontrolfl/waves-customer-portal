@@ -331,8 +331,12 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   }
   // The cancel stands — now the assigned tech hears it (post-commit,
   // best-effort, gate-dark; recipient read from the row; silent for the
-  // actor's own cancel).
-  void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null });
+  // actor's own cancel). A row that was ALREADY cancelled when re-read
+  // (another cancellation won after the preview) is a same-status repair:
+  // its tech heard from that cancel, so no second card.
+  if (String(fresh.status) !== 'cancelled') {
+    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null });
+  }
   // No per-visit customer notice — the flow sends ONE combined
   // cancellation + refund email (owner ruling 2026-07-15); this also keeps
   // refund-skipped runs silent toward the customer. handleCancellation

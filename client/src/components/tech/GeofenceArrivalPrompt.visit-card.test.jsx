@@ -30,7 +30,7 @@ const GONE = notification('visit_cancelled', {
 
 // `notifications` may be a function of the poll number (1-based) to vary
 // the feed across polls; a poll may also be `{ error: status }`.
-function stubFeed(notifications) {
+function stubFeed(notifications, { failPosts = false } = {}) {
   const calls = [];
   let polls = 0;
   vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
@@ -40,6 +40,7 @@ function stubFeed(notifications) {
       if (feed && feed.error) return { ok: false, status: feed.error, json: async () => ({}) };
       return { ok: true, json: async () => ({ notifications: feed }) };
     }
+    if (failPosts) return { ok: false, status: 503, text: async () => 'down' };
     return { ok: true, json: async () => ({}) };
   }));
   return calls;
@@ -127,6 +128,21 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
 
     await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
     expect(await screen.findAllByTestId('visit-notice')).toHaveLength(2);
+  });
+
+  it('a "Got it" the network lost brings the card back on the next poll instead of hiding it for the session', async () => {
+    const calls = stubFeed([ASSIGNED], { failPosts: true });
+    render(<GeofenceArrivalPrompt />);
+    await act(async () => { await Promise.resolve(); });
+    expect(await screen.findByTestId('visit-notice')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByTestId('visit-notice')).not.toBeInTheDocument();
+    expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/dismiss'))).toBe(true);
+
+    await act(async () => { vi.advanceTimersByTime(10_000); await Promise.resolve(); });
+    expect(await screen.findByTestId('visit-notice')).toBeInTheDocument();
   });
 
   it('stays until "Got it" (dismiss) — the 5-minute reminder timer never marks it read', async () => {

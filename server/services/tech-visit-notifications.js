@@ -31,6 +31,7 @@ const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
 const { parseETDateTime, TZ } = require('../utils/datetime-et');
+const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
 
@@ -208,7 +209,7 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
   if (lock) q = q.forShare('s');
   return q.first(
     's.id', 's.service_type', 's.scheduled_date', 's.window_start', 's.window_end', 's.technician_id', 's.status',
-    's.service_address_line1', 's.service_address_city',
+    's.source_action', 's.service_address_line1', 's.service_address_city',
     'c.first_name as cust_first_name', 'c.last_name as cust_last_name',
     'c.address_line1 as cust_address', 'c.city as cust_city',
   );
@@ -222,6 +223,11 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
 // the current state, and the newest feed row is never stale. Returns the
 // row's holder (technicians.id or null) when the card stands, else false.
 function cardStands({ kind, technicianId, snapshot }, row) {
+  // A voice-agent booking is silent until the office confirms it
+  // (relay-booking.js: a pending office-review row is not yet real): a
+  // reassignment, move, or cancel while it is still pending says nothing
+  // to anyone — the confirm hook announces it to whoever holds it then.
+  if (String(row.status) === 'pending' && row.source_action === VOICE_AGENT_BOOKING_SOURCE_ACTION) return false;
   const holder = row.technician_id ? String(row.technician_id) : null;
   const recipient = String(technicianId);
   if (kind === 'assigned' || kind === 'rescheduled') {
