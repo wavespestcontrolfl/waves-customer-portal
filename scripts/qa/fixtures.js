@@ -2,11 +2,22 @@
 const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const { v5 } = require('uuid');
-const { etDateString, addETDays } = require('../../server/utils/datetime-et');
+const { etDateString, addETDays, etParts } = require('../../server/utils/datetime-et');
 const { createScheduledService } = require('../../server/services/booking/create-scheduled-service');
 
 // MUTATES only the dedicated dev database supplied by the managed launcher.
 // Fixture IDs are deterministic within a run. No production data is copied.
+function fixtureDates(now, daysOff = [0, 6], blackouts = new Set()) {
+  const dates = [];
+  for (let offset = 14; offset <= 45 && dates.length < 2; offset++) {
+    const candidate = addETDays(now, offset);
+    const date = etDateString(candidate);
+    if (!daysOff.includes(etParts(candidate).dayOfWeek) && !blackouts.has(date)) dates.push(date);
+  }
+  if (dates.length < 2) throw new Error('QA needs two open scheduling dates within the next 45 days.');
+  return { date: dates[0], nextDate: dates[1] };
+}
+
 function fixtureIdentity(runId = crypto.randomUUID()) {
   const id = (name) => v5(name, runId);
   const suffix = runId.slice(0, 8);
@@ -18,11 +29,17 @@ function fixtureIdentity(runId = crypto.randomUUID()) {
     adminEmail: `qa-admin-${suffix}@example.invalid`, techEmail: `qa-tech-${suffix}@example.invalid`,
     customerEmail: `qa-customer-${suffix}@example.invalid`,
     phone: `+194155501${String(parseInt(suffix, 16) % 100).padStart(2, '0')}`,
-    date: etDateString(addETDays(new Date(), 14)), nextDate: etDateString(addETDays(new Date(), 15)),
+    ...fixtureDates(new Date()),
     paymentIntentId: `pi_qa_${suffix}`, eventId: `evt_qa_${suffix}` };
 }
 
 async function seed(db, f) {
+  // Read the scheduling calendar through the explicitly selected QA
+  // connection. Importing blackout-dates here would initialize its global DB.
+  const weekly = await db('system_settings').where({ key: 'schedule_weekly_days_off' }).first('value');
+  const daysOff = JSON.parse(weekly?.value || '[0,6]').map(Number);
+  const blackouts = await db('schedule_blackout_dates').select(db.raw('date::text AS date'));
+  Object.assign(f, fixtureDates(new Date(), daysOff, new Set(blackouts.map((row) => row.date))));
   const passwordHash = await bcrypt.hash(f.password, 12);
   await db.transaction(async (trx) => {
     const existing = await trx('customers').where({ phone: f.phone }).first('id');
@@ -94,4 +111,4 @@ async function cleanup(db, f) {
     await trx('technicians').whereIn('id', [f.adminId, f.technicianId]).del();
   });
 }
-module.exports = { fixtureIdentity, seed, cleanup };
+module.exports = { fixtureDates, fixtureIdentity, seed, cleanup };

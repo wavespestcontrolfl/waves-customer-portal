@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { fixtureIdentity } = require('../fixtures');
+const { fixtureDates, fixtureIdentity } = require('../fixtures');
 const { etDateString } = require('../../../server/utils/datetime-et');
 
 test('synthetic accounts have fresh credentials, reserved contact details and future appointments', () => {
@@ -16,6 +16,16 @@ test('synthetic accounts have fresh credentials, reserved contact details and fu
   assert.match(first.customerEmail, /@example\.invalid$/);
   assert.ok(first.date > etDateString(new Date()));
   assert.ok(first.nextDate > first.date);
+});
+
+test('weekend fixture runs honor weekly closures and individual blackout dates', () => {
+  // Fixed historical dates test calendar selection only, never a freshness validator.
+  const saturday = new Date('2020-01-04T17:00:00Z');
+  assert.deepEqual(fixtureDates(saturday), { date: '2020-01-20', nextDate: '2020-01-21' });
+  assert.deepEqual(fixtureDates(new Date('2020-01-05T17:00:00Z')), { date: '2020-01-20', nextDate: '2020-01-21' });
+  assert.deepEqual(fixtureDates(saturday, [0, 1, 6], new Set(['2020-01-21'])),
+    { date: '2020-01-22', nextDate: '2020-01-23' });
+  assert.throws(() => fixtureDates(saturday, [0, 1, 2, 3, 4, 5, 6]), /two open scheduling dates/);
 });
 
 test('QA server refuses another database before reading fixtures or connecting', () => {
