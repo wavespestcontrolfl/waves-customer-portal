@@ -115,6 +115,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [detailVersion, setDetailVersion] = useState(0);
   const listRequest = useRef(0);
   const listInFlight = useRef(null);
+  const currentLoad = useRef(null);
   const detailInFlight = useRef(null);
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
@@ -123,7 +124,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const load = useCallback(async (background = false) => {
     const request = ++listRequest.current;
     listInFlight.current = request;
-    setLoading(true);
+    if (!background) setLoading(true);
     setContentError("");
     try {
       const next = await adminFetch(`/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=${actionType}`);
@@ -151,6 +152,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       if (request === listRequest.current) setLoading(false);
     }
   }, [offset, status, actionType]);
+  currentLoad.current = load;
 
   const loadLinks = async () => {
     setLinkLoading(true);
@@ -253,6 +255,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         // it if a requeue/re-run replaced it since this view loaded.
         body: { decision, note: reviewNote, run_id: selected?.run?.id || null },
       });
+      if (currentLoad.current !== load || selectedIdRef.current !== selectedId) return;
       setDetail(next.item);
       setReviewNote("");
       await load();

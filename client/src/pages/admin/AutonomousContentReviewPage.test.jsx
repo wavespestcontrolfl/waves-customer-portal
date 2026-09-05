@@ -276,3 +276,38 @@ describe('slow and failed detail refresh', () => {
     expect(screen.queryByText('Full draft revision 1')).toBeNull();
   });
 });
+
+describe('navigation and background loading', () => {
+  it('does not refresh an old lane when its decision finishes after navigation', async () => {
+    const original = fetch.getMockImplementation();
+    let finish;
+    fetch.mockImplementation((url, opts) => opts?.method === 'POST'
+      ? new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ item: item('other-1') }) }); }) : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('Full draft revision 1');
+    fireEvent.click(screen.getByRole('button', { name: 'Other content' }));
+    await screen.findByRole('button', { name: 'Requeue' });
+    fireEvent.click(screen.getByRole('button', { name: 'Requeue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Content' }));
+    await screen.findByText('1–50 of 51');
+    const count = fetch.mock.calls.filter(([url]) => url.includes('actionType=other')).length;
+    await act(async () => { finish(); });
+    expect(fetch.mock.calls.filter(([url]) => url.includes('actionType=other'))).toHaveLength(count);
+    expect(screen.getByText('1–50 of 51')).toBeTruthy();
+    expect(screen.queryByText('Seasonal ants other-1')).toBeNull();
+  });
+
+  it('keeps loaded cards visible and selectable while a background poll is pending', async () => {
+    vi.useFakeTimers();
+    render(<AutonomousContentReviewPage embedded />);
+    await act(async () => {});
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, opts) => url.includes('/review?') ? new Promise(() => {}) : original(url, opts));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    const row = screen.getByRole('button', { name: /Seasonal ants blog-2 / });
+    expect(row.disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Next' }).disabled).toBe(false);
+    await act(async () => { fireEvent.click(row); });
+    expect(screen.getByText('Full draft revision 1')).toBeTruthy();
+  });
+});
