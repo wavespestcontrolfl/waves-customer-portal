@@ -407,7 +407,7 @@ describe('pre-push hook round 9', () => {
     expect(src).toContain("const fresh = await db('call_log').where({ id: call.id }).first('metadata', 'call_outcome', 'transcription', 'transcription_provider', 'transcription_metadata');"); // composed from the CURRENT row, not the claim snapshot
     // …and when the stash had NOT landed at compose time on a transfer-marked row, every transcript write composes INSIDE the UPDATE
     // from the row's metadata and reads the written value back (a stash landing between the read and the write is still composed).
-    expect(src).toContain('relayPending = transferred && !segment;');
+    expect(src).toContain('relayPending = (transferred && !segment) || reconnected;'); // …and on every write of a reconnected call (PR 2B)
     expect(src.match(/await writeTranscript\(/g)).toHaveLength(4); // primary, both fallbacks, and the relay-only rejection write
     expect(src).toMatch(/CASE WHEN \? IS NOT NULL THEN '\[AI segment\]' \|\| E'\\\\n' \|\| \? \|\| .*\|\| \?::text ELSE \?::text END/); // the relay text = the stash, else the segments (PR 2B), composed inside the UPDATE
     expect(src).toContain("COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?)");

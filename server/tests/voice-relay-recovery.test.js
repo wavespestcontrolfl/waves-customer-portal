@@ -37,7 +37,7 @@ afterEach(() => { delete process.env.GATE_VOICE_RELAY_RECOVERY; delete process.e
 function primeDb({ firstRow = null, updateImpl } = {}) {
   const db = require('../models/db');
   const updates = [];
-  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis() };
+  const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
   const builder = {
     update: updateImpl || jest.fn(async (patch) => { updates.push(patch); return 1; }),
     where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
@@ -177,6 +177,8 @@ describe('the conversation side', () => {
   function convoWithTurns(over = {}) {
     const convo = new RelayConversation({ callSid: 'CA-rec', sessionKey: 'nonce-1', sessionGeneration: 1725500001000, from: '+19415551234', send: jest.fn(), ...over });
     convo.leadCaptured = true; // the floor is not under test unless stated
+    convo._callerVerified = true; // held the claim — the proof the segment append requires
+    convo._sessionSuperseded = jest.fn(async () => false); // owns the row unless a test says otherwise
     convo._recordTurn('caller', 'my ants are back');
     convo._recordTurn('agent', 'Sorry to hear that.');
     return convo;
@@ -184,11 +186,13 @@ describe('the conversation side', () => {
 
   test('gate on: end() appends this socket\'s segment FIRST (CallSid-fenced only), then the generation-fenced column write composes from all segments', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { builder, updates } = primeDb();
+    const { builder, updates, guardQ } = primeDb();
     const convo = convoWithTurns();
     await convo.end('ws_close');
-    // 1: the segment append — metadata only, no columns, no owner/generation fence on it
-    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'transcription', 'transcription_provider', 'transcription_status', 'updated_at']); // no outcome / status / owner fence on the append
+    // 1: the segment append — fenced on having HELD the claim (the current owner, or an older generation on a row a reconnect took over), never on the outcome
+    expect(Object.keys(updates[0]).sort()).toEqual(['metadata', 'transcription', 'transcription_provider', 'transcription_status', 'updated_at']);
+    expect(guardQ.whereRaw).toHaveBeenCalledWith("(metadata->>'relay_session_claim_owner') = ?", ['nonce-1']);
+    expect(guardQ.orWhereRaw).toHaveBeenCalledWith("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [1725500001000]);
     expect(updates[0].metadata.bindings[1].sql).toContain("'relay_segments'"); // the append (both CASE branches)
     expect(updates[0].transcription.sql).toContain('transcription_provider = ?'); // recomposes only Sandy-owned columns
     const seg = JSON.parse(updates[0].metadata.bindings[1].bindings[0])[0];
@@ -202,6 +206,17 @@ describe('the conversation side', () => {
     expect(reconcile.transcription.bindings[1]).toContain('Caller: my ants are back');
     expect(JSON.parse(reconcile.transcription_metadata).segments).toEqual({ this_generation: 1725500001000, appended: true });
     expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [1725500001000]);
+  });
+
+  test("an UNVERIFIED socket (never held the claim) appends no segment — its text lands only through today's owner-fenced reconcile (hook P1)", async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb();
+    const convo = convoWithTurns();
+    convo._callerVerified = false;
+    await convo.end('ws_close');
+    expect(updates.some((u) => u.metadata && String(u.metadata.sql).includes('relay_segments'))).toBe(false);
+    expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
+    expect(typeof updates[0].transcription).toBe('string');
   });
 
   test('gate on, the append did not land (no row) ⇒ the column write carries this socket\'s plain text, no composition', async () => {
@@ -322,7 +337,8 @@ describe('the conversation side', () => {
       .toEqual({ text: '[AI segment]\nCaller: first\n\n[Reconnected]\nCaller: second', metadata: { provider: 'conversation_relay' } });
     // …and the processor's in-UPDATE composition guard (relayPending) engages on a reconnected row too (hook P1)
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("meta.relay_transfer_ring_at || (Number(meta.relay_reconnects) || 0) > 0)) || row.call_outcome === 'ai_transferred';");
+    expect(src).toContain('relayPending = (transferred && !segment) || reconnected;'); // every write of a reconnected call composes from the row's current state
+    expect(src).toContain('const recorded = recordedSegmentText || patch.transcription;'); // …around the RECORDED text, never an in-memory composite
     // the close: reconcile 0 (voicemail is terminal), terminal salvage 0, metadata-only stash 1 — on the reconnect marker, no transfer needed
     const { updates, builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: first' }] } }, updateImpl: jest.fn(async (patch) => { updates.push(patch); return updates.length === 4 ? 1 : (updates.length === 1 ? 1 : 0); }) });
     const convo = resumedConvo({ callSid: 'CA-vm2', sessionGeneration: 2 });

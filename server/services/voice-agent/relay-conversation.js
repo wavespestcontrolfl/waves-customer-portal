@@ -2046,7 +2046,14 @@ class RelayConversation {
     const recovery = require('./relay-recovery');
     const recoveryOn = recovery.isRecoveryGateOn();
     let segmentAppended = false;
-    if (recoveryOn && this.callSid && this._transcript.length) {
+    // Only a socket that legitimately HELD this call's claim may append (hook
+    // P1): verification IS that proof (the claim is won inside the caller
+    // resolution, verified callers only), and the statement re-checks it —
+    // the row's current owner, or an older generation on a row a reconnect
+    // has since taken over (the superseded first leg). An unverified socket
+    // (capture-only, never claimed) writes through today's owner-fenced
+    // reconcile alone.
+    if (recoveryOn && this.callSid && this._transcript.length && this._callerVerified === true) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
         const segment = recovery.buildSegment({
@@ -2063,7 +2070,11 @@ class RelayConversation {
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
         });
         const appended = await withTimeout(
-          db('call_log').where('twilio_call_sid', this.callSid).update(recovery.appendSegmentPatch(db, segment)),
+          db('call_log').where('twilio_call_sid', this.callSid)
+            .where((q) => q
+              .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [this.sessionKey || ''])
+              .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [this.sessionGeneration || 0]))
+            .update(recovery.appendSegmentPatch(db, segment)),
           WRITE_DRAIN_TIMEOUT_MS,
           0,
         );

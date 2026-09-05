@@ -6749,8 +6749,9 @@ const CallRecordingProcessor = {
       // PR 2B: a RECONNECTED row (relay_reconnects > 0) carries the same
       // evidence problem as a transfer — its relay stash may land during
       // this transcription — so the pending-composition guard engages too.
-      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at || (Number(meta.relay_reconnects) || 0) > 0)) || row.call_outcome === 'ai_transferred';
-      return { row, segment: composeRelaySegment(row), transferred, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
+      const reconnected = Boolean(meta && typeof meta === 'object' && (Number(meta.relay_reconnects) || 0) > 0);
+      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || row.call_outcome === 'ai_transferred';
+      return { row, segment: composeRelaySegment(row), transferred, reconnected, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
     };
     // Transfer-marked row whose relay text had NOT landed at compose time:
     // the transcript write below then composes INSIDE the UPDATE from the
@@ -6773,9 +6774,13 @@ const CallRecordingProcessor = {
     const writeTranscript = async (query, patch) => {
       if (!relayPending) return Number(await query.update(patch)) || 0;
       const hasStructured = Object.prototype.hasOwnProperty.call(patch, 'transcript_structured');
+      // The RECORDED text is what the row composes around — never an
+      // in-memory composite (a reconnected call may already have composed
+      // one at read time; the UPDATE re-composes from current metadata).
+      const recorded = recordedSegmentText || patch.transcription;
       const rows = await query.update({
         ...patch,
-        transcription: composeInSql(patch.transcription),
+        transcription: composeInSql(recorded),
         transcript_structured: hasStructured
           ? db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE ?::jsonb END`, [relayTextSql(), patch.transcript_structured == null ? null : patch.transcript_structured])
           : db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE transcript_structured END`, [relayTextSql()]),
@@ -6783,15 +6788,18 @@ const CallRecordingProcessor = {
       const n = Array.isArray(rows) ? rows.length : Number(rows) || 0;
       const written = Array.isArray(rows) && rows[0] ? rows[0].transcription : null;
       if (n > 0 && typeof written === 'string' && written.startsWith('[AI segment]')) {
-        recordedSegmentText = patch.transcription;
+        recordedSegmentText = recorded;
         transcription = written;
         logger.info(`[call-proc] relay stash landed during transcription for ${maskSid(callSid)} — composite written in the UPDATE`);
       }
       return n;
     };
     const composeRelay = async (text, provenance) => {
-      const { segment, label, transferred } = await currentRelayState();
-      relayPending = transferred && !segment;
+      const { segment, label, transferred, reconnected } = await currentRelayState();
+      // A reconnected call composes inside EVERY write from the row's current
+      // state (a later segment can land between this read and the write);
+      // a transfer only when no relay text was found yet (hook P1).
+      relayPending = (transferred && !segment) || reconnected;
       if (!segment) return text;
       recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
       provenance.metadata.relay = segment.metadata;
