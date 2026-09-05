@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
+import ProtocolTankSheet from "./ProtocolTankSheet";
 import {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
@@ -10,9 +11,6 @@ import {
 
 const FALLBACK_LAWN_TRACKS = [
   { key: "st_augustine", name: "St. Augustine Lawn Care Protocol", visits: 12 },
-  { key: "bermuda", name: "Bermuda Lawn Care Protocol", visits: 12 },
-  { key: "zoysia", name: "Zoysia Protocol", visits: 12 },
-  { key: "bahia", name: "Bahia Protocol", visits: 12 },
 ];
 const FALLBACK_SERVICE_PROGRAMS = [
   { key: "tree_shrub", name: "Tree & Shrub Protocol", visits: 12 },
@@ -932,17 +930,19 @@ export default function ProtocolReferenceTabV2() {
   const lastLoadedRef = useRef({ key: null, data: null });
   const [loading, setLoading] = useState(true);
   const [showFullCalendar, setShowFullCalendar] = useState(false);
-  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+  const [showDetailedMix, setShowDetailedMix] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(() => Number(new Intl.DateTimeFormat("en-US", { month: "numeric", timeZone: "America/New_York" }).format(new Date())));
   const [equipmentOptions, setEquipmentOptions] = useState([]);
   const [equipmentSystemId, setEquipmentSystemId] = useState("");
   const [lawnSqft, setLawnSqft] = useState(10000);
   const [mixPlan, setMixPlan] = useState(null);
   const [mixLoading, setMixLoading] = useState(false);
+  const [mixError, setMixError] = useState("");
   const [selectedConditionalIds, setSelectedConditionalIds] = useState([]);
 
-  const lawnTracks = programs?.lawn?.tracks?.length
+  const lawnTracks = (programs?.lawn?.tracks?.length
     ? programs.lawn.tracks
-    : FALLBACK_LAWN_TRACKS;
+    : FALLBACK_LAWN_TRACKS).filter((track) => track.key === "st_augustine");
   const servicePrograms = programs?.programs?.length
     ? programs.programs
     : FALLBACK_SERVICE_PROGRAMS;
@@ -984,9 +984,9 @@ export default function ProtocolReferenceTabV2() {
       .then(async (d) => {
         if (cancelled) return;
         setPrograms(d);
-        const tracks = d?.lawn?.tracks?.length
+        const tracks = (d?.lawn?.tracks?.length
           ? d.lawn.tracks
-          : FALLBACK_LAWN_TRACKS;
+          : FALLBACK_LAWN_TRACKS).filter((track) => track.key === "st_augustine");
         const defaultTrack =
           tracks.find((t) => t.key === "st_augustine")?.key || tracks[0]?.key;
         if (defaultTrack) {
@@ -1019,12 +1019,10 @@ export default function ProtocolReferenceTabV2() {
       .then((d) => {
         const rows = d.calibrations || [];
         setEquipmentOptions(rows);
-        const defaultTank =
-          rows.find((r) =>
-            String(r.system_name || "").includes("110-Gallon Spray Tank #1"),
-          ) ||
-          rows.find((r) => r.system_type === "tank") ||
-          rows[0];
+        const defaultTank = rows.find((r) => Number(r.tank_capacity_gal) === 110
+          && r.calibration_status === "field_verified"
+          && (!r.expires_at || new Date(r.expires_at) > new Date()))
+          || rows.find((r) => Number(r.tank_capacity_gal) === 110);
         if (defaultTank?.equipment_system_id)
           setEquipmentSystemId(defaultTank.equipment_system_id);
       })
@@ -1046,12 +1044,16 @@ export default function ProtocolReferenceTabV2() {
         selectedConditionalIds.join(","),
       );
     setMixLoading(true);
+    setMixError("");
     adminFetch(`/admin/protocols/lawn-mix?${params.toString()}`)
       .then((d) => {
         if (!cancelled) setMixPlan(d);
       })
-      .catch(() => {
-        if (!cancelled) setMixPlan(null);
+      .catch((error) => {
+        if (!cancelled) {
+          setMixPlan(null);
+          setMixError(error.message || "Mixing reference could not be loaded.");
+        }
       })
       .finally(() => {
         if (!cancelled) setMixLoading(false);
@@ -1242,7 +1244,7 @@ export default function ProtocolReferenceTabV2() {
             </div>{" "}
           </Card>
           )}
-          {safetyRules.length > 0 && (
+          {!isLawnTrack && safetyRules.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3.5 py-2.5 bg-alert-bg border border-hairline border-alert-fg/30 rounded-md items-center">
               {" "}
               <span className="text-12 font-medium u-label text-alert-fg mr-1 flex-shrink-0">
@@ -1255,17 +1257,24 @@ export default function ProtocolReferenceTabV2() {
               ))}
             </div>
           )}
+          {mixError && isLawnTrack && <div role="alert" className="text-14 text-alert-fg">{mixError}</div>}
           {isLawnTrack &&
             (mixLoading ? (
               <Card className="px-5 py-4 text-center text-13 text-ink-tertiary">
                 Calculating mix…
               </Card>
             ) : (
-              <ProtocolMixCard
-                plan={mixPlan}
-                selectedConditionalIds={selectedConditionalIds}
-                onToggleConditional={toggleConditional}
-              />
+              mixPlan && <>
+                <ProtocolTankSheet plan={mixPlan} calibration={equipmentOptions.find((row) => row.id === mixPlan.equipment?.calibrationId)} safetyRules={safetyRules} />
+                <Button variant="secondary" onClick={() => setShowDetailedMix((value) => !value)}>
+                  {showDetailedMix ? "Hide application details" : "Application details & conditional products"}
+                </Button>
+                {showDetailedMix && <ProtocolMixCard
+                  plan={mixPlan}
+                  selectedConditionalIds={selectedConditionalIds}
+                  onToggleConditional={toggleConditional}
+                />}
+              </>
             ))}
           {isServiceProgram && currentVisit && (
             <CurrentVisitCardV2

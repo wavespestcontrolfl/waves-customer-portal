@@ -1382,6 +1382,8 @@ async function getProtocolProducts() {
       'labeled_turf_species', 'excluded_turf_species',
       'requires_surfactant', 'allows_surfactant',
       'label_source_note', 'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
+      'ppe_required', 'signal_word', 'compatibility_notes', 'pollinator_precautions',
+      'ppe_text', 'reentry_text',
     )
     .catch(() => []);
 
@@ -1653,7 +1655,7 @@ router.get('/lawn-mix', async (req, res, next) => {
           unitSizeOz: product.unit_size_oz != null ? Number(product.unit_size_oz) : null,
           needsPricing: product.needs_pricing === true,
           rainfastMinutes: product.rainfast_minutes || null,
-          reiHours: product.rei_hours || null,
+          reiHours: product.rei_hours ?? null,
           labeledTurfSpecies: product.labeled_turf_species || [],
           excludedTurfSpecies: product.excluded_turf_species || [],
           requiresSurfactant: product.requires_surfactant,
@@ -1665,6 +1667,12 @@ router.get('/lawn-mix', async (req, res, next) => {
           sdsUrl: product.sds_url || null,
           epaRegNumber: product.epa_reg_number || null,
           manufacturer: product.manufacturer || null,
+          ppeRequired: product.ppe_required || null,
+          signalWord: product.signal_word || null,
+          compatibilityNotes: product.compatibility_notes || null,
+          pollinatorPrecautions: product.pollinator_precautions || null,
+          ppeText: product.ppe_text || null,
+          reentryText: product.reentry_text || null,
         } : null,
         jobMix,
         fullTankMix,

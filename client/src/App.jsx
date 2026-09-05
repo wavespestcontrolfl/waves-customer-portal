@@ -609,7 +609,7 @@ export default function App() {
                   remapQuery={{
                     from: "tab",
                     to: "protocolTab",
-                    preserveValues: ["overview", "readiness", "products", "gates", "calibration", "bridges", "audit"],
+                    preserveValues: ["mixing", "overview", "readiness", "products", "gates", "calibration", "bridges", "audit"],
                   }}
                 />
               )}
