@@ -1342,7 +1342,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
   test('a busy topic-merge lock defers the merge to the next tick (hook, PR codex r11 push)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
+    setupDb({ pending: [makeRun({ poll_pending_reason: 'topic_merge_lock_busy', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
     gh.getPr.mockResolvedValue(openPr());
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
@@ -1353,8 +1353,9 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(gh.closePr).not.toHaveBeenCalled();
     expect(topicGate.evaluateDraftTargeting).not.toHaveBeenCalled();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: 'topic_merge_lock_busy' });
+    expect(res.results[0]).toMatchObject({ pending: true, transient: true, reason: 'topic_merge_lock_busy' });
   });
 
   test('the recheck adopts the flat-path file the publisher updated in place (codex r20)', async () => {

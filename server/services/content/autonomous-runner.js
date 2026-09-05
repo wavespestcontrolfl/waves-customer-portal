@@ -1123,7 +1123,10 @@ class AutonomousRunner {
     if (unattendedBlog && (brief.human_review_required || !autoPublish || forceNamedCompetitorReview)) {
       const reason = !autoPublish ? 'auto_publish_disabled'
         : forceNamedCompetitorReview ? 'named_competitor_disabled' : 'brief_risk_blocked';
-      const finalized = await finalize(run, t0, { outcome: 'skipped', skip_reason: reason });
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped', skip_reason: reason,
+        reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+      });
       await this._skipClaimOrThrow(queue, opp.id, reason, { claimToken });
       return finalized;
     }

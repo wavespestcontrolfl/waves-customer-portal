@@ -1642,7 +1642,7 @@ async function maybeAutoMerge(run, pr) {
   } catch (err) {
     if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
       logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: ${err.message}`);
-      return { pending: true, reason: 'topic_merge_lock_busy' };
+      return { pending: true, transient: true, reason: 'topic_merge_lock_busy' };
     }
     if (err?.code === 'TOPIC_PARK_LOST') {
       logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: ${err.message}`);
