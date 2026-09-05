@@ -2,6 +2,7 @@ let mockProvider = 'hermes';
 jest.mock('../middleware/link-worker-auth', () => ({ linkWorkerAuth: () => (_req, _res, next) => next(), finalizeWorkerRequest: jest.fn(async () => {}) }));
 jest.mock('../services/seo/link-prospect-worker', () => ({ claim: jest.fn(async () => []), report: jest.fn(async () => ({ ok: true })), businessProfile: () => ({}) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+const { finalizeWorkerRequest } = require('../middleware/link-worker-auth');
 const worker = require('../services/seo/link-prospect-worker');
 const { isEnabled } = require('../config/feature-gates');
 const router = require('../routes/integrations-backlink-worker');
@@ -23,6 +24,7 @@ test('HTTP acquisition stays empty because only the in-process runner executes',
 });
 test('unknown claim modes are rejected without leasing', async () => {
   expect((await call('get', '/claim', { query: { mode: 'send' } })).status).toBe(400);
+  expect(finalizeWorkerRequest).toHaveBeenCalledWith(expect.any(Object), 'report_rejected');
   expect(worker.claim).not.toHaveBeenCalled();
 });
 test('a dark draft gate returns an empty claim', async () => {

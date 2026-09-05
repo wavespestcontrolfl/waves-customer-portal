@@ -3534,20 +3534,6 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   // after a mutation: the parent refreshes every panel when it owns the key, else this panel reloads itself
   const refresh = () => (onMutated ? onMutated() : load());
 
-  const markNotSubmitted = async (card) => {
-    if (!window.confirm("Confirm you reviewed the evidence and no submission reached the publisher. This releases the automatic retry hold.")) return;
-    setBusy(card.domain.id);
-    setError(null);
-    try {
-      await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ submission_verdict: "not_submitted", submission_attempt_id: card.submission_ambiguity.id }),
-      });
-      refresh();
-    } catch (e) { setError(e?.message || "Submission verdict failed"); }
-    finally { setBusy(null); }
-  };
-
   // what the inline bridge run did with the click — or why the nightly run will
   const bridgeNote = (b) => {
     if (!b) return "";
@@ -3699,13 +3685,6 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         const p = c.path;
         return (
           <div key={c.placement.id} style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
-            {c.submission_ambiguity && <div>
-              <p style={{ fontSize: 14, color: D.amber }}>The submission may have reached the publisher. Automatic retry is held. Review its evidence in the Registry, then record a confirmed placement on the Link Building board or confirm that nothing was submitted.</p>
-              <button disabled={busy !== null || Boolean(c.placement.claimed_at)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => markNotSubmitted(c)}>Confirm not submitted</button>
-            </div>}
-            {c.outreach_draft_exhausted && <p style={{ fontSize: 14, color: D.amber }}>Automatic drafting stopped without a pitch. The publisher remains held for this placement. Create or revise its outreach draft on the Link Building board to continue.</p>}
-
-
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, fontFamily: MONO }}>
                 {c.domain.domain}

@@ -603,11 +603,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     if ('status' in patch && !PROSPECT_STATUSES.includes(patch.status)) {
       return res.status(400).json({ error: `invalid status; must be one of ${PROSPECT_STATUSES.join(', ')}` });
     }
-    const negativeVerdict = req.body.submission_verdict === 'not_submitted';
-    if ('submission_verdict' in req.body && (!negativeVerdict || typeof req.body.submission_attempt_id !== 'string' || !req.body.submission_attempt_id || Object.keys(patch).length)) {
-      return res.status(400).json({ error: 'A not_submitted verdict requires its attempt id and no board edits' });
-    }
-    if (!negativeVerdict && Object.keys(patch).length === 0) return res.status(400).json({ error: 'no editable fields supplied' });
+    if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no editable fields supplied' });
     patch.updated_at = new Date();
     // A status edit that REOPENS a row into active outreach (lost/rejected/
     // placed/live/indexed → prospect/contacted/negotiating) is a board
@@ -680,17 +676,10 @@ router.patch('/prospects/:id', async (req, res, next) => {
         const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key });
         if (taken) return { taken };
       }
-      if (negativeVerdict || ['placed', 'live', 'indexed'].includes(patch.status)) {
-        await lockProspectDomain(trx, current.target_domain);
-        const confirmed = await require('../services/seo/link-execution-authority').reconcileOwnerPlacement(trx, { prospectId: current.id, status: patch.status, notSubmittedAttemptId: negativeVerdict ? req.body.submission_attempt_id : null, actorId: req.technician?.id || null });
-        if (!confirmed.ok) return { reconciliationError: confirmed.error };
-        if (negativeVerdict) await require('../services/seo/link-registry').settleRetiredPlacements(trx, { prospectIds: [current.id] });
-      }
       const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
       return { row };
     });
     if (result.missing) return res.status(404).json({ error: 'prospect not found' });
-    if (result.reconciliationError) return res.status(409).json({ error: result.reconciliationError });
     if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
     if (result.readdressed) return res.status(409).json({ error: 'the prospect was re-addressed while you edited it — reload and retry' });
     if (result.inbox) return res.status(409).json({ error: `another placement already has a conversation with this recipient (${result.inbox.status}${result.inbox.outreach_status ? ` / ${result.inbox.outreach_status}` : ''}) — one conversation per inbox`, id: result.inbox.id });

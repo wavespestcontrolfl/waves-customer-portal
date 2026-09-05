@@ -504,7 +504,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   };
   if (successor && successor.id && Array.isArray(pathIds)) {
     if (!pathIds.length) return 0;
-    const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').forUpdate().skipLocked().select(...PLACEMENT_MOVE_COLUMNS);
+    const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
     return moveRows(await movable(rows || []), successor);
   }
   if (successor && successor.id && Array.isArray(prospectIds)) {

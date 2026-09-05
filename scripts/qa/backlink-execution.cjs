@@ -85,16 +85,6 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     const authority = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution', instance_kind: '-' }).first();
     await trx('seo_link_placement_authorities').where({ id: authority.id }).update({ satisfied_at: null, satisfied_reason: null });
     await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id } });
-    await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
-    const router = require(`${root}/server/routes/admin-backlink-agent-v2`);
-    const edit = router.stack.find(l => l.route?.path === '/prospects/:id' && l.route.methods.patch).route.stack.at(-1).handle;
-    const confirm = () => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { status: 'placed', live_url: `https://${domain}/confirmed` } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
-    assert.equal((await confirm()).prospect.status, 'placed');
-    assert.equal((await trx('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'placed');
-    assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_reason, 'placed');
-    await confirm();
-    assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 1);
-    console.log('PASS existing owner board edit atomically resolves the hold and execution authority with one audit record');
     for (const releaseMode of ['runner', 'releaseClaims', 'sweep']) {
       const did = randomUUID(), oldPath = randomUUID(), newPath = randomUUID(), pid = randomUUID(), attemptId = randomUUID();
       const oldLease = new Date(Date.now() - 9 * 3600000), host = `synthetic-${did}.example`;
@@ -110,18 +100,6 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       assert.equal((await trx('seo_link_attempts').where({ id: attemptId }).first()).outcome, 'submit_ambiguous');
     }
     console.log('PASS runner/releaseClaims/expired sweep keep ambiguous submissions pinned to their original path');
-    // The same reviewed attempt cannot be used to release a later retry's hold.
-    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'prospect', automation_policy: 'skip', outreach_status: 'none', outreach_sent_at: null, follow_up_status: 'none', follow_up_due_at: null });
-    const [heldNow] = await trx('seo_link_attempts').insert({ prospect_id: p.id, path_id: pathId, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', detail: { authority_id: authority.id, error_code: 'submit_rejected' } }).returning('*');
-    const negative = body => new Promise((resolve, reject) => edit({ params: { id: p.id }, body }, { code: 200, status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code, body }); } }, reject));
-    const verdict = { submission_verdict: 'not_submitted', submission_attempt_id: heldNow.id };
-    assert.equal((await negative(verdict)).code, 200);
-    assert.equal((await trx('seo_link_prospects').where({ id: p.id }).first()).automation_policy, null);
-    assert.equal((await negative(verdict)).code, 409);
-    assert.equal((await trx('seo_link_attempts').where({ id: heldNow.id }).first()).outcome, 'slot_released');
-    assert.equal((await trx('audit_log').where({ action: 'backlink.submission.not_submitted', resource_id: p.id })).length, 1);
-    console.log('PASS negative owner verdict is audited and stale/replayed verdicts refuse');
-
     // Pre-submit failures release capacity while retaining a real investigator-visible failure.
     const failureLease = new Date(), failureId = randomUUID();
     const currentPlacement = await trx('seo_link_prospects').where({ id: p.id }).first();
