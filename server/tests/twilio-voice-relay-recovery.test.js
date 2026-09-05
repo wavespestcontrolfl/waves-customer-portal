@@ -160,6 +160,22 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(res.body).not.toContain('<Hangup');
   });
 
+  test.each(['error', 'timeout'])('an unreadable original profile (%s) returns 503 without a replacement profile stamp', async (mode) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder, updates } = primeDb();
+    builder.first.mockImplementation(() => mode === 'error' ? Promise.reject(new Error('pool down')) : new Promise(() => {}));
+    const res = mockRes();
+    jest.useFakeTimers();
+    try {
+      const pending = handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+      await jest.advanceTimersByTimeAsync(1600);
+      await pending;
+      expect(res.statusCode).toBe(503);
+      expect(res.body).not.toMatch(/ConversationRelay|<Record|<Hangup/);
+      expect(updates.some((patch) => JSON.stringify(patch).includes('relay_profile_id'))).toBe(false);
+    } finally { jest.useRealTimers(); }
+  });
+
   test('an UNCONFIRMED claim (timeout) ⇒ 503 without fallback instructions, and a claim that lands later is put back (fenced on its own stamp)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     jest.useFakeTimers();

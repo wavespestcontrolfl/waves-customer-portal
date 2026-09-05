@@ -135,7 +135,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.statusCode).toBe(404);
   });
 
-  test('gate on: the whole registry, grouped for the visit line and season, with sent dates and conditions', async () => {
+  test('gate on: only visit-line tips, with sent dates and conditions', async () => {
     process.env.GATE_TECH_TIPS = 'true';
     const calls = [];
     mockDbCurrent = scriptedDb({
@@ -154,7 +154,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.available).toBe(true);
     expect(res.body.line).toBe('mosquito');
     expect(res.body.season).toBe('wet');
-    expect(res.body.groups.flatMap((g) => g.tips).length).toBe(TIPS.length);
+    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito')).map((tip) => tip.id).sort());
     expect(res.body.groups[0].primary).toBe(true);
     // newest send wins per id
     expect(res.body.lastSent).toEqual({ water_bromeliads: '2026-08-03', light_warm_bulbs: '2026-07-01' });

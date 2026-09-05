@@ -966,7 +966,7 @@ export default function DispatchPageV2({
 
   function shiftDate(dir) {
     if (viewMode === "day") setDate(addDaysISO(date, dir));
-    else if (viewMode === "week") setDate(addDaysISO(date, dir * 7));
+    else if (viewMode === "week" || viewMode === "5day") setDate(addDaysISO(date, dir * 7));
     else setDate(addMonthsISO(date, dir));
   }
 
@@ -1121,15 +1121,13 @@ export default function DispatchPageV2({
   const dateHeader =
     viewMode === "day"
       ? formatDateDisplay(date)
-      : viewMode === "week"
+      : isMultiDayView
         ? (() => {
-            // TimeGridDays renders a Mon→Sun week containing the selected
-            // date, so the header must label that same span — not
-            // selected → selected + 6, which drifts as soon as the user
-            // picks any non-Monday.
+            // Match the grid’s Monday→Friday or Monday→Sunday span,
+            // including when the selected date is not a Monday.
             const monday = etStartOfWeek(date);
-            const sunday = addDaysISO(monday, 6);
-            return `${formatETDate(dateAtNoonUTC(monday), { month: "short", day: "numeric" })} – ${formatETDate(dateAtNoonUTC(sunday), { month: "short", day: "numeric", year: "numeric" })}`;
+            const lastDay = addDaysISO(monday, expectedDayCount - 1);
+            return `${formatETDate(dateAtNoonUTC(monday), { month: "short", day: "numeric" })} – ${formatETDate(dateAtNoonUTC(lastDay), { month: "short", day: "numeric", year: "numeric" })}`;
           })()
         : formatETDate(dateAtNoonUTC(date), { month: "long", year: "numeric" });
 

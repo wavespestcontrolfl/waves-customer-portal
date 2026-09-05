@@ -489,6 +489,7 @@ async function decidedOutsideEmail(run, row) {
  * re-sends when the first send never went out.
  */
 async function sendApprovalRequest(run, opportunity = null) {
+  if (run?.action_type === 'new_supporting_blog') return { skipped: 'unattended_blog' };
   if (!emailApprovalsEnabled()) return { skipped: 'gate_off' };
   if (!isApprovableKind(run?.skip_reason)) return { skipped: 'kind_not_approvable' };
 
@@ -647,7 +648,7 @@ async function sendApprovalRequest(run, opportunity = null) {
 async function notifyParkedRun(runId) {
   if (!emailApprovalsEnabled()) return { skipped: 'gate_off' };
   const run = await db('autonomous_runs').where({ id: runId }).first();
-  if (!run || run.outcome !== 'completed_pending_review' || !isApprovableKind(run.skip_reason)) {
+  if (!run || run.action_type === 'new_supporting_blog' || run.outcome !== 'completed_pending_review' || !isApprovableKind(run.skip_reason)) {
     return { skipped: 'not_approvable' };
   }
   const opp = run.opportunity_id
@@ -673,6 +674,7 @@ async function sweepUnnotifiedRuns() {
     .whereNull('a.id')
     .where('r.outcome', 'completed_pending_review')
     .where('r.shadow_mode', false)
+    .whereNot('r.action_type', 'new_supporting_blog')
     .where('o.status', 'pending_review')
     // Approvable kinds filtered IN SQL and oldest-first, so a pile of
     // gate_fail/brief_requires_human_review parks can't starve the LIMIT
@@ -712,7 +714,7 @@ async function executeDecision(row, decision, sender) {
   {
     const run = row.run_id ? await db('autonomous_runs').where({ id: row.run_id }).first() : null;
     const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
-    const runStillParked = run && run.outcome === 'completed_pending_review' && run.skip_reason === row.kind;
+    const runStillParked = run && run.action_type !== 'new_supporting_blog' && run.outcome === 'completed_pending_review' && run.skip_reason === row.kind;
     const oppStillParked = opp && opp.status === 'pending_review';
     if (!runStillParked || !oppStillParked) {
       await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
@@ -1036,7 +1038,7 @@ async function pollReplies() {
       .where({ opportunity_id: run.opportunity_id, outcome: 'completed_pending_review', shadow_mode: false })
       .where('created_at', '>', run.created_at || new Date(0))
       .first() : null;
-    const stillParked = run && run.outcome === 'completed_pending_review' && run.skip_reason === row.kind
+    const stillParked = run && run.action_type !== 'new_supporting_blog' && run.outcome === 'completed_pending_review' && run.skip_reason === row.kind
       && !run.trust_build_approved_at && opp && opp.status === 'pending_review' && !newerParked;
     if (!stillParked) {
       await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })

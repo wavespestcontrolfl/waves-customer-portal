@@ -9,11 +9,9 @@
  * (cap pre-check, dry-run stop), then at checkout selects bill-to-account,
  * VERIFIES it is selected, reads the FINAL total with tax + shipping and
  * runs the dispatcher's beforeSubmit(totalCents) cap check on it immediately
- * before the place-order click, and proves the Place Order control
- * actionable. The submit stage itself (the click, the confirmation number)
- * ships in PR 3c — until then a non-dry-run call refuses
- * `checkout_not_shipped` and nothing is ever submitted. Whatever it left in
- * the cart (dry run, refusal) it clears again before closing.
+ * before the place-order click — only then, and only when SITEONE_BOT_DRY_RUN
+ * is not set, does it submit. Whatever it left in the cart without
+ * submitting (dry run, refusal) it clears again before closing.
  *
  * Hard rules (same boundary as the backlink signup runner):
  *   - the bot NEVER types payment data; a checkout that asks for a card,
@@ -65,6 +63,11 @@ const { uploadEvidence } = require('../../seo/signup-evidence');
 let chromium;
 try { ({ chromium } = require('playwright')); } catch { chromium = null; }
 
+// Every label + qualifier the confirmation parser (`orderNumbersIn`) reads a
+// number after; `:has-text()` is case-insensitive, and "ref" covers
+// "reference". Mirrored by the selector test.
+const CONFIRMATION_LABELS = Object.freeze(['Order #', 'Order number', 'Order no', 'Order ID', 'Order ref', 'Order confirmation', 'Order:', 'Order is', 'Confirmation #', 'Confirmation number', 'Confirmation no', 'Confirmation ID', 'Confirmation ref', 'Confirmation:', 'Confirmation is']);
+
 const SELECTORS = Object.freeze({
   loginUser: 'input[name="username"], input[name="email"], input[type="email"], input#username, input#j_username',
   loginPass: 'input[name="password"], input[type="password"]',
@@ -79,7 +82,11 @@ const SELECTORS = Object.freeze({
   loginError: '.alert-danger, .error-message, [role="alert"]',
   searchInput: 'input[name="text"], input[type="search"], input#js-site-search-input, input[placeholder*="Search"]',
   productLink: '.product-item a.name, .product-item-name a, a.product-name, .product-tile a',
-  productSku: '[data-product-code], .product-code, .sku, [itemprop="sku"]',
+  // The live storefront (checked anonymously 2026-09-05) shows the item
+  // number in `div.brand-itemnumber` (text = the bare number; hidden `.hide`
+  // responsive copies beside it) and in `[data-itemnumber]` attributes —
+  // none of the generic Hybris SKU selectors match it.
+  productSku: '[data-product-code], [data-itemnumber], .brand-itemnumber, .product-code, .sku, [itemprop="sku"]',
   qtyInput: 'input[name="qty"], input.qty, input[name="quantity"], input[type="number"]',
   addToCart: 'button.add-to-cart, button#addToCartButton, button[data-action="add-to-cart"], button:has-text("Add to Cart")',
   // Scoped to the product's own availability / stock element — a bare
@@ -113,12 +120,19 @@ const SELECTORS = Object.freeze({
   // ancestor's text — and place() requires exactly ONE match (pre-push P0).
   checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .checkout .payment-method.selected .account-number, .checkout [data-test="bill-to-account"] .account-number',
   checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, .checkout [data-test="shipping-address"]',
+  // The confirmation node: dedicated number elements, plus every textual
+  // label `orderNumbersIn` accepts (order / confirmation + #, number, no,
+  // ID, ref[erence], confirmation) in ordinary headings / paragraphs — one
+  // list drives both, so the selector never lags the parser (Codex #3900
+  // P2, r5 P2, r6 P2).
+  orderNumber: ['[data-test="order-number"]', '.order-number', '.confirmation-number', '.order-confirmation-number', ...CONFIRMATION_LABELS.map((label) => `:is(h1, h2, h3, p, strong):has-text("${label}")`)].join(', '),
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   // Confirmation-number element only — never a bare :has-text() that an
   // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
 });
 
 const NAV_TIMEOUT = 45000;
+const CONFIRMATION_TIMEOUT = 20000; // bounded wait for the confirmation number after the click
 const LOGIN_TIMEOUT = 45000;
 const DEFAULT_LOGIN_URL = 'https://www.siteone.com/en/login';
 const EVIDENCE_PREFIX = 'procurement-evidence/';
@@ -268,12 +282,16 @@ async function shownChild(rowHandle, selector) {
   if (shown.length <= 1) return shown[0] || null;
   // The VALUE is compared, not its DOM form: an input carrying "2" beside
   // a label reading "2" is one reading (pre-push hook P1 on def020079).
+  // Every SKU reading — attribute AND text — is normalized the same way, so
+  // `data-product-code="S1-77"` beside `SKU: S1-77` is one reading, never
+  // two that refuse a valid row (Codex #3876 r25 P2).
+  const isSku = selector === SELECTORS.cartLineSku;
   const reading = async (h) => {
     const attr = await h.getAttribute('data-product-code').catch(() => null);
     if (attr) return normalizeSku(attr);
     const value = await h.inputValue().catch(() => null);
     const raw = value != null ? value : await h.textContent().catch(() => '');
-    return String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return isSku ? normalizeSku(raw) : String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
   };
   const readings = new Set(await Promise.all(shown.map(reading)));
   return readings.size === 1 ? shown[0] : null;
@@ -591,7 +609,7 @@ async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
   const skuNode = (await matches(page, SELECTORS.productSku)).shown[0]; // the SKU the page SHOWS, never a hidden copy's
   // A node matched by its data-product-code attribute carries the code in
   // the attribute, not necessarily in its text (Codex #3853 r20 P2).
-  const skuAttr = skuNode ? await skuNode.getAttribute('data-product-code').catch(() => null) : null;
+  const skuAttr = skuNode ? (await skuNode.getAttribute('data-product-code').catch(() => null)) || (await skuNode.getAttribute('data-itemnumber').catch(() => null)) : null;
   const pageSkuRaw = (skuAttr || (skuNode ? (await skuNode.textContent().catch(() => '') || '') : '')).replace(/\s+/g, ' ').trim();
   if (!pageSkuRaw) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_unreadable', `could not read the product SKU on the page for ${vendorSku} (SELECTORS.productSku)`, evidence); }
   if (normalizeSku(pageSkuRaw) !== normalizeSku(vendorSku)) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_mismatch', `product page shows "${pageSkuRaw.slice(0, 60)}", expected ${vendorSku}`, evidence); }
@@ -827,6 +845,26 @@ async function verifyBillToAccount(page, { evidence, upload }) {
   return radio;
 }
 
+// The tender and the blockers, re-checked immediately before the click: a
+// delayed checkout rerender during the earlier awaits (screenshot upload,
+// cap reservation, the identity / line / baseline reads) can reset the
+// verified radio to a saved card or reveal an MFA / terms step after the
+// last scan (Codex #3876 r3 P1, #3900 r8 P1). Page reads only — nothing is
+// awaited off the page between here and the click but the pure total read.
+async function recheckTenderAtClick(page, radio, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  await scanCheckoutBlockers(page, refuse);
+  if (await blockerShown(page, SELECTORS.cardField, 'card', refuse)) await refuse('card_required', 'SiteOne checkout asks for card entry at the moment of submission — bot never supplies it');
+  let checked = null;
+  try { checked = await radio.isChecked(); } catch { checked = null; }
+  if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is no longer selected at the moment of submission — the bot never submits on another tender');
+  // Visible too (Codex #3876 r4 P1): a rerender that hides the checked
+  // account radio behind a saved-card tender must not submit on the card.
+  if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is no longer visible at the moment of submission — not the tender the checkout shows');
+  const checkedCount = await selectedTenderCount(page, radio);
+  if (checkedCount == null) await refuse('bill_to_account_unverified', 'the selected radio\'s tender group cannot be counted at the moment of submission — the bot never submits on an unverifiable tender');
+  if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount} tenders read as selected in the bill-to-account radio's group at the moment of submission`);
+}
 
 // WHICH account, and WHERE to: the displayed values, compared to what the
 // owner configured — a saved default that drifted (another branch account,
@@ -865,27 +903,82 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
 // The CHECKOUT total (tax + shipping applied) is the binding amount: exactly
 // one VISIBLE element (responsive checkouts keep hidden desktop/mobile
 // copies; a stale hidden node is not the figure the vendor charges), parsed
-// as exactly one $ amount. Returns cents. (PR 3c's at-click re-read adds a
-// pure, screenshot-free variant with the click that consumes it.)
-async function readCheckoutTotal(page, { evidence, upload }) {
+// as exactly one $ amount. Returns cents.
+// `screenshot: false` = a pure read for the at-click check: nothing is
+// awaited between the read and the click (pre-push P0 on #3876).
+async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) {
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   const total = await readExactlyOne(page, SELECTORS.checkoutTotal, { same: parseMoney });
   if (total.count == null) await refuse('checkout_total_unreadable', 'the checkout-total readings could not be enumerated, or changed while being read — not the figure the order charges');
   if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
   if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
   const finalCents = parseMoney(total.text);
-  await shot(page, 'pre-submit', evidence, upload);
+  if (screenshot) await shot(page, 'pre-submit', evidence, upload);
   if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${total.text.trim().slice(0, 40)}")`, evidence);
   evidence.checkoutTotalCents = finalCents;
   return finalCents;
 }
 
+// The click and its confirmation number. Anything thrown after the click is
+// `ambiguous`: the order may exist — the dispatcher parks, never re-submits.
+// Returns the order number; calls markSubmitted() at the click boundary — the
+// caller's cart cleanup guard flips only when the click actually happened
+// (a pre-click refusal here still cleans the cart — Codex #3853 r15 P2).
+// The whitespace-normalized text of every shown confirmation-number node.
+// Unreadable = unresolved (null): a node whose visibility or text cannot be
+// read mid-rerender may carry a different order number, so the poll must
+// not settle the readable one (Codex #3900 r5 P2). TWO identical snapshots
+// (the cart-line pattern, Codex #3900 r10 + r11 P2): the count, the
+// visibility mask AND every text are read again after the first pass — a
+// node appended, hidden, or rewritten to another identifier between the
+// two is churn the scan must not settle on; null, and the next poll judges
+// what the page shows then.
+async function shownOrderTexts(page) {
+  const snapshot = async () => {
+    let found;
+    try { found = await matches(page, SELECTORS.orderNumber, { strict: true }); } catch { return null; }
+    const texts = [];
+    for (const n of found.shown) {
+      const t = await n.textContent().catch(() => null);
+      if (t == null) return null;
+      texts.push(String(t).replace(/\s+/g, ' '));
+    }
+    return { mask: found.all.map((el) => found.shown.includes(el)).join(''), count: found.all.length, texts };
+  };
+  const first = await snapshot();
+  const second = first && await snapshot();
+  if (!first || !second) return null;
+  if (second.count !== first.count || second.mask !== first.mask || JSON.stringify(second.texts) !== JSON.stringify(first.texts)) return null;
+  return first.texts;
+}
+
+// EVERY shown confirmation-selector node before the click — each text and
+// each parsed identifier — read strictly: two shown reference nodes, or a
+// visibility that cannot be read, must not collapse to "no baseline" that a
+// stale node left after a rejected click would then satisfy; unreadable
+// refuses, before the click (Codex #3876 r7 P2).
+async function preClickOrderBaseline(page, refuse) {
+  const texts = new Set();
+  const ids = new Set();
+  try {
+    // EVERY match, hidden ones included (Codex #3900 r2 P2): a hidden
+    // pre-click node the responsive rerender around the click reveals must
+    // not read as a fresh confirmation.
+    for (const node of (await matches(page, SELECTORS.orderNumber, { strict: true })).all) {
+      const text = String(await node.textContent() || '').replace(/\s+/g, ' ');
+      texts.add(text);
+      for (const id of orderNumbersIn(text)) ids.add(id.toUpperCase()); // case-insensitive: a rerender that only recases so-12345 → SO-12345 is the same node (r8 P2)
+    }
+  } catch (e) { await refuse('confirmation_baseline_unreadable', `the confirmation-number nodes could not be read before the click (${String(e.message).slice(0, 80)}) — nothing submitted`); }
+  return { texts, ids };
+}
+
 // The Place Order control, proven actionable WITHOUT dispatching: the one
 // visible control, resolved to an element handle, trial-clicked (Playwright's
 // actionability checks — a disabled / covered control refuses here). Runs
-// at the checkout stage's end (PR 3c runs it again on every pass of the
-// pre-click loop), so a green dry run has exercised the control the first
-// live order will click (Codex #3876 r17 P2). Returns the handle.
+// on every pass of the pre-click loop and at a dry run's stop, so a green
+// dry run has exercised the control the first live order will click (Codex
+// #3876 r17 P2). Returns the handle.
 async function trialPlaceOrder(page, placeOrder, refuse) {
   const handle = await placeOrder.elementHandle({ timeout: 1500 }).catch(() => null);
   if (!handle) await refuse('place_order_unactionable', 'the Place Order control could not be resolved — nothing submitted');
@@ -894,15 +987,271 @@ async function trialPlaceOrder(page, placeOrder, refuse) {
   return handle;
 }
 
+async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines, confirmationTimeoutMs = CONFIRMATION_TIMEOUT }) {
+  await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence); // a refusal, before anything is sent
+  const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  // Confirmation must be evidence created AFTER the click: a node the
+  // selector already matches before submission (a reference / PO element,
+  // a stale SPA confirmation) is remembered and never accepted as the
+  // outcome (Codex #3876 r3 P2).
+  // Sampled inside the final stable iteration, not here: the loop below
+  // awaits cap reservations and re-checks during which a reference / stale
+  // confirmation node can appear or change — a baseline taken before those
+  // awaits would let that node pass as post-click evidence (Codex #3876 r6 P2).
+  let baseline = null;
+  // The ELEMENT the click goes to: an ElementHandle taken at the trial
+  // click, so the dispatch is bound to the control the checks validated. A
+  // locator (even forced) re-resolves and retries a detached target for up
+  // to its timeout, and would click a REPLACEMENT button after a rerender
+  // that changed the page (pre-push hook P1 on a0ffa12fd). A replaced
+  // control is refused before the submitted guard flips.
+  let placeHandle = null;
+  // The total the click submits is the one shown NOW: an async tax /
+  // shipping recalculation after the earlier read (which also spans the
+  // screenshot upload and the cap reservation) would otherwise bypass the
+  // cap and record the old figure (Codex #3876 r2 P1). A changed total is
+  // gated again before the click.
+  // The read is pure (no screenshot upload) and a changed figure is gated
+  // and then READ AGAIN — the cap reservation is itself an awaited DB write
+  // during which the page may recalculate once more; the click happens only
+  // when the figure on screen is the one the cap approved (pre-push P0).
+  // Order at the boundary (Codex #3876 r4 P1): total read → (changed: gate,
+  // start over) → claim re-asserted → Place Order proven actionable →
+  // account + ship-to re-checked → order lines re-checked → the validated
+  // control still shown → confirmation baseline → tender + blockers
+  // re-checked → total read AGAIN — the very last await before the click is
+  // that pure read, and it must equal the figure the cap approved.
+  // The tender proof is the LAST proof but the total (Codex #3900 r8 P1): a
+  // saved-card tender can keep the same account, ship-to, lines and total,
+  // so none of the longer reads detects a reset that lands during them —
+  // read first, the tender proof was stale by the click. After it only the
+  // pure total read stands before the dispatch.
+  // The identity re-check (Codex #3876 r5 P1): a delayed rerender that
+  // swaps the displayed billing account or ship-to while the radio stays
+  // checked and the total stable would otherwise submit on a stale proof.
+  // The trial click (Codex #3876 r5 P2): Playwright's actionability checks
+  // without dispatching — a disabled Place Order refuses BEFORE the
+  // submitted guard flips, instead of parking ambiguous with nothing sent.
+  // It runs FIRST (Codex #3876 r6 P1): it is itself an awaited wait of up
+  // to 5 s, so a rerender during it that resets the tender or swaps the
+  // account would otherwise go unrevalidated; after it only pure page
+  // reads stand between the proofs and the click.
+  let cents = finalCents;
+  const unstable = (shownCents) => new RefusedError('checkout_total_unstable', `SiteOne checkout total kept changing before the click (${cents} → ${shownCents}) — not submitted`, evidence, shownCents);
+  for (let i = 0; ; i += 1) {
+    let shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
+    if (shownCents !== cents) {
+      if (i >= 3) throw unstable(shownCents);
+      evidence.totalChangedBeforeClick = { from: cents, to: shownCents };
+      cents = shownCents;
+      await gate(cents, 'total at the click');
+      continue;
+    }
+    // The ONE visible control is resolved again on every pass: a rerender
+    // during the awaits above can expose a second visible Place Order, and
+    // an `nth()` locator saved earlier would re-resolve to one of them
+    // without the ambiguity refusal (Codex #3900 r1 P2).
+    // The claim is re-asserted on EVERY pass, changed figure or not: the
+    // page checks can outlive the claim (stale recovery parks it after
+    // prolonged heartbeat failures), and only the reservation — conditional
+    // on `status = 'placing'` — refuses `claim_lost`; without it the click
+    // would spend after the claim was settled (Codex #3900 r5 P1). It is an
+    // awaited DB write, so it runs FIRST, like the trial click: everything
+    // the page must still prove — tender, blockers, identity, lines, the
+    // control, the baseline, the total — is read AFTER it (pre-push hook P1
+    // on c30aa1cee), and a checkout that switched tender, ship-to, or SKU
+    // during the wait is caught by those re-checks.
+    await gate(cents, 'final claim check');
+    placeHandle = await trialPlaceOrder(page, await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence), refuse);
+    await identity();
+    await lines();
+    // Still the validated element, still shown: a detached handle is a
+    // replaced control — refused, nothing submitted (hook P1). Read BEFORE
+    // the baseline and the final total read; a control replaced during
+    // those is a detached handle the forced click cannot dispatch → ambiguous.
+    if (!(await placeHandle.isVisible().catch(() => false))) await refuse('place_order_replaced', 'the Place Order control was replaced after the final checks — nothing submitted');
+    // The baseline precedes only the tender proof and the final pure total
+    // read, so a reference node that appears during the longer awaits is in
+    // the baseline (Codex #3900 r5 P1); the total read stays last (Codex
+    // #3876 r4 P1) — a node appearing inside the tender re-check or that
+    // single read is the residual window, and it still has to survive two
+    // settle polls to be recorded.
+    baseline = await preClickOrderBaseline(page, refuse);
+    // Tender + blockers LAST but the total (Codex #3900 r8 P1): page reads
+    // only from here to the click.
+    await recheckTenderAtClick(page, radio, { evidence, upload });
+    shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
+    if (shownCents === cents) break;
+    if (i >= 3) throw unstable(shownCents);
+  }
+  markSubmitted();
+  let number = null;
+  try {
+    // The dispatch must not WAIT past the validated state: an ordinary
+    // click re-runs Playwright's actionability checks and can sit through a
+    // SiteOne rerender (button briefly disabled, covered, moving) that
+    // changes the total, tender, identity or lines, then dispatch on the
+    // unvalidated page. `force` dispatches at once on the control the trial
+    // click proved actionable a few reads ago; a control the browser will
+    // not act on submits nothing and falls to the ambiguous path (Codex
+    // #3876 r8 P1).
+    // `noWaitAfter`: the click is the dispatch — a slow post-submit
+    // navigation must not reject the click and skip the confirmation poll
+    // (which would park a placed order without its number); the bounded
+    // load-state wait and the poll below handle the response (Codex #3900 P2).
+    await placeHandle.click({ force: true, noWaitAfter: true, timeout: 5000 });
+    await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+    // The confirmation must be read ON SiteOne: SITEONE_BOT_ALLOWED_HOSTS can
+    // admit an asset host, and a numeric error id on a page there is not an
+    // order number — an off-host landing is ambiguous, never green (Codex
+    // #3876 r10 P2). Re-checked on every confirmation poll.
+    // An SPA checkout renders the confirmation after domcontentloaded: wait
+    // (bounded) for a SHOWN confirmation-number node rather than sampling
+    // once after a fixed delay (Codex #3876 r2 P2). A timeout falls through
+    // to the ambiguous path below.
+    number = await waitForNewOrderNumber(page, baseline, confirmationTimeoutMs); // injectable: the fake-page tests wait milliseconds, not the 20 s production deadline (Codex #3900 P1)
+  } catch (e) {
+    const err = new Error(`siteone submit outcome unknown: ${String(e.message).slice(0, 120)}`);
+    err.ambiguous = true; err.evidence = evidence; err.cents = cents;
+    throw err;
+  }
+  await shot(page, 'confirmation', evidence, upload);
+  // The ONE visible confirmation-number node — a hidden or stale responsive
+  // copy must not record the wrong number or force the ambiguous path (r15 P2).
+  if (!number) {
+    const err = new Error('siteone: order submitted but no confirmation number was found');
+    err.ambiguous = true; err.evidence = evidence; err.cents = cents;
+    throw err;
+  }
+  return { number, cents };
+}
+
+// Wait (bounded) for exactly ONE new identifier among the shown
+// confirmation-number nodes. Each shown node is judged on its own against
+// the pre-click baseline: a node whose text was shown before the click, or
+// whose identifier was, is not evidence — a reference node whose status text
+// alone changes ("PO reference 55501 · Ready" → "… · Validation failed") is
+// not a new confirmation (Codex #3876 r5 P2), nor is one of two pre-click
+// nodes left standing alone after a rejected click (r7 P2), nor a retained
+// reference node beside the confirmation the SPA appended (r17 P2). Nested
+// matches (an h1 wrapping the strong that carries the number) are one
+// identifier (r12 P2); two DIFFERENT new identifiers are ambiguous at once. A node's
+// first render ("Processing order…", an empty element) is not the outcome:
+// polling continues until a text yields a number (Codex #3876 r4 P2); a
+// timeout returns null and leaves the ambiguous path to decide.
+// The sole candidate must SETTLE: the same single new identifier on two
+// consecutive polls. A reference / PO value that renders a tick before the
+// order number would otherwise be recorded at once and the real number never
+// observed (Codex #3900 r1 P2); a candidate that changes starts over.
+async function waitForNewOrderNumber(page, baseline, timeout) {
+  const deadline = Date.now() + timeout;
+  let candidate = null;
+  for (;;) {
+    if (!isTrustedSiteOneUrl(page.url())) throw new Error(`confirmation page left the trusted host (${String(page.url()).slice(0, 80)})`);
+    const fresh = new Map();
+    const texts = await shownOrderTexts(page);
+    if (texts == null) { candidate = null; if (Date.now() >= deadline) return null; await page.waitForTimeout(500); continue; } // unreadable scan: nothing settles on it
+    for (const text of texts) {
+      if (baseline.texts.has(text)) continue;
+      // EVERY labeled identifier in the node is judged: a wrapper that grew
+      // from the pre-click reference to reference + confirmation carries the
+      // baseline id first and the new one after it (Codex #3876 r18 P2).
+      for (const number of orderNumbersIn(text)) if (!baseline.ids.has(number.toUpperCase())) fresh.set(number.toUpperCase(), number);
+    }
+    // Two different NEW identifiers on one poll is ambiguity that waiting
+    // cannot resolve — one of them disappearing later would let the other
+    // settle and be recorded (Codex #3900 r2 P2): null at once, the
+    // ambiguous path decides.
+    if (fresh.size > 1) return null;
+    const sole = fresh.size === 1 ? fresh.values().next().value : null;
+    if (sole && candidate && sole.toUpperCase() === candidate.toUpperCase()) return sole;
+    candidate = sole;
+    if (Date.now() >= deadline) return null;
+    await page.waitForTimeout(500);
+  }
+}
+
+// The confirmation number: the first of `orderNumbersIn`.
+function orderNumberIn(text) { return orderNumbersIn(text)[0] || null; }
+
+// EVERY distinct identifier a confirmation node carries, in order: each
+// token adjacent to an "Order #/number" label that is an identifier, else
+// (a dedicated number element) the whole text when it is one identifier. An
+// identifier carries at least one DIGIT — a label word ("Confirmation",
+// "order") never becomes the recorded order number (Codex PR3 r1 P2).
+function orderNumbersIn(text) {
+  // An identifier carries a digit and is never date-shaped: digits joined
+  // only by separators (2026-09-05, 09-05-2026, 05/09/26) are not ids —
+  // an unlabeled all-digit run (12345678) still is (Codex #3876 r3 P2).
+  const MON = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*';
+  // Separator-joined digit groups are a date only when the groups CAN be one
+  // (year-month-day, month-day-year, day-month-year, month-year, with real
+  // month / day ranges): "12345-67890" is a labeled confirmation number, not
+  // a date (Codex #3876 r8 P2).
+  const md = (m, d) => m >= 1 && m <= 12 && d >= 1 && d <= 31;
+  const yr = (g) => g.length === 2 || (g.length === 4 && /^(?:19|20)/.test(g));
+  const sepDate = (t) => {
+    const g = t.split(/[-/.]/);
+    if (!g.every((x) => /^\d{1,4}$/.test(x))) return false;
+    const n = g.map(Number);
+    if (g.length === 2) return n[0] >= 1 && n[0] <= 12 && yr(g[1]); // 09/26, 09-2026
+    if (g.length !== 3) return false;
+    return (g[0].length === 4 && yr(g[0]) && md(n[1], n[2])) // 2026-09-05
+      || (yr(g[2]) && (md(n[0], n[1]) || md(n[1], n[0]))); // 09-05-2026, 05/09/26
+  };
+  const dateShaped = (t) => sepDate(t)
+    || /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/.test(t) // 20260905 (compact)
+    || /^(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:19|20)\d{2}$/.test(t) // 09052026 (compact, month first — r5 P2)
+    || /^(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])(?:19|20)\d{2}$/.test(t) // 05092026 (compact, day first)
+    || new RegExp(`^${MON}[-/.]?\\d{1,2}[-/.]\\d{2,4}$`, 'i').test(t) // Sep-05-2026
+    || new RegExp(`^\\d{1,2}[-/.]?${MON}[-/.]?\\d{2,4}$`, 'i').test(t); // 05-Sep-2026
+  // Nor money-shaped: "Order # pending · Total $105.93" must keep polling
+  // for the number, not record the price as the order id (Codex #3876 r10 P2).
+  const moneyShaped = (t) => /^\d+\.\d{2}$/.test(t) || /^\d{1,3}(?:,\d{3})+(?:\.\d{2})?$/.test(t);
+  const isId = (t) => !!t && /\d/.test(t) && !dateShaped(t) && !moneyShaped(t);
+  // A STRONG qualifier (#, number, no, ID, ref) positively identifies the
+  // value: "Order # 20260905" is that order's number even though the digits
+  // form a date — excluded, a placed order would park ambiguous on every
+  // date-shaped id (Codex #3900 r9 P2). The date exclusion stays for the
+  // weak forms ("Order confirmation 09/05/2026", "Order: 2026-09-05") and
+  // for the unlabeled dedicated-element text.
+  const strongLabel = (q) => /#|number|no\b|\bid\b|ref/i.test(q);
+  const isLabeledId = (q, t) => (strongLabel(q) ? !!t && /\d/.test(t) && !moneyShaped(t) : isId(t));
+  // EVERY labeled match is tried: "Order date 2026-09-05 … Order # SO-778899"
+  // must yield the number, not the date (Codex #3876 r2 P2). Labeled ONLY —
+  // no unlabeled fallback: "Order # pending · Ships to 34205" must keep
+  // polling, not record the ZIP (Codex #3876 r16 P2). Labels: order /
+  // confirmation, optionally followed by confirmation / number / no. / id /
+  // ref / #. An identifier ends in a letter or digit: the sentence's own
+  // period ("Your order number is 55501234.") is prose, not part of the id —
+  // recorded with it, the same number rerendered without it would read as a
+  // new one, and the date / money exclusions would miss (Codex #3876 r17 P2).
+  const ids = [];
+  // A word boundary before the label, and no known prefix concept before
+  // it: "Reorder # 12345", "Backorder # 12345", "Purchase Order # PO-12345",
+  // "Back Order # BO-12345", "Sales order 778", "Work order 42" are other
+  // concepts, never the confirmation (Codex #3900 P2 ×2). A bare label needs
+  // a colon or "is" ("Order: SO-1", "Order is SO-1"): "Order SO-1" alone is
+  // not read, so every accepted form has a selector label (Codex #3900 r7 P2).
+  for (const m of String(text).matchAll(/(?<!\b(?:purchase|back|sales|work|change|pre|re)[\s-]*)\b(?:order|confirmation)(?!\s*date)((?:(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))+(?:\s+is)?\s*:?|\s+is\s*:?|\s*:))\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isLabeledId(m[1], m[2]) && !ids.some((x) => x.toUpperCase() === m[2].toUpperCase())) ids.push(m[2]);
+  if (ids.length) return ids;
+  // A dedicated number element (`[data-test="order-number"]`, `.order-number`)
+  // carries the bare identifier and no label: the WHOLE text, when it is one
+  // identifier token, is the number (pre-push hook P1 on de3e4a993). Prose
+  // still needs the label — a ZIP or price inside a sentence never qualifies.
+  const whole = String(text).trim();
+  return /^[A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9]$/i.test(whole) && isId(whole) ? [whole] : [];
+}
+
 // The checkout stage: bill-to proof, identity + final total, the cap gate on
 // that total, the one click, the confirmation number. Every check refuses
 // BEFORE the click; only the click flips the caller's cart-cleanup guard.
-async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, dryRun = false }) {
+async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, markSubmitted, confirmationTimeoutMs, dryRun = false }) {
   await (await visibleControl(page, SELECTORS.checkoutButton, 'checkout_button', evidence)).click();
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
   await page.waitForTimeout(2000);
   if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
-  await verifyBillToAccount(page, { evidence, upload }); // PR 3c keeps the radio for its at-click re-check
+  const radio = await verifyBillToAccount(page, { evidence, upload });
   await verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
   await verifyCheckoutLines(page, { vendorSku, qty, evidence, upload });
   const finalCents = await readCheckoutTotal(page, { evidence, upload });
@@ -910,25 +1259,33 @@ async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToToke
   // A dry run has now exercised every checkout selector and the final cap
   // check; it stops HERE, before the one click, and bells the checkout
   // total — selector drift is caught before any live purchase (Codex #3876
-  // r2 P1).
-  // The Place Order control is resolved and trial-clicked too, so a missing
-  // / ambiguous / disabled control is a dry-run refusal, not the first live
-  // order's park (r17 P2). The caller's finally empties the cart.
-  const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence);
-  await trialPlaceOrder(page, placeOrder, async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); });
-  evidence.placeOrderValidated = true;
-  if (dryRun) { await shot(page, 'dry-run-stop', evidence, upload); return { dryRun: true, amountCents: finalCents, externalOrderNumber: null, evidence }; }
-  // The submit stage (the stable-total click loop, the one click, the
-  // confirmation number) ships in PR 3c. Until then a real placement is
-  // refused — parked with a bell, nothing submitted (Adam's ruling on the
-  // #3876 r18 round-cap stop, 2026-09-05).
-  await shot(page, 'pre-submit', evidence, upload);
-  throw new RefusedError('checkout_not_shipped', 'SiteOne submit is not shipped yet (PR 3c) — run with SITEONE_BOT_DRY_RUN=true or order by hand', evidence, finalCents);
+  // r2 P1). The Place Order control is resolved and trial-clicked too, so a
+  // missing / ambiguous / disabled control is a dry-run refusal, not the
+  // first live order's park (r17 P2). The caller's finally empties the cart.
+  if (dryRun) {
+    const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence);
+    await trialPlaceOrder(page, placeOrder, async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); });
+    evidence.placeOrderValidated = true;
+    await shot(page, 'dry-run-stop', evidence, upload);
+    return { dryRun: true, amountCents: finalCents, externalOrderNumber: null, evidence };
+  }
+  let placed;
+  const identity = () => verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
+  const lines = () => verifyCheckoutLines(page, { vendorSku, qty, evidence, upload });
+  try { placed = await submitAndReadOrderNumber(page, { evidence, upload, markSubmitted, finalCents, gate, radio, identity, lines, confirmationTimeoutMs }); }
+  catch (e) {
+    // The click happened at THIS total: an ambiguous outcome parks with it
+    // (a null amount on a placed_at row would count $0 against the
+    // monthly cap — pre-push P0).
+    if (e.ambiguous && e.cents == null) e.cents = finalCents;
+    throw e;
+  }
+  return { externalOrderNumber: placed.number, amountCents: placed.cents, evidence, dryRun: false };
 }
 
 async function place(
   { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
-  { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
+  { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence, confirmationTimeoutMs = CONFIRMATION_TIMEOUT } = {},
 ) {
   if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
   const { qty, shipToTokens } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
@@ -946,6 +1303,7 @@ async function place(
   };
   let browser = null;
   let page = null;
+  let submitted = false; // the place-order click happened: the cart is the vendor's now
   try {
     ({ browser, page } = await openLockedBrowser({ launchBrowser, resolveHostIps, evidence }));
     await login(page, credentials);
@@ -957,15 +1315,14 @@ async function place(
     const amountCents = await verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload });
     await gate(amountCents, 'order');
     // The dry run continues into the checkout verifications (r2 P1) and
-    // stops inside checkoutAndSubmit, before the click; a real placement
-    // refuses there until PR 3c ships the submit stage.
-    // `await` is load-bearing: the finally below must run AFTER the stage
-    // (a bare `return promise` runs finally first).
-    return await checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, dryRun });
+    // stops inside checkoutAndSubmit, before the click.
+    // `await` is load-bearing: the finally below reads `submitted`, so the
+    // stage must have run before it (a bare `return promise` runs finally first).
+    return await checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, dryRun, confirmationTimeoutMs, markSubmitted: () => { submitted = true; } });
   } finally {
     // Nothing was submitted (dry run, refusal, error): leave no cart behind
     // for the next run to find. Best effort — the next run clears it anyway.
-    if (page) {
+    if (page && !submitted) {
       try { await Promise.race([clearCart(page), new Promise((resolve) => setTimeout(resolve, 20000))]); }
       catch (e) { logger.warn(`[siteone-bot] post-run cart cleanup failed: ${String(e.message).slice(0, 120)}`); }
     }
@@ -983,5 +1340,5 @@ module.exports = {
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, fillLoginForm, EVIDENCE_PREFIX },
+  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, orderNumbersIn, fillLoginForm, EVIDENCE_PREFIX },
 };

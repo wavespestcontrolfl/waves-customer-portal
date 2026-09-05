@@ -51,7 +51,7 @@ describe('relay session → owed commitments', () => {
     expect(reconcileAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(reconcileAt);
     const site = conversation.slice(recordAt - 1500, recordAt + 200);
-    expect(site).toContain('if ((updated || transferSalvaged) && (transcriptUpdate?.transcription || composedFromRowOnly)) {'); // the transfer's salvage qualifies too (PR 2A codex r2 P2); a resumed socket's row-only composition too (PR 2B)
+    expect(site).toContain('if ((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) {'); // the transfer's salvage qualifies too (PR 2A codex r2 P2); a resumed socket's row-only composition too (PR 2B)
     expect(site).toContain('let commitmentsTranscript = transcriptUpdate ? transcriptUpdate.transcription : null;'); // the scrubbed transcript the reconcile wrote… or, on a reconnected call, the persisted composed one (PR 2B)
     const helperAt = conversation.indexOf('async _recordCommitments({ transcript, sessionKey, promises = this._promises }) {');
     expect(helperAt).toBeGreaterThan(-1);
@@ -84,7 +84,9 @@ describe('relay session → owed commitments', () => {
   });
 
   test('a superseded socket never records promises under its OWN key (its close-time writes are skipped wholesale; PR 2B\'s late-segment pass runs under the row\'s CURRENT owner)', () => {
-    const guardAt = conversation.indexOf('if (this.callSid && !supersededAtClose) {');
+    const guardAt = conversation.indexOf('if (supersededAtClose) {');
+    const closeBody = conversation.slice(guardAt, conversation.indexOf('await this._runCaptureFloor(reason);', guardAt));
+    expect(closeBody).toMatch(/return;\s*}/);
     const recordAt = conversation.indexOf("await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });");
     expect(guardAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(guardAt);

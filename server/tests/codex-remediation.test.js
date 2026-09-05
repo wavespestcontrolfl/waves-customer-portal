@@ -555,8 +555,15 @@ describe('lane entry points', () => {
   const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
   afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
 
-  test('disabled → skip without touching GitHub', async () => {
+  test('unset remediation does not enable the scheduler or refresh lanes', async () => {
     delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    const gh = makeGh();
+    expect(await maybeRemediateBlogPost({ id: 1 }, { gh })).toMatchObject({ reason: 'disabled' });
+    expect(await maybeRemediateAutonomousPr({ number: 5 }, { action_type: 'refresh_existing_page' }, { gh })).toMatchObject({ reason: 'disabled' });
+  });
+
+  test('disabled → skip without touching GitHub', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'false';
     const gh = makeGh();
     const r = await maybeRemediateBlogPost({ id: 1, astro_pr_number: 5, astro_branch_name: 'b', slug: 'x' }, { db: makeDb(), gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
     expect(r).toEqual({ skipped: true, reason: 'disabled' });
@@ -799,11 +806,9 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
       const stamped = eligibleDb._tables.autonomous_runs.find((x) => x.id === 'run-1');
       expect(stamped.comparison_table_result).toBeUndefined();
 
-      // Category/spoke seed shape (shared bucket + operator_brief, no
-      // TRUE-intercept marker) still parks.
+      // Clean blog repairs no longer require an intercept marker.
       const { result: seed } = await harness(false);
-      expect(seed.parked).toBe(true);
-      expect(seed.reason).toMatch(/named-competitor/);
+      expect(seed.remediated).toBe(true);
     } finally {
       fg.isEnabled.mockRestore();
       process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;

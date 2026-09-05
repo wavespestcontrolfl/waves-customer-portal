@@ -77,6 +77,7 @@ test('runner identifies its checkout, rejects foreign stop requests, and release
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['-C', root, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'test']);
   fs.cpSync(path.join(sourceRoot, 'scripts/dev'), path.join(root, 'scripts/dev'), { recursive: true });
+  fs.copyFileSync(path.join(sourceRoot, '.nvmrc'), path.join(root, '.nvmrc'));
   fs.mkdirSync(path.join(root, 'client'));
   fs.copyFileSync(path.join(sourceRoot, 'client/vite.config.js'), path.join(root, 'client/vite.config.js'));
   fs.writeFileSync(path.join(root, 'client/preview-estimate.html'), '<!doctype html><title>Runner fixture</title>');

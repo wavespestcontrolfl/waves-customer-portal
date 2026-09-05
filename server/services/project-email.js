@@ -522,6 +522,9 @@ module.exports = {
   buildProjectPayload,
   ensurePrepToken,
   ensureServicePrepToken,
+  // The customer-facing project title (type-gated fee-cue + amount scrub) —
+  // shared with the composer's project report link (GH Codex #3893 r4 P1).
+  projectTitle,
   markServicePrepSent,
   isPrepTemplateKey,
   prepTemplateForProjectType,

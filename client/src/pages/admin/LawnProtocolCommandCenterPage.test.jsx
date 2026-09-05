@@ -27,6 +27,7 @@ vi.mock("../../components/admin/AdminCommandHeader", () => ({
     </div>
   ),
 }));
+vi.mock("./ProtocolReferenceTabV2", () => ({ default: () => <div>Tank mixing reference</div> }));
 
 import LawnProtocolCommandCenterPage from "./LawnProtocolCommandCenterPage";
 
@@ -86,8 +87,10 @@ describe("LawnProtocolCommandCenterPage embedded navigation", () => {
   it("renders embedded navigation as a non-sticky second-level heading", () => {
     renderProtocol("/admin/service-library?tab=protocols");
 
-    const header = screen.getByRole("button", { name: "Overview" }).parentElement;
+    const header = screen.getByRole("button", { name: "Mixing & labels" }).parentElement;
     expect(header).toHaveAttribute("data-heading-level", "2");
     expect(header).toHaveAttribute("data-sticky", "false");
+    expect(screen.getByText("Tank mixing reference")).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

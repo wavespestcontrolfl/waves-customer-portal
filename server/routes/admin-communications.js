@@ -265,6 +265,11 @@ router.post('/sms', async (req, res, next) => {
   // before dispatch (claimCardRequestSends) — released on every no-send
   // exit, marked after a real provider send.
   let cardClaim = null;
+  // Composer-carried project report links: the project send flow's own
+  // delivery claim, taken before dispatch (claimProjectReportSends) and
+  // handed back on every exit once the provider has answered — the text is
+  // a re-share, never a delivery.
+  let projectClaim = null;
   // Verified composer statement links — a real send is their first delivery.
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
@@ -293,6 +298,16 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[communications] card request claim release failed (the service's stale-claim lease recovers it): ${releaseErr.message}`);
     }
   };
+  const releaseProjectClaim = async () => {
+    if (!projectClaim) return;
+    const claim = projectClaim;
+    projectClaim = null;
+    try {
+      await require('../services/composer-customer-links').releaseProjectReportSends(claim);
+    } catch (releaseErr) {
+      logger.warn(`[communications] project report claim release failed (the send flow's stale-claim takeover recovers it): ${releaseErr.message}`);
+    }
+  };
   // AMBIGUOUS provider outcome (GH Codex #3851 r4 P1 — the card funnel's own
   // rule): a provider-phase retryable/deferred result (Twilio timeout, 5xx,
   // 429) is NOT a definitive no-send — the provider may already hold the
@@ -308,6 +323,15 @@ router.post('/sms', async (req, res, next) => {
       const ids = contractActivations.map((a) => a.id).join(', ');
       contractActivations = null;
       logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — prepared contract links stay activated (${ids})`);
+    }
+    // The project delivery claim stays too (GH Codex #3893 r12 P1): the
+    // provider may still hold the text, and restoring the row's state would
+    // let a resend start inside that window. The send flow's own stale-claim
+    // takeover (ten minutes) recovers the row, as after a crashed send.
+    if (projectClaim) {
+      const claim = projectClaim;
+      projectClaim = null;
+      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the project report delivery claim for projects ${claim.projects.map((p) => p.id).join(', ')}`);
     }
     if (cardClaim) {
       const claim = cardClaim;
@@ -534,6 +558,7 @@ router.post('/sms', async (req, res, next) => {
     const abortUnsent = async (status, error) => {
       await clearManualReservation();
       await releaseCardClaim();
+      await releaseProjectClaim();
       await restoreContractLinks();
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
@@ -569,7 +594,7 @@ router.post('/sms', async (req, res, next) => {
     // mid-send, or a text already out) refuses here; every later exit
     // restores/releases or records/marks them.
     try {
-      const { bearerLinkSendCheck, claimCardRequestSends } = require('../services/composer-customer-links');
+      const { bearerLinkSendCheck, claimCardRequestSends, claimProjectReportSends } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), {
         trustedCustomerId: trustedCustomerId || null,
         // The seam binds by the last ten digits; a non-US E.164 destination
@@ -595,6 +620,14 @@ router.post('/sms', async (req, res, next) => {
         const claim = await claimCardRequestSends(bearerCheck.cards);
         if (!claim.ok) return abortUnsent(409, claim.error);
         cardClaim = claim.claim;
+      }
+      // The project send flow's delivery claim, held through the provider
+      // handoff (GH Codex #3893 r11 P1): a resend that starts now 409s on
+      // its own claim instead of texting the same report twice.
+      if (bearerCheck.projectReports) {
+        const claim = await claimProjectReportSends(bearerCheck.projectReports);
+        if (!claim.ok) return abortUnsent(409, claim.error);
+        projectClaim = claim.claim;
       }
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
@@ -778,6 +811,9 @@ router.post('/sms', async (req, res, next) => {
         await releaseCardClaim();
         await restoreContractLinks();
       }
+      // Definitive no-send: the project delivery claim is handed back (an
+      // ambiguous outcome kept it above — this is a no-op then).
+      await releaseProjectClaim();
       if (claimedReviewRequestId) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
@@ -872,6 +908,9 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] card request claim finalize failed (text already sent): ${markErr.message}`);
       }
     }
+    // The text left — the project delivery claim has covered its window; the
+    // row's delivery state is restored (the text is a re-share, not a delivery).
+    await releaseProjectClaim();
     if (claimedReviewRequestId) {
       try {
         reviewEmailOutcome = await settleInlineReviewAfterSend({
@@ -1027,6 +1066,9 @@ router.post('/sms', async (req, res, next) => {
       && (err.providerOutcome.retryable || err.providerOutcome.deferred)) {
       await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
     }
+    // The project delivery claim is handed back on a throw too — accepted,
+    // or definitively not sent; an ambiguous outcome kept it above.
+    await releaseProjectClaim();
     // Same convention for the card request claim: accepted → mark, else release.
     if (cardClaim) {
       if (err?.providerOutcome?.sent === true) {
@@ -2143,7 +2185,8 @@ const EMAIL_SEND_CHANNELS = ['email', 'both'];
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
-// card_request | prep_guide | service_report | contract | statement. Same
+// card_request | prep_guide | service_report | contract | statement |
+// project_report. Same
 // fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
@@ -2278,6 +2321,8 @@ function composerLinkBuilders() {
     // Handled by statementLinkInsert before any customer resolution (the
     // key here only admits the kind).
     statement: null,
+    // A project report is the account's, like a service report.
+    project_report: (ids) => builders.buildProjectReportLink(ids),
   };
 }
 
@@ -2299,7 +2344,7 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // typed-in number sends as an unverified conversational lead, whose consent
 // read can miss the customer's notification_prefs entirely when the number
 // is formatted differently on file (GH Codex #3844 r4 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report'];
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first
@@ -2336,7 +2381,7 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {

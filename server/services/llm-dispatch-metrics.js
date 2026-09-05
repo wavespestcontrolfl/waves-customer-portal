@@ -545,6 +545,9 @@ function monotoneMerge(db, { counters = 'greatest' } = {}) {
     error_code: first('error_code'),
     error_class: first('error_class'),
     latency_ms: greatest('latency_ms'),
+    // the session's start is its EARLIEST recorded turn start; a turn's
+    // re-record carries the same start (LEAST skips a null side)
+    started_at: db.raw('LEAST(llm_dispatch_log.started_at, EXCLUDED.started_at)'),
     served_model: first('served_model'),
     ...Object.fromEntries(SESSION_COUNTERS.map((col) => [col, counters === 'add' ? add(col) : greatest(col)])),
   };
@@ -617,20 +620,26 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
     return await db.transaction(async (trx) => {
       // Short: lock, read the previous snapshot, write both rows.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [sessionId]);
-      return await upsertSessionRow(trx, ledgerRow({
-        ctx,
-        rowKind: 'session',
-        laneId: lane,
-        policyLabel: lane || `anthropic/${model || 'session'}`,
-        provider: 'anthropic',
-        requestedModel: model,
-        servedModel: session.model,
-        ok: !errorCode,
-        errorCode,
-        tokens,
-        latencyMs,
-        providerRef: sessionId,
-      }), sessionTurnKey(sessionId, startedAt, turnId));
+      return await upsertSessionRow(trx, {
+        ...ledgerRow({
+          ctx,
+          rowKind: 'session',
+          laneId: lane,
+          policyLabel: lane || `anthropic/${model || 'session'}`,
+          provider: 'anthropic',
+          requestedModel: model,
+          servedModel: session.model,
+          ok: !errorCode,
+          errorCode,
+          tokens,
+          latencyMs,
+          providerRef: sessionId,
+        }),
+        // the start the runner captured, persisted: created_at is the
+        // recording time, AFTER the usage GET, so a start derived from it
+        // drifts by the whole fetch (Codex r12 on #3891)
+        started_at: startedAt ? new Date(Number(startedAt)) : null,
+      }, sessionTurnKey(sessionId, startedAt, turnId));
     });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);

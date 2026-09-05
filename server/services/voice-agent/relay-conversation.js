@@ -20,12 +20,13 @@ const crypto = require('crypto');
 const { performance } = require('perf_hooks');
 const MODELS = require('../../config/models');
 const db = require('../../models/db');
+const segmentStore = require('./relay-segments');
 const logger = require('../logger');
 const { maskSid } = require('../twilio-failure-alerts');
 const { toE164, isLikelyE164 } = require('../../utils/phone');
 const { createLeadFromExtraction } = require('../lead-from-extraction');
 const { syncVoiceMessageForCall } = require('../conversations');
-const { activeTools } = require('./relay-tools');
+const { activeTools, speakSlot } = require('./relay-tools');
 const { isContextEnabled, resolveCallerContext, renderClockBlock } = require('./relay-context');
 const { classifyRelayEvent, DEFAULT_TTS_PROVIDER, DEFAULT_LANGUAGE, defaultTtsVoice, RELAY_TERMINAL_OUTCOMES } = require('./relay-protocol');
 
@@ -596,6 +597,7 @@ class RelayConversation {
     // is closed for the rest of the call.
     this._lookupsUsed = 0;
     this._priorLookupsUsed = 0;
+    this._priorCallerTurns = 0;
     // Session-scoped OFFERED-SLOT registry. Same opaque-ref doctrine as the
     // lookup refs: the availability tools speak "Tuesday August 18 at 9 AM"
     // (no ISO date anywhere), so request_booking takes a ref instead of making
@@ -1440,7 +1442,9 @@ class RelayConversation {
           this._slotRefs.set(existing, context);
           return existing;
         }
-        const ref = `S${this._slotRefs.size + 1}`;
+        // Match customer refs: a late prior segment cannot alias this leg's offer.
+        const prefix = require('./relay-recovery').isRecoveryGateOn() ? `${this.sessionGeneration || 0}-` : '';
+        const ref = `S${prefix}${this._slotRefs.size + 1}`;
         this._slotRefs.set(ref, context);
         this._slotRefsByKey.set(key, ref);
         return ref;
@@ -1660,19 +1664,19 @@ class RelayConversation {
    * promise THIS leg already made for the same kind is kept.
    */
   _applyResumeState(state) {
-    this._resume = state || null;
+    this._resume = state; // loadResumeState returns a verified state or null
     if (!state) return;
-    if (state.relayLeadId || state.leadCaptured) this.leadCaptured = true;
+    this.leadCaptured = [this.leadCaptured, state.relayLeadId, state.leadCaptured, state.reserviceFiled, state.noLeadCreated].some(Boolean);
     // The earlier leg's lead is THIS call's lead for the booking card too
     // (hook r36 P1): request_booking after the reconnect reads ctx.leadId().
     // A lead this leg captured itself is kept.
-    if (state.relayLeadId && !this._leadId) this._leadId = state.relayLeadId;
+    this._leadId ||= state.relayLeadId;
     // The call started when its FIRST leg did (hook r25 P1): the close-time
     // duration_seconds covers the whole call, not the resumed leg alone.
-    if (state.startedAtMs && state.startedAtMs < this._startedAt) this._startedAt = state.startedAtMs;
+    this._startedAt = Math.min(this._startedAt, state.startedAtMs || Infinity);
     // The earlier legs' caller turns count toward this CALL's turn cap
     // (codex r3 P2): a reconnect is not a fresh budget.
-    this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
+    this._priorCallerTurns = Math.max(this._priorCallerTurns, (state.callerTurns || []).length);
     // …and so do the customer-book lookups already spent (codex r4 P2).
     this._priorLookupsUsed = Math.max(this._priorLookupsUsed, Number(state.lookupsUsed) || 0);
     this._lookupResults = [...new Set([...(state.lookupResults || []), ...this._lookupResults])];
@@ -1681,13 +1685,19 @@ class RelayConversation {
       this._lookupRefs.set(ref, customerId);
       if (!this._lookupRefsByCustomer.has(customerId)) this._lookupRefsByCustomer.set(customerId, ref);
     }
+    // Keep this leg's newer search context and reverse-key choice on reload.
+    this._slotRefs = new Map([...(state.slotRefs || []), ...this._slotRefs]);
+    this._slotRefsByKey = new Map([
+      ...[...this._slotRefs].map(([ref, slot]) => [`${slot.date}@${slot.startMinutes}`, ref]),
+      ...this._slotRefsByKey,
+    ]);
     // A re-service already FILED on an earlier leg is this call's artifact:
     // no lead is owed (the floor stays down) and the close reports it filed.
     // A capture that deliberately created NO lead (an existing lifecycle
     // customer) is captured all the same (codex r2 P2): the floor stays
     // down and the session may end when the caller is done.
-    if (state.reserviceFiled) { this._reserviceFiled = true; this._noLeadCreated = true; this.leadCaptured = true; }
-    else if (state.noLeadCreated) { this._noLeadCreated = true; this.leadCaptured = true; }
+    this._reserviceFiled ||= state.reserviceFiled === true;
+    this._noLeadCreated = [this._noLeadCreated, state.reserviceFiled, state.noLeadCreated].some(Boolean);
     // An INCOMPLETE estimate capture on the earlier leg (codex r2 P1): the
     // hold that keeps the call open for the missing fields, and the fields
     // already given, carry over — otherwise the resumed leg's first
@@ -1695,8 +1705,8 @@ class RelayConversation {
     // retry would have forgotten the name and address. Only while THIS leg
     // has not captured yet (markCaptured sets the boolean); this leg's own
     // fields win over the earlier ones.
-    if (state.holdOpen && this._holdOpenForRetry == null) this._holdOpenForRetry = true;
-    if (state.estimateFields) this._estimateFields = { ...state.estimateFields, ...(this._estimateFields || {}) };
+    this._holdOpenForRetry ??= state.holdOpen || null;
+    this._estimateFields = { ...state.estimateFields, ...this._estimateFields };
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
@@ -1752,6 +1762,17 @@ class RelayConversation {
       logger.warn(`[voice-relay] provider-failure callback failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       return false;
     }
+  }
+
+  // Both turn-time hydration and a silent close can race the older socket's
+  // append. They use the same bounded, owner-verified restoration attempt.
+  async _reloadResumeState() {
+    const recovery = require('./relay-recovery');
+    if (this._callerVerified !== true || !recovery.isRecoveryGateOn()) return;
+    try {
+      const fresh = await recovery.loadResumeState(db, this.callSid, { sessionKey: this.sessionKey });
+      if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh);
+    } catch { /* fail-soft: a later turn or close may retry */ }
   }
 
   async _sessionSuperseded() {
@@ -1826,17 +1847,17 @@ class RelayConversation {
       // empty list. Reload (bounded) on each of the first turns until the
       // segment is there — the seed then lands on that turn (hook P1).
       this._resumeReloads = (this._resumeReloads || 0) + 1;
-      try {
-        // Also the retry for an initial load that timed out, or a verification
-        // that settled late — the owner + verification checks stay (hook P1).
-        const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
-        if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh); // the same restoration as the constructor's load (hook P1)
-      } catch { /* fail-soft: the next turn retries */ }
+      await this._reloadResumeState();
     }
     if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
       this._resumeSeeded = true;
+      const { formatSmsTime } = require('../../utils/sms-time-format');
+      const offeredSlots = [...this._slotRefs].map(([ref, slot]) => {
+        const start = `${Math.floor(slot.startMinutes / 60)}:${String(slot.startMinutes % 60).padStart(2, '0')}`;
+        return `${speakSlot({ date: slot.date, start_label: formatSmsTime(start) })} (slot_ref: ${ref})`;
+      }).join('\n');
       this.messages.push(
-        { role: 'user', content: `[Earlier in this call, before the line dropped — the caller may pick up where this left off]\n${this._resume.segmentsText}\n[Previously issued account lookup results — same redacted access rules apply]\n${this._lookupResults.join('\n')}` },
+        { role: 'user', content: `[Earlier in this call, before the line dropped — the caller may pick up where this left off]\n${this._resume.segmentsText}\n[Previously issued account lookup results — same redacted access rules apply]\n${this._lookupResults.join('\n')}\n[Previously offered times — use the matching slot_ref if accepted; request_booking rechecks availability]\n${offeredSlots}` },
         { role: 'assistant', content: 'Understood — I have what we covered before the line dropped.' },
       );
     }
@@ -2080,6 +2101,7 @@ class RelayConversation {
    */
   async end(reason) {
     if (this.ended) return;
+    reason ||= null;
     this.ended = true;
     this.interrupt();
     // A barge-in the caller never followed with speech before hanging up is
@@ -2107,17 +2129,8 @@ class RelayConversation {
     // composition below read that state, so it settles first (hook P1).
     if (this._resumeReady) {
       try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
-      // …and a snapshot that read the row before the old socket appended its
-      // segment is refreshed ONCE here (bounded): the floor below must see
-      // the earlier caller turns even when the caller never spoke on this
-      // leg, so the turn-time reload never ran (hook P1).
-      if (this._resumedHint && (!this._resume || !this._resume.segmentsText) && require('./relay-recovery').isRecoveryGateOn()) {
-        try {
-          const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
-          if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh);
-        } catch { /* fail-soft */ }
-      }
     }
+    if (this._resumedHint && !this._resume?.segmentsText) await this._reloadResumeState();
 
     // …and then drain the writes the chain does NOT cover. A tool that blew its
     // WRITE timeout was detached from the turn loop deliberately (the caller
@@ -2166,10 +2179,10 @@ class RelayConversation {
     if (recoveryOn && this.callSid && this._transcript.length && this._callerVerified === true) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
-        segment = recovery.buildSegment({
+        segment = segmentStore.buildSegment({
           generation: this.sessionGeneration,
           sessionKey: this.sessionKey,
-          reason: reason || null,
+          reason,
           text: buildTranscriptText(this._transcript),
           turns: this._transcript.length,
           latency: summarizeTurnStats(this._turnStats),
@@ -2179,20 +2192,21 @@ class RelayConversation {
           noLeadCreated: this._noLeadCreated === true,
           modelFailures: this._modelFailures,
           toolFailures: this._toolFailures,
-          promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
+          promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, ...v })),
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
           startedAt: this._startedAt,
           lookupsUsed: this._priorLookupsUsed + this._lookupsUsed,
           lookupRefs: [...this._lookupRefs.entries()],
           lookupResults: this._lookupResults,
+          slotRefs: [...this._slotRefs],
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)
             .where((q) => q
               .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [this.sessionKey || ''])
               .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [this.sessionGeneration || 0]))
-            .update(recovery.appendSegmentPatch(db, segment)),
+            .update(segmentStore.appendSegmentPatch(db, segment)),
           WRITE_DRAIN_TIMEOUT_MS,
           0,
         );
@@ -2202,18 +2216,13 @@ class RelayConversation {
         logger.warn(`[voice-relay] segment append failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       }
     }
-    const supersededAtClose = this.sessionKey
-      ? await this._sessionSuperseded().catch(() => false)
-      : false;
+    const supersededAtClose = await this._sessionSuperseded().catch(() => false);
     if (supersededAtClose) {
       logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
       // …except that this socket's segment may just have RECOMPOSED a call
       // the replacement already finalized (appendSegmentPatch): the unified
       // message row follows it. Bounded, best-effort.
       if (segmentAppended) {
-        try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
-          logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
-        }
         // …and the replacement's commitments pass may already have run on a
         // transcript without this segment: reconcile once more, on the
         // PERSISTED composed transcript, under the row's CURRENT owner (the
@@ -2230,7 +2239,7 @@ class RelayConversation {
             // The ROW's latest promise per kind (the just-appended segment
             // included) — never this superseded socket's own map, which
             // could overwrite a deadline the resumed leg gave (hook P1).
-            const promises = new Map(require('./relay-recovery').latestPromises(meta.relay_segments)
+            const promises = new Map(segmentStore.latestPromises(meta.relay_segments)
               .map((p) => [p.kind, { verdict: p.verdict, expectation: p.expectation, at: p.at ? new Date(p.at) : null }]));
             await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });
           }
@@ -2244,10 +2253,17 @@ class RelayConversation {
         } catch (err) {
           logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
         }
+        // Copy the repaired whole-call duration and summary into the inbox.
+        // Still sync the appended transcript if any best-effort repair failed.
+        try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
+          logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
+        }
       }
+      return;
     }
 
-    if (!supersededAtClose) await this._runCaptureFloor(reason);
+    await this._runCaptureFloor(reason);
+    if (!this.callSid) return;
 
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
@@ -2257,8 +2273,7 @@ class RelayConversation {
     // calls don't linger as ringing/no-answer/null, then resync the unified
     // message row. Keyed by CallSid — a no-op (0 rows) when no call_log row
     // exists for the session (a call answered outside the signed webhooks).
-    if (this.callSid && !supersededAtClose) {
-      try {
+    try {
         // RACE: end() runs on EVERY WebSocket close, including a relay failure
         // (rejected upgrade / WS error / transient disconnect). On failure Twilio
         // also hits /relay-complete, which stamps call_outcome='voicemail' as the
@@ -2282,11 +2297,12 @@ class RelayConversation {
         // Turns still waiting on a speaker event log now (firstAudio=n/a).
         for (const s of this._turnStats) this._finishTurn(s);
         const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats } = require('./relay-transcript');
+        const capturedLead = this.leadCaptured && !this._noLeadCreated;
         const transcriptUpdate = buildTranscriptUpdate({
           turns: this._transcript,
           modelSummary: this._modelSummary,
-          reason: reason || null,
-          leadCaptured: this.leadCaptured && !this._noLeadCreated,
+          reason,
+          leadCaptured: capturedLead,
           reserviceFiled: this._reserviceFiled,
           callSid: this.callSid,
           model: MODEL,
@@ -2297,9 +2313,11 @@ class RelayConversation {
         // PR 2B (codex r3 P2): on a reconnected call the summary covers the
         // WHOLE call — the earlier legs' caller lines ahead of this leg's —
         // unless the model wrote one (capture_lead's, which already did).
-        const priorCallerTurns = (recoveryOn && this._resume && Array.isArray(this._resume.callerTurns) ? this._resume.callerTurns : []).map((text) => ({ role: 'caller', text }));
+        const resume = this._resume || {};
+        const priorCallerTurns = Array.from(recoveryOn ? (resume.callerTurns || []) : [], (text) => ({ role: 'caller', text }));
+        const hasTranscript = Boolean(transcriptUpdate?.transcription);
         if (transcriptUpdate && priorCallerTurns.length && !this._modelSummary) {
-          transcriptUpdate.call_summary = buildCallSummary({ turns: [...priorCallerTurns, ...this._transcript], reason: reason || null, leadCaptured: this.leadCaptured && !this._noLeadCreated });
+          transcriptUpdate.call_summary = buildCallSummary({ turns: [...priorCallerTurns, ...this._transcript], reason, leadCaptured: capturedLead });
         }
         const reconcileQuery = db('call_log')
           .where('twilio_call_sid', this.callSid)
@@ -2320,7 +2338,7 @@ class RelayConversation {
         // a socket older than the row's latest reconnect stamp writes no
         // columns (its segment is already appended); the resumed socket's
         // generation is ≥ the stamp and composes the whole call.
-        const fenceOwner = (q) => (recoveryOn ? recovery.generationFenceSql(this._fenceOwner(q), this.sessionGeneration) : this._fenceOwner(q));
+        const fenceOwner = (q) => (recoveryOn ? segmentStore.generationFenceSql(this._fenceOwner(q), this.sessionGeneration) : this._fenceOwner(q));
         // …and the transcript column is composed from ALL segments (in
         // generation order, `[Reconnected]` between them) when this socket's
         // segment landed; a call with one segment reads exactly as before.
@@ -2332,14 +2350,14 @@ class RelayConversation {
         // the row's durable earlier segments plus this socket's own record,
         // deduplicated by session key should the append land after all —
         // never this socket's text alone over a reconnected call (hook r27 P1).
-        if (recoveryOn && segment && transcriptUpdate && transcriptUpdate.transcription) {
-          composedTranscription = db.raw('COALESCE(?, ?)', [recovery.composeSegmentsSql(db, segmentAppended ? null : segment), transcriptUpdate.transcription]);
+        if (recoveryOn && segment && hasTranscript) {
+          composedTranscription = db.raw('COALESCE(?, ?)', [segmentStore.composeSegmentsSql(db, segmentAppended ? null : segment), transcriptUpdate.transcription]);
           try {
             const tm = JSON.parse(transcriptUpdate.transcription_metadata);
             tm.segments = { this_generation: this.sessionGeneration, appended: segmentAppended };
             transcriptUpdate.transcription_metadata = JSON.stringify(tm);
           } catch { /* keep the metadata as built */ }
-        } else if (recoveryOn && this._resume && !(transcriptUpdate && transcriptUpdate.transcription)) {
+        } else if (recoveryOn && this._resume && !hasTranscript) {
           // The caller hung up before speaking on the reconnected leg: the
           // reconnect claim fenced the first socket's reconcile out, so this
           // close is the only one that can put the earlier segment(s) on the
@@ -2347,10 +2365,10 @@ class RelayConversation {
           const { TRANSCRIPTION_PROVIDER: RELAY_PROVIDER } = require('./relay-transcript');
           composedFromRowOnly = {
             // …and its summary (the superseded first socket never wrote one).
-            ...(priorCallerTurns.length ? { call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason: reason || null, leadCaptured: this.leadCaptured && !this._noLeadCreated }) } : {}),
-            transcription: db.raw('COALESCE(?, transcription)', [recovery.composeSegmentsSql(db)]),
-            transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [recovery.composeSegmentsSql(db), RELAY_PROVIDER]),
-            transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [recovery.composeSegmentsSql(db)]),
+            ...(priorCallerTurns.length ? { call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason, leadCaptured: capturedLead }) } : {}),
+            transcription: db.raw('COALESCE(?, transcription)', [segmentStore.composeSegmentsSql(db)]),
+            transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [segmentStore.composeSegmentsSql(db), RELAY_PROVIDER]),
+            transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [segmentStore.composeSegmentsSql(db)]),
           };
         }
         fenceOwner(reconcileQuery);
@@ -2363,9 +2381,9 @@ class RelayConversation {
               ? db.raw('GREATEST(COALESCE(duration_seconds, 0), ?)', [Math.max(0, Math.round((Date.now() - this._startedAt) / 1000))])
               : Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
             updated_at: new Date(),
-            ...(transcriptUpdate || {}),
+            ...transcriptUpdate,
             ...(composedTranscription ? { transcription: composedTranscription } : {}),
-            ...(composedFromRowOnly || {}),
+            ...composedFromRowOnly,
           });
         // LOUD on a dropped audit record: 0 rows with a real transcript means
         // either the voicemail guard fired (a genuinely failed relay leg) or
@@ -2470,8 +2488,8 @@ class RelayConversation {
         // too. A never-reconnected, never-transferred salvage (relay_failed)
         // and the sandbox record nothing, as before.
         const transferSalvaged = salvaged > 0 && this.sandbox !== true
-          && (this._transferRequested === true || Boolean(this._resume && this._resume.reconnects > 0));
-        if ((updated || transferSalvaged) && (transcriptUpdate?.transcription || composedFromRowOnly)) {
+          && (this._transferRequested === true || (resume.reconnects > 0));
+        if ((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) {
           // PR 2B: on a reconnected call the persisted transcript is the
           // composed one (all segments); the commitments pass reads THAT
           // under the same owner fence, so segment 1's promises reach Owed
@@ -2483,13 +2501,12 @@ class RelayConversation {
               2000,
               null,
             );
-            if (persisted && typeof persisted.transcription === 'string' && persisted.transcription) commitmentsTranscript = persisted.transcription;
+            commitmentsTranscript = persisted?.transcription || commitmentsTranscript;
           }
           await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });
         }
-      } catch (err) {
-        logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
-      }
+    } catch (err) {
+      logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
     }
 
   }
@@ -2504,8 +2521,7 @@ class RelayConversation {
    */
   async _refreshCallSummary(meta) {
     if (!this.callSid) return false;
-    const recovery = require('./relay-recovery');
-    const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
+    const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta && meta.relay_segments));
     try {
       const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
       const starts = legs.map((leg) => Date.parse(leg.started_at)).filter(Number.isFinite);
@@ -2546,8 +2562,7 @@ class RelayConversation {
    */
   async _refreshFloorLeadSummary(meta) {
     if (this.sandbox || !this.callSid) return false;
-    const recovery = require('./relay-recovery');
-    const callerTurns = recovery.callerTurnsFromText(recovery.segmentsText(meta && meta.relay_segments));
+    const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta && meta.relay_segments));
     if (!callerTurns.length) return false;
     try {
       const { scrubForStorage } = require('./relay-transcript');

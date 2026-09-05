@@ -1,3 +1,4 @@
+const segmentStore = require('../services/voice-agent/relay-segments');
 /**
  * Sandy PR 2B — voice-session recovery (GATE_VOICE_RELAY_RECOVERY), the
  * module + the conversation side. The route side is
@@ -103,24 +104,24 @@ describe('relay-recovery module', () => {
 
   test('segments: append never overwrites; composition orders by generation with the [Reconnected] separator; the fence is ≤ generation', () => {
     const { db } = primeDb();
-    const seg = recovery.buildSegment({ generation: 7, sessionKey: 'k', reason: 'ws_close', text: 'Caller: hi', turns: 1, latency: { turns: 1 }, versions: { model: 'm' }, leadCaptured: true });
+    const seg = segmentStore.buildSegment({ generation: 7, sessionKey: 'k', reason: 'ws_close', text: 'Caller: hi', turns: 1, latency: { turns: 1 }, versions: { model: 'm' }, leadCaptured: true });
     expect(seg).toEqual(expect.objectContaining({ generation: 7, session_key: 'k', reason: 'ws_close', text: 'Caller: hi', turns: 1, lead_captured: true }));
-    const append = recovery.appendSegmentSql(db, seg);
+    const append = segmentStore.appendSegmentSql(db, seg);
     expect(append.sql).toBe("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segments', COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb)");
     expect(JSON.parse(append.bindings[0])).toEqual([seg]);
-    const compose = recovery.composeSegmentsSql(db);
+    const compose = segmentStore.composeSegmentsSql(db);
     expect(compose.sql).toContain("string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord)");
-    expect(compose.bindings).toEqual([recovery.SEGMENT_SEPARATOR]);
-    expect(recovery.segmentsText([{ generation: 2, text: 'second' }, { generation: 1, text: 'first' }, { generation: 3, text: '' }])).toBe(`first${recovery.SEGMENT_SEPARATOR}second`);
+    expect(compose.bindings).toEqual([segmentStore.SEGMENT_SEPARATOR]);
+    expect(segmentStore.segmentsText([{ generation: 2, text: 'second' }, { generation: 1, text: 'first' }, { generation: 3, text: '' }])).toBe(`first${segmentStore.SEGMENT_SEPARATOR}second`);
     const q = { whereRaw: jest.fn().mockReturnThis() };
-    recovery.generationFenceSql(q, 99);
+    segmentStore.generationFenceSql(q, 99);
     expect(q.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [99]);
   });
 
   test('appendSegmentPatch: the append also recomposes Sandy-owned columns and the stash — a late old segment refreshes a call the resumed socket already finalized (hook P1)', () => {
     const { db } = primeDb();
-    const seg = recovery.buildSegment({ generation: 1, text: 'Caller: first leg' });
-    const patch = recovery.appendSegmentPatch(db, seg);
+    const seg = segmentStore.buildSegment({ generation: 1, text: 'Caller: first leg' });
+    const patch = segmentStore.appendSegmentPatch(db, seg);
     expect(patch.transcription.sql).toContain("WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ?");
     expect(patch.transcription.sql).toMatch(/ELSE transcription\s+END$/);
     expect(patch.transcription.bindings[0]).toBe('conversation_relay'); // a recording's transcript is never touched
@@ -132,7 +133,7 @@ describe('relay-recovery module', () => {
 
   test('appendSegmentPatch fills an EMPTY column only on a row that RECONNECTED — a failed claim\'s voicemail row keeps its columns for the recording (hook r28 P1)', () => {
     const { db } = primeDb();
-    const patch = recovery.appendSegmentPatch(db, recovery.buildSegment({ generation: 1, text: 'x' }));
+    const patch = segmentStore.appendSegmentPatch(db, segmentStore.buildSegment({ generation: 1, text: 'x' }));
     const fill = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
     expect(patch.transcription.sql).toContain(fill);
     expect(patch.transcription_provider.sql).toContain(fill);
@@ -141,7 +142,7 @@ describe('relay-recovery module', () => {
 
   test('appendSegmentPatch refreshes the AI portion of a processor composite and preserves the recorded portion (hook P1)', () => {
     const { db } = primeDb();
-    const patch = recovery.appendSegmentPatch(db, recovery.buildSegment({ generation: 1, text: 'Caller: first leg' }));
+    const patch = segmentStore.appendSegmentPatch(db, segmentStore.buildSegment({ generation: 1, text: 'Caller: first leg' }));
     expect(patch.transcription.sql).toMatch(/WHEN transcription LIKE '\[AI segment\]%' AND transcription ~ \? AND \? IS NOT NULL\s+THEN '\[AI segment\]' \|\| E'\\n' \|\| \? \|\| substring\(transcription from \?\)/);
     expect(patch.transcription.bindings[5]).toBe('\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$'); // non-capturing: substring(from) returns the whole match
     expect(patch.transcription.bindings[8]).toBe(patch.transcription.bindings[5]);
@@ -161,7 +162,7 @@ describe('relay-recovery module', () => {
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'other-nonce' })).toBeNull(); // not this socket's claim ⇒ nothing (hook P0)
     expect(await recovery.loadResumeState(db, 'CA-1')).toBeNull(); // no key ⇒ nothing
-    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
+    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
     primeDb({ firstRow: { metadata: JSON.stringify({ ...OWNED, relay_segments: [{ generation: 1, text: 'x' }] }) } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toBeNull(); // no reconnect stamp ⇒ a forged <Parameter resumed> proves nothing
     primeDb({ firstRow: null });
@@ -175,7 +176,7 @@ describe('relay-recovery module', () => {
   test('a segment keeps everything the transcript store keeps; only the resume SEED is capped (tail) (hook P1)', async () => {
     const { MAX_TRANSCRIPT_CHARS } = require('../services/voice-agent/relay-transcript');
     const long = 'x'.repeat(MAX_TRANSCRIPT_CHARS + 10);
-    expect(recovery.buildSegment({ generation: 1, text: long }).text).toHaveLength(MAX_TRANSCRIPT_CHARS);
+    expect(segmentStore.buildSegment({ generation: 1, text: long }).text).toHaveLength(MAX_TRANSCRIPT_CHARS);
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_reconnect_ms: 5, relay_segments: [{ generation: 1, text: 'a'.repeat(recovery.RESUME_SEED_MAX_CHARS + 50) }] } } });
     const state = await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' });
     expect(state.segmentsText).toHaveLength(recovery.RESUME_SEED_MAX_CHARS + 3);
@@ -188,7 +189,7 @@ describe('relay-recovery module', () => {
 
   test('promises ride the segment and are restored (latest per kind) with their expectation and timestamp; caller turns are extracted (hook P1)', async () => {
     const at = new Date('2026-09-05T02:00:00.000Z');
-    const seg = recovery.buildSegment({ generation: 1, text: 'Caller: ants\nAgent: I will send an estimate.\nCaller: thanks', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at }] });
+    const seg = segmentStore.buildSegment({ generation: 1, text: 'Caller: ants\nAgent: I will send an estimate.\nCaller: thanks', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at }] });
     expect(seg.promises).toEqual([{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }]);
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [
       { generation: 2, text: 'Caller: later', promises: [{ kind: 'send_estimate', verdict: false, expectation: null, at: '2026-09-05T02:05:00.000Z' }] },
@@ -200,10 +201,10 @@ describe('relay-recovery module', () => {
   });
 
   test('an incomplete estimate capture rides the segment (hold + the fields given) and is restored from the LATEST leg, fields accumulated across legs (codex r2 P1)', async () => {
-    const seg = recovery.buildSegment({ generation: 1, text: 'Caller: ants', holdOpen: true, estimateFields: { first_name: 'Ann', email: '  ', address_line1: null, city: 'Venice ' } });
+    const seg = segmentStore.buildSegment({ generation: 1, text: 'Caller: ants', holdOpen: true, estimateFields: { first_name: 'Ann', email: '  ', address_line1: null, city: 'Venice ' } });
     expect(seg.hold_open).toBe(true);
     expect(seg.estimate_fields).toEqual({ first_name: 'Ann', city: 'Venice' });
-    expect(recovery.buildSegment({ generation: 1, text: 'x' })).toEqual(expect.objectContaining({ hold_open: false, estimate_fields: null }));
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x' })).toEqual(expect.objectContaining({ hold_open: false, estimate_fields: null }));
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [
       { generation: 2, text: 'Caller: later', hold_open: true, estimate_fields: { email: 'ann@example.com', city: 'Sarasota' } },
       seg,
@@ -296,7 +297,7 @@ describe('the conversation side', () => {
     expect(u2[1].transcription.sql).toBe('COALESCE(?, ?)');
     // an UNKEYED segment (no session key) unions without the filter
     const { db } = primeDb();
-    const unkeyed = recovery.composeSegmentsSql(db, { generation: 1, text: 'x' });
+    const unkeyed = segmentStore.composeSegmentsSql(db, { generation: 1, text: 'x' });
     expect(unkeyed.sql).not.toContain('session_key');
     expect(unkeyed.bindings).toHaveLength(2);
   });
@@ -322,6 +323,31 @@ describe('the conversation side', () => {
     expect(updates[0].metadata.sql).toContain('jsonb_set(?, \'{relay_transcript,text}\'');
     expect(updates[0].transcription.sql).toContain('transcription_provider = ?');
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-rec');
+  });
+
+  test.each([false, true])('late-segment inbox sync follows the duration repair and survives its failure (%s)', async (repairFails) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { syncVoiceMessageForCall } = require('../services/conversations');
+    const row = {
+      duration_seconds: 15,
+      metadata: {
+        relay_session_claim_owner: 'nonce-2',
+        relay_segments: [{ started_at: '2026-01-01T12:00:00Z', ended_at: '2026-01-01T12:02:00Z' }],
+      },
+    };
+    primeDb({ firstRow: row, updateImpl: jest.fn(async (patch) => {
+      if (patch.duration_seconds) {
+        if (repairFails) throw new Error('repair unavailable');
+        row.duration_seconds = 120;
+      }
+      return 1;
+    }) });
+    const inboxDurations = [];
+    syncVoiceMessageForCall.mockImplementationOnce(async () => { inboxDurations.push(row.duration_seconds); });
+    const convo = convoWithTurns();
+    convo._sessionSuperseded = jest.fn(async () => true);
+    await convo.end('ws_close');
+    expect(inboxDurations).toEqual([repairFails ? 15 : 120]);
   });
 
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
@@ -477,7 +503,7 @@ describe('the conversation side', () => {
 
   test('the provider-failure streak continues across the reconnect (codex r1 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    expect(recovery.buildSegment({ generation: 1, text: 'x', modelFailures: 1, toolFailures: 0 })).toEqual(expect.objectContaining({ model_failures: 1, tool_failures: 0 }));
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x', modelFailures: 1, toolFailures: 0 })).toEqual(expect.objectContaining({ model_failures: 1, tool_failures: 0 }));
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', model_failures: 1, tool_failures: 1 }] } } });
     const convo = resumedConvo({ callSid: 'CA-streak' });
     await convo._resumeReady;
@@ -536,8 +562,8 @@ describe('the conversation side', () => {
   test('the call\'s START rides the segment and the resumed leg restores the earliest one, so duration_seconds covers the whole call (hook r25 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const t0 = Date.now() - 600000; // the first leg began 10 minutes ago
-    expect(recovery.buildSegment({ generation: 1, text: 'x', startedAt: t0 }).started_at).toBe(new Date(t0).toISOString());
-    expect(recovery.buildSegment({ generation: 1, text: 'x' }).started_at).toBeNull();
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x', startedAt: t0 }).started_at).toBe(new Date(t0).toISOString());
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x' }).started_at).toBeNull();
     const { updates } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', started_at: new Date(t0).toISOString() }, { generation: 0, text: 'Caller: earlier', started_at: 'not-a-date' }] } } });
     const convo = resumedConvo({ callSid: 'CA-dur' });
     convo._sessionSuperseded = jest.fn(async () => false);
@@ -593,7 +619,7 @@ describe('the conversation side', () => {
 
   test('customer-book lookups already spent ride the segment and the resumed leg continues the per-call budget (codex r4 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    expect(recovery.buildSegment({ generation: 1, text: 'x', lookupsUsed: 2 }).lookups_used).toBe(2);
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x', lookupsUsed: 2 }).lookups_used).toBe(2);
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', lookups_used: 3 }] } } });
     const convo = resumedConvo({ callSid: 'CA-lookups' });
     await convo._resumeReady;
@@ -741,7 +767,7 @@ describe('the conversation side', () => {
 
   test('lookup references remain usable after the lookup budget was exhausted on the earlier leg', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const segment = recovery.buildSegment({ generation: 1, lookupsUsed: 3, lookupRefs: [['C1-1', 'customer-1']], text: 'Caller: thanks' });
+    const segment = segmentStore.buildSegment({ generation: 1, lookupsUsed: 3, lookupRefs: [['C1-1', 'customer-1']], text: 'Caller: thanks' });
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [segment] } } });
     const convo = resumedConvo();
     await convo._resumeReady;
@@ -749,6 +775,59 @@ describe('the conversation side', () => {
     expect(ctx.consumeLookup()).toBe(false);
     expect(ctx.resolveLookupRef('C1-1')).toBe('customer-1');
     expect(ctx.rememberLookup({ id: 'customer-1' })).toBe('C1-1');
+  });
+
+  test('offered slots and their search context survive the closing segment and owner-verified resume', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb();
+    const first = convoWithTurns();
+    const slot = { date: '2026-01-02', start_time: '14:00' };
+    const context = { lat: 27.4, lng: -82.5, duration: 90, timeOfDay: 'afternoon', expandOpenDays: true };
+    const ref = first._buildToolCtx().rememberSlot(slot, context);
+    first._sessionSuperseded = jest.fn(async () => true);
+    await first.end('ws_close');
+    const segment = JSON.parse(updates[0].metadata.bindings[1].bindings[0])[0];
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [segment] } } });
+    const resumed = resumedConvo();
+    await resumed._resumeReady;
+    const ctx = resumed._buildToolCtx();
+    expect(ctx.resolveSlotRef(ref)).toEqual({ date: slot.date, startMinutes: 840, ...context });
+    expect(ctx.rememberSlot(slot, context)).toBe(ref);
+    const fresh = ctx.rememberSlot({ ...slot, start_time: '15:00' }, context);
+    expect(fresh).not.toBe(ref);
+    expect(ctx.resolveSlotRef(ref).startMinutes).toBe(840);
+    expect(ctx.resolveSlotRef(fresh).startMinutes).toBe(900);
+  });
+
+  test('a late slot registry cannot alias current offers or undo a newer re-offer context', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const convo = resumedConvo();
+    await convo._resumeReady;
+    const ctx = convo._buildToolCtx();
+    const slot = { date: '2026-01-02', start_time: '14:00' };
+    const context = { date: slot.date, startMinutes: 840, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'any', expandOpenDays: true };
+    const fresh = ctx.rememberSlot({ ...slot, start_time: '15:00' }, context);
+    const state = { slotRefs: [['S1-1', context]] };
+    convo._applyResumeState(state);
+    expect(ctx.resolveSlotRef(fresh).startMinutes).toBe(900);
+    expect(ctx.resolveSlotRef('S1-1')).toEqual(context);
+    expect(ctx.rememberSlot(slot, { ...context, timeOfDay: 'afternoon' })).toBe('S1-1');
+    convo._applyResumeState(state);
+    expect(ctx.resolveSlotRef('S1-1').timeOfDay).toBe('afternoon');
+    expect(ctx.rememberSlot({ ...slot, start_time: '15:00' }, context)).toBe(fresh);
+  });
+
+  test('slot restoration follows segment generation, accepts legacy refs, and skips malformed entries', async () => {
+    const context = { date: '2026-01-02', startMinutes: 840 };
+    const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [
+      { generation: 2, slot_refs: [['S1', { ...context, timeOfDay: 'afternoon' }]] },
+      { generation: 1, slot_refs: [['S1', { ...context, timeOfDay: 'any' }], null, ['bad', null], ['bad', {}]] },
+      { generation: 0 },
+    ] } } });
+    const state = await recovery.loadResumeState(db, 'CA-res', { sessionKey: 'nonce-2' });
+    expect(state.slotRefs).toEqual([['S1', { ...context, timeOfDay: 'afternoon' }]]);
+    expect(await recovery.loadResumeState(db, 'CA-res', { sessionKey: 'foreign-owner' })).toBeNull();
   });
 
   test('a delayed resume read preserves locally consumed lookups and does not spend while history is unknown', async () => {
@@ -887,7 +966,7 @@ describe('the conversation side', () => {
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
     const convo = resumedConvo({ callSid: 'CA-res', sessionGeneration: 2 });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
     await convo._runLoop('where were we').catch(() => {}); // no Anthropic client in tests: the seeding half runs
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call, before the line dropped'));
     expect(seeded).toHaveLength(1);
@@ -920,7 +999,7 @@ describe('the conversation side', () => {
       isolatedDb = require('../models/db');
     });
     try {
-      const segment = recovery.buildSegment({ generation: 1, text: 'Caller: help with that account', lookupsUsed: 3, lookupRefs: [['C1-1', 'internal-customer-id']], lookupResults: [result] });
+      const segment = segmentStore.buildSegment({ generation: 1, text: 'Caller: help with that account', lookupsUsed: 3, lookupRefs: [['C1-1', 'internal-customer-id']], lookupResults: [result] });
       primeDb({ db: isolatedDb, firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [segment] } } });
       const convo = new Convo({ callSid: 'CA-model-resume', sessionKey: 'nonce-2', sessionGeneration: 2, from: '+19415551234', send: jest.fn(), resumed: true });
       convo._callerVerified = true;
@@ -939,12 +1018,51 @@ describe('the conversation side', () => {
     } finally { jest.dontMock('@anthropic-ai/sdk'); }
   });
 
+  test('the resumed model can accept a prior spoken time using its seeded slot reference', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    let Convo;
+    let isolatedDb;
+    let calls = 0;
+    const context = { date: '2026-01-02', startMinutes: 840, lat: 27.4, lng: -82.5, duration: 90, timeOfDay: 'afternoon', expandOpenDays: true };
+    const stream = jest.fn((request) => ({ finalMessage: async () => {
+      calls += 1;
+      if (calls > 1) return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'The team will confirm your requested time.' }] };
+      const seed = request.messages.find((m) => typeof m.content === 'string' && m.content.includes('Previously offered times'));
+      expect(seed.content).toContain('Friday January 2 at 2 PM (slot_ref: S1-1)');
+      expect(seed.content).not.toMatch(/27\.4|-82\.5|startMinutes|expandOpenDays/);
+      const ref = seed.content.match(/slot_ref: ([A-Z0-9-]+)/)[1];
+      return { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'restored-booking', name: 'request_booking', input: { slot_ref: ref } }] };
+    } }));
+    jest.isolateModules(() => {
+      jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream } }; });
+      Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
+      isolatedDb = require('../models/db');
+    });
+    try {
+      const segment = segmentStore.buildSegment({ generation: 1, text: 'Agent: I can offer Friday at two.\nTool: find_slots', slotRefs: [['S1-1', context]] });
+      primeDb({ db: isolatedDb, firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [segment] } } });
+      const convo = new Convo({ callSid: 'CA-model-slots', sessionKey: 'nonce-2', sessionGeneration: 2, from: '+19415551234', send: jest.fn(), resumed: true });
+      convo._callerVerified = true;
+      await convo._resumeReady;
+      convo._sessionSuperseded = jest.fn(async () => false);
+      const execute = jest.fn(async (name, input, ctx) => {
+        expect(name).toBe('request_booking');
+        expect(ctx.resolveSlotRef(input.slot_ref)).toEqual(context);
+        return 'The team will confirm the requested time.';
+      });
+      convo._executeToolBounded = execute;
+      await convo._runLoop('Yes, Friday at two works');
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(stream).toHaveBeenCalledTimes(2);
+    } finally { jest.dontMock('@anthropic-ai/sdk'); }
+  });
+
   test('a reconnect that read the row BEFORE the old socket appended its segment reloads on the next turns and seeds when it lands (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } }); // proven, but no segment yet
     const convo = resumedConvo({ callSid: 'CA-race' });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
     builder.first = jest.fn(async () => ({ metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L9', relay_segments: [{ generation: 1, text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } })); // the old socket's append landed
