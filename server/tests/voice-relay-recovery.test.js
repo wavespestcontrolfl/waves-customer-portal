@@ -180,6 +180,47 @@ describe('the conversation side', () => {
     expect(createLeadFromExtraction).not.toHaveBeenCalled();
   });
 
+  test('a reconnect that read the row BEFORE the old socket appended its segment reloads on the next turns and seeds when it lands (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder } = primeDb({ firstRow: { metadata: { relay_reconnects: 1 } } }); // proven, but no segment yet
+    const convo = new RelayConversation({ callSid: 'CA-race', from: '+19415551234', send: jest.fn(), resumed: true });
+    await convo._resumeReady;
+    expect(convo._resume).toEqual({ reconnects: 1, segmentsText: '', relayLeadId: null });
+    await convo._runLoop('hello').catch(() => {});
+    expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
+    builder.first = jest.fn(async () => ({ metadata: { relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back' }] } })); // the old socket's append landed
+    await convo._runLoop('where were we').catch(() => {});
+    const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'));
+    expect(seeded).toHaveLength(1);
+    expect(seeded[0].content).toContain('Caller: my ants are back');
+    // bounded: after RESUME_RELOAD_ATTEMPTS turns without a segment it stops re-reading
+    const again = new RelayConversation({ callSid: 'CA-race2', from: '+19415551234', send: jest.fn(), resumed: true });
+    builder.first = jest.fn(async () => ({ metadata: { relay_reconnects: 1 } }));
+    await again._resumeReady;
+    for (const t of ['a', 'b', 'c', 'd', 'e']) await again._runLoop(t).catch(() => {});
+    expect(builder.first.mock.calls.length).toBeLessThanOrEqual(1 + 3);
+  });
+
+  test('after a reconnect, the transfer SALVAGE and the metadata-only STASH carry the whole call (composed), not the resumed socket alone (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb({ updateImpl: jest.fn(async (patch) => { updates.push(patch); return updates.length === 2 ? 0 : 1; }) }); // append 1, reconcile 0 (terminal), salvage 1
+    const convo = convoWithTurns({ sessionGeneration: 2 });
+    convo._transferRequested = true;
+    await convo.end('transfer');
+    const salvage = updates[2];
+    expect(salvage.transcription.sql).toBe('COALESCE(?, ?)'); // composed from relay_segments
+    expect(salvage.metadata.sql).toContain("jsonb_build_object('relay_transcript', jsonb_build_object('text', ?, 'metadata', ?::jsonb))");
+    expect(salvage.metadata.bindings[0].sql).toBe('COALESCE(?, ?)');
+    // …and the metadata-only stash (voicemail won the close, or the processor already wrote the columns)
+    const { updates: u2 } = primeDb({ updateImpl: jest.fn(async (patch) => { u2.push(patch); return u2.length === 4 ? 1 : (u2.length === 1 ? 1 : 0); }) });
+    const c2 = convoWithTurns({ sessionGeneration: 2 });
+    c2._transferRequested = true;
+    await c2.end('transfer');
+    const stash = u2[3];
+    expect(stash.metadata.sql).toContain("jsonb_build_object('relay_transcript', jsonb_build_object('text', ?, 'metadata', ?::jsonb))");
+    expect(stash.transcription.bindings[0].sql).toBe("'[AI segment]' || E'\\n' || ?"); // the prepend text is composed too
+  });
+
   test('a forged `resumed` hint (row has no reconnect stamp) seeds nothing and the floor runs as usual; gate off loads nothing', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { relay_segments: [{ generation: 1, text: 'x' }] } } });
