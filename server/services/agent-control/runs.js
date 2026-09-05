@@ -182,7 +182,7 @@ async function insertRun(args, laneId, policy, workItemId, traceId, now) {
   return db('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).first();
 }
 
-async function openAttempt(run, now) {
+async function openAttempt(run, policy, now) {
   const attemptNo = Number(run.attempts || 0) + 1;
   const [attempt] = await db('agent_attempts')
     .insert({ run_id: run.id, attempt_no: attemptNo, worker_id: WORKER_ID, started_at: now })
@@ -190,12 +190,21 @@ async function openAttempt(run, now) {
     .ignore()
     .returning('id');
   const attemptId = attempt ? attempt.id || attempt : (await db('agent_attempts').where({ run_id: run.id, attempt_no: attemptNo }).first('id'))?.id || null;
+  // A reopened run gets a fresh lease and a clean current outcome — the
+  // previous attempt's result and error live on in agent_attempts.
   await db('agent_runs').where({ id: run.id }).update({
     attempts: attemptNo,
     lifecycle: 'running',
     worker_id: WORKER_ID,
     leased_at: now,
+    lease_expires_at: new Date(now.getTime() + policy.stall_after_ms),
     started_at: run.started_at || now,
+    finished_at: null,
+    result: null,
+    disposition: null,
+    failure_class: null,
+    error_code: null,
+    error_message: null,
     last_heartbeat_at: now,
     updated_at: now,
   });
@@ -226,7 +235,7 @@ async function startRun(args = {}) {
     const run = await insertRun(args, laneId, policy, workItemId, traceId, now);
     if (!run) throw new Error('run row missing after insert');
     const resumed = Number(run.attempts || 0) > 0 || run.lifecycle !== 'running';
-    const { attemptId, attemptNo } = await openAttempt(run, now);
+    const { attemptId, attemptNo } = await openAttempt(run, policy, now);
     await insertEvent(run.id, resumed ? 'resumed' : 'started', null, { attempt: attemptNo, worker: WORKER_ID });
     return { run, attemptId, attemptNo, workItemId: run.work_item_id || workItemId };
   });
@@ -380,6 +389,11 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
       lifecycle: 'terminal',
       result: res,
       disposition: dispo,
+      // a successful retry clears the previous attempt's error from the
+      // run's current outcome (it stays on that attempt row)
+      failure_class: null,
+      error_code: null,
+      error_message: null,
       finished_at: now,
       last_heartbeat_at: now,
       lease_expires_at: null,

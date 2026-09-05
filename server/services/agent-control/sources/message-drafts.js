@@ -8,6 +8,7 @@ const { canonicalRun, humanize, modelLabel, isMissingSchema } = require('./shape
 
 const SOURCE = 'message_drafts';
 const LANE = 'sms_draft';
+const START = 'd.created_at';
 const COLUMNS = [
   'd.id', 'd.intent', 'd.drafter', 'd.draft_ms', 'd.created_at', 'd.approved_at', 'd.sent_at', 'd.status',
   'd.campaign_type', 'd.purpose', 'd.customer_id', 'd.sms_log_id', 'd.model', 'd.prompt_version',
@@ -68,14 +69,15 @@ function baseQuery() {
   return db('message_drafts as d').leftJoin('customers as c', 'c.id', 'd.customer_id').select(COLUMNS);
 }
 
-async function list({ from, to, limit = 200 } = {}) {
+async function list({ from, before = null, limit = 200 } = {}) {
   try {
     const rows = await baseQuery()
       .where((q) => {
         q.where('d.status', 'pending');
-        q.orWhere((w) => { w.where('d.created_at', '>=', from); if (to) w.andWhere('d.created_at', '<=', to); });
+        q.orWhere(START, '>=', from);
       })
-      .orderBy('d.created_at', 'desc')
+      .modify((q) => { if (before) q.where(START, '<=', before); })
+      .orderBy(START, 'desc')
       .limit(limit);
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {

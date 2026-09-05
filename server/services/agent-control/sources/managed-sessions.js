@@ -10,6 +10,7 @@ const { canonicalRun, humanize, isMissingSchema } = require('./shape');
 const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
+const START = 'created_at';
 const COLUMNS = [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',
   'latency_ms', 'input_tokens', 'output_tokens', 'created_at', 'run_id', 'trace_id', 'workload',
@@ -50,12 +51,12 @@ function baseQuery() {
     .where((q) => q.whereNull('workload').orWhere('workload', 'live'));
 }
 
-async function list({ from, to, limit = 200 } = {}) {
+async function list({ from, before = null, limit = 200 } = {}) {
   try {
     const rows = await baseQuery()
-      .where('created_at', '>=', from)
-      .modify((q) => { if (to) q.andWhere('created_at', '<=', to); })
-      .orderBy('created_at', 'desc')
+      .where(START, '>=', from)
+      .modify((q) => { if (before) q.where(START, '<=', before); })
+      .orderBy(START, 'desc')
       .limit(limit);
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {

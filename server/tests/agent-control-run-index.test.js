@@ -101,6 +101,23 @@ describe('adapters project onto the canonical shape', () => {
     expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
   });
 
+  test('call_log: every processing_status the processor writes or sweeps is mapped; an unknown one surfaces as failed / attention', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = ['call-recording-processor.js', 'context-aggregator.js'].map((f) => fs.readFileSync(path.join(__dirname, '..', 'services', f), 'utf8')).join('\n');
+    const seen = new Set();
+    // assignments / comparisons (processing_status: 'x', = 'x', finalStatus = cond ? 'x' : 'y') and the sweep's IN list
+    for (const m of src.matchAll(/(?:processing_status|finalStatus|preClaimStatus)\s*(?:[:=]=*|<>|!=|IS DISTINCT FROM)\s*\(?'([a-z_]+)'/g)) seen.add(m[1]);
+    for (const m of src.matchAll(/finalStatus = [^\n]*/g)) for (const v of m[0].matchAll(/'([a-z_]+)'/g)) seen.add(v[1]);
+    for (const m of src.matchAll(/processing_status IN \(([^)]*)\)/g)) for (const v of m[1].matchAll(/'([a-z_]+)'/g)) seen.add(v[1]);
+    expect(seen.size).toBeGreaterThanOrEqual(9);
+    for (const status of seen) expect(callLog.STATUS_MAP).toHaveProperty(status);
+    expect(callLog.fromRow({ id: 'x', processing_status: 'customer_creation_failed', created_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'tool', errorCode: 'customer_creation_failed' });
+    const unknown = callLog.fromRow({ id: 'y', processing_status: 'brand_new_state', created_at: ago(1e3) });
+    expect(unknown).toMatchObject({ lifecycle: 'terminal', result: null });
+    expect(runIndex.bucketsOf({ ...unknown, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
+  });
+
   test('job_health: a running job is live, a failing job is errored, a lane comes from its policy workflow_id', () => {
     const running = jobHealth.fromRow({ job_name: 'nightly_sweep', last_status: 'running', last_started_at: ago(5e3), last_finished_at: ago(3600e3), last_duration_ms: 400 });
     expect(running).toMatchObject({ lifecycle: 'running', finishedAt: null, durationMs: null, workflowId: 'nightly_sweep', title: 'nightly sweep' });
@@ -180,15 +197,33 @@ describe('listRuns', () => {
     expect(spies.agentDecisions).toHaveBeenCalled();
   });
 
-  test('keyset cursor pages in (startedAt desc, key) order and a bad cursor / window / status / area / lane is a 400', async () => {
-    spies.autonomousRuns.mockResolvedValue({ runs: [1, 2, 3, 4, 5].map((i) => laneRun({ id: `a${i}`, createdAt: ago(i * 1000) })), unavailable: false });
+  test('keyset cursor: the cut is pushed into the source queries (before + limit), pages walk the window, counts only on page 1; bad params are 400', async () => {
+    const all = [1, 2, 3, 4, 5].map((i) => laneRun({ id: `a${i}`, createdAt: ago(i * 1000) }));
+    // a source behaves like SQL: newest first, cut at `before`, capped at `limit`
+    spies.autonomousRuns.mockImplementation(async ({ before, limit }) => ({
+      runs: all.filter((r) => !before || new Date(r.startedAt) <= before).slice(0, limit), unavailable: false,
+    }));
     const p1 = await runIndex.listRuns({ limit: 2, now: NOW });
     expect(p1.runs.map((r) => r.id)).toEqual(['a1', 'a2']);
+    expect(p1.counts.all).toBe(5);
+    expect(p1.countsCapped).toBe(false);
+    expect(spies.autonomousRuns).toHaveBeenLastCalledWith(expect.objectContaining({ before: null, limit: 2000 }));
     const p2 = await runIndex.listRuns({ limit: 2, cursor: p1.nextCursor, now: NOW });
     expect(p2.runs.map((r) => r.id)).toEqual(['a3', 'a4']);
+    expect(p2.counts).toBeNull();
+    expect(spies.autonomousRuns).toHaveBeenLastCalledWith(expect.objectContaining({ before: new Date(p1.runs[1].startedAt), limit: 3 }));
     const p3 = await runIndex.listRuns({ limit: 2, cursor: p2.nextCursor, now: NOW });
     expect(p3.runs.map((r) => r.id)).toEqual(['a5']);
     expect(p3.nextCursor).toBeNull();
+    // a source that filled the first-page scan cap: counts are flagged and a cursor is offered past the cap
+    spies.autonomousRuns.mockImplementation(async ({ limit }) => ({ runs: all.slice(0, limit), unavailable: false }));
+    const capped = await runIndex.listRuns({ limit: 10, now: NOW });
+    expect(capped.runs).toHaveLength(5);
+    expect(capped.countsCapped).toBe(false);
+    spies.messageDrafts.mockImplementation(async ({ limit }) => ({ runs: Array.from({ length: limit }, (_, i) => canonicalRun({ source: 'message_drafts', id: `d${i}`, laneId: 'sms_draft', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(i + 1) })), unavailable: false }));
+    const hit = await runIndex.listRuns({ limit: 10, now: NOW });
+    expect(hit.countsCapped).toBe(true);
+    expect(hit.nextCursor).not.toBeNull();
     for (const bad of [{ cursor: '!!' }, { window: '90d' }, { status: 'weird' }, { area: 'nope' }, { lane: 'not_a_lane' }, { window: 'constructor' }]) {
       await expect(runIndex.listRuns({ ...bad, now: NOW })).rejects.toMatchObject({ status: 400 });
     }

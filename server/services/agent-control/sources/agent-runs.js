@@ -60,6 +60,8 @@ function fromRow(run, steps = []) {
   });
 }
 
+// The column rows sort and page on = the run's startedAt in fromRow.
+const START = db.raw('COALESCE(r.started_at, r.created_at)');
 const STEP_COUNTS = [
   db.raw("(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id AND s.status = 'done') AS steps_done"),
   db.raw('(SELECT count(*) FROM agent_run_steps s WHERE s.run_id = r.id) AS steps_total'),
@@ -72,16 +74,19 @@ function baseQuery() {
     .select('r.*', 'w.title as work_item_title', 'w.entity_type', 'w.entity_id', ...STEP_COUNTS);
 }
 
-async function list({ from, to, laneId = null, limit = 200 } = {}) {
+async function list({ from, before = null, laneId = null, limit = 200 } = {}) {
   try {
     const rows = await baseQuery()
       .where((q) => {
         // live runs stay listed however old; terminal ones by the window
         q.where('r.lifecycle', '<>', 'terminal');
-        q.orWhere((w) => { w.where('r.created_at', '>=', from); if (to) w.andWhere('r.created_at', '<=', to); });
+        q.orWhere(START, '>=', from);
       })
-      .modify((q) => { if (laneId) q.where('r.lane_id', laneId); })
-      .orderBy('r.created_at', 'desc')
+      .modify((q) => {
+        if (before) q.where(START, '<=', before);
+        if (laneId) q.where('r.lane_id', laneId);
+      })
+      .orderBy(START, 'desc')
       .limit(limit);
     return { runs: rows.map((r) => fromRow(r)), unavailable: false };
   } catch (err) {

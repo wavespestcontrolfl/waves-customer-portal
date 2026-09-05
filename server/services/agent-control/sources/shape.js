@@ -136,4 +136,4 @@ function isMissingSchema(err) {
   return !!err && (err.code === MISSING_TABLE_SQLSTATE || err.code === UNDEFINED_COLUMN_SQLSTATE);
 }
 
-module.exports = { canonicalRun, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };
+module.exports = { canonicalRun, defined, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };

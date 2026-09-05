@@ -10,6 +10,8 @@ const { canonicalRun, humanize, modelLabel, isMissingSchema } = require('./shape
 
 const SOURCE = 'call_log';
 const LANE = 'call_extraction';
+// The column rows sort and page on = the run's startedAt in fromRow.
+const START = db.raw('COALESCE(processing_started_at, created_at)');
 const COLUMNS = [
   'id', 'direction', 'status', 'duration_seconds', 'processing_status', 'transcription_status', 'v2_extraction_status',
   'enrichment_status', 'classification', 'disposition', 'call_outcome', 'processing_started_at', 'processing_heartbeat_at',
@@ -24,7 +26,16 @@ const STATUS_MAP = Object.freeze({
   voicemail: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   spam: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   no_transcription: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
+  // extraction landed but the customer / lead write did not (the processor
+  // stamps these instead of processed; the sweep retries them)
+  customer_creation_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'tool' },
+  lead_creation_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'tool' },
 });
+// A status this map does not know is NOT a success: terminal with no
+// result, which the index buckets as failed / attention so it surfaces
+// (tests/agent-control-run-index drift-checks the map against the
+// processor's vocabulary).
+const UNKNOWN_STATUS = Object.freeze({ lifecycle: 'terminal', result: null });
 
 const DONE = new Set(['completed', 'complete']);
 
@@ -41,7 +52,7 @@ function title(c) {
 
 function fromRow(c) {
   const status = c.processing_status || 'pending';
-  const map = STATUS_MAP[status] || { lifecycle: 'terminal', result: 'succeeded' };
+  const map = STATUS_MAP[status] || UNKNOWN_STATUS;
   const live = map.lifecycle === 'running';
   const extracted = status === 'processed' || c.v2_extraction_status === 'completed';
   const transcribed = extracted || DONE.has(c.transcription_status);
@@ -70,16 +81,17 @@ function fromRow(c) {
   });
 }
 
-async function list({ from, to, limit = 200 } = {}) {
+async function list({ from, before = null, limit = 200 } = {}) {
   try {
     const rows = await db('call_log')
       .select(COLUMNS)
       .whereNotNull('processing_status')
       .where((q) => {
-        q.whereIn('processing_status', ['processing']);
-        q.orWhere((w) => { w.where('created_at', '>=', from); if (to) w.andWhere('created_at', '<=', to); });
+        q.where('processing_status', 'processing');
+        q.orWhere(START, '>=', from);
       })
-      .orderBy('created_at', 'desc')
+      .modify((q) => { if (before) q.where(START, '<=', before); })
+      .orderBy(START, 'desc')
       .limit(limit);
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
@@ -98,4 +110,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, LANE, list, get, fromRow };
+module.exports = { SOURCE, LANE, STATUS_MAP, list, get, fromRow };

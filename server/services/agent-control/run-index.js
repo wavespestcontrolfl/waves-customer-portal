@@ -28,7 +28,7 @@ const { policyFor } = require('./lane-policies');
 const { deriveHealth } = require('./health');
 const { resolveWindow } = require('./hub-read');
 const { runGateOn } = require('./runs');
-const { isMissingSchema } = require('./sources/shape');
+const { isMissingSchema, defined } = require('./sources/shape');
 const agentRuns = require('./sources/agent-runs');
 const autonomousRuns = require('./sources/autonomous-runs');
 const messageDrafts = require('./sources/message-drafts');
@@ -43,8 +43,12 @@ const STATUSES = Object.freeze(['all', 'active', 'waiting', 'attention', 'done',
 const ACTIVE = new Set(['queued', 'leased', 'running', 'waiting_external']);
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
-// Per source, per read. Six legacy ledgers × this is the merge's upper bound.
-const FETCH_LIMIT = 400;
+// First page: every source is scanned up to this many rows inside the
+// window so the status counts cover the window (countsCapped says when a
+// source hit it). Later pages read only what they need: the cursor is
+// pushed into each source query as a start-time cutoff, so paging walks
+// the whole window instead of re-reading the newest rows.
+const COUNT_SCAN_LIMIT = 2000;
 const CALL_COLUMNS = [
   'id', 'created_at', 'provider', 'requested_model', 'served_model', 'ok', 'error_code', 'error_class', 'fallback_used',
   'input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens', 'latency_ms',
@@ -88,27 +92,32 @@ function encodeCursor(run) {
   return Buffer.from(JSON.stringify({ at: run.startedAt || run.createdAt || '', key: run.key }), 'utf8').toString('base64url');
 }
 
+// → { key: the sort key to page after, before: the start-time cutoff the
+// source queries apply (≤, ties resolved in memory by key) }
 function decodeCursor(cursor) {
   if (!cursor) return null;
   try {
     const parsed = JSON.parse(Buffer.from(String(cursor), 'base64url').toString('utf8'));
-    if (!parsed || typeof parsed.key !== 'string') throw new Error('shape');
-    return `${parsed.at || ''}|${parsed.key}`;
+    const before = new Date(parsed.at);
+    if (!parsed || typeof parsed.key !== 'string' || Number.isNaN(before.getTime())) throw new Error('shape');
+    return { key: `${parsed.at}|${parsed.key}`, before };
   } catch {
     throw badRequest('bad cursor');
   }
 }
 
-async function loadSources({ window, laneId, sourceFilter = null }) {
-  const args = { from: window.from, to: null, laneId, limit: FETCH_LIMIT };
+async function loadSources({ window, laneId, before, limit, sourceFilter = null }) {
+  const args = { from: window.from, before, laneId, limit };
   const readers = [agentRuns, ...LEGACY_SOURCES].filter((s) => !sourceFilter || sourceFilter(s));
   const results = await Promise.all(readers.map((s) => s.list(args)));
   const unavailable = [];
+  let capped = false;
   const canonicalKeys = new Set();
   const runs = [];
   results.forEach((r, i) => {
     const source = readers[i];
     if (r.unavailable) unavailable.push(source.SOURCE);
+    if (r.runs.length >= limit) capped = true;
     for (const run of r.runs) {
       const mirrorKey = `${run.sourceSystem}:${run.sourceRunId}`;
       if (run.canonical) {
@@ -119,7 +128,7 @@ async function loadSources({ window, laneId, sourceFilter = null }) {
       }
     }
   });
-  return { runs, unavailable };
+  return { runs, unavailable, capped };
 }
 
 function validate({ preset, status, area, lane, now }) {
@@ -132,7 +141,11 @@ function validate({ preset, status, area, lane, now }) {
   for (const [name, value, ok] of checks) if (!ok(value)) throw badRequest(`unknown ${name}: ${value}`);
 }
 
-async function listRuns({ lane = null, area = null, status = 'all', window: preset = '7d', cursor = null, limit = DEFAULT_LIMIT, now = new Date() } = {}) {
+const LIST_DEFAULTS = Object.freeze({ lane: null, area: null, status: 'all', window: '7d', cursor: null, limit: DEFAULT_LIMIT, now: null });
+
+async function listRuns(params = {}) {
+  const { lane, area, status, window: preset, cursor, limit } = { ...LIST_DEFAULTS, ...defined(params) };
+  const now = params.now ?? new Date();
   validate({ preset, status, area, lane, now });
   const window = resolveWindow(preset, now);
   const pageSize = Math.min(MAX_LIMIT, Math.max(1, Number(limit) || DEFAULT_LIMIT));
@@ -140,21 +153,32 @@ async function listRuns({ lane = null, area = null, status = 'all', window: pres
 
   // A lane filter skips the single-lane adapters that cannot match.
   const sourceFilter = lane ? (s) => !s.LANE || s.LANE === lane : null;
-  const loaded = await loadSources({ window, laneId: lane, sourceFilter });
+  // First page = the counting scan; a cursor page reads only past the cut.
+  const scan = after ? pageSize + 1 : COUNT_SCAN_LIMIT;
+  const loaded = await loadSources({ window, laneId: lane, before: after ? after.before : null, limit: scan, sourceFilter });
   const scoped = loaded.runs
     .map((run) => annotate(run, now))
     .filter((run) => (!lane || run.laneId === lane) && (!area || run.area === area));
 
-  const counts = { all: scoped.length, active: 0, waiting: 0, attention: 0, done: 0, failed: 0 };
-  for (const run of scoped) for (const [k, hit] of Object.entries(bucketsOf(run))) counts[k] += Number(hit);
+  // Counts belong to the first page (the window scan); a cursor page has
+  // read only a slice and reports none.
+  let counts = null;
+  if (!after) {
+    counts = { all: scoped.length, active: 0, waiting: 0, attention: 0, done: 0, failed: 0 };
+    for (const run of scoped) for (const [k, hit] of Object.entries(bucketsOf(run))) counts[k] += Number(hit);
+  }
   const filtered = status === 'all' ? scoped : scoped.filter((run) => bucketsOf(run)[status]);
   filtered.sort((a, b) => (sortKey(a) < sortKey(b) ? 1 : sortKey(a) > sortKey(b) ? -1 : 0));
-  const page = (after ? filtered.filter((run) => sortKey(run) < after) : filtered).slice(0, pageSize + 1);
+  const page = (after ? filtered.filter((run) => sortKey(run) < after.key) : filtered).slice(0, pageSize + 1);
   const runs = page.slice(0, pageSize);
+  // More may exist past this page when the slice overflowed OR a source hit
+  // its scan cap (rows older than the cap are reachable by cursor).
+  const more = page.length > pageSize || (loaded.capped && runs.length > 0);
   return {
     runs,
     counts,
-    nextCursor: page.length > pageSize ? encodeCursor(runs[runs.length - 1]) : null,
+    countsCapped: !after && loaded.capped,
+    nextCursor: more ? encodeCursor(runs[runs.length - 1]) : null,
     window: { key: window.key, from: window.from.toISOString(), to: window.to.toISOString() },
     unavailableSources: loaded.unavailable,
     phases: { runs: runGateOn() },

@@ -10,6 +10,8 @@ const { canonicalRun, humanize, isMissingSchema } = require('./shape');
 
 const SOURCE = 'autonomous_runs';
 const LANE = 'blog_draft';
+// The column rows sort and page on = the run's startedAt in fromRow.
+const START = db.raw('COALESCE(claimed_at, created_at)');
 const COLUMNS = [
   'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
   db.raw("draft_payload->>'title' AS draft_title"),
@@ -89,15 +91,16 @@ function fromRow(run) {
   });
 }
 
-async function list({ from, to, limit = 200 } = {}) {
+async function list({ from, before = null, limit = 200 } = {}) {
   try {
     const rows = await db('autonomous_runs')
       .select(COLUMNS)
       .where((q) => {
         q.whereNull('completed_at');
-        q.orWhere((w) => { w.where('created_at', '>=', from); if (to) w.andWhere('created_at', '<=', to); });
+        q.orWhere(START, '>=', from);
       })
-      .orderBy('created_at', 'desc')
+      .modify((q) => { if (before) q.where(START, '<=', before); })
+      .orderBy(START, 'desc')
       .limit(limit);
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {

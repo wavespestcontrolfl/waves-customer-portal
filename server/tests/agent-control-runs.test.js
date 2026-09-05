@@ -148,14 +148,17 @@ describe('start / step / finish', () => {
     expect(h.traceId).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  test('a second startRun on the same source key joins the run as attempt 2 (resumed)', async () => {
+  test('a second startRun on the same source key joins the run as attempt 2 (resumed); a successful retry clears the earlier error', async () => {
     const a = await runs.startRun(base);
-    await a.finish({});
+    await a.fail({ error: new Error('first'), errorCode: 'openai_500', retryable: false });
     const b = await runs.startRun(base);
     expect(b.id).toBe(a.id);
     expect(b.attemptNo).toBe(2);
+    expect(runRow()).toMatchObject({ lifecycle: 'running', finished_at: null, error_code: null });
+    await b.finish({});
+    expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', failure_class: null, error_code: null, error_message: null });
     expect(store.agent_attempts.map((x) => x.attempt_no)).toEqual([1, 2]);
-    expect(events(a.id)).toEqual(['started', 'finished', 'resumed']);
+    expect(events(a.id)).toEqual(['started', 'failed', 'resumed', 'finished']);
   });
 
   test('step: timed row, step scope with a span, done + progress on success; failed + rethrow on error; tool steps hit the tool ledger', async () => {
@@ -212,6 +215,10 @@ describe('fail and retry', () => {
     expect(events(a.id)).toEqual(['started', 'retry_scheduled']);
     const b = await runs.startRun(base);
     expect(b.attemptNo).toBe(2);
+    // the reopened run carries a fresh lease and a clean current outcome; attempt 1 keeps its error
+    expect(runRow()).toMatchObject({ lifecycle: 'running', result: null, finished_at: null, failure_class: null, error_code: null, error_message: null });
+    expect(runRow().lease_expires_at.getTime() - runRow().leased_at.getTime()).toBe(policyFor('blog_draft').stall_after_ms);
+    expect(store.agent_attempts[0]).toMatchObject({ result: 'errored', error_code: 'openai_500' });
     expect(await b.fail({ error: new Error('still'), errorCode: 'openai_500', retryable: true })).toMatchObject({ retry: false, result: 'errored' });
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'errored', attempts: 2 });
     expect(store.agent_attempts[1]).toMatchObject({ result: 'errored', error_code: 'openai_500' });
