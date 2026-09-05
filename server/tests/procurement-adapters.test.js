@@ -225,9 +225,11 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       getAttribute: async (n) => (spec.attrs ? spec.attrs[n] ?? null : null),
       // firstSeq: each first() call resolves to the NEXT spec (models Playwright re-resolving a locator whose node was replaced between operations — r10 P1)
       first() { if (spec.firstSeq) { const i = Math.min(spec.firstIdx = (spec.firstIdx || 0) + 1, spec.firstSeq.length) - 1; return el(spec.firstSeq[i]); } return this; },
-      elementHandle() { return Promise.resolve(spec.detached ? { textContent: async () => spec.text ?? null, isVisible: async () => false } : this); },
+      elementHandle() { return Promise.resolve(spec.detached ? { textContent: async () => spec.text ?? null, isVisible: async () => false, $$: async () => [] } : this); },
+      // ElementHandle.$$: the handle's OWN children — a row detached since (detachedWhen) has none (r11 P1)
+      $$: async (sub) => { if (spec.detachedWhen && spec.detachedWhen()) return []; const l = spec.sub ? spec.sub(sub) : el(); const n = await l.count(); return Array.from({ length: n }, (_, i) => l.nth(i)); },
       nth: (i) => spec.nth ? spec.nth(i) : el(spec),
-      textContent: async () => spec.text ?? null,
+      textContent: async () => { if (spec.onRead) spec.onRead(); return spec.text ?? null; }, // onRead: a rerender lands the moment this node is read (r11 P1)
       inputValue: async () => { if (spec.value == null) throw new Error('not an input'); return String(spec.value); },
       isVisible: async () => { if (spec.isVisibleThrows) throw new Error('Element is not attached to the DOM'); return !!spec.visible; },
       isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
@@ -243,7 +245,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     // cartRowChildrenHiddenFirst: inside a visible row, a hidden stale SKU / quantity copy precedes the shown one (r20 P2)
     const child = (spec) => (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
     // cartSkuInAttribute: the row's SKU node carries the code in data-product-code and shows unrelated text (r21 P2)
-    const line = (l) => el({ count: 1, visible: true, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: l.sku }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
+    // checkoutRowSwapAtClick: reading the row's SKU is the moment SiteOne replaces the row with a substitute product (S1-99 × same qty):
+    // a re-resolving locator then reads the substitute's quantity beside the old SKU; the old row's handle is detached instead (r11 P1)
+    const swapping = (l) => st.checkoutRowSwapAtClick && st.atClick && l.sku === 'S1-77';
+    const line = (l) => el({ count: 1, get visible() { return !(swapping(l) && st.rowSwapped); }, detachedWhen: () => swapping(l) && st.rowSwapped, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: swapping(l) && st.rowSwapped ? 'S1-99' : l.sku, onRead: () => { if (swapping(l)) st.rowSwapped = true; } }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
     const resolve = (sel) => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
@@ -907,6 +912,13 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ urlAfterClick: 'https://cdn.example.com/error/12345678', orderNumberText: 'Order # 12345678', checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a checkout row replaced the moment its SKU is read is ONE detached snapshot — the substitute\'s quantity is never paired with the old SKU; refused, no click (r11 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutRowSwapAtClick: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
+    expect(st.rowSwapped).toBe(true);
+    expect(st.placeClicked || 0).toBe(0);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {

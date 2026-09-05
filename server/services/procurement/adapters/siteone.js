@@ -244,23 +244,39 @@ async function gotoCart(page) {
 // Only SHOWN lines count: SiteOne renders each item again in a hidden
 // desktop / mobile container, and the one-line proof must not refuse a
 // valid single-item cart on its responsive copy (Codex #3853 r16 P2).
+// The first SHOWN child of a row HANDLE (not a re-resolving locator): SKU
+// and quantity must come from the same DOM row — a summary SiteOne rerenders
+// mid-check would otherwise pair the old row's SKU with its replacement's
+// quantity and approve a line that never existed (Codex #3876 r11 P1). A
+// replaced row leaves a detached handle: no children, not visible → the
+// line reads unreadable and the proof fails closed.
+async function shownChild(rowHandle, selector) {
+  for (const h of await rowHandle.$$(selector).catch(() => [])) if (await h.isVisible().catch(() => false)) return h;
+  return null;
+}
+
 async function cartLines(page, lineSelector = SELECTORS.cartLine) {
   const { shown } = await matches(page, lineSelector);
   const out = [];
   for (const line of shown) {
+    const row = await line.elementHandle({ timeout: 1500 }).catch(() => null);
+    if (!row) { out.push({ sku: '', qty: NaN }); continue; }
     // Inside the row too, only the SHOWN SKU / quantity node is read: a
     // hidden responsive child or a stale copy must not feed the exact-cart
     // proof (Codex #3853 r20 P2). None shown = unreadable = fails closed.
-    const skuEl = (await matches(line, SELECTORS.cartLineSku)).shown[0];
+    const skuEl = await shownChild(row, SELECTORS.cartLineSku);
     // Attribute-first, like the product page: a row that exposes its code
     // only through data-product-code shows unrelated text (Codex #3853 r21 P2).
     const skuAttr = skuEl ? await skuEl.getAttribute('data-product-code').catch(() => null) : null;
     const sku = (skuAttr || (skuEl ? (await skuEl.textContent().catch(() => '') || '') : '')).replace(/\s+/g, ' ').trim();
-    const qtyEl = (await matches(line, SELECTORS.cartLineQty)).shown[0];
+    const qtyEl = await shownChild(row, SELECTORS.cartLineQty);
     let qtyText = qtyEl ? await qtyEl.inputValue().catch(() => null) : null;
     if (qtyText == null && qtyEl) qtyText = await qtyEl.textContent().catch(() => null);
+    // The row read must still be the row shown: replaced after both reads =
+    // the values belong to a node that is gone (r11 P1).
+    const stillShown = await row.isVisible().catch(() => false);
     const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
-    out.push({ sku, qty: qtyText == null || qtyText === '' ? NaN : qty });
+    out.push({ sku, qty: !stillShown || qtyText == null || qtyText === '' ? NaN : qty });
   }
   return out;
 }
