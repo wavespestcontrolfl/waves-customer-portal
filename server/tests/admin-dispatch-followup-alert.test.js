@@ -340,6 +340,14 @@ describe('codex r3 — double-card, no_show coverage, storage-level dedupe, IB w
     expect(migration).toContain('dedupedByMigration');
   });
 
+  test('IB cancel_appointment names the acting staff row as transitionedBy (audit + the tech cancel notice stays silent for the actor)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    expect(src).toContain("case 'cancel_appointment': return await cancelAppointment(input, actionContext);");
+    const fn = src.slice(src.indexOf('async function cancelAppointment(input, actionContext = {})'));
+    const block = fn.slice(fn.indexOf('transitionJobStatus({'), fn.indexOf('notes: reason ?'));
+    expect(block).toContain('transitionedBy: actionContext.technicianId || null,');
+  });
+
   test('Intelligence Bar cancel_appointment routes through the shared status writer', () => {
     const ibSource = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
     const fn = ibSource.slice(ibSource.indexOf('async function cancelAppointment'), ibSource.indexOf('async function draftSms'));

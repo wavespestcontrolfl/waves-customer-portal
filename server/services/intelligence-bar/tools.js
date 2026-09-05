@@ -381,7 +381,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'create_appointment': return await createAppointment(input);
       case 'get_recent_completions': return await getRecentCompletions(input);
       case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
-      case 'cancel_appointment': return await cancelAppointment(input);
+      case 'cancel_appointment': return await cancelAppointment(input, actionContext);
       case 'draft_sms': return await draftSms(input);
       default:
         return { error: `Unknown tool: ${toolName}` };
@@ -2592,7 +2592,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 }
 
 
-async function cancelAppointment(input) {
+async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
@@ -2685,7 +2685,10 @@ async function cancelAppointment(input) {
         jobId: appointment_id,
         fromStatus: appt.status,
         toStatus: 'cancelled',
-        transitionedBy: null,
+        // The acting staff row: audit attribution on the history row, and
+        // the actor the tech-facing cancel notice (job-status.js) keeps
+        // silent for — an operator cancelling their own visit gets no card.
+        transitionedBy: actionContext.technicianId || null,
         notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
         trx,
       });
