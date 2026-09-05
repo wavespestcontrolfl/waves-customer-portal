@@ -2784,6 +2784,17 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
   // server presigns for 1 h; the cell drops the links a little before that
   // and offers Refresh, so a tab left open can always re-request fresh URLs.
   const [evidence, setEvidence] = useState({});
+  // React does not rerender because time passed: drop each entry AT its
+  // expiry so the cell actually falls back to the Refresh action (Codex
+  // #3853 r20 P2).
+  useEffect(() => {
+    const next = Math.min(...Object.values(evidence).map((e) => e.expiresAt).filter((t) => Number.isFinite(t)));
+    if (!Number.isFinite(next)) return undefined;
+    const timer = setTimeout(() => {
+      setEvidence((e) => Object.fromEntries(Object.entries(e).filter(([, v]) => v.expiresAt > Date.now())));
+    }, Math.max(0, next - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [evidence]);
   const loadEvidence = async (requestId) => {
     try {
       const data = await adminFetch(`/admin/inventory/restock-requests/${requestId}/order-evidence`);

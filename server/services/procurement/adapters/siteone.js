@@ -205,10 +205,14 @@ async function cartLines(page) {
   const { shown } = await matches(page, SELECTORS.cartLine);
   const out = [];
   for (const line of shown) {
-    const sku = (await line.locator(SELECTORS.cartLineSku).first().textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
-    const qtyEl = line.locator(SELECTORS.cartLineQty).first();
-    let qtyText = await qtyEl.inputValue().catch(() => null);
-    if (qtyText == null) qtyText = await qtyEl.textContent().catch(() => null);
+    // Inside the row too, only the SHOWN SKU / quantity node is read: a
+    // hidden responsive child or a stale copy must not feed the exact-cart
+    // proof (Codex #3853 r20 P2). None shown = unreadable = fails closed.
+    const skuEl = (await matches(line, SELECTORS.cartLineSku)).shown[0];
+    const sku = (skuEl ? (await skuEl.textContent().catch(() => '') || '') : '').replace(/\s+/g, ' ').trim();
+    const qtyEl = (await matches(line, SELECTORS.cartLineQty)).shown[0];
+    let qtyText = qtyEl ? await qtyEl.inputValue().catch(() => null) : null;
+    if (qtyText == null && qtyEl) qtyText = await qtyEl.textContent().catch(() => null);
     const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
     out.push({ sku, qty: qtyText == null || qtyText === '' ? NaN : qty });
   }
@@ -306,8 +310,11 @@ async function login(page, creds) {
     // An attempt that RETURNS (SiteOne answered, login form still up)
     // clears an earlier attempt's transient error: the exhaustion verdict
     // below must read the LAST outcome — a rejected login parks, only three
-    // network failures are run-level (Codex r4 P1).
-    try { ok = await attempt(); lastError = null; }
+    // network failures are run-level (Codex r4 P1). And a rejection is
+    // DEFINITIVE: the same credential is never submitted again in this run —
+    // retries are for transient exceptions only, so one bad password cannot
+    // trip the vendor's failed-login lockout (Codex #3853 r20 P1).
+    try { ok = await attempt(); lastError = null; if (!ok) break; }
     catch (e) { if (e.runLevel) throw e; lastError = e; logger.warn(`[siteone-bot] login attempt ${i + 1} failed: ${String(e.message).slice(0, 120)}`); }
   }
   if (ok) return;
@@ -420,7 +427,10 @@ async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
   await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
   await page.waitForTimeout(1500);
   const skuNode = (await matches(page, SELECTORS.productSku)).shown[0]; // the SKU the page SHOWS, never a hidden copy's
-  const pageSkuRaw = (skuNode ? (await skuNode.textContent().catch(() => '') || '') : '').replace(/\s+/g, ' ').trim();
+  // A node matched by its data-product-code attribute carries the code in
+  // the attribute, not necessarily in its text (Codex #3853 r20 P2).
+  const skuAttr = skuNode ? await skuNode.getAttribute('data-product-code').catch(() => null) : null;
+  const pageSkuRaw = (skuAttr || (skuNode ? (await skuNode.textContent().catch(() => '') || '') : '')).replace(/\s+/g, ' ').trim();
   if (!pageSkuRaw) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_unreadable', `could not read the product SKU on the page for ${vendorSku} (SELECTORS.productSku)`, evidence); }
   if (normalizeSku(pageSkuRaw) !== normalizeSku(vendorSku)) { await shot(page, 'product', evidence, upload); throw new RefusedError('sku_mismatch', `product page shows "${pageSkuRaw.slice(0, 60)}", expected ${vendorSku}`, evidence); }
   if (await visible(page, SELECTORS.unavailable)) { await shot(page, 'product', evidence, upload); throw new RefusedError('unavailable', `SiteOne lists ${vendorSku} as unavailable`, evidence); }
