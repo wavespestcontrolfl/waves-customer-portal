@@ -99,10 +99,11 @@ async function cleanup(db, f) {
     await trx('activity_log').where({ customer_id: f.customerId }).del();
     await trx('visit_billing_dispositions').whereIn('scheduled_service_id',
       trx('scheduled_services').select('id').where({ customer_id: f.customerId })).del();
-    for (const table of ['property_application_history', 'customer_cards']) {
-      await trx(table).whereIn('service_record_id',
-        trx('service_records').select('id').where({ customer_id: f.customerId })).del();
-    }
+    await trx('short_codes').where({ customer_id: f.customerId }).del();
+    await trx('customer_cards').where({ customer_id: f.customerId }).del();
+    await trx('referral_promoters').where({ customer_id: f.customerId }).del();
+    await trx('property_application_history').whereIn('service_record_id',
+      trx('service_records').select('id').where({ customer_id: f.customerId })).del();
     for (const table of ['sms_log', 'emails']) await trx(table).where({ customer_id: f.customerId }).del();
     await trx('payments').where({ customer_id: f.customerId }).del();
     await trx('invoices').where({ customer_id: f.customerId }).del();
