@@ -1588,6 +1588,11 @@ class RelayConversation {
     if (!isRecoveryGateOn() || this._handoffForFailure || this.ended || this._ending) return false;
     if (providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) !== 'handoff') return false;
     this._handoffForFailure = true;
+    if (await this._sessionSuperseded()) {
+      this._ending = true;
+      try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
+      return true;
+    }
     const { copy } = require('./relay-language');
     logger.warn(`[voice-relay] provider-failure handoff callSid=${maskSid(this.callSid)} model=${this._modelFailures} tools=${this._toolFailures}`);
     const { isTransferAvailable } = require('./relay-transfer');
@@ -1612,6 +1617,11 @@ class RelayConversation {
     // customer and skips an already-captured call. Not filed ⇒ Sandy does
     // not promise one. The capture floor itself is left to end() (one pass).
     const filed = await this._fileFailureCallback();
+    if (await this._sessionSuperseded()) {
+      this._ending = true;
+      try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
+      return true;
+    }
     this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
     if (!this._ending) {
       this._ending = true;
@@ -1751,7 +1761,9 @@ class RelayConversation {
         2000,
         0,
       );
-      const claimPromise = db('call_log').where('twilio_call_sid', this.callSid).whereNull('voicemail_callback_alerted_at').update({ voicemail_callback_alerted_at: claimStamp }).catch(() => 0);
+      const claim = db('call_log').where('twilio_call_sid', this.callSid).whereNull('voicemail_callback_alerted_at');
+      if (verified && this.sessionKey) claim.whereRaw("(metadata->>'relay_session_claim_owner') = ?", [this.sessionKey]);
+      const claimPromise = claim.update({ voicemail_callback_alerted_at: claimStamp }).catch(() => 0);
       const claimed = await withTimeout(claimPromise, 2000, 'timeout');
       if (claimed === 'timeout') {
         void claimPromise.then((rows) => (Number(rows) > 0 ? releaseClaim() : 0)).catch(() => {});

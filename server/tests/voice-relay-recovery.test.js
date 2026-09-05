@@ -550,6 +550,32 @@ describe('the conversation side', () => {
     expect(seg.started_at).toBe(new Date(t0).toISOString()); // this leg's segment carries the CALL's start forward
   });
 
+  test('a stale callback claim cannot spend the replacement session callback slot', async () => {
+    const { builder } = primeDb({ firstRow: { id: 'cl-1', from_phone: '+19415551234', metadata: { relay_session_claim_owner: 'replacement' } } });
+    builder.update.mockResolvedValue(0); // PostgreSQL rejects the old owner's predicate
+    const convo = new RelayConversation({ callSid: 'CA-old', sessionKey: 'old', from: '+19415551234', send: jest.fn() });
+    convo._callerVerified = true;
+    expect(await convo._fileFailureCallback()).toBe(false);
+    expect(builder.whereRaw).toHaveBeenCalledWith("(metadata->>'relay_session_claim_owner') = ?", ['old']);
+    expect(require('../services/notification-triggers').triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test.each([true, false])('supersession before or during handoff stops speech and callback instructions (before=%s)', async (before) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const endSession = jest.fn();
+    const convo = new RelayConversation({ callSid: 'CA-old', from: '+19415551234', send: jest.fn(), endSession });
+    convo._modelFailures = 2;
+    convo._sessionSuperseded = jest.fn().mockResolvedValue(true);
+    if (!before) convo._sessionSuperseded.mockResolvedValueOnce(false);
+    convo._fileFailureCallback = jest.fn().mockResolvedValue(false);
+    convo.say = jest.fn();
+    expect(await convo._maybeHandoffForFailure(null)).toBe(true);
+    expect(convo._fileFailureCallback).toHaveBeenCalledTimes(before ? 0 : 1);
+    expect(convo.say).not.toHaveBeenCalled();
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+  });
+
   test('the provider-failure callback links the customer and rings the row\'s number only for a VERIFIED session; an unverified one files unlinked to the number it declared (hook r26 P1)', async () => {
     const { triggerNotification: trig } = require('../services/notification-triggers');
     primeDb({ firstRow: { id: 'cl-9', customer_id: 'C1', from_phone: '+19415550000' } });
