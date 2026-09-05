@@ -630,11 +630,19 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
         // (GH Codex #3953 r4 P1).
         onQueued: async () => {
           const stampAt = (v) => (v ? new Date(v).getTime() : null);
-          const verdict = await db.transaction(async (trx) => {
-            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customer.id)]);
-            const row = await trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
-            return stampAt(row?.irrigation_home_changed_at) === stampAt(snapshot.moveStamp);
-          });
+          let verdict = false;
+          try {
+            verdict = await db.transaction(async (trx) => {
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customer.id)]);
+              const row = await trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+              return stampAt(row?.irrigation_home_changed_at) === stampAt(snapshot.moveStamp);
+            });
+          } catch (err) {
+            // The library treats a THROWING hook as "keep" — an unreadable
+            // home check must abort explicitly (pre-push Codex P1 on 39222b221).
+            logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: move-stamp re-read failed (${err.message})`);
+            return false;
+          }
           if (!verdict) {
             logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: address changed before dispatch`);
             return false;
@@ -856,57 +864,65 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
   }
 }
 
+// The send-once fence. Three sources, any one is enough: the interaction
+// marker (the pre-dispatch claim, settled on delivery), the email ledger for
+// this template (every attempt not refused outright — queued / uncertain
+// included), and the SMS log by the hub link the text carries (twilio.js
+// keeps no caller metadata; pre-push Codex P1 on 1c5df4ec7). A claim that
+// never settled (process exit between the claim and the provider call) is
+// in flight while young and reclaimed once stale — never a permanent
+// "already sent" (GH Codex #3953 r4 P2).
+async function priorGuideDelivery(customer, config, pestType) {
+  const [marker, email, text] = await Promise.all([
+    db('customer_interactions')
+      .where({ customer_id: customer.id })
+      .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
+      .orderBy('created_at', 'desc')
+      .first(),
+    db('email_messages')
+      .where({ recipient_id: customer.id, template_key: config.emailTemplateKey })
+      .whereNotIn('status', ['blocked', 'failed'])
+      .orderBy('created_at', 'desc')
+      .first(),
+    db('sms_log')
+      .where({ customer_id: customer.id, direction: 'outbound' })
+      .whereRaw('message_body ILIKE ?', [`%${GUIDE_SMS_LINK_SIGNATURE}%`])
+      .orderBy('created_at', 'desc')
+      .first(),
+  ]);
+  let priorMarker = marker;
+  if (marker && marker.body === GUIDE_CLAIM_BODY) {
+    const ageMs = Date.now() - new Date(marker.created_at || 0).getTime();
+    if (ageMs < GUIDE_CLAIM_STALE_MS) return { refusal: { reason: 'prep_send_busy' } };
+    await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).del();
+    priorMarker = null;
+  }
+  const prior = priorMarker || email || text;
+  if (prior) return { refusal: { reason: 'guide_already_sent', sentAt: prior.created_at || null } };
+  return { refusal: null };
+}
+
 // Why a standalone guide is not sent right now, or null. Reads fail closed:
 // an unreadable preference or history is treated as a refusal, never as a
 // send (a guide is a courtesy; a second copy or an unwanted one is not).
 async function guideGate(customer, config, pestType, { wantEmail = true, wantSms = true } = {}) {
   try {
     // The guide says "every Monday we email you your watering plan" — true
-    // only for the Monday sweep's FULL audience (active recurring lawn
-    // customer with the email and coordinates a plan needs): its own query,
-    // scoped to this customer (GH Codex #3953 r3 P2, r4 P2).
-    const { findEligibleCustomers } = require('./irrigation-weekly-email');
-    const eligible = await findEligibleCustomers({ customerId: customer.id });
-    if (!eligible.some((row) => String(row.id) === String(customer.id))) return { refusal: { reason: 'not_recurring_lawn' } };
+    // only for the Monday sweep's audience: an ACTIVE customer with
+    // recurring lawn evidence (the sweep's own predicate). Channel
+    // preferences are judged below per leg, not here: the sweep's full query
+    // also folds in the email opt-out, which would refuse the text-only
+    // fallback outright (GH Codex #3953 r3 P2, r4 P2; pre-push P1 on
+    // 39222b221).
+    const { hasRecurringLawnEvidence } = require('./irrigation-weekly-email');
+    if (customer.active !== true || !(await hasRecurringLawnEvidence(customer.id))) return { refusal: { reason: 'not_recurring_lawn' } };
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
     if (prefs && prefs.seasonal_tips === false) return { refusal: { reason: 'seasonal_tips_off' } };
     // History BEFORE the email opt-out: on Both, that opt-out only drops the
     // email leg, so a customer already sent the guide must be caught here
-    // or the text goes out twice (pre-push Codex P1 on 71346bab2). Three
-    // sources, any one is enough: the interaction marker (best-effort — its
-    // insert is swallowed after delivery), the email ledger for this
-    // template (every attempt not refused outright, queued / uncertain
-    // included), and the SMS log by the hub link the text carries (twilio.js
-    // keeps no caller metadata; pre-push Codex P1 on 1c5df4ec7).
-    const [marker, email, text] = await Promise.all([
-      db('customer_interactions')
-        .where({ customer_id: customer.id })
-        .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
-        .orderBy('created_at', 'desc')
-        .first(),
-      db('email_messages')
-        .where({ recipient_id: customer.id, template_key: config.emailTemplateKey })
-        .whereNotIn('status', ['blocked', 'failed'])
-        .orderBy('created_at', 'desc')
-        .first(),
-      db('sms_log')
-        .where({ customer_id: customer.id, direction: 'outbound' })
-        .whereRaw('message_body ILIKE ?', [`%${GUIDE_SMS_LINK_SIGNATURE}%`])
-        .orderBy('created_at', 'desc')
-        .first(),
-    ]);
-    // A pre-dispatch claim that never settled (process exit between the
-    // claim and the provider call): in flight while young, reclaimed once
-    // stale — never a permanent "already sent" (GH Codex #3953 r4 P2).
-    let priorMarker = marker;
-    if (marker && marker.body === GUIDE_CLAIM_BODY) {
-      const ageMs = Date.now() - new Date(marker.created_at || 0).getTime();
-      if (ageMs < GUIDE_CLAIM_STALE_MS) return { refusal: { reason: 'prep_send_busy' } };
-      await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).del();
-      priorMarker = null;
-    }
-    const prior = priorMarker || email || text;
-    if (prior) return { refusal: { reason: 'guide_already_sent', sentAt: prior.created_at || null } };
+    // or the text goes out twice (pre-push Codex P1 on 71346bab2).
+    const history = await priorGuideDelivery(customer, config, pestType);
+    if (history.refusal) return { refusal: history.refusal };
     // The text is a seasonal tip: it needs the EXPLICIT Seasonal Tips opt-in
     // (seasonal_tips === true; a never-asked NULL is not consent) and the
     // consent basis the marketing_seasonal policy requires — the same

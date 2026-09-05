@@ -14,7 +14,7 @@ let mockNotificationPrefsRow = null;
 // The guide's audience: the Monday sweep's own recurring-lawn predicate.
 let mockRecurringLawn = true;
 jest.mock('../services/irrigation-weekly-email', () => ({
-  findEligibleCustomers: jest.fn(async ({ customerId }) => (mockRecurringLawn ? [{ id: customerId }] : [])),
+  hasRecurringLawnEvidence: jest.fn(async () => mockRecurringLawn),
 }));
 jest.mock('../services/document-contract-delivery', () => ({
   marketingSmsConsentBasisForContract: jest.fn(async () => (mockNotificationPrefsRow?.seasonal_tips === true
@@ -165,7 +165,7 @@ beforeEach(() => {
     id: 'cust-1', first_name: 'Megan', last_name: 'Example',
     email: 'megan@example.com', phone: '+19415550101',
     address_line1: '5022 Sunnyside Ln', city: 'Bradenton', state: 'FL', zip: '34211',
-    deleted_at: null,
+    active: true, deleted_at: null,
   };
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
@@ -1161,6 +1161,29 @@ describe('sprinkler timer guide', () => {
     expect(queuedVerdict).toBe(false);
     expect(withheld.ok).toBe(false);
     expect(interactionDeletes).toBe(1);
+    // An unreadable check aborts explicitly (the library keeps sending on a
+    // THROWING hook), through the library's real callback handling.
+    jest.clearAllMocks(); interactionDeletes = 0;
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customersQuery();
+      if (table === 'property_preferences') return traceQuery({ irrigation_run_minutes: 35, irrigation_home_changed_at: null });
+      if (table === 'customer_turf_profiles') return traceQuery(null);
+      if (table === 'notification_prefs') return traceQuery(mockNotificationPrefsRow);
+      if (table === 'customer_interactions') { const q = traceQuery(null); q.insert = interactionsInsert; q.update = jest.fn(async () => 1); q.del = jest.fn(async () => { interactionDeletes += 1; return 1; }); return q; }
+      if (table === 'email_messages') return traceQuery(null);
+      if (table === 'sms_log') return traceQuery(null);
+      return customersQuery();
+    });
+    db.transaction = jest.fn(async () => { throw new Error('lock timeout'); });
+    let libraryKeep = true;
+    EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ onQueued }) => {
+      try { libraryKeep = (await onQueued()) !== false; } catch { /* the library's own handling: a throw keeps sending */ }
+      return libraryKeep ? { sent: true } : { sent: false, aborted: true };
+    });
+    const unreadable = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(libraryKeep).toBe(false);
+    expect(unreadable.ok).toBe(false);
+    expect(interactionDeletes).toBe(1);
   });
 
   test('a stale pre-dispatch claim (process died before the provider call) is reclaimed; a young one reads as in flight', async () => {
@@ -1178,11 +1201,20 @@ describe('sprinkler timer guide', () => {
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('only a recurring lawn customer (the Monday plan\'s audience) gets the guide', async () => {
+  test('only an active recurring lawn customer (the Monday plan\'s audience) gets the guide; channel preferences are judged per leg, not by the audience', async () => {
     mockRecurringLawn = false;
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
     expect(result).toMatchObject({ ok: false, reason: 'not_recurring_lawn' });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    mockRecurringLawn = true;
+    customerRow = { ...customerRow, active: false };
+    const inactive = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(inactive).toMatchObject({ ok: false, reason: 'not_recurring_lawn' });
+    // An email opt-out never masquerades as "not in the audience": Text still goes.
+    customerRow = { ...customerRow, active: true };
+    mockNotificationPrefsRow = { seasonal_tips: true, email_enabled: false };
+    const text = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(text).toMatchObject({ ok: true, smsSent: true });
     // Visit prep is unaffected by the lawn audience.
     const flea = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'email' });
     expect(flea.ok).toBe(true);
