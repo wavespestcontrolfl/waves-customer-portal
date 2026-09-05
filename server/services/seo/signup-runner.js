@@ -174,7 +174,7 @@ async function recordAttempt(p, result, evidenceKey) {
  * matches our lease_token, the update affects 0 rows, and we DON'T clobber the newer
  * lease or overwrite its automation_policy. Returns rows updated (0 = stale).
  */
-async function leaseGuardedReclassify(p, patch) {
+async function leaseGuardedReclassify(p, patch, evidence = null) {
   const leaseDate = p.lease_token ? new Date(p.lease_token) : null;
   if (!leaseDate || Number.isNaN(leaseDate.getTime())) return 0;
   const n = await db.transaction(async (trx) => {
@@ -189,6 +189,9 @@ async function leaseGuardedReclassify(p, patch) {
     // again): the placement follows a superseded path in the SAME transaction,
     // like every other release — released and settled, or neither.
     if (updated) {
+      if (evidence) await trx('seo_link_attempts').where({ prospect_id: p.id, lease_token: leaseDate.toISOString(), action: 'submit' })
+        .whereIn('outcome', ['slot_reserved', 'submitting']).update({ evidence_url: evidence.evidence_url,
+          detail: trx.raw("COALESCE(detail, '{}'::jsonb) || ?::jsonb", [evidence.detail]), updated_at: new Date() });
       await require('./link-execution-authority').releaseSlots(trx, [p.id]);
       await worker.settleReleasedPlacements([p.id], trx);
     }
@@ -310,17 +313,17 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       if (result.errorCode === 'blocked_account') patch.requires_account = true;
       if (result.errorCode === 'blocked_captcha') patch.requires_captcha = true;
       if (result.errorCode === 'blocked_payment') patch.requires_payment = true;
-      await leaseGuardedReclassify(p, patch);
+      await leaseGuardedReclassify(p, patch, attemptRowFor(p, result, evidenceKey));
       counts.blocked++;
     } else if (result.outcome === 'skipped') {
       // No submittable form here — mark off-lane so we stop claiming it.
-      await leaseGuardedReclassify(p, { automation_policy: 'skip' });
+      await leaseGuardedReclassify(p, { automation_policy: 'skip' }, attemptRowFor(p, result, evidenceKey));
       counts.skipped++;
     } else if (result.errorCode === 'submit_blocked' || result.errorCode === 'submit_rejected') {
       // submit_blocked = the submit endpoint is off the pinned host (can't auto-submit);
       // submit_rejected = the directory returned a rejection/error page. Either way
       // retrying the same data is futile → park it (skip) so we stop re-claiming it.
-      await leaseGuardedReclassify(p, { automation_policy: 'skip' });
+      await leaseGuardedReclassify(p, { automation_policy: 'skip' }, attemptRowFor(p, result, evidenceKey));
       counts.skipped++;
     } else {
       // The worker retries only failures before submit; uncertainty after submit is quarantined.

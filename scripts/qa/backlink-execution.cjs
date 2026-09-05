@@ -64,6 +64,17 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     assert.equal(afterDraft.status, 'live'); assert.equal(afterDraft.attempts, 2); assert.equal(afterDraft.outreach_draft_attempts, W.MAX_ATTEMPTS);
     assert.deepEqual(await W.claim({ type: 'outreach', mode: 'draft', provider: 'hermes', domains: [domain] }), []);
     console.log('PASS skipped late pitch preserves live lifecycle and acquisition attempts, then stops reclaiming');
+    const rejectedLease = new Date(), rejectedAttempt = randomUUID();
+    await trx('seo_link_prospects').where({ id: p.id }).update({ claimed_at: rejectedLease, lease_mode: 'acquire', leased_provider: 'deterministic_runner' });
+    await trx('seo_link_attempts').insert({ id: rejectedAttempt, prospect_id: p.id, path_id: pathId, provider: 'deterministic_runner', action: 'submit', outcome: 'submitting', lease_token: rejectedLease.toISOString(), detail: { authority_id: 'synthetic-authority' } });
+    const runner = require(`${root}/server/services/seo/signup-runner`)._internals;
+    await runner.leaseGuardedReclassify({ ...afterDraft, lease_token: rejectedLease.toISOString() }, { automation_policy: 'skip' }, { evidence_url: 'synthetic/evidence.png', detail: JSON.stringify({ error_code: 'submit_rejected', error_message: 'Synthetic rejection' }) });
+    const heldAttempt = await trx('seo_link_attempts').where({ id: rejectedAttempt }).first();
+    assert.equal(heldAttempt.outcome, 'submit_ambiguous'); assert.equal(heldAttempt.evidence_url, 'synthetic/evidence.png');
+    assert.deepEqual(heldAttempt.detail, { authority_id: 'synthetic-authority', error_code: 'submit_rejected', error_message: 'Synthetic rejection' });
+    const released = await trx('seo_link_prospects').where({ id: p.id }).first();
+    assert.equal(released.claimed_at, null); assert.equal(released.lease_mode, null); assert.equal(released.leased_provider, null);
+    console.log('PASS held submit preserves screenshot/reason/authority on the original attempt and releases lease stamps');
     const V = require(`${root}/server/services/seo/link-prospect-verifier`);
     const Q = require(`${root}/server/services/seo/link-owner-queue`);
     const oid = randomUUID(), opath = randomUUID(), first = randomUUID(), second = randomUUID(), backlink = randomUUID();

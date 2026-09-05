@@ -50,6 +50,7 @@ jest.mock('../models/db', () => {
   mockWhere.mockImplementation(() => builder); // chainable: .where(...).where(...)
   builder.where = mockWhere;
   const fn = jest.fn(() => builder);
+  fn.raw = (sql, bindings) => ({ sql, bindings });
   fn.transaction = async (cb) => cb(fn); // reclassify releases + settles in one transaction
   return fn;
 });
@@ -344,4 +345,17 @@ test('unscoped content submission preserves its domain-wide identity', async () 
   await runner.run();
   expect(worker.report).toHaveBeenCalledTimes(1);
   expect(worker.report.mock.calls[0][0]).not.toHaveProperty('location');
+});
+
+
+test.each(['submit_rejected', 'submit_blocked'])('held %s keeps evidence and failure details on the reserved attempt', async errorCode => {
+  worker.claim.mockResolvedValue([prospect()]);
+  fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode, notes: 'Synthetic validation rejection', screenshot: Buffer.from('png') });
+  await runner.run();
+  expect(mockWhere).toHaveBeenCalledWith({ prospect_id: 'p1', lease_token: '2026-06-22T00:00:00.000Z', action: 'submit' });
+  const write = mockUpdate.mock.calls.map(([patch]) => patch).find(patch => patch.evidence_url);
+  expect(write.evidence_url).toBe('backlink-evidence/x.png');
+  expect(write.detail.sql).toContain('COALESCE(detail');
+  expect(JSON.parse(write.detail.bindings[0])).toMatchObject({ error_code: errorCode, error_message: 'Synthetic validation rejection' });
+  expect(mockInsert).not.toHaveBeenCalled();
 });
