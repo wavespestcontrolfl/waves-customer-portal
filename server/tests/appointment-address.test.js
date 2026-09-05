@@ -118,8 +118,8 @@ test('editing a child includes its template and outstanding siblings, not anothe
 });
 
 
-test('changes future defaults without relocating a historical template or its siblings', async () => {
-  const template = { ...row, id: 'template', status: 'completed', visit_id: 'historic' };
+test.each(['completed', 'rescheduled'])('changes future defaults without relocating a %s template or its siblings', async (status) => {
+  const template = { ...row, id: 'template', status, visit_id: 'historic' };
   const sibling = { ...template, id: 'historic-sibling', is_recurring: false };
   const child = { ...row, id: 'child', recurring_parent_id: 'template' };
   const conn = connection({ rows: [child, sibling, template], visits: [{ id: 'historic', stop_base_key: 'old:2099-01-01' }] });
@@ -185,4 +185,22 @@ test('address changes discard the stale route position echoed by the modal', () 
   const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
   const addressBranch = source.slice(source.indexOf('    if (addressPlan) {'));
   expect(addressBranch.slice(0, 220)).toContain('delete updates.route_order');
+});
+
+
+test('address propagation leaves a rescheduled placeholder and its obsolete stop unchanged', async () => {
+  const template = { ...row, id: 'template', status: 'completed' };
+  const child = { ...row, id: 'child', recurring_parent_id: template.id };
+  const phantom = { ...child, id: 'phantom', status: 'rescheduled', visit_id: 'obsolete', scheduled_date: '2098-12-01' };
+  const conn = connection({ rows: [template, child, phantom], visits: [{
+    id: 'obsolete', customer_id: row.customer_id, property_id: 'old',
+    scheduled_date: phantom.scheduled_date, stop_base_key: 'old:2098-12-01',
+  }] });
+  const plan = await planAppointmentAddress(conn, child.id, property.id);
+  expect(plan.rows.map((r) => r.id).sort()).toEqual(['child', 'template']);
+  expect(plan.visits).toEqual([]);
+  await applyAppointmentAddress(conn, plan, 'admin-a');
+  const addressWrite = conn.calls.find((call) => call.patch?.service_address_line1);
+  expect(addressWrite.filters).toContainEqual(['whereIn', 'id', ['child']]);
+  expect(conn.calls.some((call) => call.table === 'service_visits' && call.patch)).toBe(false);
 });
