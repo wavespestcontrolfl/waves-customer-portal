@@ -209,7 +209,8 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
   const v = {
     first: vars.first || vars.name || 'there',
     name: vars.name || vars.first || 'there',
-    tech: vars.tech || 'Adam',
+    // 9 chars: keeps every {tech} template inside one segment at its worst case
+    tech: vars.tech || 'Your tech',
     service_type: vars.service_type || 'service',
     review_url: vars.review_url || '',
     date: vars.date || '',

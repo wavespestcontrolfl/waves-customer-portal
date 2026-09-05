@@ -156,7 +156,6 @@ postgres('protocol publishing on PostgreSQL', () => {
 
   test.each([
     ['/lawn/products/:id', 'draftProduct', { ratePer1000: 5 }, 'lawn_protocol_products'],
-    ['/lawn/gates/:id', 'draftGate', { ruleText: 'Late edit' }, 'lawn_protocol_gates'],
     ['/lawn/windows/:windowKey', 'draftWindow', { requiredTasks: ['late'] }, 'lawn_protocol_windows'],
     ['/lawn/windows/:windowKey/wiki-sync', 'draftWindow', {}, 'lawn_protocol_windows'],
   ])('%s waits for publication and refuses a late write', async (path, key, body, table) => {

@@ -28,7 +28,6 @@ it('reports initial catalog failure, repeats a failed retry, then loads the cata
   catalogFails=false;
   fireEvent.click(screen.getByRole('button',{name:'Retry'}));
   await waitFor(() => expect(screen.getByLabelText('Protocol')).toHaveValue('st_augustine'));
-  // Calibration warnings are independent of catalog request recovery.
   expect(screen.queryByText('Failed to load protocol catalog')).not.toBeInTheDocument();
   expect(fetch).toHaveBeenCalledWith('/api/admin/protocols/programs?track=st_augustine',expect.anything());
 });
