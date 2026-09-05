@@ -527,16 +527,23 @@ function sessionTurnRow(row, prev, turnKey) {
   return turn;
 }
 // Every merged column is MONOTONE — no ordering between writers is assumed.
-function monotoneMerge(db) {
+// The session row's counters are cumulative snapshots → GREATEST. A turn
+// row's counters are DELTAS since the session row's previous snapshot, so a
+// re-record of the same turn carries only what arrived since its last
+// record (0 for an identical snapshot, everything for one recovered from a
+// failed GET, the increment for a snapshot that grew) → they ADD; null
+// only while every record of the turn has had unknown usage.
+function monotoneMerge(db, { counters = 'greatest' } = {}) {
   const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
   const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
+  const add = (col) => db.raw(`CASE WHEN llm_dispatch_log.${col} IS NULL AND EXCLUDED.${col} IS NULL THEN NULL ELSE COALESCE(llm_dispatch_log.${col}, 0) + COALESCE(EXCLUDED.${col}, 0) END`);
   return {
     ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
     error_code: first('error_code'),
     error_class: first('error_class'),
     latency_ms: greatest('latency_ms'),
     served_model: first('served_model'),
-    ...Object.fromEntries(SESSION_COUNTERS.map((col) => [col, greatest(col)])),
+    ...Object.fromEntries(SESSION_COUNTERS.map((col) => [col, counters === 'add' ? add(col) : greatest(col)])),
   };
 }
 // Inside recordSessionUsage's locked transaction (`trx`); the caller's catch
@@ -552,7 +559,7 @@ async function upsertSessionRow(trx, row, turnKey) {
     await trx('llm_dispatch_log')
       .insert(sessionTurnRow(row, prev || null, turnKey))
       .onConflict(db.raw("(step_id) WHERE row_kind = 'session_turn'"))
-      .merge(monotoneMerge(db));
+      .merge(monotoneMerge(db, { counters: 'add' }));
   }
   return id;
 }

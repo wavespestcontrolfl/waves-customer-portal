@@ -665,7 +665,9 @@ describe('llm call ledger', () => {
       expect(mergesFor('session_turn')).toHaveLength(2);
       const [, target, updates] = mergesFor('session_turn')[1];
       expect(String(target)).toBe("(step_id) WHERE row_kind = 'session_turn'");
-      expect(String(updates.input_tokens)).toBe('GREATEST(EXCLUDED.input_tokens, llm_dispatch_log.input_tokens)');
+      // turn counters are deltas since the last record → they ADD (null only while all unknown); latency still GREATEST
+      expect(String(updates.input_tokens)).toBe('CASE WHEN llm_dispatch_log.input_tokens IS NULL AND EXCLUDED.input_tokens IS NULL THEN NULL ELSE COALESCE(llm_dispatch_log.input_tokens, 0) + COALESCE(EXCLUDED.input_tokens, 0) END');
+      expect(String(updates.latency_ms)).toBe('GREATEST(EXCLUDED.latency_ms, llm_dispatch_log.latency_ms)');
       expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
       expect(String(updates.error_code)).toBe('COALESCE(llm_dispatch_log.error_code, EXCLUDED.error_code)');
       // the next turn: the cumulative snapshot grew by 100 / 5 → only that lands on its own row
