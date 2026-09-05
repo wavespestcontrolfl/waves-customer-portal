@@ -14,7 +14,7 @@ const scenarios = [
   { name: 'portal-cancelled', url: '/preview-portal.html?persona=cancelled', ready: 'cancelled' },
   { name: 'secure-pest', url: '/preview-secure.html?v=pest', ready: 'Quarterly Pest Control' },
   { name: 'secure-lawn', url: '/preview-secure.html?v=lawn', ready: 'Lawn Care' },
-  { name: 'service-report', url: '/preview-service-report.html', ready: 'service' },
+  { name: 'service-report', url: '/preview-service-report.html', ready: 'Quarterly Pest Control' },
   { name: 'completion', url: '/preview-completion-presets.html', ready: 'Completion' },
 ];
 const viewports = { desktop: { width: 1440, height: 1000 }, mobile: { width: 390, height: 844 } };
@@ -37,6 +37,11 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
     const response = await page.goto(baseUrl + scenario.url, { waitUntil: 'domcontentloaded' });
     assert.equal(response.status(), 200);
     await page.waitForFunction((text) => document.body.innerText.toLowerCase().includes(text.toLowerCase()), scenario.ready, { timeout: 30000 });
+    if (scenario.name === 'service-report') {
+      await page.locator('h1.sr-title').waitFor();
+      assert.equal(await page.locator('h1.sr-title').innerText(), 'Hi Test, one area could not be serviced!');
+      await page.getByText('Side Yard was marked skipped.', { exact: true }).waitFor();
+    }
     if (scenario.name === 'completion') {
       for (const preset of ['fire_ant', 'tick_control', 'bee_wasp_removal', 'mud_dauber_removal', 'bed_bug_treatment', 'mosquito', 'dethatching', 'plugging']) {
         await page.selectOption('#preset', preset);
