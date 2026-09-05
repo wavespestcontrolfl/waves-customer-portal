@@ -4,8 +4,7 @@ const { dateOnly } = require('./visit-groups');
 
 const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
 
-// Rescheduled rows are inactive placeholders for the original appointment.
-const terminal = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
+const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const retry = () => Object.assign(new Error('Appointments changed while saving. Reload and choose the address again.'), { statusCode: 409, isOperational: true });
 
 // The template remains the address source for future recurrence generation.
@@ -21,12 +20,12 @@ async function planAppointmentAddress(conn, serviceId, propertyId) {
     .where((q) => {
       q.where('id', anchor.id);
       if (parentId) q.orWhere('id', parentId).orWhere((children) => children
-        .where('recurring_parent_id', parentId).whereNotIn('status', terminal));
+        .where('recurring_parent_id', parentId).whereNotIn('status', JOIN_INELIGIBLE_STATUSES));
     }).orderBy('id');
-  const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !terminal.includes(row.status))
+  const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status))
     .map((row) => row.visit_id).filter(Boolean))];
   if (visitIds.length) {
-    const members = await conn('scheduled_services').whereIn('visit_id', visitIds).whereNotIn('status', terminal);
+    const members = await conn('scheduled_services').whereIn('visit_id', visitIds).whereNotIn('status', JOIN_INELIGIBLE_STATUSES);
     if (members.some((row) => row.customer_id !== anchor.customer_id)) throw retry();
     rows = [...new Map([...rows, ...members].map((row) => [row.id, row])).values()]
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -65,7 +64,7 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
-  const addressRows = locked.filter((row) => row.id === plan.anchor.id || !terminal.includes(row.status));
+  const addressRows = locked.filter((row) => row.id === plan.anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
   for (const visit of fresh.visits) {
     const verdict = await frozenVisitVerdict(trx, visit.id);
     // A retained historical member must never be left at a different property

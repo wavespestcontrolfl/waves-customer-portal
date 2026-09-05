@@ -10312,6 +10312,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
       }
+      // Address changes can make unattached services share a physical stop.
+      // Use the final date/window/technician after all edits and count changes.
+      // The canonical seam owns eligibility, gates and savepoint isolation.
+      for (const id of addressUpdatedIds) {
+        await require('../services/visit-groups').maybeGroupRow(id, { database: trx, createdBy: 'dispatch' });
+      }
     });
 
     // Tech-facing notice for a same-tech date/time move (a tech change in the

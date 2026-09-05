@@ -223,3 +223,16 @@ test('rejects an anchor rescheduled after the address plan was read', async () =
     .rejects.toMatchObject({ statusCode: 409, isOperational: true });
   expect(conn.calls.some((call) => call.patch)).toBe(false);
 });
+
+
+test.each(require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES)(
+  'propagation excludes a sibling with canonical join-ineligible status %s', async (status) => {
+    const sibling = { ...row, id: 'inactive-sibling', recurring_parent_id: row.id, status };
+    const conn = connection({ rows: [row, sibling] });
+    const plan = await planAppointmentAddress(conn, row.id, property.id);
+    expect(plan.rows.map((r) => r.id)).toEqual([row.id]);
+    await applyAppointmentAddress(conn, plan, 'admin-a');
+    const addressWrite = conn.calls.find((call) => call.patch?.service_address_line1);
+    expect(addressWrite.filters).toContainEqual(['whereIn', 'id', [row.id]]);
+  },
+);
