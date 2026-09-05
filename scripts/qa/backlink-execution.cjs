@@ -124,6 +124,17 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       assert.equal(recoveryCards[0].outreach_draft_exhausted, false);
       assert.equal(recoveryCards[0].decidable, false);
     }
+    await trx('seo_link_domains').where({ id }).update({ agent_state: 'acquiring' });
+    for (const status of ['rejected', 'watching', 'lost']) {
+      await trx('seo_link_prospects').where({ id: p.id }).update({ status });
+      const [recovery] = (await Q.listOwnerQueue(proxy)).cards;
+      assert.equal(recovery.submission_ambiguity.id, rejectedAttempt);
+      assert.deepEqual(recovery.rows, []);
+      assert.equal(recovery.decidable, false);
+      assert.equal(recovery.backlink_match, null);
+      assert.equal(recovery.outreach_draft_exhausted, false);
+    }
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live' });
     await trx('seo_link_domains').where({ id }).update({ agent_state: 'rejected' });
     console.log('PASS held submission remains visible outside acquisition states without approval/assignment actions');
     const confirm = (overrides = {}) => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { submission_attempt_id: rejectedAttempt, submission_verdict: 'placed', live_url: `https://${domain}/confirmed`, ...overrides } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
