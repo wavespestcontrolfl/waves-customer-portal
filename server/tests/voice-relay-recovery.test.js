@@ -1240,6 +1240,40 @@ describe('the conversation side', () => {
       } finally { jest.useRealTimers(); }
     });
 
+    test.each(['_modelFailures', '_toolFailures'])('next caller turn retries a deferred %s handoff before another model round', async (counter) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'How can I help?' }] }) }));
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-deferred-next-turn', from: '+19415551234', send: jest.fn(), endSession });
+      convo[counter] = 2;
+      convo._fileFailureCallback = jest.fn(async () => true);
+      let settle;
+      const write = new Promise((resolve) => { settle = resolve; }).then(() => { convo._inFlightWrites.delete('request_booking'); });
+      convo._inFlightWrites.set('request_booking', write);
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+      try {
+        const deferred = convo._maybeHandoffForFailure(null);
+        await jest.advanceTimersByTimeAsync(10010);
+        expect(await deferred).toBe(true);
+        expect(convo._handoffForFailure).toBe(false);
+        // A caller turn while the write is still pending must not resume the model.
+        const waitingTurn = convo._runLoop('is it done yet');
+        await jest.advanceTimersByTimeAsync(10010);
+        await waitingTurn;
+        expect(stream).not.toHaveBeenCalled();
+        expect(convo._fileFailureCallback).not.toHaveBeenCalled();
+        settle();
+        await write;
+        await convo._runLoop('please continue');
+        expect(stream).not.toHaveBeenCalled();
+        expect(convo[counter]).toBe(2);
+        expect(convo._fileFailureCallback).toHaveBeenCalledTimes(1);
+        expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
+      } finally { jest.useRealTimers(); }
+    });
+
     test('…office closed ⇒ the callback close: capture floor + a clean end (reason provider_failure); once per call', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
       primeDb();

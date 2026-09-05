@@ -1872,6 +1872,10 @@ class RelayConversation {
       try { await withTimeout(this._officeHoursReady, OFFICE_HOURS_TIMEOUT_MS); } catch { /* degrade */ }
     }
 
+    // A previous turn may have deferred handoff while a write drained.
+    // Retry before a successful model round can clear the failure streak.
+    if (await this._maybeHandoffForFailure(toolCtx)) return;
+
     // ── PROMPT CACHING ORDERING ────────────────────────────────────────────
     // Caching is a strict PREFIX match over tools → system → messages, so the
     // system prompt must be byte-identical on every turn of a call. Two
