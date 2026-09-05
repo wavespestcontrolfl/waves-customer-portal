@@ -4899,7 +4899,7 @@ function JobCardProduct({ p, D }) {
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
         {p.short && (
           <div style={{ color: "#C8312F" }}>
-            On hand {fmtAmount(p.onHand, p.onHandUnit)} vs {amount} planned.
+            On hand {fmtAmount(p.onHand, p.onHandUnit)} vs {fmtAmount(p.demand?.amount, p.demand?.unit) || amount} planned.
           </div>
         )}
         {!p.short && p.onHand != null && (
@@ -4956,6 +4956,8 @@ function JobCardTank({ tank, serviceId, D }) {
     }
     let cancelled = false;
     setBusy(true);
+    // Never show the previous product's verdict beside the new one.
+    setMix(null);
     adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
@@ -5043,6 +5045,7 @@ function JobCardTank({ tank, serviceId, D }) {
             {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
               <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
             )}
+            {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}</div>}
             {busy ? (
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (

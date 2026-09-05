@@ -515,7 +515,7 @@ describe('mixForProduct', () => {
   const makeDb = (fixtures) => (table) => {
     const rows = fixtures[String(table).split(" as ")[0]] ?? [];
     const chain = {};
-    for (const m of ['join', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
     chain.first = async () => rows[0] ?? null;
     chain.catch = (fn) => Promise.resolve(rows).catch(fn);
     chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
@@ -971,22 +971,36 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
   const catalog = [{ id: 'c', name: 'Celsius WG', rate_unit: 'oz' }, { id: 's', name: 'Speedzone Southern', rate_unit: 'fl oz' }];
 
   test('add-on lines resolve onto the card with their source and visit; unmatched, lawn and pest-default add-ons are reported, not dosed', async () => {
-    const facts = { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: ['Tree & Shrub Care', 'Lawn Care', 'Mosquito', 'Bee/Wasp removal'] };
+    const facts = {
+      isLawn: false,
+      serviceType: 'Quarterly Pest Control',
+      scheduledDate: '2026-09-04',
+      addons: [
+        { name: 'Tree & Shrub Care', category: 'tree_shrub' },
+        { name: 'Lawn Care', category: 'lawn_care' },
+        { name: 'Mosquito', category: 'mosquito' },
+        // Identity, not name (r2 P1): an inspection is never a treatment, and
+        // a name the matcher would classify as pest resolves nothing without
+        // a treatment category.
+        { name: 'Pest Inspection Service', category: 'inspection' },
+        { name: 'Bee/Wasp removal', category: null },
+      ],
+    };
     const out = await jobCard.resolveVisitLines({ facts, protocols: { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Celsius WG 1 oz' }] }, tree_shrub: program }, catalog, dbh: () => ({}) });
     expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['c', null], ['s', 'Tree & Shrub Care']]);
     expect(out.addons).toEqual([
       { name: 'Tree & Shrub Care', products: 1, visit: { number: 9, month: 'Sep' }, note: null },
       { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
       { name: 'Mosquito', products: 0, visit: null, note: 'No protocol matched this add-on' },
-      // An unknown name must not fall to the general-pest default (r1 P1).
-      { name: 'Bee/Wasp removal', products: 0, visit: null, note: 'No protocol matched this add-on' },
+      { name: 'Pest Inspection Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (inspection)' },
+      { name: 'Bee/Wasp removal', products: 0, visit: null, note: 'No treatment protocol for this add-on (no catalog identity)' },
     ]);
     const [, card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, verdicts: [], packSizes: {} });
     expect(card.line).toBe('Tree & Shrub Care: Speedzone Southern');
   });
 
   test('an add-on that selects a product the primary lists as conditional wins the card through the merger (r1 P1)', async () => {
-    const facts = { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: ['Tree & Shrub Care'] };
+    const facts = { isLawn: false, serviceType: 'Quarterly Pest Control', scheduledDate: '2026-09-04', addons: [{ name: 'Tree & Shrub Care', category: 'tree_shrub' }] };
     const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Speedzone Southern 1 fl oz', secondary: 'Celsius WG 1 oz' }] }, tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Celsius WG 1 oz' }] } };
     const out = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}) });
     expect(out.lines.filter((l) => l.product.id === 'c').map((l) => [l.selected, l.source || null])).toEqual([[false, null], [true, 'Tree & Shrub Care']]);
@@ -997,9 +1011,37 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(celsius.line).toBe('Tree & Shrub Care: Celsius WG · Celsius WG');
   });
 
-  test('a failed add-on read fails the card (503)', async () => {
-    const dbh = () => { const chain = {}; for (const m of ['where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = (fn) => Promise.resolve(fn(new Error('db down'))); return chain; };
+  test('a failed add-on read fails the card (503); rows carry the catalog category', async () => {
+    const dbh = () => { const chain = {}; for (const m of ['leftJoin', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = (fn) => Promise.resolve(fn(new Error('db down'))); return chain; };
+    dbh.raw = (sql) => sql;
     await expect(jobCard._test.loadAddons(dbh, 'svc1')).rejects.toMatchObject({ statusCode: 503 });
+    const ok = () => { const chain = {}; for (const m of ['leftJoin', 'where', 'orderBy', 'select']) chain[m] = () => chain; chain.catch = async () => [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }, { service_name: 'Bee/Wasp removal', category: null }]; return chain; };
+    ok.raw = (sql) => sql;
+    expect(await jobCard._test.loadAddons(ok, 'svc1')).toEqual([{ name: 'Tree & Shrub Care', category: 'tree_shrub' }, { name: 'Bee/Wasp removal', category: null }]);
+  });
+
+  test('a searched product booked through a non-lawn add-on is judged under that add-on, not the lawn plan (r2 P2)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const product = { id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' };
+    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], scheduled_service_addons: [{ service_name: 'Quarterly Pest Control', category: 'pest_control' }], product_aliases: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] }, mixCalculator: { items: [] } });
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] } };
+    const out = await jobCard.mixForProduct('d', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(buildPlan).not.toHaveBeenCalled();
+    expect(out.context).toEqual({ line: 'Quarterly Pest Control' });
+    expect(out.planBlocks).toEqual([]);
+    expect(out.amount).toBe(0.2);
   });
 
   test('the tank search runs the spray check at the property: a Hold withholds the dose', async () => {
@@ -1009,7 +1051,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const dbh = (table) => {
       const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] }[String(table).split(' as ')[0]] ?? [];
       const chain = {};
-      for (const m of ['join', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
       chain.first = async () => rows[0] ?? null;
       chain.catch = (fn) => Promise.resolve(rows).catch(fn);
       chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
