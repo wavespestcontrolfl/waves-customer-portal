@@ -43,6 +43,7 @@ const NAME_MAX_CHARS = 60;
 // keeps talking while this function ends the call underneath it.
 const PACKET_WRITE_TIMEOUT_MS = 4000;
 const NO_CONTEXT_WRITE_TIMEOUT_MS = 1500;
+const ABANDON_REVERT_TIMEOUT_MS = 1500;
 const NO_CONTEXT_BELL = 'sandy_transfer_no_context';
 
 function isTransferGateOn() {
@@ -248,9 +249,17 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // stay a transfer nobody rang. Undo the stamp (detached) and abort.
   if (typeof ctx.sessionEnded === 'function' && ctx.sessionEnded() === true) {
     logger.warn(`[voice-relay] transfer abandoned — session ended during the packet write callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
+    // AWAITED (bounded): end() resumes when this tool returns and reconciles
+    // the row at once — a detached revert would race it (an ai_transferred
+    // row skips the reconcile, a NULL one reached after the salvage loses the
+    // transcript). 4s + 1.5s + 1.5s stays inside the 8s write-tool budget.
     if (typeof ctx.revertHandoff === 'function') {
-      void Promise.resolve(ctx.revertHandoff(packet.attempt))
-        .catch((err) => logger.warn(`[voice-relay] abandoned-transfer revert failed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}: ${err.message}`));
+      try {
+        const res = await withTimeout(Promise.resolve(ctx.revertHandoff(packet.attempt)), ABANDON_REVERT_TIMEOUT_MS, 'timeout');
+        if (res === 'timeout') logger.warn(`[voice-relay] abandoned-transfer revert unconfirmed (timeout) callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
+      } catch (err) {
+        logger.warn(`[voice-relay] abandoned-transfer revert failed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}: ${err.message}`);
+      }
     }
     revertLateWrites(ctx, packet.attempt, late); // a timed-out full write landing after this revert is undone too
     return 'The call has ended. Do not say anything else and do not call any more tools.';

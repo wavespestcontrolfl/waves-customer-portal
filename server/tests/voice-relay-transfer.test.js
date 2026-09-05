@@ -439,10 +439,11 @@ describe('codex r3 follow-ups', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     let ended = false;
     const writeHandoff = jest.fn(async () => { ended = true; return { rows: 1, contextAvailable: true }; }); // the socket closes mid-write
-    const revertHandoff = jest.fn(async () => 1);
+    let reverted = false;
+    const revertHandoff = jest.fn(async () => { await new Promise((r) => setTimeout(r, 20)); reverted = true; return 1; });
     const { ctx } = ctxFor({ writeHandoff, revertHandoff, sessionEnded: () => ended });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/call has ended/);
-    await new Promise((r) => setImmediate(r));
+    expect(reverted).toBe(true); // AWAITED: end()'s reconcile (which resumes when the tool returns) sees the reverted row
     expect(revertHandoff).toHaveBeenCalledWith(writeHandoff.mock.calls[0][0].attempt);
     expect(ctx.say).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
@@ -512,5 +513,15 @@ describe('whisper + AI segment', () => {
     jest.useRealTimers();
     expect(out).toMatch(/could not be started/);
     expect(ctx.endForTransfer).not.toHaveBeenCalled(); // settled before the outer 8s deadline, and nothing ended the call
+    // Worst case with the abandoned-transfer revert: full write hangs (4s), fallback confirms, the socket has closed, the revert hangs (1.5s) ⇒ still < 8s.
+    jest.useFakeTimers();
+    let ended = false;
+    const wh = jest.fn().mockImplementationOnce(never).mockImplementationOnce(async () => { ended = true; return 1; });
+    const { ctx: c2 } = ctxFor({ writeHandoff: wh, revertHandoff: jest.fn(never), sessionEnded: () => ended });
+    const p2 = executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, c2);
+    await jest.advanceTimersByTimeAsync(7000);
+    expect(await p2).toMatch(/call has ended/);
+    jest.useRealTimers();
+    expect(c2.endForTransfer).not.toHaveBeenCalled();
   });
 });
