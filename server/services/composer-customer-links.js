@@ -2255,7 +2255,21 @@ const issuedProjectReport = (project) => Boolean(project)
  *     delivery state is restored, token-guarded (only THIS claim is
  *     cleared). A stale claim taken over restores to 'failed', as the flow
  *     itself normalizes a crashed send.
+ * A migrated 'legacy_sent' report is NOT claimed: delivery_status is its
+ * only issuance evidence (sent_at is null), so a claim that crashed before
+ * its release — or the flow's own stale takeover normalizing it to
+ * 'failed' — would erase the proof a working public token still deserves
+ * (pre-push Codex P1; GH Codex #3893 r11 P2 asks the same of the flow).
+ * Those rows get the read-only check instead: a live flow claim refuses;
+ * a durable issued-at field, honoured by the flow's own revert, is the
+ * follow-up that closes the residual window for them.
  */
+const PROJECT_SEND_CLAIM_STALE_MS = 10 * 60 * 1000;
+function liveProjectSendClaim(row) {
+  if (!row || row.delivery_status !== 'sending') return false;
+  const claimedAt = new Date(row.updated_at || 0).getTime();
+  return Number.isFinite(claimedAt) && claimedAt >= Date.now() - PROJECT_SEND_CLAIM_STALE_MS;
+}
 async function claimProjectReportSends(projectReports) {
   const crypto = require('crypto');
   const won = [];
@@ -2266,6 +2280,20 @@ async function claimProjectReportSends(projectReports) {
   // (pre-push Codex P1).
   const unique = [...new Map(projectReports.map((p) => [p.id, p])).values()];
   for (const { id, deliveryStatus } of unique) {
+    if (deliveryStatus === PROJECT_REPORT_LEGACY_DELIVERY) {
+      let row;
+      try {
+        row = await db('projects').where({ id }).first('delivery_status', 'updated_at');
+      } catch (err) {
+        await releaseProjectReportSends({ projects: won });
+        throw err;
+      }
+      if (liveProjectSendClaim(row)) {
+        await releaseProjectReportSends({ projects: won });
+        return { ok: false, error: CLAIMED };
+      }
+      continue;
+    }
     const token = crypto.randomBytes(12).toString('hex');
     const seenSending = deliveryStatus === 'sending';
     const q = db('projects').where({ id });

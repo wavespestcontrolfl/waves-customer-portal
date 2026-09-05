@@ -2432,6 +2432,30 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(r.claim.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
     });
 
+    test('claim: a migrated legacy_sent report is never claimed — delivery_status is its only issuance evidence — but a LIVE flow claim on it still refuses (pre-push Codex P1)', async () => {
+      const projects = chainBuilder({ firstRow: { delivery_status: 'legacy_sent', updated_at: '2026-01-01T00:00:00Z' } });
+      mockBuilders = { projects };
+      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'legacy_sent' }, { id: 'p2', deliveryStatus: 'sent' }]);
+      expect(r.ok).toBe(true);
+      // Read, not written; only the stamped report carries a claim.
+      expect(projects.first).toHaveBeenCalledWith('delivery_status', 'updated_at');
+      expect(claimUpdate(projects)).toHaveLength(1);
+      expect(r.claim.projects.map((p) => p.id)).toEqual(['p2']);
+      // The flow is re-sending the legacy report right now: refuse, and hand
+      // back the claim already won. A stale claim (past ten minutes) passes.
+      const busy = chainBuilder({ firstRow: { delivery_status: 'sending', updated_at: new Date().toISOString() } });
+      mockBuilders = { projects: busy };
+      const lost = await claimProjectReportSends([{ id: 'p2', deliveryStatus: 'sent' }, { id: 'p1', deliveryStatus: 'legacy_sent' }]);
+      expect(lost.ok).toBe(false);
+      expect(lost.error).toMatch(/being re-sent right now/);
+      expect(claimUpdate(busy)).toHaveLength(2);
+      expect(claimUpdate(busy)[1][0]).toMatchObject({ delivery_status: 'sent', delivery_claim_token: null });
+      const stale = chainBuilder({ firstRow: { delivery_status: 'sending', updated_at: '2020-01-01T00:00:00Z' } });
+      mockBuilders = { projects: stale };
+      expect((await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'legacy_sent' }])).ok).toBe(true);
+      expect(claimUpdate(stale)).toHaveLength(0);
+    });
+
     test('claim lost (the flow is sending right now, or the state moved): every claim this call won is handed back, token-guarded, and the send refuses', async () => {
       const projects = chainBuilder();
       projects.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
