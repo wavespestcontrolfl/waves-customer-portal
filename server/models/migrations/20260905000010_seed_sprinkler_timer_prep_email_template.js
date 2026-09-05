@@ -46,7 +46,7 @@ const TEMPLATE = {
   ctaUrlVariable: null,
   blocks: [
     { type: 'heading', content: 'Running your sprinklers by hand, {{first_name}}' },
-    { type: 'paragraph', content: 'Every Monday morning we email you your lawn\'s watering plan for the week: how many minutes to run each zone, which day, and whether to skip because of rain. That plan only helps if you can make the sprinklers run. This one-time guide shows the easiest way: run them by hand, once a week, straight from the plan.' },
+    { type: 'paragraph', content: 'Every Monday morning we email you your lawn\'s watering plan for the week: how many minutes to run each zone, and whether to skip because of rain. Your county sets the day. That plan only helps if you can make the sprinklers run. This one-time guide shows the easiest way: run them by hand, once a week, straight from the plan.' },
     { type: 'paragraph', content: 'You do not need to be handy for this. Open the little box in your garage or on the side of the house and look for the brand name printed on the front. Then tap that name below for photos of your exact box.' },
     { type: 'cta', label: 'RAIN BIRD', url: `${HUB_GUIDES}/rain-bird/` },
     { type: 'cta', label: 'HUNTER', url: `${HUB_GUIDES}/hunter/` },
