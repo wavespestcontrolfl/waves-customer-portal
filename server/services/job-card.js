@@ -1567,7 +1567,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
  * The non-lawn protocol line that names this product — the primary visit's
  * (by catalog identity, name for a legacy row: resolveVisitProducts' rule)
  * or an add-on's — if any. The product is matched the way the card matched
- * it (name + aliases against that program's visit); `addon` is the add-on's
+ * it (the full catalog against that program's visit, then the id); `addon` is the add-on's
  * name (null for the primary line) and `selected` says whether the line is
  * booked work or the visit's "if needed" (a selected line anywhere wins
  * over a conditional one) and `rate` the line's own per-gallon band when it
@@ -1593,9 +1593,11 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
   if (!candidates.length) return found(null);
-  const aliases = await dbh('product_aliases').where({ product_id: product.id }).select('alias_name')
-    .catch((err) => { throw unavailable('Product catalog unavailable', err); });
-  const catalog = [{ ...product, aliases: aliases.map((r) => r.alias_name) }];
+  // The lines resolve against the full catalog, exactly as on the card: a
+  // one-product catalog would let a reverse-alias / first-two-word match
+  // accept the wrong formulation ("Headway G" for Headway) and skip the
+  // lawn plan on that false line.
+  const catalog = await loadCatalog(dbh);
   let conditional = null;
   for (const c of candidates) {
     const { lines } = resolveProtocolLines(c.name, scheduledDate, protocols, catalog, { programKey: c.programKey || null, serviceKey: c.serviceKey || null });

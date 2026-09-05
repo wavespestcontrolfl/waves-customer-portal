@@ -1524,4 +1524,33 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       'Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)',
     ]) expect([raw, isConditionalLine(raw)]).toEqual([raw, false]);
   });
+
+  test('the tank search resolves protocol lines against the full catalog — the wrong formulation never claims the line and skips the lawn plan (hook P1)', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const headway = { id: 'h', name: 'Headway', default_rate: '0.5-1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const headwayG = { id: 'hg', name: 'Headway G', default_rate_per_1000: 3, rate_unit: 'lb', label_verified_at: '2026-07-12' };
+    const rows = {
+      scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' }],
+      // The searched product first (the stub's first() is positional); the granular formulation is the one the add-on line names.
+      products_catalog: [headway, headwayG], equipment_calibrations: [live], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }],
+    };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] }, mixCalculator: { items: [] } });
+    const protocols = { tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Headway G 3 lbs/1000 broadcast', secondary: '' }] } };
+    const out = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    // The line is Headway G's, not Headway's: the lawn plan governs the search and its block withholds.
+    expect(out.context).toEqual({ line: null });
+    expect(buildPlan).toHaveBeenCalled();
+    expect(out).toMatchObject({ amount: null, planBlocks: [{ code: 'nitrogen_blackout' }] });
+  });
 });
