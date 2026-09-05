@@ -94,6 +94,10 @@ const HEAVY_WEIGHT_RX = /fontWeight:\s*[^,}\n]*?\b(6[5-9]\d|7[1-9]\d|[89]\d\d|FW
 // pass the gate while the JSX spelling failed it.
 const BANNED_CSS_FONT_SIZE_RX = /font-size:\s*((?:\d|1[0-3])(?:\.\d+)?)px\b/;
 const HEAVY_CSS_WEIGHT_RX = /font-weight:\s*[^;}\n]*?\b(6[5-9]\d|7[1-9]\d|[89]\d\d)\b/;
+// …and as SVG presentation attributes (`<text fontSize="10">`, `fontSize={10}`,
+// `fontWeight="800"`) — the report charts label their axes this way.
+const BANNED_ATTR_FONT_SIZE_RX = /\bfontSize=(?:"((?:[1-9]|1[0-3])(?:\.\d+)?)"|\{((?:[1-9]|1[0-3])(?:\.\d+)?)\})/;
+const HEAVY_ATTR_WEIGHT_RX = /\bfontWeight=(?:"(6[5-9]\d|7[1-9]\d|[89]\d\d)"|\{(6[5-9]\d|7[1-9]\d|[89]\d\d)\})/;
 
 // =========================================================================
 // Walk
@@ -187,6 +191,24 @@ function checkFile(filePath) {
         rule: 'banned-font-size',
         line: n,
         msg: `font-size: ${m[1]}px — nothing under 14px on a customer surface, embedded CSS included (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_ATTR_FONT_SIZE_RX.test(line)) {
+      const m = line.match(BANNED_ATTR_FONT_SIZE_RX);
+      violations.push({
+        rule: 'banned-font-size',
+        line: n,
+        msg: `fontSize=${m[1] || m[2]} — nothing under 14px on a customer surface, SVG text included (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (HEAVY_ATTR_WEIGHT_RX.test(line)) {
+      const m = line.match(HEAVY_ATTR_WEIGHT_RX);
+      violations.push({
+        rule: 'heavy-weight',
+        line: n,
+        msg: `fontWeight=${m[1] || m[2]} — customer weights are 400 / 500 / 600 / 700 only, SVG text included (owner sheet 2026-09-03)`,
         snippet: line.trim().slice(0, 140),
       });
     }

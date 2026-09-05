@@ -1275,12 +1275,12 @@ export function LawnTrendChart({ title, sub, points = [], domain, unit = '', acc
           </g>
         ))}
         {activePt ? (
-          <text x={labelX(active)} y={y(activePt.value) - 11} textAnchor="middle" style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: accent }} fontSize="13">{fmt(activePt.value)}</text>
+          <text x={labelX(active)} y={y(activePt.value) - 11} textAnchor="middle" style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: accent }} fontSize="14">{fmt(activePt.value)}</text>
         ) : (
-          <text x={x(pts.length - 1)} y={y(last.value) - 9} textAnchor="end" style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: accent }} fontSize="13">{fmt(last.value)}</text>
+          <text x={x(pts.length - 1)} y={y(last.value) - 9} textAnchor="end" style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: accent }} fontSize="14">{fmt(last.value)}</text>
         )}
         {pts.map((p, i) => (
-          <text key={i} x={x(i)} y={H - 6} textAnchor="middle" style={{ fontFamily: FONTS.body, fill: active === i ? TEXT : MUTED, fontWeight: active === i ? 700 : 400 }} fontSize="10.5">{p.label}</text>
+          <text key={i} x={x(i)} y={H - 6} textAnchor="middle" style={{ fontFamily: FONTS.body, fill: active === i ? TEXT : MUTED, fontWeight: active === i ? 700 : 400 }} fontSize="14">{p.label}</text>
         ))}
       </svg>
       {footnote ? (

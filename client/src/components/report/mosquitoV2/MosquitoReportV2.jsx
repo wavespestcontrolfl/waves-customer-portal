@@ -378,7 +378,7 @@ export function MosquitoHabitatMap({ habitat, print = false }) {
                   <circle cx={n.x} cy={n.y} r="6.5" fill={COLORS.white} stroke={color} strokeWidth="2.5" />
                   <circle cx={n.x} cy={n.y} r="2.5" fill={color} />
                 </g>
-                <text x={n.x} y={n.y + (n.dy > 0 ? n.dy + 4 : n.dy)} textAnchor="middle" fontSize="10" fontWeight="700" fill={TEXT} fontFamily={FONTS.body}>{n.label}</text>
+                <text x={n.x} y={n.y + (n.dy > 0 ? n.dy + 4 : n.dy)} textAnchor="middle" fontSize="14" fontWeight="700" fill={TEXT} fontFamily={FONTS.body}>{n.label}</text>
               </g>
             );
           })}
