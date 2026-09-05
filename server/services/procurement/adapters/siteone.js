@@ -626,13 +626,15 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
 // one VISIBLE element (responsive checkouts keep hidden desktop/mobile
 // copies; a stale hidden node is not the figure the vendor charges), parsed
 // as exactly one $ amount. Returns cents.
-async function readCheckoutTotal(page, { evidence, upload }) {
+// `screenshot: false` = a pure read for the at-click check: nothing is
+// awaited between the read and the click (pre-push P0 on #3876).
+async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) {
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   const total = await readExactlyOne(page, SELECTORS.checkoutTotal);
   if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
   if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
   const finalCents = parseMoney(total.text);
-  await shot(page, 'pre-submit', evidence, upload);
+  if (screenshot) await shot(page, 'pre-submit', evidence, upload);
   if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${total.text.trim().slice(0, 40)}")`, evidence);
   evidence.checkoutTotalCents = finalCents;
   return finalCents;
@@ -650,9 +652,17 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // screenshot upload and the cap reservation) would otherwise bypass the
   // cap and record the old figure (Codex #3876 r2 P1). A changed total is
   // gated again before the click.
-  let cents = await readCheckoutTotal(page, { evidence, upload });
-  if (cents !== finalCents) {
-    evidence.totalChangedBeforeClick = { from: finalCents, to: cents };
+  // The read is pure (no screenshot upload) and a changed figure is gated
+  // and then READ AGAIN — the cap reservation is itself an awaited DB write
+  // during which the page may recalculate once more; the click happens only
+  // when the figure on screen is the one the cap approved (pre-push P0).
+  let cents = finalCents;
+  for (let i = 0; ; i += 1) {
+    const shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
+    if (shownCents === cents) break;
+    if (i >= 3) throw new RefusedError('checkout_total_unstable', `SiteOne checkout total kept changing before the click (${cents} → ${shownCents}) — not submitted`, evidence, shownCents);
+    evidence.totalChangedBeforeClick = { from: cents, to: shownCents };
+    cents = shownCents;
     await gate(cents, 'total at the click');
   }
   markSubmitted();

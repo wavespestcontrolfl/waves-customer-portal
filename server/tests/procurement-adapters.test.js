@@ -312,7 +312,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.checkoutShipTo) return el({ count: st.shipToCount ?? 1, visible: st.shipToVisible ?? true, text: st.shipToText === undefined ? 'Ship to: Waves Pest Control\n 123 Example Ave\n Bradenton, FL 34205' : st.shipToText });
       // checkoutTotalText: the checkout total (default = the cart total, so a dry run's bell reports 9900);
       // totalAtClick: a DIFFERENT total shown once the Place Order stage re-reads it (async tax / shipping recalculation)
-      if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
+      // totalByRead: a function of the read index for a total that keeps moving
+      if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalByRead ? st.totalByRead(st.totalReads) : st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       const placeBtn = () => el({ count: 1, visible: true, onClick: () => { st.placeClicked += 1; } });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
@@ -666,6 +667,24 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(r).toMatchObject({ externalOrderNumber: 'SO-778899', amountCents: 11240 });
     expect(r.evidence.totalChangedBeforeClick).toEqual({ from: 10593, to: 11240 });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a total that changes AGAIN during the cap reservation is re-read and re-gated; the click waits for a stable, approved figure (pre-push P0)', async () => {
+    // read 1 = the checkout-stage read; read 2 differs → gated → read 3 differs again → gated → read 4 stable
+    const seq = { 1: '$105.93', 2: '$112.40', 3: '$118.00', 4: '$118.00', 5: '$118.00' };
+    const { st, deps } = fakeSiteOne({ totalByRead: (n) => `Order total ${seq[n] || '$118.00'}` });
+    const totals = [];
+    const r = await s1.place(args({ beforeSubmit: async (c) => { totals.push(c); return { ok: true }; } }), deps);
+    expect(totals).toEqual([9900, 10593, 11240, 11800]);
+    expect(r).toMatchObject({ amountCents: 11800 });
+    expect(st.placeClicked).toBe(1);
+  });
+
+  test('a total that never settles before the click refuses checkout_total_unstable — nothing submitted (pre-push P0)', async () => {
+    const { st, deps } = fakeSiteOne({ totalByRead: (n) => `Order total $${100 + n}.00` });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_total_unstable' });
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
   });
 
   test('a changed total at the click boundary that the cap refuses is NOT clicked (r2 P1)', async () => {
