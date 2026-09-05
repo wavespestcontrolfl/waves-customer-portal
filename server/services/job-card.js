@@ -28,7 +28,7 @@ const { detectServiceCategory } = require('../utils/service-normalizer');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
-const { buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot } = require('./waveguard-plan-engine');
+const { buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot, summarizeCalibration } = require('./waveguard-plan-engine');
 const { latestComparableGroupApplication } = require('./waveguard-approval-engine');
 
 const PROMPT_VERSION = 'job_card_paragraph_v1';
@@ -542,20 +542,29 @@ async function getActiveCalibration(dbh = db) {
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
     .where('es.active', true)
-    .select('ec.carrier_gal_per_1000', 'ec.expires_at', 'es.name as system_name', 'es.tank_capacity_gal')
+    .select('ec.carrier_gal_per_1000', 'ec.expires_at', 'ec.calibration_status', 'es.name as system_name', 'es.tank_capacity_gal')
     .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 when es.system_type = 'tank' then 1 else 2 end")
     .orderBy('es.name', 'asc')
     .first()
     .catch(() => null);
 }
 
+// The plan engine's calibration validation (expired / not field verified)
+// decides whether a mix may be computed; only the wording is the card's.
+const TANK_BLOCK_REASON = {
+  missing_calibration: 'No rig calibration on file',
+  expired_calibration: 'Rig calibration expired',
+  calibration_not_field_verified: 'Rig calibration not field verified',
+};
+
 function tankFromCalibration(cal, now = new Date()) {
-  if (!cal) return { calibrated: false, reason: 'No rig calibration on file', carrierGalPer1000: null, tankCapacityGal: null, expiresAt: null, systemName: null };
-  const expired = cal.expires_at && new Date(cal.expires_at) < now;
+  if (!cal) return { calibrated: false, reason: TANK_BLOCK_REASON.missing_calibration, carrierGalPer1000: null, tankCapacityGal: null, expiresAt: null, systemName: null };
+  const { blocks } = summarizeCalibration({ calibration: cal, date: now });
+  const block = blocks[0] || null;
   const carrier = Number(cal.carrier_gal_per_1000 || 0);
   return {
-    calibrated: !expired && carrier > 0,
-    reason: expired ? 'Rig calibration expired' : (carrier > 0 ? null : 'No carrier rate on file'),
+    calibrated: !block && carrier > 0,
+    reason: block ? (TANK_BLOCK_REASON[block.code] || block.message) : (carrier > 0 ? null : 'No carrier rate on file'),
     carrierGalPer1000: carrier > 0 ? carrier : null,
     tankCapacityGal: cal.tank_capacity_gal != null ? Number(cal.tank_capacity_gal) : null,
     expiresAt: cal.expires_at || null,

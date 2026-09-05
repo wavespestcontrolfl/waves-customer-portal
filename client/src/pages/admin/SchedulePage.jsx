@@ -4648,7 +4648,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 const JOB_CARD_CHIP = {
   ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
   hold: { label: "Hold", bg: "#C8312F", fg: "#FFFFFF" },
-  unknown: { label: "No limit on file", bg: "#F4F4F5", fg: "#71717A" },
+  unknown: { label: "Unknown", bg: "#F4F4F5", fg: "#71717A" },
 };
 
 function JobCardChip({ tone = "unknown", label, D }) {
@@ -4794,8 +4794,8 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
               <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
                 <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                  {p.verdict === "hold" && p.verdictReason && (
-                    <span style={{ fontSize: 12, color: "#C8312F" }}>{p.verdictReason}</span>
+                  {p.verdict !== "ok" && p.verdictReason && (
+                    <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
                   )}
                   <JobCardChip tone={p.verdict} D={D} />
                 </span>
@@ -4885,6 +4885,9 @@ function JobCardProduct({ p, D }) {
     <JobCardCollapsible title={p.name} right={right} D={D}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
+        {p.verdict !== "ok" && p.verdictReason && (
+          <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
+        )}
         {p.precautions && <div>{p.precautions}</div>}
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
         {p.short && (

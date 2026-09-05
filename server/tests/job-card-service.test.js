@@ -264,8 +264,12 @@ describe('tankFromCalibration', () => {
       .toMatchObject({ calibrated: false, reason: 'Rig calibration expired', carrierGalPer1000: 2 });
   });
   test('live calibration', () => {
-    expect(jobCard.tankFromCalibration({ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }, now))
+    expect(jobCard.tankFromCalibration({ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }, now))
       .toMatchObject({ calibrated: true, reason: null, tankCapacityGal: 110 });
+  });
+  test('unexpired but not field verified → not calibrated (Codex r3 P1, plan-engine block reused)', () => {
+    expect(jobCard.tankFromCalibration({ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }, now))
+      .toMatchObject({ calibrated: false, reason: 'Rig calibration not field verified', carrierGalPer1000: 2 });
   });
   test('none on file', () => {
     expect(jobCard.tankFromCalibration(null, now)).toMatchObject({ calibrated: false, reason: 'No rig calibration on file' });
@@ -357,7 +361,7 @@ describe('mixForProduct', () => {
   test('granular product → no tank amount even on a live rig (Codex r1 P1)', async () => {
     const dbh = makeDb({
       products_catalog: [{ id: 'hg', name: 'Headway G', default_rate_per_1000: 3, rate_unit: 'lb', label_verified_at: null }],
-      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
+      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
     const out = await jobCard.mixForProduct('hg', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') });
     expect(out).toMatchObject({ amount: null, tankMixable: false, reason: 'Not a tank mix — apply as labeled', tank: { calibrated: true } });
@@ -366,7 +370,7 @@ describe('mixForProduct', () => {
   test('live calibration → amount for 110 gal', async () => {
     const dbh = makeDb({
       products_catalog: [product],
-      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
+      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
     const out = await jobCard.mixForProduct('p1', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') });
     expect(out).toMatchObject({ amount: 6.22, unit: 'oz', gallons: 110, rateVerified: false, tankMixable: true });
