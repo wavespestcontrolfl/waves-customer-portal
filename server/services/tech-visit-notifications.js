@@ -68,6 +68,14 @@ const PUSH_TITLE_BY_KIND = Object.freeze({
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// What a failed card write may put in the log. A Knex error message carries
+// the SQL with its bound values — here the card text: the customer's name
+// and street address — so only the driver's code / error name is logged,
+// never the message (AGENTS.md: no PII in logs).
+function errorTag(err) {
+  return String((err && (err.code || err.name)) || 'error');
+}
+
 function enabled() {
   return gateEnvValue(GATE);
 }
@@ -351,7 +359,7 @@ async function deliver(notices) {
       if (await writeCard(n)) written.push(n);
       else dropped += 1;
     } catch (err) {
-      logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId}: ${err.message}`);
+      logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
     }
   }
   for (const n of written) await pushCard(n);
@@ -407,7 +415,7 @@ function enqueueForVisit(visitId, fn) {
   const key = String(visitId);
   const prior = visitQueues.get(key) || Promise.resolve();
   const next = prior.then(fn, fn).catch((err) => {
-    logger.warn(`[tech-visit-notifications] queued notice failed for visit ${key}: ${err.message}`);
+    logger.warn(`[tech-visit-notifications] queued notice failed for visit ${key} (${errorTag(err)})`);
   });
   visitQueues.set(key, next);
   next.finally(() => { if (visitQueues.get(key) === next) visitQueues.delete(key); });

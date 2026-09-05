@@ -189,6 +189,13 @@ describe('notifyTechVisitChange', () => {
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
     expect(out).toEqual({ sent: false, skipped: 'error' });
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    // The insert error's message carries the SQL with its bound values (the
+    // customer's name and address) — the log line names the visit and the
+    // driver code only.
+    const logged = logger.error.mock.calls.map((c) => c[0]).join('\n');
+    expect(logged).toContain('card not written for visit visit-1');
+    expect(logged).not.toContain('insert failed');
+    expect(logged).not.toContain('Ruiz');
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('card not written'));
   });
 
