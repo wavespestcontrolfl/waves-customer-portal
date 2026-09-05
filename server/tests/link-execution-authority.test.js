@@ -57,6 +57,7 @@ test('only one submit begins; release after it preserves ambiguity and prohibits
   const args={prospectId:s.placement.id,leaseToken:s.token,citation:{website:'https://wavespestcontrol.com',location:'sarasota'}};
   expect(await E.beginSubmission(s.db,args)).toBe(true);
   expect(s.db._tables.seo_link_attempts[0].detail.citation).toEqual(args.citation);
+  expect(Number.isFinite(Date.parse(s.db._tables.seo_link_attempts[0].detail.submitted_at))).toBe(true);
   expect(await E.beginSubmission(s.db,args)).toBe(false);
   await E.releaseSlots(s.db,[s.placement.id]);
   expect(s.db._tables.seo_link_attempts[0].outcome).toBe('submit_ambiguous');
@@ -119,12 +120,12 @@ test('owner placement confirmation resolves a held attempt and its exact executi
   s.db._tables.seo_link_prospects[0].claimed_at = null;
   const approvalId = uid();
   s.db._tables.seo_link_approvals.push({ id: approvalId, prospect_id: s.placement.id, dimension: 'execution', action: 'acquire', consumed_at: null });
-  s.db._tables.seo_link_attempts.push({ id: uid(), prospect_id: s.placement.id, path_id: s.path.id, action: 'submit', outcome: 'submit_ambiguous', evidence_url: 'synthetic/evidence.png', detail: { authority_id: s.authority.id, approval_id: approvalId, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } } });
+  s.db._tables.seo_link_attempts.push({ id: uid(), prospect_id: s.placement.id, path_id: s.path.id, action: 'submit', outcome: 'submit_ambiguous', lease_token: s.token, evidence_url: 'synthetic/evidence.png', detail: { authority_id: s.authority.id, approval_id: approvalId, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } } });
   const currentDecision = { ...s.authority, id: uid(), instance_key: 'revised-instance', satisfied_at: null };
   s.db._tables.seo_link_placement_authorities[0].ended_at = new Date();
   s.db._tables.seo_link_placement_authorities.push(currentDecision);
   const args = { prospectId: s.placement.id, status: 'placed', liveUrl: 'https://publisher.example/confirmed', attemptId: s.db._tables.seo_link_attempts[0].id };
-  expect(await E.reconcileOwnerPlacement(s.db, args)).toEqual({ ok: true });
+  expect(await E.reconcileOwnerPlacement(s.db, args)).toMatchObject({ ok: true });
   expect(s.db._tables.seo_link_attempts[0]).toMatchObject({ outcome: 'placed', evidence_url: 'synthetic/evidence.png' });
   expect(s.db._tables.seo_link_placement_authorities.every(r => r.satisfied_reason === 'placed')).toBe(true);
   expect(s.db._tables.seo_link_approvals[0].consumed_at).toBeInstanceOf(Date);
@@ -151,7 +152,7 @@ test.each(['submit_rejected', 'submit_blocked'])('negative owner verdict release
   s.db._tables.seo_link_prospects[0].attempts = 3;
   const args = { prospectId: s.placement.id, attemptId: attempt.id, notSubmitted: true };
   expect(await E.reconcileOwnerPlacement(s.db, { ...args, attemptId: uid() })).toMatchObject({ ok: false });
-  expect(await E.reconcileOwnerPlacement(s.db, args)).toEqual({ ok: true });
+  expect(await E.reconcileOwnerPlacement(s.db, args)).toMatchObject({ ok: true });
   expect(attempt).toMatchObject({ outcome: 'slot_released', evidence_url: 'synthetic/evidence.png', idempotency_key: null });
   expect(s.db._tables.seo_link_placement_authorities[0].satisfied_at).toBeUndefined();
   expect(s.db._tables.seo_link_prospects[0].automation_policy).toBeNull();
@@ -178,9 +179,9 @@ test.each([
   const s = scenario({ placement: { location_key, target_page } });
   s.db._tables.audit_log = [];
   s.db._tables.seo_link_prospects[0].claimed_at = null;
-  const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', detail: { authority_id: s.authority.id } };
+  const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', lease_token: s.token, detail: { authority_id: s.authority.id } };
   s.db._tables.seo_link_attempts.push(attempt);
-  expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed', liveUrl: 'https://www.publisher.example/confirmed' })).toEqual({ ok: true });
+  expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed', liveUrl: 'https://www.publisher.example/confirmed' })).toMatchObject({ ok: true });
   expect(s.db._tables.seo_link_prospects[0]).toMatchObject({ location_key: expectedLocation, quality_signals: { cited_homepage: true, location: expectedLocation, submitted_website: 'https://wavespestcontrol.com' } });
   expect(attempt).toMatchObject({ outcome: 'placed', detail: { citation: { website: 'https://wavespestcontrol.com', location: expectedLocation } } });
 });
@@ -194,4 +195,18 @@ test('a hold with unknown provider identity remains unresolved', async () => {
   expect(attempt.outcome).toBe('submit_ambiguous');
   expect(s.db._tables.audit_log).toHaveLength(0);
   expect(s.db._tables.seo_link_placement_authorities[0].satisfied_at).toBeUndefined();
+});
+
+
+test.each(['prospect', 'live', 'indexed'])('confirmation preserves %s lifecycle and original submission boundary', async (status) => {
+  const s = scenario({ placement: { status } });
+  s.db._tables.audit_log = [];
+  const submitted_at = new Date(Date.now() - 5 * 86400000).toISOString();
+  const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', lease_token: s.token, detail: { authority_id: s.authority.id, submitted_at, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } } };
+  s.db._tables.seo_link_attempts.push(attempt);
+  s.db._tables.seo_link_prospects[0].claimed_at = null;
+  const result = await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed', liveUrl: 'https://publisher.example/confirmed' });
+  expect(result).toEqual({ ok: true, status: status === 'prospect' ? 'placed' : status });
+  expect(s.db._tables.seo_link_prospects[0].quality_signals.submitted_at).toBe(submitted_at);
+  expect(attempt.detail.submitted_at).toBe(submitted_at);
 });

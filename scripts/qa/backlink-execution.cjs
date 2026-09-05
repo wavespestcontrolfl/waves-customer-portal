@@ -146,7 +146,7 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_at, null);
       assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
     }
-    assert.equal((await confirm({ live_url: `https://www.${domain}/confirmed` })).prospect.status, 'placed');
+    assert.equal((await confirm({ live_url: `https://www.${domain}/confirmed` })).prospect.status, 'live');
     assert.equal((await trx('seo_link_domains').where({ id }).first()).agent_state, 'rejected');
     assert.equal((await Q.listOwnerQueue(proxy)).cards.length, 0);
     await trx('seo_link_domains').where({ id }).update({ agent_state: 'acquiring' });
@@ -154,6 +154,15 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     assert.equal((await trx('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'placed');
     const recoveredCitation = await trx('seo_link_prospects').where({ id: p.id }).first();
     assert.equal(recoveredCitation.quality_signals.cited_homepage, true);
+    assert.equal(recoveredCitation.quality_signals.submitted_at, rejectedLease.toISOString());
+    const oldLinkId = randomUUID();
+    await trx('seo_backlinks').insert({ id: oldLinkId, source_domain: domain, source_url: `https://${domain}/old-listing`, target_url: 'https://wavespestcontrol.com', status: 'active', discovery_source: 'dataforseo', first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date(rejectedLease.getTime() - 10 * 86400000)) });
+    const V = require(`${root}/server/services/seo/link-prospect-verifier`);
+    assert.equal(await V.reconcileByDomain(recoveredCitation), null);
+    await trx('seo_backlinks').where({ id: oldLinkId }).update({ first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date(rejectedLease.getTime() + 2 * 86400000)) });
+    assert.equal((await V.reconcileByDomain(recoveredCitation)).id, oldLinkId);
+    console.log('PASS recovered submission rejects older homepage evidence and accepts later evidence');
+
     assert.equal(recoveredCitation.quality_signals.location, p.location_key);
     assert.equal(require(`${root}/server/services/seo/link-prospect-verifier`)._test.expectedTargetUrl(recoveredCitation), 'https://wavespestcontrol.com');
     assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_reason, 'placed');
