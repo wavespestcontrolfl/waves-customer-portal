@@ -5067,7 +5067,12 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // retry re-enters safely. Only a CONFIRMED payer-billed result
       // returns successfully (that skip is correct and permanent).
       const resolvedPayer = await require('../services/payer')
-        .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true });
+        .resolveForInvoice({ customerId: wavesCustomerId, throwOnError: true })
+        .catch((err) => {
+          throw annotateSetupIntentWebhookError(err, {
+            handlerBranch: 'portal_add_method', retryClass: 'expected_retry', reasonCode: 'payer_lookup_failed',
+          });
+        });
       if (resolvedPayer?.payerId) {
         await require('../services/notification-service').notifyAdmin(
           'billing',
@@ -5099,7 +5104,9 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       // Re-throw so Stripe retries: for the micro-deposit flow this event
       // is the only completion path, and every step above is idempotent.
       logger.error(`[stripe-webhook] portal-add-method completion failed for SI ${setupIntent.id} (Stripe will retry): ${err.message}`);
-      annotateSetupIntentWebhookError(err, { handlerBranch: 'portal_add_method', retryClass: 'unexpected_failure' });
+      // Preserve anticipated retry annotations; unclassified errors default
+      // to unexpected_failure in stripeWebhookSentryContext.
+      annotateSetupIntentWebhookError(err, { handlerBranch: 'portal_add_method' });
       throw err;
     }
     return;

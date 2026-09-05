@@ -81,6 +81,14 @@ jest.mock('../routes/estimate-public', () => ({
   findLinkedUpcomingAppointment: jest.fn(async () => ({ id: 'appt_test' })),
 }));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
+jest.mock('../services/payment-method-consents', () => ({
+  hasEnrollmentScopedConsent: jest.fn(async () => true),
+  linkPaymentMethodId: jest.fn(async () => {}),
+}));
+jest.mock('../services/autopay-enrollment', () => ({ enrollConsentedMethod: jest.fn() }));
+const Payer = require('../services/payer');
+const ConsentService = require('../services/payment-method-consents');
+const { enrollConsentedMethod } = require('../services/autopay-enrollment');
 const RecurringCards = require('../services/recurring-card-on-file');
 const AppointmentCardRequests = require('../services/appointment-card-request');
 const Sentry = require('@sentry/node');
@@ -323,6 +331,47 @@ test('raw one-word enrollment exception stays out of every Sentry field while St
   expect(update).toHaveBeenCalledWith({
     error: `recurring-cof webhook enrollment transient failure (${privateReason}) — retry`,
   });
+});
+
+test.each([
+  ['payer lookup', 'expected_retry', 'payer_lookup_failed'],
+  ['consent persistence', 'unexpected_failure', 'ECONNRESET'],
+])('portal %s failure preserves retry behavior and its diagnostic classification', async (failureStage, retryClass, reasonCode) => {
+  const boom = new Error('private downstream detail');
+  boom.code = 'ECONNRESET';
+  const update = jest.fn().mockResolvedValue(1);
+  const ledger = ledgerBuilder({ update });
+  db.mockImplementation((table) => {
+    if (table === 'stripe_webhook_events') return ledger;
+    if (table === 'payment_methods') {
+      return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => ({
+        id: 'method_test', customer_id: 'customer_test', method_type: 'card',
+      })) };
+    }
+    throw new Error(`Unexpected db table: ${table}`);
+  });
+  if (failureStage === 'payer lookup') Payer.resolveForInvoice.mockRejectedValueOnce(boom);
+  else ConsentService.linkPaymentMethodId.mockRejectedValueOnce(boom);
+  mockConstructEvent.mockReturnValue({
+    id: 'evt_portal_retry', type: 'setup_intent.succeeded',
+    data: { object: {
+      id: 'seti_portal_retry', payment_method: 'pm_test',
+      metadata: { purpose: 'portal_add_method', waves_customer_id: 'customer_test' },
+    } },
+  });
+
+  expect((await postWebhook()).status).toBe(500);
+  expect(enrollConsentedMethod).not.toHaveBeenCalled();
+  expect(Payer.resolveForInvoice).toHaveBeenCalledTimes(failureStage === 'payer lookup' ? 1 : 0);
+  expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+  const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+  expect(context.extra).toMatchObject({ handlerBranch: 'portal_add_method', retryClass, reasonCode });
+  expect(context.fingerprint).toEqual([
+    'stripe-webhook-handler', 'setup_intent.succeeded', 'Error', 'portal_add_method', retryClass, reasonCode,
+  ]);
+  expect(JSON.stringify([capturedErr.message, capturedErr.stack, context])).not.toContain(boom.message);
+  expect(update).toHaveBeenCalledWith({ error: boom.message });
+  expect(update).not.toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
 });
 
 test('unexpected setup capture failures stay distinct from expected retries', async () => {
