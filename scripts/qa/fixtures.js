@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const { v5 } = require('uuid');
 const { etDateString, addETDays } = require('../../server/utils/datetime-et');
+const { createScheduledService } = require('../../server/services/booking/create-scheduled-service');
 
 // MUTATES only the dedicated dev database supplied by the managed launcher.
 // Fixture IDs are deterministic within a run. No production data is copied.
@@ -48,13 +49,15 @@ async function seed(db, f) {
         oneTime: { total: 99, membershipFee: 0,
           items: [{ service: 'pest_general', catalogServiceKey: service.service_key, name: service.name, price: 99 }] } } },
     }).onConflict('id').ignore();
-    await trx('scheduled_services').insert({ id: f.appointmentId, customer_id: f.customerId,
-      technician_id: f.technicianId, service_id: service.id, service_type: service.name,
-      scheduled_date: f.date, window_start: '09:00:00', window_end: '10:30:00',
-      status: 'pending', estimated_duration_minutes: 90, estimated_price: 99,
-      source_estimate_id: f.estimateId, reservation_expires_at: new Date(Date.now() + 15 * 60000),
-      is_recurring: false, create_invoice_on_complete: false,
-    }).onConflict('id').ignore();
+    await createScheduledService({ trx, cols: await trx('scheduled_services').columnInfo(),
+      source: { sourceAction: 'qa_fixture' }, idempotencyKey: `qa:${f.runId}:appointment`,
+      insertData: { id: f.appointmentId, customer_id: f.customerId,
+        technician_id: f.technicianId, service_id: service.id, service_type: service.name,
+        scheduled_date: f.date, window_start: '09:00:00', window_end: '10:30:00',
+        status: 'pending', estimated_duration_minutes: 90, estimated_price: 99,
+        source_estimate_id: f.estimateId, reservation_expires_at: new Date(Date.now() + 15 * 60000),
+        is_recurring: false, create_invoice_on_complete: false,
+      } });
     await trx('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, token: f.invoiceToken,
       invoice_number: `QA-${f.runId.slice(0, 8)}`, title: 'QA service invoice', subtotal: 99, total: 99,
       status: 'sent', stripe_payment_intent_id: f.paymentIntentId,

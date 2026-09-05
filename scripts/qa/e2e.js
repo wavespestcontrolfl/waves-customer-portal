@@ -11,6 +11,7 @@ const { doctor } = require('../dev/doctor');
 const { launchBrowser, evidence } = require('./browser');
 const { fixtureIdentity, seed, cleanup } = require('./fixtures');
 const { etDateString } = require('../../server/utils/datetime-et');
+const { createScheduledService } = require('../../server/services/booking/create-scheduled-service');
 
 async function main() {
   const context = readContext();
@@ -128,9 +129,10 @@ async function main() {
       await db('scheduled_services').where({ id: fixture.appointmentId }).update({
         window_start: '09:00:00', window_end: '10:30:00', estimated_duration_minutes: 90,
       });
-      await db('scheduled_services').insert({ id: fixture.conflictId, customer_id: fixture.customerId,
-        technician_id: null, service_id: fixture.serviceId, service_type: fixture.serviceName,
-        scheduled_date: fixture.nextDate, window_start: '11:00:00', window_end: '12:30:00', status: 'confirmed' });
+      await createScheduledService({ trx: db, cols: await db('scheduled_services').columnInfo(), source: { sourceAction: 'qa_fixture' },
+        insertData: { id: fixture.conflictId, customer_id: fixture.customerId,
+          technician_id: null, service_id: fixture.serviceId, service_type: fixture.serviceName,
+          scheduled_date: fixture.nextDate, window_start: '11:00:00', window_end: '12:30:00', status: 'confirmed' } });
       const result = await json(await page.request.post(`${baseUrl}/api/admin/dispatch/${fixture.appointmentId}/reschedule`, {
         headers, data: { newDate: fixture.nextDate, newWindow: { start: '11:00' }, notifyCustomer: false },
       }));
