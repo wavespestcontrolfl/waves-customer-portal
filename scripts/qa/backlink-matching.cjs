@@ -35,6 +35,15 @@ stub('models/db', proxy);
     assert.deepEqual(await V.reconcileOutreach(), {matched:0,ambiguous:2});
     const queue = await Q.listOwnerQueue(proxy);
     assert.equal(queue.cards.filter(c=>c.backlink_match?.id===backlink).length,2);
+    for (const status of ['lost', 'disavowed']) {
+      await trx('seo_backlinks').where({ id: backlink }).update({ status });
+      await V.reconcileOutreach();
+      assert.equal((await Q.listOwnerQueue(proxy)).cards.length, 0);
+      for (const row of await trx('seo_link_prospects').whereIn('id', [first, second])) assert.equal(row.quality_signals.outreach_match_ambiguous, undefined);
+      await trx('seo_backlinks').where({ id: backlink }).update({ status: 'active' });
+      assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 2 });
+    }
+    console.log('PASS lost/disavowed evidence clears stale markers and empty owner cards');
     await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
     assert.deepEqual(await V.reconcileOutreach({ownerMatch:{prospectId:second,backlinkId:backlink}}),{matched:1,ambiguous:0});
     const chosen = await trx('seo_link_prospects').where({id:second}).first();

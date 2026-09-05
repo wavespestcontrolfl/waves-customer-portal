@@ -260,11 +260,11 @@ const outreachAwaitingPlacement = (p) => p.outreach_status === 'sent' && p.outre
 async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
   if (!isEnabled('linkAuthority') && !ownerMatch) return { matched: 0, ambiguous: 0 };
   const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-domain-lock');
-  let pendingQuery = db('seo_link_prospects').where({ outreach_status: 'sent' })
-    .whereIn('status', ['contacted', 'negotiating', 'awaiting_owner']).whereNotNull('domain_id');
+  let pendingQuery = db('seo_link_prospects').where((q) => q.where((b) => b.where({ outreach_status: 'sent' })
+    .whereIn('status', ['contacted', 'negotiating', 'awaiting_owner'])).orWhereRaw("quality_signals->>'outreach_match_ambiguous' IS NOT NULL")).whereNotNull('domain_id');
   if (ownerMatch) pendingQuery = pendingQuery.where({ id: ownerMatch.prospectId });
   const pending = await pendingQuery;
-  const domains = [...new Set(pending.filter(outreachAwaitingPlacement).map((p) => canonicalProspectDomain(p.target_domain)))].sort();
+  const domains = [...new Set(pending.filter((p) => outreachAwaitingPlacement(p) || parseQuality(p.quality_signals).outreach_match_ambiguous).map((p) => canonicalProspectDomain(p.target_domain)))].sort();
   const counts = { matched: 0, ambiguous: 0 };
   for (const domain of domains) {
     const result = await db.transaction(async (trx) => {
@@ -274,6 +274,18 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
         .whereNotIn('status', ['rejected', 'lost']).forUpdate();
       const links = await trx('seo_backlinks').where({ status: 'active' }).where(scanTrackedOnly)
         .whereRaw("lower(regexp_replace(source_domain, '^www\\.', '')) = ?", [domain]).orderBy('id');
+      // A queued choice is valid only while the same active evidence still has ambiguous identity.
+      for (const p of placements) {
+        const quality = parseQuality(p.quality_signals);
+        if (!quality.outreach_match_ambiguous) continue;
+        const link = links.find((b) => b.id === quality.outreach_match_ambiguous);
+        const eligible = link && outreachAwaitingPlacement(p) && !placements.some((other) => other.backlink_id === link.id)
+          && outreachMatch(link, placements).ambiguous.some((candidate) => candidate.id === p.id);
+        if (eligible) continue;
+        delete quality.outreach_match_ambiguous;
+        await trx('seo_link_prospects').where({ id: p.id }).update({ quality_signals: quality, updated_at: now });
+        p.quality_signals = quality;
+      }
       let matched = 0, ambiguous = 0;
       for (const link of links) {
         if (ownerMatch && ownerMatch.backlinkId !== link.id) continue;
