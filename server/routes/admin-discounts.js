@@ -161,8 +161,9 @@ router.post('/calculate', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/discounts/promo-validate — validate a promo code
-router.post('/promo-validate', async (req, res, next) => {
+// Legacy name: this applies the promo to the customer and consumes a use,
+// so it needs the same admin permission as the explicit assignment route.
+router.post('/promo-validate', requireAdmin, async (req, res, next) => {
   try {
     const { customerId, code } = req.body;
     if (!code) return res.status(400).json({ error: 'code required' });
