@@ -1723,11 +1723,21 @@ class RelayConversation {
       // without that stamp (delivery failed / suppressed, or a timed-out
       // claim that landed late) earns no promise.
       const claimStamp = new Date();
-      const claimed = await withTimeout(
-        db('call_log').where('twilio_call_sid', this.callSid).whereNull('voicemail_callback_alerted_at').update({ voicemail_callback_alerted_at: claimStamp }).catch(() => 0),
+      // Release the dedupe claim (fenced on this leg's own stamp) so a later
+      // leg of the call — or the voicemail / missed-call lanes — may still
+      // file the one callback: after a CONFIRMED delivery failure, or when a
+      // claim that timed out here LANDS later (the deadline cannot cancel a
+      // queued UPDATE; hook r33 P1). Never while delivery is unresolved.
+      const releaseClaim = () => withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid).where('voicemail_callback_alerted_at', claimStamp).update({ voicemail_callback_alerted_at: null }).catch(() => 0),
         2000,
         0,
       );
+      const claimPromise = db('call_log').where('twilio_call_sid', this.callSid).whereNull('voicemail_callback_alerted_at').update({ voicemail_callback_alerted_at: claimStamp }).catch(() => 0);
+      const claimed = await withTimeout(claimPromise, 2000, 'timeout');
+      if (claimed === 'timeout') {
+        void claimPromise.then((rows) => (Number(rows) > 0 ? releaseClaim() : 0)).catch(() => {});
+      }
       if (!(Number(claimed) > 0)) {
         const again = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('metadata').catch(() => null), 2000, null);
         let meta = again ? again.metadata : null;
@@ -1745,14 +1755,6 @@ class RelayConversation {
           .catch((err) => logger.warn(`[voice-relay] provider-failure callback evidence stamp failed callSid=${maskSid(this.callSid)}: ${err.message}`)),
         2000,
         null,
-      );
-      // Release the dedupe claim (fenced on this leg's own stamp) so a later
-      // leg of the call may still file the one callback — only after a
-      // CONFIRMED failure, never while delivery is unresolved (hook r32 P1).
-      const releaseClaim = () => withTimeout(
-        db('call_log').where('twilio_call_sid', this.callSid).where('voicemail_callback_alerted_at', claimStamp).update({ voicemail_callback_alerted_at: null }).catch(() => 0),
-        2000,
-        0,
       );
       const notify = triggerNotification('customer_voicemail_callback', {
         name: (this._estimateFields && this._estimateFields.first_name) || null,

@@ -609,6 +609,33 @@ describe('the conversation side', () => {
     expect(u4.some((u) => u.metadata && String(u.metadata.bindings?.[0] || '').includes('relay_failure_callback_filed_at'))).toBe(false);
   });
 
+  test('a callback CLAIM that times out but lands later is released on its own stamp — never a stuck claim (hook r33 P1)', async () => {
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      let landClaim;
+      const { updates, builder } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', metadata: {} } });
+      builder.update.mockImplementation((patch) => {
+        updates.push(patch);
+        if (patch.voicemail_callback_alerted_at instanceof Date) return new Promise((resolve) => { landClaim = () => resolve(1); });
+        return Promise.resolve(1);
+      });
+      const convo = new RelayConversation({ callSid: 'CA-cb-late', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+      trig.mockClear();
+      const pending = convo._fileFailureCallback();
+      await jest.advanceTimersByTimeAsync(2100);
+      expect(await pending).toBe(false); // unconfirmed claim ⇒ no bell, no promise
+      expect(trig).not.toHaveBeenCalled();
+      landClaim();
+      await jest.advanceTimersByTimeAsync(10);
+      const stamp = updates.find((u) => u.voicemail_callback_alerted_at instanceof Date).voicemail_callback_alerted_at;
+      expect(updates.some((u) => u.voicemail_callback_alerted_at === null)).toBe(true);
+      expect(builder.where).toHaveBeenCalledWith('voicemail_callback_alerted_at', stamp);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a callback delivery that is still UNRESOLVED at the bound keeps the claim (no promise, no release); its eventual result stamps the evidence or releases the claim (hook r32 P1)', async () => {
     const { triggerNotification: trig } = require('../services/notification-triggers');
     const isEvidence = (u) => u.metadata && String(u.metadata.bindings?.[0] || '').includes('relay_failure_callback_filed_at');
