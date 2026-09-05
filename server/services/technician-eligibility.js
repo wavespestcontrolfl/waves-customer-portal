@@ -46,16 +46,27 @@ function reasonFor(tech) {
  * Throws a 422 (code TECH_NOT_ASSIGNABLE) unless the technician may take a
  * field assignment. null / undefined = unassigned, which is always legal.
  * Returns the technician row so callers can reuse it (name, etc.).
+ *
+ * Call it on the WRITING transaction. When `conn` is a transaction the row
+ * is read FOR SHARE, which conflicts with the FOR UPDATE every Team-tab
+ * status writer takes (admin-timetracking.js), so an offboarding or a
+ * field-eligibility removal cannot commit between this check and the
+ * assignment's commit. On a plain connection it is a point-in-time check.
  */
 async function assertAssignableTechnician(technicianId, { conn = db } = {}) {
   if (technicianId === null || technicianId === undefined || technicianId === '') return null;
-  const tech = await conn('technicians')
-    .where({ id: technicianId })
-    .first('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active');
+  let query = conn('technicians').where({ id: technicianId });
+  if (conn.isTransaction) query = query.forShare();
+  const tech = await query.first('id', 'name', 'role', 'employment_status', 'field_dispatchable', 'active');
   const reason = reasonFor(tech);
   if (reason) {
     const err = new Error(`Technician ${tech ? tech.name : technicianId} ${reason} and cannot be assigned work`);
+    // Both shapes: `status` for route handlers that read it, and the
+    // isOperational + statusCode pair the shared error middleware
+    // (middleware/errors.js) needs to surface a 422 instead of a 500.
     err.status = 422;
+    err.statusCode = 422;
+    err.isOperational = true;
     err.code = NOT_ASSIGNABLE;
     err.technicianId = technicianId;
     throw err;

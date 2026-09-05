@@ -18,6 +18,7 @@ jest.mock('../models/db', () => {
       orWhereRaw() { chain._ops.push(['orWhereRaw', ...arguments]); return chain; },
       leftJoin() { chain._ops.push(['leftJoin', ...arguments]); return chain; },
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
+      forShare() { chain._ops.push(['forShare']); return chain; },
       orderBy() { chain._ops.push(['orderBy', ...arguments]); return chain; },
       max() { chain._ops.push(['max', ...arguments]); return chain; },
       first(...cols) {

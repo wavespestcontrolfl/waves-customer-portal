@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
@@ -3996,7 +3997,8 @@ router.get('/', async (req, res, next) => {
       tech.loadList = Object.keys(materials);
     });
 
-    const technicians = await db('technicians').select('id', 'name').where({ active: true }).orderBy('name');
+    // Assignment picker roster: assignable staff only (technician-eligibility.js).
+    const technicians = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
 
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
@@ -5442,6 +5444,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           throw dupErr;
         }
       }
+      // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE) —
+      // covers a stale picker and the auto-assign path alike; recurring
+      // children below inherit this row's tech, so one check fences both.
+      await assertAssignableTechnician(resolvedTechId, { conn: trx });
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,

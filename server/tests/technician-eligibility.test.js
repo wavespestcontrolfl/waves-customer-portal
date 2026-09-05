@@ -14,12 +14,14 @@ const {
   employmentPatch,
 } = require('../services/technician-eligibility');
 
-function connReturning(row) {
+function connReturning(row, { transaction = false } = {}) {
   const chain = {
     where: jest.fn(() => chain),
+    forShare: jest.fn(() => chain),
     first: jest.fn(async () => row),
   };
   const conn = jest.fn(() => chain);
+  if (transaction) conn.isTransaction = true;
   return { conn, chain };
 }
 
@@ -87,10 +89,28 @@ describe('technician eligibility', () => {
       const { conn } = connReturning(row ? { id: 't1', name: 'Tech One', ...row } : null);
       await expect(assertAssignableTechnician('t1', { conn })).rejects.toMatchObject({
         status: 422,
+        // The shared error middleware (middleware/errors.js) only surfaces
+        // isOperational errors with their statusCode — without both this
+        // would reach the client as a generic 500.
+        statusCode: 422,
+        isOperational: true,
         code: NOT_ASSIGNABLE,
         technicianId: 't1',
         message: expect.stringMatching(message),
       });
+    });
+
+    test('on a transaction the row is read FOR SHARE so a concurrent status change cannot commit underneath the assignment', async () => {
+      const row = { id: 't1', name: 'Tech One', employment_status: 'active', field_dispatchable: true };
+      const { conn, chain } = connReturning(row, { transaction: true });
+      await expect(assertAssignableTechnician('t1', { conn })).resolves.toBe(row);
+      expect(chain.forShare).toHaveBeenCalledTimes(1);
+    });
+
+    test('on a plain connection no row lock is taken', async () => {
+      const { conn, chain } = connReturning({ id: 't1', employment_status: 'active', field_dispatchable: true });
+      await assertAssignableTechnician('t1', { conn });
+      expect(chain.forShare).not.toHaveBeenCalled();
     });
 
     test('defaults to the shared db handle when no connection is passed', async () => {

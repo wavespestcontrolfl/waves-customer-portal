@@ -155,6 +155,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   const fromTechId = job.technician_id || null;
   let updatedRow;
   const applyAssignment = async (assignmentTrx) => {
+    // Re-checked FOR SHARE on the writing trx: a Team-tab offboarding or
+    // field-eligibility removal (FOR UPDATE) cannot slip between the
+    // pre-transaction read above and this commit.
+    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx });
     // Tech-day membership fence (scheduling/tech-day-lock.js): reassignment
     // moves the stop between two tech-days on the same date — the nightly
     // reorder's membership read is only safe against writers holding the

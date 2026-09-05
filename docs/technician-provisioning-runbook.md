@@ -23,17 +23,23 @@ drop target on the board. Every visit writer checks this at save time
 (`server/services/technician-eligibility.js`), so a stale schedule screen
 cannot put a customer on it either.
 
-When the person starts:
+When the person starts (order matters — the register API below is for a
+brand-new row and returns 409 once the placeholder owns the email, and
+"Forgot password" refuses a row that is not active):
 
 1. Rename the placeholder to the hire's name (allowed only while the row has
    no visit, time, or payout history — a row that already worked is a
    person, never recycled; a replacement hire gets a new row).
-2. Register credentials with the same email (below). Register creates a
-   second row if the emails differ, so set the placeholder's email first.
-3. Team tab → Employment = *Active*, and tick **"Can be assigned field
-   work"** once they may take solo stops. Employment and field eligibility
-   are separate on purpose: an office admin stays active without ever
-   becoming dispatchable, and a trainee can sign in before they take work.
+2. Team tab → Edit: set the hire's real mailbox as the email and Employment
+   = *Active*. Save. (An active row requires an email.)
+3. Have the hire use **"Forgot password"** on `/admin/login` with that
+   email — the emailed reset link sets their first password. Do NOT call the
+   register API for a placeholder.
+4. Add licensing on the Compliance page, then tick **"Can be assigned field
+   work"** on the Team tab once they may take solo stops. Employment and
+   field eligibility are separate on purpose: an office admin stays active
+   without ever becoming dispatchable, and a trainee can sign in before they
+   take work.
 
 ## Before you start
 

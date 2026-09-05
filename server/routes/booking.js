@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const { isAssignable } = require('../services/technician-eligibility');
+const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
@@ -2676,6 +2676,9 @@ async function createSelfBooking(payload = {}) {
         if (keptGuardError) logger.warn(`[booking:confirm] in-booking duplicate-series guard failed (post-commit guard decides): ${keptGuardError.message}`);
         if (keptMatches.length > 0) pestDuplicateKeptAtBooking = keptMatches[0];
       }
+      // Re-asserted FOR SHARE on the writing trx (the pre-transaction check
+      // above is the fast path): an offboarding cannot commit in between.
+      await assertAssignableTechnician(technician_id || null, { conn: trx });
       const [scheduledRow] = await trx('scheduled_services').insert({
         ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
         ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration

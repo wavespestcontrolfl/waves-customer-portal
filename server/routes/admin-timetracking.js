@@ -1049,7 +1049,7 @@ async function deactivateTechnician(req, res, next) {
       const futureAssignedVisits = await trx('scheduled_services as s')
         .leftJoin('customers as c', 's.customer_id', 'c.id')
         .where('s.technician_id', target.id)
-        .where('s.scheduled_date', '>=', trx.raw('CURRENT_DATE'))
+        .where('s.scheduled_date', '>=', etDateString(new Date()))
         .whereNotIn('s.status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
         .orderBy('s.scheduled_date')
         .select('s.id', 's.scheduled_date', 's.service_type', 'c.first_name', 'c.last_name');

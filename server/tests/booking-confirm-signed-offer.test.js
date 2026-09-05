@@ -365,6 +365,14 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       };
       return b;
     }
+    if (table === 'technicians') {
+      // In-transaction eligibility re-check (technician-eligibility.js).
+      return {
+        where: jest.fn().mockReturnThis(),
+        forShare: jest.fn().mockReturnThis(),
+        first: jest.fn().mockResolvedValue({ id: TECH_ID, employment_status: 'active', field_dispatchable: true }),
+      };
+    }
     throw new Error(`unexpected trx table ${table}`);
   }
 
@@ -391,6 +399,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (table === 'technicians') {
         return {
           where: jest.fn().mockReturnThis(),
+          forShare: jest.fn().mockReturnThis(),
           first: jest.fn().mockResolvedValue({ id: TECH_ID, employment_status: 'active', field_dispatchable: true }),
         };
       }
