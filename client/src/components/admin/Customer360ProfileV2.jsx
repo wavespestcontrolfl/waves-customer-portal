@@ -5138,6 +5138,7 @@ export default function Customer360ProfileV2({
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timeline, setTimeline] = useState([]);
   const [timelineError, setTimelineError] = useState(false);
+  const [timelineRetrying, setTimelineRetrying] = useState(false);
   const [comms, setComms] = useState([]);
   const [commsLoaded, setCommsLoaded] = useState(false);
   const [commsLoading, setCommsLoading] = useState(false);
@@ -5374,6 +5375,7 @@ export default function Customer360ProfileV2({
     setLoading(true);
     setData(null);
     setProfileLoadError("");
+    setTimelineRetrying(false);
     setProfileActionErr("");
     setCommsLoading(false);
     setMenuOpen(false);
@@ -5389,12 +5391,12 @@ export default function Customer360ProfileV2({
     setRefundPayment(null);
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
-      adminFetch(`/admin/customers/${customerId}/timeline`, {
+      isAdmin ? adminFetch(`/admin/customers/${customerId}/timeline`, {
         signal: ctrl.signal,
       }).catch((err) => {
         if (err.name === "AbortError") throw err;
         return null;
-      }),
+      }) : Promise.resolve({ timeline: [] }),
     ])
       .then(([detail, tl]) => {
         if (seq !== profileSeqRef.current) return;
@@ -5412,7 +5414,23 @@ export default function Customer360ProfileV2({
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [customerId, profileReloadKey]);
+  }, [customerId, profileReloadKey, isAdmin]);
+
+  const retryTimeline = async () => {
+    const seq = profileSeqRef.current;
+    const signal = profileAbortRef.current.signal;
+    setTimelineRetrying(true);
+    try {
+      const result = await adminFetch(`/admin/customers/${customerId}/timeline`, { signal });
+      if (signal.aborted || seq !== profileSeqRef.current) return;
+      setTimeline(result.timeline || []);
+      setTimelineError(false);
+    } catch {
+      // Keep the loaded profile and recovery action when history is still unavailable.
+    } finally {
+      if (!signal.aborted && seq === profileSeqRef.current) setTimelineRetrying(false);
+    }
+  };
 
   useEffect(() => {
     if (activeTab !== "comms" || commsLoaded || commsLoading) return;
@@ -7909,8 +7927,8 @@ export default function Customer360ProfileV2({
             </div>
           )}
         </div>
-        {/* ZONE 4 — TIMELINE */}
-        <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
+        {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
+        {isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
           {" "}
           <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">
             {" "}
@@ -7990,9 +8008,10 @@ export default function Customer360ProfileV2({
                 <Button
                   variant="secondary"
                   aria-label="Retry customer history"
-                  onClick={() => setProfileReloadKey((key) => key + 1)}
+                  onClick={retryTimeline}
+                  disabled={timelineRetrying}
                 >
-                  Retry
+                  {timelineRetrying ? "Retrying…" : "Retry"}
                 </Button>
               </div>
             )}
@@ -8002,7 +8021,7 @@ export default function Customer360ProfileV2({
               </div>
             )}
           </div>{" "}
-        </div>
+        </div>}
         {/* Mobile spacer for sticky action bar — tracks the same keyboard
             inset as the bar itself so content still scrolls clear of it. */}
         <div

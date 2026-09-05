@@ -67,16 +67,29 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
   });
 
+  it('does not request or offer admin-only history to a technician', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({ error: 'Forbidden' }, 403)));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(screen.queryByText('Could not load customer history.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
+  });
+
   it.each([{ events: [] }, { events: [{ type: 'interaction', title: 'Recovered fixture note' }] }])(
     'distinguishes unavailable history from successful empty/nonempty history after retry (%j)',
     async ({ events }) => {
+      localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
       let failTimeline = true;
       vi.stubGlobal('fetch', vi.fn((url) => {
         const path = String(url);
         if (path.endsWith('/timeline')) return failTimeline
           ? response({ error: 'Unavailable' }, 503)
           : response({ timeline: events });
-        if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+        if (path.endsWith('/customer-a')) return failTimeline ? response(customerDetail('customer-a', 'Avery')) : response({ error: 'Profile unavailable' }, 503);
         return response({});
       }));
       render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
@@ -89,10 +102,13 @@ describe('Customer360ProfileV2 profile state', () => {
       expect(await screen.findByText(events.length ? 'Recovered fixture note' : 'No timeline events')).toBeInTheDocument();
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
       expect(screen.getByText(`Timeline (${events.length})`)).toBeInTheDocument();
+      expect(screen.getAllByText('Avery Customer')).toHaveLength(2);
+      expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(1);
     },
   );
 
   it('ignores history from an old customer when switching records during retry', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     const oldHistory = deferred();
     let attempts = 0;
     vi.stubGlobal('fetch', vi.fn((url) => {
