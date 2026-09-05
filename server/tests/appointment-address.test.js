@@ -204,3 +204,22 @@ test('address propagation leaves a rescheduled placeholder and its obsolete stop
   expect(addressWrite.filters).toContainEqual(['whereIn', 'id', ['child']]);
   expect(conn.calls.some((call) => call.table === 'service_visits' && call.patch)).toBe(false);
 });
+
+
+test('rejects a rescheduled anchor before planning or writing its live siblings', async () => {
+  const anchor = { ...row, status: 'rescheduled', visit_id: 'obsolete' };
+  const sibling = { ...row, id: 'live-child', recurring_parent_id: row.id };
+  const conn = connection({ rows: [anchor, sibling] });
+  await expect(planAppointmentAddress(conn, row.id, property.id))
+    .rejects.toMatchObject({ statusCode: 409, isOperational: true });
+  expect(conn.calls).toHaveLength(1);
+  expect(conn.calls.some((call) => call.patch)).toBe(false);
+});
+
+test('rejects an anchor rescheduled after the address plan was read', async () => {
+  const plan = await planAppointmentAddress(connection(), row.id, property.id);
+  const conn = connection({ rows: [{ ...row, status: 'rescheduled' }] });
+  await expect(applyAppointmentAddress(conn, plan, 'admin-a'))
+    .rejects.toMatchObject({ statusCode: 409, isOperational: true });
+  expect(conn.calls.some((call) => call.patch)).toBe(false);
+});

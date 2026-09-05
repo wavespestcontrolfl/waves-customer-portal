@@ -14,6 +14,8 @@ const retry = () => Object.assign(new Error('Appointments changed while saving. 
 async function planAppointmentAddress(conn, serviceId, propertyId) {
   const anchor = await conn('scheduled_services').where({ id: serviceId }).first();
   if (!anchor) throw Object.assign(new Error('Appointment not found'), { statusCode: 404, isOperational: true });
+  // A stale editor must not relocate the placeholder left by a reschedule.
+  if (anchor.status === 'rescheduled') throw retry();
   const parentId = anchor.recurring_parent_id || (anchor.is_recurring ? anchor.id : null);
   let rows = await conn('scheduled_services').where({ customer_id: anchor.customer_id })
     .where((q) => {
