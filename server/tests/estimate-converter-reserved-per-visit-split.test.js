@@ -201,3 +201,29 @@ describe('reservedAcceptPerVisitSplit — codex #3938 r2', () => {
     })).toEqual({ reserved: 91.8, promoted: [60] });
   });
 });
+
+describe('reservedAcceptPerVisitSplit — codex #3938 r3', () => {
+  const bait = { service: 'termite_bait', name: 'Termite Bait Stations', annualAfterDiscount: 480, visitsPerYear: 4 };
+
+  test('a station-rental route row folds into the bait share (the converter bills it on the bait visit)', () => {
+    const rowAmounts = [
+      { service: 'pest_control', name: 'Pest Control', amount: 91.8 },
+      { service: 'termite_bait', name: 'Termite Bait Stations', amount: 120 },
+      { service: 'termite_station_rental', name: 'Station rental', amount: 15 },
+    ];
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 226.8, reservedService: pestLine, promotedServices: [bait], acceptedPlanFrequency: 'quarterly', rowAmounts,
+    })).toEqual({ reserved: 91.8, promoted: [135] });
+  });
+
+  test('a rental row with no bait line to carry it declines', () => {
+    const rowAmounts = [
+      { service: 'pest_control', name: 'Pest Control', amount: 91.8 },
+      { service: 'lawn_care', name: 'Every 6 Weeks Lawn Care Service', amount: 60 },
+      { service: 'termite_station_rental', name: 'Station rental', amount: 15 },
+    ];
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 166.8, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly', rowAmounts,
+    })).toBeNull();
+  });
+});

@@ -2609,6 +2609,16 @@ function reservedAcceptPerVisitSplit({
       if (!key || !(amount > 0) || byKey.has(key)) return null;
       byKey.set(key, amount);
     }
+    // The station-rental rider is billed as part of the bait visit (the
+    // converter folds it into the bait line's per-treatment amount), so a
+    // route row for it belongs to the bait share (codex #3938 r3 P1).
+    for (const baitKey of ['termite_bait', 'commercial_termite_bait']) {
+      if (byKey.has('termite_station_rental') && byKey.has(baitKey)) {
+        byKey.set(baitKey, byKey.get(baitKey) + byKey.get('termite_station_rental'));
+        byKey.delete('termite_station_rental');
+      }
+    }
+    if (byKey.has('termite_station_rental')) return null;
     routeRowsUsed = new Set();
     routeRowCount = byKey.size;
     lineAmount = (svc) => {
