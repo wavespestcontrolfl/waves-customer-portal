@@ -189,6 +189,29 @@ describe('updateTechnician', () => {
     expect(PushService.deactivateStaffUser).not.toHaveBeenCalled();
   });
 
+  test('removing field eligibility from an assignable tech lists the visits still on them (they vanish from the board)', async () => {
+    const target = makeChain({ first: { ...ADAM, id: 'tech-9', role: 'technician' } });
+    const write = makeChain();
+    const reread = makeChain({ first: { ...ADAM, id: 'tech-9', field_dispatchable: false } });
+    installTransaction([target, write, reread], { futureVisits: [{ id: 'ss-8', scheduled_date: '2026-09-21', service_type: 'Lawn Care', first_name: 'Bo', last_name: 'Lee' }] });
+    const res = await invoke(updateTechnician, { params: { id: 'tech-9' }, body: { fieldDispatchable: false }, technicianId: 'adam' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.futureAssignedVisits).toEqual([{ id: 'ss-8', scheduledDate: '2026-09-21', serviceType: 'Lawn Care', customerName: 'Bo Lee' }]);
+    // Still employed: no credential rotation, no push deactivation.
+    expect(write.update.mock.calls[0][0]).not.toHaveProperty('auth_token_version');
+    expect(PushService.deactivateStaffUser).not.toHaveBeenCalled();
+  });
+
+  test('a non-assignable row that is edited without re-entering the pool lists nothing', async () => {
+    const target = makeChain({ first: { ...PLACEHOLDER, id: 'tech-9' } });
+    const write = makeChain();
+    const reread = makeChain({ first: { ...PLACEHOLDER, id: 'tech-9', name: 'Tech Nine' } });
+    installTransaction([target, write, reread], { futureVisits: [{ id: 'ss-9' }] });
+    const res = await invoke(updateTechnician, { params: { id: 'tech-9' }, body: { name: 'Tech Nine' }, technicianId: 'adam' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.futureAssignedVisits).toEqual([]);
+  });
+
   test('a bad employmentStatus or fieldDispatchable is rejected before any read', async () => {
     expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { employmentStatus: 'quit' } })).statusCode).toBe(400);
     expect((await invoke(updateTechnician, { params: { id: 'x' }, body: { fieldDispatchable: 1 } })).statusCode).toBe(400);

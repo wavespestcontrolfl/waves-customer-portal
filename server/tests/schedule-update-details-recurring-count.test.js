@@ -83,7 +83,7 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -206,6 +206,8 @@ function scenario({
       return weeklyDaysOff ? { value: weeklyDaysOff } : null;
     }
     if (table === 'schedule_blackout_dates') return [];
+    // assignableRecurringTemplateTechnicianId fences the template tech on the trx.
+    if (table === 'technicians') return op === 'first' ? { id: 'tech-1', employment_status: 'active', field_dispatchable: true } : [];
     return null;
   };
   return { conn: makeConn(handler, { hasCardHoldTable }), inserted, parent, live };

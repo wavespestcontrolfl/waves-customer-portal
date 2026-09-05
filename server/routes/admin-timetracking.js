@@ -5,7 +5,7 @@ const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { isEmploymentStatus, employmentPatch } = require('../services/technician-eligibility');
+const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 const {
   addStaffWorkDays,
@@ -793,9 +793,12 @@ async function updateTechnician(req, res, next) {
       const revokeAccess = credentialsChanged || active === false;
       if (revokeAccess) await PushService.deactivateStaffUser(target.id, trx);
       const tech = await trx('technicians').where({ id: target.id }).first();
-      // Leaving active through Edit surfaces the same remaining-assignment
+      // Leaving the assignable pool through Edit — inactive, prospective, OR
+      // field eligibility removed — surfaces the same remaining-assignment
       // list the DELETE path returns; visits are never touched here.
-      const futureAssignedVisits = active === false ? await listFutureAssignedVisits(trx, target.id) : [];
+      const futureAssignedVisits = isAssignable(target) && !isAssignable(tech)
+        ? await listFutureAssignedVisits(trx, target.id)
+        : [];
       return {
         tech,
         futureAssignedVisits,

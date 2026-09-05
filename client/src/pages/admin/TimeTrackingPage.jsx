@@ -2452,7 +2452,8 @@ export function TeamTab({ showToast }) {
           method: "PUT",
           body: JSON.stringify(form),
         });
-        // Offboarding through Edit (Employment → Inactive) surfaces the same
+        // Leaving the dispatch pool through Edit (Employment → Inactive or
+        // Prospective, or field eligibility removed) surfaces the same
         // remaining-assignment notice as the Deactivate button: future work
         // stays on the schedule for manual reassignment.
         const pending = (res && res.futureAssignedVisits) || [];
