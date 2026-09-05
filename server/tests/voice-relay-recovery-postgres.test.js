@@ -109,6 +109,21 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeTruthy();
   });
 
+  test('post-commit takeover permits compensation without changing the replacement owner', async () => {
+    let receipt;
+    await NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
+      dedupeKey: `relay-failure:${callSid}`,
+      relayFailureCall: { callSid, owner: 'old', onCommitted: (value) => { receipt = value; } },
+    });
+    expect(await beginRelaySessionClaim(callSid, 'replacement', 2)).toBe(true);
+    await NotificationService.revertRelayFailureCallback(receipt);
+    expect(await mockPg('notifications')).toHaveLength(0);
+    const row = await mockPg('call_log').first();
+    expect(row.metadata.relay_session_claim_owner).toBe('replacement');
+    expect(row.metadata.relay_failure_callback_filed_at).toBeUndefined();
+    expect(row.voicemail_callback_alerted_at).toBeNull();
+  });
+
   test('an insertion or evidence failure rolls back the bell and callback stamp', async () => {
     await mockPg.raw("CREATE FUNCTION reject_callback_evidence() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''fixture evidence failure''; END;'");
     await mockPg.raw('CREATE TRIGGER reject_callback BEFORE UPDATE ON call_log FOR EACH ROW EXECUTE FUNCTION reject_callback_evidence()');

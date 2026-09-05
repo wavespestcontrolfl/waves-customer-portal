@@ -1249,6 +1249,39 @@ describe('the conversation side', () => {
       expect(pushed).toHaveBeenCalledTimes(1);
     });
 
+    test.each(['superseded', 'ended', '_ending'])('callback is retracted without speech after the post-commit ownership read (%s)', async (change) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const service = require('../services/notification-service');
+      service.revertRelayFailureCallback = jest.fn(async () => {});
+      const receipt = { callSid: 'CA-post-commit', callbackStamp: 'stamp-fixture', notificationId: 'bell-fixture' };
+      const send = jest.fn();
+      const endSession = jest.fn(() => true);
+      const convo = new Convo({ callSid: 'CA-post-commit', from: '+19415551234', send, endSession });
+      convo._modelFailures = 2;
+      convo._failureCallbackEndDecision = jest.fn();
+      convo._fileFailureCallback = jest.fn(async () => { convo._failureCallbackReceipt = receipt; return true; });
+      let readStarted;
+      let finishRead;
+      const started = new Promise((resolve) => { readStarted = resolve; });
+      const ownerRead = new Promise((resolve) => { finishRead = resolve; });
+      convo._sessionSuperseded = jest.fn().mockResolvedValueOnce(false).mockImplementationOnce(() => { readStarted(); return ownerRead; });
+      const pending = convo._maybeHandoffForFailure(null);
+      await started;
+      if (change !== 'superseded') convo[change] = true;
+      finishRead(change === 'superseded');
+      await pending;
+      expect(send).not.toHaveBeenCalled();
+      expect(convo._transcript).toEqual([]);
+      expect(service.revertRelayFailureCallback).toHaveBeenCalledWith(receipt);
+      expect(convo._failureCallbackEndDecision).toHaveBeenCalledWith(false);
+      if (change === 'superseded') {
+        expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+        expect(convo._ending).toBe(true);
+      } else expect(endSession).not.toHaveBeenCalled();
+    });
+
     test('transfer snapshots the outcome after a pending capture settles', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
       process.env.GATE_VOICE_RELAY_TRANSFER = 'true';

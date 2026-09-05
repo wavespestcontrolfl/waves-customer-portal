@@ -1620,19 +1620,20 @@ class RelayConversation {
     if (!superseded) {
       const filed = await this._fileFailureCallback();
       superseded = await this._sessionSuperseded();
-      if (!superseded) this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
+      if (![superseded, this.ended, this._ending].some(Boolean)) this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
     }
     const sent = this._endForHandoff(superseded ? 'superseded' : 'provider_failure');
-    this._failureCallbackEndDecision?.(sent);
-    if (!sent) {
-      this._handoffForFailure = false;
+    const retainCallback = [sent, !superseded].every(Boolean);
+    this._failureCallbackEndDecision?.(retainCallback);
+    this._handoffForFailure = sent;
+    if (!retainCallback) {
       if (this._failureCallbackReceipt) {
         const { revertRelayFailureCallback } = require('../notification-service');
         try {
           await revertRelayFailureCallback(this._failureCallbackReceipt);
           this._failureCallbackReceipt = null;
         } catch (err) {
-          logger.error(`[voice-relay] unsent callback revert failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+          logger.error(`[voice-relay] abandoned callback revert failed callSid=${maskSid(this.callSid)}: ${err.message}`);
         }
       }
     }
