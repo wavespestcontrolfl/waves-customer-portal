@@ -662,7 +662,7 @@ export default function App() {
             <Route path="pricing-logic" element={<Suspense fallback={<RouteFallback label="Loading pricing..." />}><PricingHubPage /></Suspense>} />
             <Route path="pricing-reality-check" element={<Navigate to="/admin/pricing-logic?section=reality" replace />} />
             <Route path="tool-health" element={<Suspense fallback={<RouteFallback label="Loading tool health..." />}><AdminToolHealthPage /></Suspense>} />
-            <Route path="auto-dispatch" element={<AdminTabRedirect to="/admin/dispatch" tab="automation" />} />
+            <Route path="auto-dispatch" element={<AdminTabRedirect to="/admin/agents" tab="dispatch" />} />
             <Route path="price-match" element={<Suspense fallback={<RouteFallback label="Loading price match..." />}><AdminPriceMatchPage /></Suspense>} />
             <Route path="price-change" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="notices" />} />
             <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><AdminMorePage /></Suspense>} />

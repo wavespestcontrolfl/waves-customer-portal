@@ -2,6 +2,7 @@
  * <AgentsHubPage> — unified agent oversight surface at /admin/agents.
  * Tabs rendered as one centered pill:
  *   - "Overview"           — AgentOpsPage (fleet health cards + task queue)
+ *   - "Dispatch"           — Auto-Dispatch run history and visit decisions
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
  *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
  *                            parked message_drafts; approve/revise sends)
@@ -43,6 +44,8 @@ import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
 import AgentModelsTab from "./AgentModelsTab";
 import AgentQueueTab from "./AgentQueueTab";
+import AutoDispatchPage from "./AutoDispatchPage";
+import { getAdminUser } from "../../lib/adminAuth";
 import { adminFetch } from "../../utils/admin-fetch";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { useHubParams } from "./agents/hubParams";
@@ -51,6 +54,7 @@ const TAB_KEY = "tab";
 const TABS = {
   OVERVIEW: "overview",
   ACTIVITY: "activity",
+  DISPATCH: "dispatch",
   DECISIONS: "decisions",
   DRAFTS: "drafts",
   SHADOW: "shadow",
@@ -64,6 +68,7 @@ const TAB_LIST = [
   // working) — GATE_AGENT_ACTIVITY; the tab renders a "not enabled" note
   // while the gate is off (the endpoint answers { available: false }).
   { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
+  { key: TABS.DISPATCH, label: "Dispatch", Icon: Bot, adminOnly: true },
   { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
   { key: TABS.DRAFTS, label: "Pending Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
@@ -94,7 +99,8 @@ export default function AgentsHubPage() {
     return () => { disposed = true; };
   }, []);
   const queueAvailable = hub.features.queue === true;
-  const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
+  const tabList = (queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST)
+    .filter(({ adminOnly }) => !adminOnly || getAdminUser()?.role === "admin");
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
   const tab = validTabs.includes(paramTab) ? paramTab : TABS.OVERVIEW;
@@ -150,7 +156,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 lg:grid-cols-8" : "grid-cols-2 md:grid-cols-4 lg:grid-cols-7"}
+        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-9" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"}
         secondarySections={areaSections}
         secondaryActiveKey={activeArea}
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}
@@ -172,6 +178,8 @@ export default function AgentsHubPage() {
           <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
         ) : tab === TABS.ACTIVITY ? (
           <AgentActivityTab />
+        ) : tab === TABS.DISPATCH ? (
+          <AutoDispatchPage embedded />
         ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
         ) : tab === TABS.DRAFTS ? (

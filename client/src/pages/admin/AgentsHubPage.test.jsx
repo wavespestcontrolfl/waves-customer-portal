@@ -9,6 +9,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("./AutoDispatchPage", () => ({ default: () => <div>Auto-Dispatch workspace</div> }));
+
 vi.mock("./AgentOpsPage", () => ({
   default: () => <div>Overview workspace</div>,
 }));
@@ -36,8 +38,9 @@ import { useLocation } from "react-router-dom";
 
 const HUB = { features: { queue: false }, areas: [{ key: "sms", label: "SMS & messaging" }, { key: "calls", label: "Calls" }] };
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.clear(); });
 beforeEach(() => {
+  localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
   trackAdminPageView.mockClear();
   adminFetch.mockReset();
   adminFetch.mockImplementation(async (path) => {
@@ -123,5 +126,20 @@ describe("AgentsHubPage usage reporting", () => {
       search: "?tab=shadow",
       authoritative: true,
     });
+  });
+});
+
+
+describe("Dispatch oversight", () => {
+  it("opens the canonical Dispatch tab and retains the requested run", () => {
+    renderHub("/admin/agents?tab=dispatch&run=run-123");
+    expect(screen.getByText("Auto-Dispatch workspace")).toBeInTheDocument();
+    expect(screen.getByTestId("search")).toHaveTextContent("run=run-123");
+  });
+  it("hides Dispatch oversight from technician accounts", () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "tech" }));
+    renderHub("/admin/agents?tab=dispatch");
+    expect(screen.queryByRole("button", { name: "Dispatch" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Auto-Dispatch workspace")).not.toBeInTheDocument();
   });
 });
