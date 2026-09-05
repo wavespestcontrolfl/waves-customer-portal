@@ -231,7 +231,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
       // `disabled` models Playwright's actionability failure; `{ trial: true }` runs the checks without dispatching (r5 P2)
       // onTrial models a delayed rerender landing DURING the awaited trial wait (r6 P1)
-      click: async (o) => { if (spec.disabled) throw new Error('element is not enabled'); if (o && o.trial) { if (spec.onTrial) await spec.onTrial(); return; } if (spec.onClick) await spec.onClick(); },
+      // A forced click skips the actionability wait: on a disabled control the browser ignores it (nothing dispatched) — it never throws (r8 P1)
+      click: async (o) => { if (spec.disabled) { if (o && o.force) return; throw new Error('element is not enabled'); } if (o && o.trial) { if (spec.onTrial) await spec.onTrial(); return; } if (spec.onClick) await spec.onClick(o); },
       fill: async (v) => { if (spec.onFill) spec.onFill(v); },
       press: async (key) => { if (spec.onPress) await spec.onPress(key); },
       waitFor: async () => {},
@@ -335,7 +336,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
       // placeOrderDisabled: the visible Place Order button is not enabled (actionability fails, nothing dispatched)
-      const placeBtn = () => el({ count: 1, visible: true, disabled: !!st.placeOrderDisabled, onTrial: () => { st.trialDone = true; }, onClick: () => { st.placeClicked += 1; } });
+      // placeOrderDisabledAfterTrial: a rerender disables Place Order between the trial click and the dispatch (r8 P1)
+      const placeBtn = () => el({ count: 1, visible: true, get disabled() { return !!st.placeOrderDisabled || (!!st.placeOrderDisabledAfterTrial && !!st.trialDone); }, onTrial: () => { st.trialDone = true; }, onClick: (o) => { st.placeClicked += 1; st.placeClickOpts = o; } });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
       if (sel === S.placeOrder) return st.placeOrderHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } }) : placeBtn()) }) : placeBtn();
       // orderNumberHiddenFirst: a hidden stale confirmation node precedes the visible current one
@@ -484,6 +486,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(s1._internals.orderNumberIn('Order date 09052026')).toBeNull(); // compact, month first (r5 P2)
     expect(s1._internals.orderNumberIn('Order date 05092026')).toBeNull(); // compact, day first
     expect(s1._internals.orderNumberIn('Order # 55501234')).toBe('55501234'); // an 8-digit id that is not a date stays an id
+    expect(s1._internals.orderNumberIn('Order # 12345-67890')).toBe('12345-67890'); // separator-joined groups that cannot be a date are an id (r8 P2)
+    expect(s1._internals.orderNumberIn('Order # 2026-778899')).toBe('2026-778899');
+    expect(s1._internals.orderNumberIn('Order date 09-2026')).toBeNull(); // month-year
+    expect(s1._internals.orderNumberIn('Order date 5.9.2026')).toBeNull();
     expect(s1._internals.orderNumberIn('Order date Sep-05-2026')).toBeNull(); // named month
     expect(s1._internals.orderNumberIn('Placed 05-Sep-2026')).toBeNull();
     expect(s1._internals.orderNumberIn('Order date Sep-05-2026 · Order # SO-778899')).toBe('SO-778899');
@@ -851,6 +857,21 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'confirmation_baseline_unreadable' });
     expect(st.placeClicked || 0).toBe(0);
     expect(st.cart).toEqual([]);
+  });
+
+  test('the dispatch click is FORCED — it never waits on actionability past the validated state; a control disabled after the trial submits nothing and parks ambiguous, one click attempt (r8 P1)', async () => {
+    const ok = fakeSiteOne();
+    await expect(s1.place(args(), ok.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(ok.st.placeClickOpts).toMatchObject({ force: true });
+    const { st, deps } = fakeSiteOne({ placeOrderDisabledAfterTrial: true, orderNumberText: 'Thank you', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(0); // the browser ignored the forced click on a disabled control — nothing dispatched, nothing retried
+  });
+
+  test('a pre-click reference whose only post-click change is casing (so-12345 → SO-12345) is the same node — ambiguous, not placed (r8 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberBeforeClick: 'Order ref so-12345', orderNumberText: 'Order ref SO-12345', checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.placeClicked).toBe(1);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {

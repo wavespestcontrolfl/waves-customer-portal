@@ -756,7 +756,7 @@ async function preClickOrderBaseline(page, refuse) {
       const text = String(await node.textContent() || '').replace(/\s+/g, ' ');
       texts.add(text);
       const id = orderNumberIn(text);
-      if (id) ids.add(id);
+      if (id) ids.add(id.toUpperCase()); // case-insensitive: a rerender that only recases so-12345 → SO-12345 is the same node (r8 P2)
     }
   } catch (e) { await refuse('confirmation_baseline_unreadable', `the confirmation-number nodes could not be read before the click (${String(e.message).slice(0, 80)}) — nothing submitted`); }
   return { texts, ids };
@@ -822,7 +822,15 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   markSubmitted();
   let number = null;
   try {
-    await placeOrder.click();
+    // The dispatch must not WAIT past the validated state: an ordinary
+    // click re-runs Playwright's actionability checks and can sit through a
+    // SiteOne rerender (button briefly disabled, covered, moving) that
+    // changes the total, tender, identity or lines, then dispatch on the
+    // unvalidated page. `force` dispatches at once on the control the trial
+    // click proved actionable a few reads ago; a control the browser will
+    // not act on submits nothing and falls to the ambiguous path (Codex
+    // #3876 r8 P1).
+    await placeOrder.click({ force: true, timeout: 5000 });
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
     // An SPA checkout renders the confirmation after domcontentloaded: wait
     // (bounded) for a SHOWN confirmation-number node rather than sampling
@@ -859,7 +867,7 @@ async function waitForNewOrderNumber(page, baseline, timeout) {
   for (;;) {
     const text = await shownOrderText(page);
     const number = text != null && !baseline.texts.has(text) ? orderNumberIn(text) : null;
-    if (number && !baseline.ids.has(number)) return number;
+    if (number && !baseline.ids.has(number.toUpperCase())) return number;
     if (Date.now() >= deadline) return null;
     await page.waitForTimeout(500);
   }
@@ -874,7 +882,22 @@ function orderNumberIn(text) {
   // only by separators (2026-09-05, 09-05-2026, 05/09/26) are not ids —
   // an unlabeled all-digit run (12345678) still is (Codex #3876 r3 P2).
   const MON = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*';
-  const dateShaped = (t) => /^\d+([-/.]\d+)+$/.test(t) // 2026-09-05, 09-05-2026, 05/09/26
+  // Separator-joined digit groups are a date only when the groups CAN be one
+  // (year-month-day, month-day-year, day-month-year, month-year, with real
+  // month / day ranges): "12345-67890" is a labeled confirmation number, not
+  // a date (Codex #3876 r8 P2).
+  const md = (m, d) => m >= 1 && m <= 12 && d >= 1 && d <= 31;
+  const yr = (g) => g.length === 2 || (g.length === 4 && /^(?:19|20)/.test(g));
+  const sepDate = (t) => {
+    const g = t.split(/[-/.]/);
+    if (!g.every((x) => /^\d{1,4}$/.test(x))) return false;
+    const n = g.map(Number);
+    if (g.length === 2) return n[0] >= 1 && n[0] <= 12 && yr(g[1]); // 09/26, 09-2026
+    if (g.length !== 3) return false;
+    return (g[0].length === 4 && yr(g[0]) && md(n[1], n[2])) // 2026-09-05
+      || (yr(g[2]) && (md(n[0], n[1]) || md(n[1], n[0]))); // 09-05-2026, 05/09/26
+  };
+  const dateShaped = (t) => sepDate(t)
     || /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/.test(t) // 20260905 (compact)
     || /^(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:19|20)\d{2}$/.test(t) // 09052026 (compact, month first — r5 P2)
     || /^(?:0[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])(?:19|20)\d{2}$/.test(t) // 05092026 (compact, day first)
