@@ -58,12 +58,24 @@ const COPY = {
     es: 'Disculpe, esto me está tomando más de lo debido. He dejado una nota para que el equipo le dé seguimiento. ¿Hay algo más en lo que pueda ayudarle?',
   },
   // PR 2B — session recovery. `resumed` is the reconnected leg's welcome
-  // greeting (spoken by Twilio before the socket opens).
+  // greeting (spoken by Twilio before the socket opens); the other two are
+  // the provider-failure handoff.
   resumed: {
     en: 'Sorry, I lost you for a second — where were we?',
     es: 'Disculpe, se cortó por un segundo. ¿En qué estábamos?',
   },
-
+  troubleConnecting: {
+    en: "I'm having trouble pulling that up, so I'm going to connect you with the office rather than keep you waiting.",
+    es: 'Estoy teniendo problemas para acceder a eso, así que le comunico con la oficina en lugar de hacerle esperar.',
+  },
+  troubleNoCallback: {
+    en: "I'm having trouble pulling that up right now, and I couldn't save a callback either. Please call us back when you get a chance — thanks for calling.",
+    es: 'Estoy teniendo problemas para acceder a eso y tampoco pude guardar una devolución de llamada. Por favor, llámenos de nuevo cuando pueda. Gracias por llamar.',
+  },
+  troubleCallback: {
+    en: "I'm having trouble pulling that up. I've noted your number, and a Waves team member will call you back as soon as possible. Thanks for calling.",
+    es: 'Estoy teniendo problemas para acceder a eso. He anotado su número y un miembro del equipo de Waves le devolverá la llamada lo antes posible. Gracias por llamar.',
+  },
 };
 
 function copy(key, language) {
