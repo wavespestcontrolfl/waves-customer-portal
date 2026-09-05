@@ -2256,7 +2256,7 @@ class RelayConversation {
    * summary the model wrote (capture_lead's) is never replaced. Bounded,
    * compare-and-set on explicit deterministic provenance.
    */
-  async _refreshCallSummary(meta) {
+  async _refreshCallSummary(meta, retry = true) {
     if (!this.callSid) return false;
     const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta && meta.relay_segments));
     try {
@@ -2275,6 +2275,7 @@ class RelayConversation {
       const summary = buildCallSummary({ turns: callerTurns.map((text) => ({ role: 'caller', text })), leadCaptured });
       const rows = await withTimeout(
         db('call_log').where('twilio_call_sid', this.callSid)
+          .whereRaw("COALESCE(metadata->'relay_segments', '[]'::jsonb) = ?::jsonb", [JSON.stringify(legs)])
           .where((q) => q.whereNull('call_summary').orWhereRaw("transcription_metadata->>'summary_source' = ?", ['deterministic']))
           .update({ call_summary: summary,
             transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'deterministic')"),
@@ -2282,7 +2283,12 @@ class RelayConversation {
         WRITE_DRAIN_TIMEOUT_MS,
         0,
       );
-      return Number(rows) > 0;
+      if (Number(rows) > 0 || !retry) return Number(rows) > 0;
+      const fresh = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('metadata'), 2000, null);
+      if (!fresh) return false;
+      const current = typeof fresh.metadata === 'string' ? JSON.parse(fresh.metadata) : fresh.metadata;
+      return this._refreshCallSummary(current, false);
+
     } catch (err) {
       logger.warn(`[voice-relay] call summary refresh after a late segment failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       return false;

@@ -151,11 +151,24 @@ postgres('atomic relay segment append and composition', () => {
     const meta = { relay_segments: [buildSegment({ generation: 1, text: 'Caller: first leg' }), buildSegment({ generation: 2, text: 'Caller: second leg' })] };
     await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: meta,
       call_summary: patch.call_summary, transcription_metadata: patch.transcription_metadata });
-    const refreshed = await RelayConversation.prototype._refreshCallSummary.call({ callSid: 'CA-fixture' }, meta);
+    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture' });
+    const refreshed = await convo._refreshCallSummary(meta);
     const row = await db('call_log').first();
     expect(refreshed).toBe(!modelWritten);
     if (modelWritten) expect(row.call_summary).toBe(modelSummary);
     else expect(row.call_summary).toContain('first leg | second leg');
+  });
+
+  test('a summary repair retries from a changed segment snapshot instead of overwriting with stale text', async () => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const old = { relay_segments: [buildSegment({ generation: 1, text: 'Caller: first leg' })] };
+    const current = { relay_segments: [...old.relay_segments, buildSegment({ generation: 2, text: 'Caller: second leg' })] };
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: current,
+      call_summary: 'AI phone assistant handled this call. Caller said: first leg | second leg',
+      transcription_metadata: { summary_source: 'deterministic' } });
+    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture' });
+    expect(await convo._refreshCallSummary(old)).toBe(true);
+    expect((await db('call_log').first()).call_summary).toContain('first leg | second leg');
   });
 
 });
