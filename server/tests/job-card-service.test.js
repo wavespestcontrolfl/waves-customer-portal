@@ -790,3 +790,40 @@ describe('PR review r5', () => {
     expect(seen).toContain('service_products as sp');
   });
 });
+
+describe('PR review r6', () => {
+  test('the lawn plan is built strict so a catalog outage is a plan block, not an empty card (P2)', async () => {
+    const buildPlan = jest.fn().mockRejectedValue(new Error('products_catalog down'));
+    const out = await jobCard.resolveVisitProducts({ facts: { isLawn: true, serviceId: 'svc1' }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan } });
+    expect(buildPlan.mock.calls[0][1]).toMatchObject({ strict: true });
+    expect(out.blocks[0].code).toBe('plan_unavailable');
+  });
+
+  test('a failed findings read makes the history unavailable, never "no findings" (P2)', async () => {
+    const dbh = (table) => {
+      const chain = {};
+      for (const m of ['where', 'modify', 'orderBy', 'select']) chain[m] = () => chain;
+      chain.first = () => ({ catch: async () => ({ id: 'r1', service_date: '2026-08-12', technician_notes: 'fine' }) });
+      chain.catch = (fn) => (table === 'service_findings' ? Promise.resolve(fn(new Error('db down'))) : Promise.resolve([]));
+      return chain;
+    };
+    expect(await jobCard._test.loadLastVisit(dbh, 'c1', 'lawn')).toEqual({ unavailable: true });
+  });
+
+  test('a failed pack-size read withholds ordering (P2)', async () => {
+    const dbh = () => { const chain = {}; for (const m of ['whereIn', 'whereNotNull', 'select']) chain[m] = () => chain; chain.catch = (fn) => Promise.resolve(fn(new Error('db down'))); return chain; };
+    expect(await jobCard._test.loadPackSizes(dbh, ['p'])).toBeNull();
+    const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' } };
+    const [card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: [line], verdicts: [], packSizes: null });
+    expect(card.order).toBeNull();
+    const [ok] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: [line], verdicts: [], packSizes: {} });
+    expect(ok.order.quantity).toBe(1);
+  });
+
+  test('a current away date is a critical fact the rewrite may not drop (P2)', () => {
+    const facts = { ...baseFacts(), awayUntil: '2026-09-10' };
+    expect(jobCard._test.criticalFacts(facts)).toContain('2026-09-10');
+    const template = jobCard.buildTemplateParagraph(facts);
+    expect(jobCard.validateParagraph('First visit on record.', template, [], jobCard._test.criticalFacts(facts))).toBe('critical_fact_dropped');
+  });
+});

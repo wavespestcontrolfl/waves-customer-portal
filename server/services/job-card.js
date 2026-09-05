@@ -186,10 +186,13 @@ async function loadLastVisit(dbh, customerId, serviceLine, beforeDate = null) {
   if (!record) return null;
   // severity is text: rank it (critical > high > medium > low > info)
   // with the report's own ranking, never alphabetically.
+  // A failed findings read is not "no findings": the headline finding is
+  // the visit's most important fact, so the history reads as unavailable.
   const findings = await dbh('service_findings')
     .where({ service_record_id: record.id })
     .select('title', 'severity')
-    .catch(() => []);
+    .catch(() => ({ unavailable: true }));
+  if (findings?.unavailable) return { unavailable: true };
   const rank = (f) => SEVERITY_RANK[String(f?.severity || '').toLowerCase()] || 0;
   const finding = (Array.isArray(findings) ? findings : []).filter((f) => f?.title).sort((a, b) => rank(b) - rank(a))[0] || null;
   return {
@@ -471,6 +474,8 @@ function criticalFacts(facts) {
   if (facts.chemicalSensitivity) out.push(facts.chemicalSensitivity === 'yes' ? 'sensitiv' : facts.chemicalSensitivity);
   if (facts.petsSecured) out.push(facts.petsSecured);
   for (const issue of facts.issues || []) if (issue.urgent && issue.text) out.push(issue.text);
+  // Current away mode: the paragraph is the only place the card says it.
+  if (facts.awayUntil) out.push(facts.awayUntil);
   return out;
 }
 
@@ -719,13 +724,16 @@ async function loadCatalog(dbh = db) {
   return products.map((p) => ({ ...p, aliases: byProduct[p.id] || [] }));
 }
 
+// Null when the read failed (ordering is withheld — a 1-unit fallback would
+// under-order a multi-unit pack); {} when nothing is mapped.
 async function loadPackSizes(dbh, productIds) {
   if (!productIds.length) return {};
   const rows = await dbh('distributor_product_map')
     .whereIn('product_id', productIds)
     .whereNotNull('pack_size')
     .select('product_id', 'pack_size')
-    .catch(() => []);
+    .catch(() => null);
+  if (!rows) return null;
   return rows.reduce((acc, r) => { if (!acc[r.product_id]) acc[r.product_id] = r.pack_size; return acc; }, {});
 }
 
@@ -825,7 +833,10 @@ const APPROVALS_UNAVAILABLE = { code: 'approvals_unavailable', message: 'Approva
 /** { plan } or { plan: null, error } — a failed build is its own block. */
 async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date() } = {}) {
   try {
-    return { plan: await (deps.buildPlan || buildPlanForService)(serviceId, { db: dbh, now }) };
+    // strict: the plan engine's own catalog read throws instead of reading
+    // as an empty catalog, so an outage is a visible plan block, never
+    // "no products matched".
+    return { plan: await (deps.buildPlan || buildPlanForService)(serviceId, { db: dbh, now, strict: true }) };
   } catch (err) {
     logger.warn(`[job-card] plan unavailable for ${serviceId}: ${err.message}`);
     return { plan: null, error: err };
@@ -996,7 +1007,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       labelUrl: p.label_url || null,
       sdsUrl: p.sds_url || null,
       rotation,
-      order: orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null, { includePricing }),
+      order: packSizes ? orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null, { includePricing }) : null,
     });
   }
   return cards;
@@ -1152,7 +1163,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
     ...mix,
     planBlocks,
     tank,
-    order: orderFor(product, packSizes[product.id], null, { includePricing }),
+    order: packSizes ? orderFor(product, packSizes[product.id], null, { includePricing }) : null,
   };
 }
 
@@ -1188,5 +1199,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
 };

@@ -1058,7 +1058,10 @@ async function getActiveCalibrations(knex, filters = {}) {
   return query.catch(() => []);
 }
 
-async function getProducts(knex) {
+// strict: a failed catalog read throws instead of reading as an empty
+// catalog (the job card treats that plan as unavailable; the Lawn plan and
+// closeout keep the lenient default).
+async function getProducts(knex, { strict = false } = {}) {
   const products = await knex('products_catalog')
     .where(function () {
       this.where({ active: true }).orWhereNull('active');
@@ -1073,7 +1076,7 @@ async function getProducts(knex) {
       'label_verified_at',
       'active', 'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
     )
-    .catch(() => []);
+    .catch((err) => { if (strict) throw err; return []; });
 
   if (!products.length) return products;
 
@@ -1311,7 +1314,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .first()
     .catch(() => null);
   const profileCompleteness = summarizeTurfProfileCompleteness(profile);
-  const products = await getProducts(knex);
+  const products = await getProducts(knex, { strict: options.strict === true });
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
   const stressFlags = latestAssessment?.stress_flags || {};
