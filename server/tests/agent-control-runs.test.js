@@ -158,6 +158,7 @@ describe('start / step / finish', () => {
     const b = await runs.startRun(base);
     expect(b.id).toBe(a.id);
     expect(b.attemptNo).toBe(2);
+    expect(b.traceId).toBe(a.traceId); // the persisted trace, not a fresh one
     expect(runRow()).toMatchObject({ lifecycle: 'running', finished_at: null, error_code: null });
     await b.finish({});
     expect(runRow()).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', failure_class: null, error_code: null, error_message: null });

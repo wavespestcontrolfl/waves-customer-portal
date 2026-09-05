@@ -5,7 +5,7 @@
  */
 
 const db = require('../../../models/db');
-const { RUN_STAGES, runStatus } = require('../../agent-activity');
+const { RUN_STAGES, runStatus, TERMINAL_APPROVAL } = require('../../agent-activity');
 const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'autonomous_runs';
@@ -20,13 +20,28 @@ const COLUMNS = [
   'published_url', 'claimed_at', 'completed_at', 'created_at', 'updated_at', 'total_ms', 'agent_session_id',
   'claim_ms', 'brief_ms', 'agent_ms', 'uniqueness_gate_ms', 'quality_gate_ms', 'seo_completion_gate_ms',
   'publish_ms', 'index_submit_ms', 'link_plan_ms',
-  'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result',
+  'uniqueness_gate_result', 'quality_gate_result', 'seo_completion_gate_result', 'trust_build_approved_at',
+  // the NEWEST emailed approval on the run decides whether the owner still owes a reply
+  db.raw("(SELECT a.status FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1) AS approval_status"),
+  db.raw("(SELECT COALESCE(a.decided_at, a.created_at) FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1) AS approval_at"),
 ];
+// A run parked for the owner (completed_pending_review) stays live until a
+// terminal emailed decision or the in-review approval stamp lands.
+const PARKED = "(outcome = 'completed_pending_review' AND trust_build_approved_at IS NULL"
+  + " AND NOT EXISTS (SELECT 1 FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id AND a.status IN ('approved', 'rejected', 'superseded', 'failed')))";
+// emailed decision → (lifecycle, result, disposition); executing = the poller is applying it
+const DECIDED = Object.freeze({
+  approved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'passed' },
+  rejected: { lifecycle: 'terminal', result: 'succeeded', disposition: 'rejected', verification: 'failed' },
+  superseded: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
+  failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure' },
+  executing: { lifecycle: 'running' },
+});
 
 // agent-activity status → (lifecycle, result, disposition, failureClass)
 const STATUS_MAP = Object.freeze({
   running: { lifecycle: 'running' },
-  awaiting_review: { lifecycle: 'waiting_human', disposition: 'drafted' },
+  awaiting_review: { lifecycle: 'waiting_human', disposition: 'drafted', verification: 'unjudged' },
   blocked: { lifecycle: 'terminal', result: 'errored', failureClass: 'instruction', disposition: 'no_action' },
   completed: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' },
   skipped: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
@@ -63,9 +78,22 @@ function stepsFor(run, status) {
 const SHADOW_LABEL = Object.freeze({ true: 'shadow' });
 const REVIEW_LINK = '/admin/blog?tab=autopilot';
 
+// The agent-activity rule: a pending-review outcome never changes once
+// decided (the poller stamps the run, not its outcome) — the newest emailed
+// approval or the in-review stamp says whether the owner already decided.
+function decisionFor(run, status) {
+  if (status !== 'awaiting_review') return null;
+  if (run.approval_status && TERMINAL_APPROVAL[run.approval_status]) return DECIDED[run.approval_status] || null;
+  if (run.trust_build_approved_at) return DECIDED.approved;
+  return null;
+}
+
 function fromRow(run) {
   const status = runStatus(run);
-  const map = STATUS_MAP[status] || STATUS_MAP.completed;
+  const decided = decisionFor(run, status);
+  const map = decided || STATUS_MAP[status] || STATUS_MAP.completed;
+  // an emailed approval (raised or decided) or the in-review stamp is the run's latest event
+  const decidedAt = run.approval_at || run.trust_build_approved_at;
   const steps = stepsFor(run, status);
   const errored = map.result === 'errored';
   const skipReason = run.skip_reason ? humanize(run.skip_reason) : null;
@@ -81,12 +109,12 @@ function fromRow(run) {
     errorMessage: run.failure_message,
     createdAt: run.created_at,
     startedAt: run.claimed_at || run.created_at,
-    finishedAt: run.completed_at,
+    finishedAt: decided ? decidedAt || run.completed_at : run.completed_at,
     lastHeartbeatAt: run.updated_at || run.claimed_at,
-    lastProgressAt: run.updated_at || run.claimed_at,
+    lastProgressAt: decidedAt || run.updated_at || run.claimed_at,
     durationMs: run.total_ms,
     steps,
-    link: status === 'awaiting_review' ? REVIEW_LINK : run.published_url,
+    link: map.lifecycle === 'waiting_human' ? REVIEW_LINK : run.published_url,
     detail: run.failure_message || skipReason || run.published_url,
     entity: { type: 'autonomous_run', id: run.id },
   });
@@ -98,6 +126,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .select(COLUMNS)
       .where((q) => {
         q.whereNull('completed_at');
+        q.orWhereRaw(PARKED);
         q.orWhere(START, '>=', from);
       }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };

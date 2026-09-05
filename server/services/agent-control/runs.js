@@ -247,7 +247,8 @@ async function startRun(args = {}) {
     return { run, attemptId, attemptNo, workItemId: run.work_item_id || workItemId };
   });
   if (!opened) return inertHandle(args);
-  return liveHandle({ ...opened, laneId, policy, traceId, workflowId: args.workflowId || null });
+  // a reopened run keeps the trace its ledger rows already carry
+  return liveHandle({ ...opened, laneId, policy, traceId: opened.run.trace_id || traceId, workflowId: args.workflowId || null });
 }
 
 // ── Live handle ──────────────────────────────────────────────────────

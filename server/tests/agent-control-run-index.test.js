@@ -64,7 +64,13 @@ describe('adapters project onto the canonical shape', () => {
   test('autonomous_runs: outcome → lifecycle / result / disposition, stages → steps, shadow subtitle', () => {
     const base = { id: 'a', action_type: 'new_post', page_type: 'blog', claim_ms: 5, brief_ms: 7, created_at: ago(60e3), claimed_at: ago(50e3) };
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_published', completed_at: ago(1e3), published_url: 'https://x/y' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', link: 'https://x/y', laneId: 'blog_draft' });
-    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review' })).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted', link: '/admin/blog?tab=autopilot' });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(2e3) })).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted', link: '/admin/blog?tab=autopilot' });
+    // a parked run keeps waiting through an open approval, and closes on the newest emailed decision or the in-review stamp
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'awaiting_reply', approval_at: ago(1e3) })).toMatchObject({ lifecycle: 'waiting_human', lastProgressAt: ago(1e3).toISOString() });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'approved', approval_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'passed', finishedAt: ago(1e3).toISOString(), link: null });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'rejected' })).toMatchObject({ disposition: 'rejected', verification: 'failed' });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'executing' })).toMatchObject({ lifecycle: 'running' });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', trust_build_approved_at: ago(500) })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', finishedAt: ago(500).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'skipped_gate_fail', quality_gate_result: { ok: false } })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'instruction' });
     const running = autonomousRuns.fromRow({ ...base, outcome: null, shadow_mode: true });
     expect(running.lifecycle).toBe('running');
