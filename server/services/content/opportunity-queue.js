@@ -207,7 +207,7 @@ class OpportunityQueue {
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
-       RETURNING *`,
+       RETURNING *, ${effectiveActionSql} AS effective_action_type`,
       [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(exclude.length ? [exclude] : [])

@@ -1505,11 +1505,11 @@ async function maybeAutoMerge(run, pr) {
         filePath: draftForImages?.file_path || null,
       });
     } catch (err) {
-      bodyImages = { ok: false, reason: `body-image check failed: ${err.message}` };
+      bodyImages = { ok: false, transient: true, reason: `body-image check failed: ${err.message}` };
     }
     if (!bodyImages.ok) {
       logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: body images — ${bodyImages.reason}`);
-      return { pending: true, reason: `body_images_required: ${bodyImages.reason}` };
+      return { pending: true, reason: `body_images_required: ${bodyImages.reason}`, transient: bodyImages.transient === true };
     }
     bodyImagesBaseSha = bodyImages.baseSha || null;
   }

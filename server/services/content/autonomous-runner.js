@@ -217,8 +217,8 @@ class AutonomousRunner {
     if (!opp) return finalize(run, t0, { outcome: 'skipped_no_opportunity' });
 
     run.opportunity_id = opp.id;
-    run.action_type = opp.action_type;
-    run.shadow_mode = isShadow(opp.action_type);
+    run.action_type = opp.effective_action_type || opp.action_type;
+    run.shadow_mode = isShadow(run.action_type);
     const claimToken = opp.claimed_at;
 
     // 1a. Protected-page guard. Money pages, high-traffic pages, and manually

@@ -750,6 +750,24 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     return { number: 42, state: 'open', merged: false, merged_at: null, title: 'Blog: Test Post', head: { ref: 'content/autonomous-test', sha: 'headsha1' } };
   }
 
+  test.each(['verdict', 'throw'])('a transient body-image %s after 49 hours never retires the PR', async (failure) => {
+    const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValueOnce('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValueOnce(true);
+    if (failure === 'throw') publisher.assertBodyImagesAtHead.mockRejectedValueOnce(new Error('GitHub unavailable'));
+    else publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, transient: true, reason: 'GitHub unavailable' });
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ pending: true, transient: true, reason: expect.stringMatching(/^body_images_required/) });
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(updates.some(u => u.updates.poll_pending_reason)).toBe(false);
+  });
+
   test('an affiliate gate disabled for 49 hours pauses without retiring', async () => {
     process.env.GATE_AFFILIATE_LINKS = 'false';
     setupDb({ pending: [makeRun({ poll_pending_reason: 'affiliate_autopublish_disabled', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
