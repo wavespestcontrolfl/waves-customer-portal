@@ -11170,10 +11170,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           );
         } catch (overlapErr) {
           if (overlapErr && overlapErr.annualPrepayOverlap) {
-            throw estimateAcceptError(
+            const conflict = estimateAcceptError(
               'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
               409,
             );
+            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+            throw conflict;
           }
           throw overlapErr;
         }
