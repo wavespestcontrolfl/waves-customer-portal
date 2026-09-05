@@ -93,6 +93,12 @@ under .tmp/qa/previews. Traces contain only the synthetic preview session; keep
 real sessions out of this harness. Open a trace with `npx playwright show-trace`
 and its zip path. CI retains evidence for seven days, including failed runs.
 
+Production and preview entry points share self-hosted fonts. Browser QA waits
+for all declared families to load before captures and fails on missing fonts;
+external requests remain blocked. Font files, upstream source hashes and licenses
+live in `client/public/fonts/`; Inter and Roboto use the existing Fontsource
+dependencies. No font download is needed during a build or QA run.
+
 Browser previews are fixture-based UI evidence. They do not exercise the backend,
 provider APIs or database and must not be described as full end-to-end QA.
 

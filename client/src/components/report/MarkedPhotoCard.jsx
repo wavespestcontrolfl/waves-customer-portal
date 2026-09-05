@@ -73,7 +73,7 @@ export default function MarkedPhotoCard({ marked, live = true }) {
           marks are optional and need not be complete, and foam is billed by
           drill-point count, so a customer could read exhaustiveness as a
           promise that every billed point carries a pin. */}
-      <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '0 0 16px' }}>
+      <p className="sr-ink" style={{ fontSize: 16, color: '#04395E', lineHeight: 1.5, margin: '0 0 16px' }}>
         {MARKED_PHOTO_INTRO}
       </p>
       <div
@@ -153,7 +153,7 @@ export default function MarkedPhotoCard({ marked, live = true }) {
                 minWidth: 25, height: 25, padding: '0 6px',
                 borderRadius: 999, border: '2px solid rgba(255,255,255,.94)',
                 background: markColor(mark.kind),
-                color: '#fff', fontSize: 12, fontWeight: 600,
+                color: '#fff', fontSize: 14, fontWeight: 600,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 boxShadow: '0 2px 7px rgba(6,16,24,.5)',
                 lineHeight: 1,

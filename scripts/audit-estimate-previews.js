@@ -8,7 +8,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { previewServer: startPreviewServer, launchBrowser, evidence, previewPage } = require('./qa/browser');
+const { previewServer: startPreviewServer, launchBrowser, evidence, previewPage, waitForFonts } = require('./qa/browser');
 
 const ALL_SCENARIOS = [
   'pest', 'lawn', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent',
@@ -115,6 +115,7 @@ const auditPageInBrowser = () => {
         // target intersecting at capture time. Force the already-rendered cards
         // visible for the audit artifact; production behavior is unchanged.
         await page.addStyleTag({ content: 'html[data-glass-theme] [data-glass].glass-reveal-pending{opacity:1!important;transform:none!important}' });
+        await waitForFonts(page);
         await revealWholePage(page);
 
         if (!response?.ok()) fail(scenario, viewportName, `HTTP ${response?.status() || 'no response'}`);
@@ -160,7 +161,7 @@ const auditPageInBrowser = () => {
       const printUrl = `${baseUrl}/preview-estimate.html?scenario=${scenario}&chrome=0&mode=pdf`;
       await printPage.goto(printUrl, { waitUntil: 'domcontentloaded' });
       await printPage.locator('.estimate-document-v1, h1').first().waitFor({ state: 'visible', timeout: 15000 });
-      await printPage.waitForTimeout(150);
+      await waitForFonts(printPage);
       // The print artifact is only evidence if it carries the pricing table
       // the customer's emailed PDF prints (proposal buildings / programs /
       // corrective work) — an official-looking document without one would

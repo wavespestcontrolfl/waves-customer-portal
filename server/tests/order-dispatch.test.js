@@ -732,6 +732,19 @@ test('a higher confirmed total re-checked after placement keeps the reservationâ
   } finally { mockState.reservedAt = null; }
 });
 
+test('an adapter that gates more than once keeps the FIRST reservation\'s accounting month â€” later beforeSubmit calls pass it as accountingAt and never re-stamp created_at (Codex #3876 r3 P1)', async () => {
+  mockState.reservedAt = new Date('2026-08-31T23:59:30Z');
+  const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(9900); await beforeSubmit(10593); await beforeSubmit(11240); return { externalOrderNumber: 'S1-15', amountCents: 11240, evidence: { totalSource: 'vendor' } }; }) });
+  try {
+    expect(await run(a)).toMatchObject({ status: 'placed', amountCents: 11240 });
+    const reservations = mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.amount_cents != null && !u.row.status);
+    expect(reservations.map((u) => u.row.amount_cents)).toEqual([9900, 10593, 11240]);
+    expect(reservations[0].row.created_at).toBeInstanceOf(Date); // the first reservation stamps the month
+    expect(reservations[1].row.created_at).toBeUndefined(); // the checkout-total gate keeps it
+    expect(reservations[2].row.created_at).toBeUndefined(); // so does the at-click gate
+  } finally { mockState.reservedAt = null; }
+});
+
 test('a quotesAtPlace vendor whose confirmed total is at or under the reserved checkout figure is recorded placed', async () => {
   const a = mockAdapter({ quotesAtPlace: true, bindingQuote: undefined, place: jest.fn(async ({ beforeSubmit }) => { await beforeSubmit(9900); return { externalOrderNumber: 'S1-12', amountCents: 9900, evidence: {} }; }) });
   expect(await run(a)).toMatchObject({ status: 'placed' });

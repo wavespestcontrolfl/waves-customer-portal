@@ -1778,6 +1778,7 @@ async function servicesCatalogText() {
 }
 
 module.exports = {
+  stampCallLeadLinkage,
   isOfficeOpenAt,
   isContextEnabled,
   requiresAttestation,
@@ -1785,7 +1786,6 @@ module.exports = {
   beginRelaySessionClaim,
   relaySessionClaimOwner,
   claimOwnedElsewhere,
-  stampCallLeadLinkage,
   servicesCatalogText,
   loadOfficeHours,
   renderClockBlock,

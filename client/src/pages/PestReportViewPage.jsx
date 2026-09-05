@@ -79,10 +79,10 @@ function NotFoundCard() {
   return (
     <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
       <SectionTitle>This pest report isn&apos;t available</SectionTitle>
-      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at what you&apos;re seeing.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -102,7 +102,7 @@ function PricingCard({ pricing }) {
         {tiers.map((tier, i) => (
           <div key={`${tier.label}-${i}`} style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
             <div>
-              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
                 {/* "Recommended", not "Most popular": the pest-identifier
                     snapshot hardcodes recommended on its (often only) tier —
                     a popularity claim would be fabricated (codex P2 #2824).
@@ -126,14 +126,14 @@ function PricingCard({ pricing }) {
                   the per-application figure; /mo only survives as the
                   fallback when the tier has no visit count. */}
               {tier.monthly != null && tier.one_time == null ? (
-                <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: TEXT }}>
                   {tierPerApplication(tier) != null
                     ? <>${fmtCents(tierPerApplication(tier))}<span style={{ fontSize: 14, fontWeight: 600, color: BODY }}> / application</span></>
                     : <span style={{ fontSize: 14, fontWeight: 600, color: BODY }}>Priced per application</span>}
                 </div>
               ) : null}
               {tier.one_time != null ? (
-                <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: TEXT }}>
                   ${fmtCents(tier.one_time)}<span style={{ fontSize: 14, fontWeight: 600, color: BODY }}> one-time</span>
                 </div>
               ) : null}
@@ -179,7 +179,7 @@ export default function PestReportViewPage() {
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
 
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -230,7 +230,7 @@ export default function PestReportViewPage() {
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
           {greeting}&apos;s what we identified
         </h1>
-        <p style={{ margin: 0, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 20, lineHeight: 1.3, color: TEXT }}>
+        <p style={{ margin: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 20, lineHeight: 1.3, color: TEXT }}>
           {/* Generic labels arrive lowercase ("an ant species") and read as a
               sentence; named labels ("Ghost Ants", "Likely Ghost Ants") stand
               alone as the headline. Inspection-first IDs (termite/rodent/
@@ -251,7 +251,7 @@ export default function PestReportViewPage() {
         {/* Safety flags stay as one plain line — the chips are gone (owner
             2026-09-04) but "don't handle" must still be said. */}
         {safetyFlags.length ? (
-          <p style={{ margin: '12px 0 0', fontSize: 15, fontWeight: 700, color: COLORS.red, lineHeight: 1.5 }}>
+          <p style={{ margin: '12px 0 0', fontSize: 16, fontWeight: 700, color: COLORS.red, lineHeight: 1.5 }}>
             {safetyFlags.map(([, label]) => label).join(' · ')}
           </p>
         ) : null}
@@ -261,7 +261,7 @@ export default function PestReportViewPage() {
       {report.about ? (
         <SectionCard>
           <SectionTitle>{report.not_a_pest ? 'Why this one’s fine' : 'What you should know'}</SectionTitle>
-          <p style={{ margin: 0, color: BODY, fontSize: 15, lineHeight: 1.6 }}>{report.about}</p>
+          <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.6 }}>{report.about}</p>
         </SectionCard>
       ) : null}
 
@@ -269,15 +269,15 @@ export default function PestReportViewPage() {
       {recommendation ? (
         <SectionCard>
           <SectionTitle>Our recommendation</SectionTitle>
-          <p style={{ margin: '0 0 6px', fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+          <p style={{ margin: '0 0 6px', fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
             {recommendation.service_label}
             {recommendation.inspection_required ? ' — starting with a free inspection' : ''}
           </p>
           {recommendation.note ? (
-            <p style={{ margin: 0, color: BODY, fontSize: 15, lineHeight: 1.55 }}>{recommendation.note}</p>
+            <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.55 }}>{recommendation.note}</p>
           ) : null}
           {report.next_step ? (
-            <p style={{ margin: '10px 0 0', color: BODY, fontSize: 15, lineHeight: 1.55 }}>{report.next_step}</p>
+            <p style={{ margin: '10px 0 0', color: BODY, fontSize: 16, lineHeight: 1.55 }}>{report.next_step}</p>
           ) : null}
         </SectionCard>
       ) : null}
@@ -289,13 +289,13 @@ export default function PestReportViewPage() {
       {!report.not_a_pest ? (
         <SectionCard>
           <SectionTitle>Ready when you are</SectionTitle>
-          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
             {recommendation?.inspection_required
               ? 'Book your free inspection online in about a minute, or call and a real person will help you right away.'
               : 'Book online in about a minute, or call and a real person will help you right away.'}
           </p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-            <a data-glass-accent="" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 16, textDecoration: 'none' }}>
+            <a data-glass-accent="" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
               Book now
             </a>
             <a href={`tel:${WAVES_PHONE_TEL}`} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
@@ -306,10 +306,10 @@ export default function PestReportViewPage() {
       ) : (
         <SectionCard>
           <SectionTitle>Seeing something else?</SectionTitle>
-          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
             If different bugs show up — or this one keeps coming back in numbers — we&apos;re happy to take a look.
           </p>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
             Call {WAVES_PHONE_DISPLAY}
           </a>
         </SectionCard>
