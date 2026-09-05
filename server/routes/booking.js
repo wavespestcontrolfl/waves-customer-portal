@@ -2677,8 +2677,17 @@ async function createSelfBooking(payload = {}) {
         if (keptMatches.length > 0) pestDuplicateKeptAtBooking = keptMatches[0];
       }
       // Re-asserted FOR SHARE on the writing trx (the pre-transaction check
-      // above is the fast path): an offboarding cannot commit in between.
-      await assertAssignableTechnician(technician_id || null, { conn: trx });
+      // above is the fast path): an offboarding cannot commit in between. A
+      // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
+      // recovery below (just-created profile rolled back, generic message).
+      try {
+        await assertAssignableTechnician(technician_id || null, { conn: trx });
+      } catch (eligErr) {
+        if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+        const err = new Error('That time slot is no longer available. Please pick another.');
+        err.code = 'SLOT_TAKEN';
+        throw err;
+      }
       const [scheduledRow] = await trx('scheduled_services').insert({
         ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
         ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
