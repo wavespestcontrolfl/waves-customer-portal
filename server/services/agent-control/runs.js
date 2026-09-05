@@ -338,11 +338,19 @@ function refuse(run, reason) {
 async function refusalBefore(trx, args, now) {
   const sourceSystem = clip(args.sourceSystem, 60);
   const sourceRunId = clip(args.sourceRunId, 180);
+  const key = clip(args.idempotencyKey, 260);
+  // A NEW key has no row to lock: two starts under different source ids
+  // sharing it would both pass the lookup, and the loser's insert would
+  // hit the unique index — the thrown start degrading to an inert handle
+  // whose body runs. Serialized on the key for the transaction instead
+  // (the session recorder's pattern), so the second start's lookup finds
+  // the first's committed row (pre-push audit on Codex r17).
+  if (key) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`agent_runs:idempotency:${key}`]);
   const existing = await trx('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).forUpdate().first();
   const reason = existing ? refusalOf(existing, now) : null;
   if (reason && !args.supersede) return { existing, refused: refuse(existing, reason) };
-  if (args.idempotencyKey) {
-    const byKey = await trx('agent_runs').where({ idempotency_key: clip(args.idempotencyKey, 260) }).forUpdate().first();
+  if (key) {
+    const byKey = await trx('agent_runs').where({ idempotency_key: key }).forUpdate().first();
     if (byKey && (byKey.source_system !== sourceSystem || byKey.source_run_id !== sourceRunId)) return { existing, refused: refuse(byKey, 'idempotency_conflict') };
   }
   return { existing, refused: null };

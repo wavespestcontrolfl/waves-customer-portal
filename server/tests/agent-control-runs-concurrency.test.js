@@ -79,6 +79,17 @@ describeOrSkip('agent runs: concurrent starts on PostgreSQL', () => {
     await live(both)[0].finish({ result: 'succeeded' });
   });
 
+  test('one NEW idempotency key under two source ids: exactly one run exists, the other start is refused — never an inert handle whose body runs', async () => {
+    const shared = { laneId: 'blog_draft', sourceSystem: SRC, idempotencyKey: 'k-shared', maxAttempts: 3 };
+    const body = jest.fn(async () => { await new Promise((r) => setTimeout(r, 30)); return 'ran'; });
+    const results = await Promise.allSettled([runs.runManaged({ ...shared, sourceRunId: 'shared-a' }, body), runs.runManaged({ ...shared, sourceRunId: 'shared-b' }, body)]);
+    expect(body).toHaveBeenCalledTimes(1);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const refused = results.find((r) => r.status === 'rejected');
+    expect(refused.reason).toMatchObject({ code: 'run_idempotency_conflict', held: { reason: 'idempotency_conflict' } });
+    expect(await db('agent_runs').where({ source_system: SRC, idempotency_key: 'k-shared' })).toHaveLength(1);
+  });
+
   test('runManaged: one body runs, the other is refused with run_in_progress', async () => {
     const body = jest.fn(async () => { await new Promise((r) => setTimeout(r, 50)); return 'ran'; });
     const results = await Promise.allSettled([runs.runManaged(args('managed'), body), runs.runManaged(args('managed'), body)]);
