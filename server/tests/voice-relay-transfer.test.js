@@ -408,7 +408,7 @@ describe('pre-push hook round 9', () => {
     // …and when the stash had NOT landed at compose time on a transfer-marked row, every transcript write composes INSIDE the UPDATE
     // from the row's metadata and reads the written value back (a stash landing between the read and the write is still composed).
     expect(src).toContain('relayPending = transferred && !segment;');
-    expect(src.match(/await writeTranscript\(/g)).toHaveLength(3);
+    expect(src.match(/await writeTranscript\(/g)).toHaveLength(4); // primary, both fallbacks, and the relay-only rejection write
     expect(src).toMatch(/CASE WHEN \$\{STASH_SQL\} THEN '\[AI segment\]' \|\| .*\(metadata->'relay_transcript'->>'text'\).*\|\| \?::text ELSE \?::text END/);
     expect(src).toContain("}, ['transcription']);");
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
@@ -423,6 +423,7 @@ describe('pre-push hook round 9', () => {
     expect(relayOnlyAt).toBeLessThan(wholeCallAt);
     const site = src.slice(relayOnlyAt, wholeCallAt);
     expect(site).toContain("if (!wroteRelayOnly) return abandonToPeer('the relay-only transcript write');");
+    expect(site).toContain('relayPending = !relayOnly;'); // a still-pending AI text is composed inside this UPDATE too
     expect(site).toContain('fallbackImplausible = false;');
     expect(site).toContain('primaryTranscriptRejected = false;');
     expect(site).toContain('recorded_segment_rejected');
