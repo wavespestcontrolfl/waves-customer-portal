@@ -13,6 +13,7 @@
  * at the cap; the queue's Send action routes to the sender with its refusals
  * mapped.
  */
+jest.mock('../services/seo/link-prospect-verifier', () => ({ reconcileOutreach: jest.fn(async () => ({ matched: 0, ambiguous: 0 })) }));
 let mockStore = null;
 jest.mock('../models/db', () => { const fn = (t) => mockStore(t); fn.transaction = (cb) => mockStore.transaction(cb); fn.raw = (...a) => mockStore.raw(...a); return fn; });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

@@ -22,6 +22,7 @@ stub('models/db', proxy);
 (async () => {
   const trx = await db.transaction(); active = trx;
   try {
+    await require(`${root}/server/models/migrations/20260830000010_backlink_worker_auth_step1b`).up(trx);
     const V = require(`${root}/server/services/seo/link-prospect-verifier`);
     const Q = require(`${root}/server/services/seo/link-owner-queue`);
     const oid = randomUUID(), opath = randomUUID(), first = randomUUID(), second = randomUUID(), backlink = randomUUID();
@@ -115,6 +116,21 @@ stub('models/db', proxy);
     assert.deepEqual(await V.reconcileOutreach(), { matched: 1, ambiguous: 0 });
     assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).backlink_id, replacement);
     console.log('PASS exact publisher page wins before a lower-UUID generic backlink');
+
+    // A lease can defer a weekly match; the next automatic bridge must retry it
+    // before considering any follow-up send.
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', claimed_at: new Date(), follow_up_status: 'drafted' });
+    assert.equal((await V.reconcileOutreach()).matched, 0);
+    await trx('seo_link_prospects').where({ id: second }).update({ claimed_at: null });
+    gates.add('linkProspectOutreach');
+    const bridge = await require(`${root}/server/services/seo/link-authority-bridge`).runAuthorityBridge(proxy, {
+      domainIds: [oid], autoSend: true, exclusive: async (_key, work) => work(), notify: async () => {},
+      send: async () => { throw Error('Matched follow-up must not send'); },
+    });
+    assert.deepEqual(bridge.errors, []);
+    assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).status, 'placed');
+    assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).follow_up_status, 'skipped');
+    console.log('PASS automatic bridge retries a lease-deferred match before sending');
 
   } finally { await trx.rollback(); }
   // Real independent transactions exercise publisher-lock serialization and replay.
