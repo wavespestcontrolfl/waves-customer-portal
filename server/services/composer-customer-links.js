@@ -1085,7 +1085,13 @@ async function checkProjectReportLinks(ctx, onRecipientAccount) {
     const lookup = segment && require('./project-report-links').extractProjectReportTokenLookup(segment);
     if (!lookup) return refuseSend('A project report link in this message is not on the Waves portal — remove it before sending.');
     const project = await linkableProjectReport(lookup);
-    if (!project) return refuseSend('This project report is no longer viewable — remove the link before sending.');
+    // Issued only (sent / closed — the builder's own set): a /send that
+    // failed after stamping report_token leaves a draft whose URL the admin
+    // project APIs still expose; texting it would bypass the project send
+    // flow's readiness and official-document checks (GH Codex #3893 r1 P1).
+    if (!project || !PROJECT_REPORT_STATUSES.includes(String(project.status || ''))) {
+      return refuseSend('This project report is no longer viewable — remove the link before sending.');
+    }
     if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
       return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
     }

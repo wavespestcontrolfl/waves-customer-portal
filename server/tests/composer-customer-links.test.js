@@ -1959,6 +1959,10 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: null });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        // A tokened but unissued (draft) project — a /send that failed after
+        // stamping the token — is not a report to text (GH Codex #3893 r1 P1).
+        wireProject({ full: project({ status: 'draft' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: project({ report_hold_status: 'held' }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);
         wireProject({ full: project({ customer_id: 'c9' }), linkCustomer: acct('c9', 'other') });
