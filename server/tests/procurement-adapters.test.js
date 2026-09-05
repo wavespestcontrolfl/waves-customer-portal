@@ -546,12 +546,15 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   });
 
   test('the confirmation selector exposes every label the parser accepts — a plain heading for each qualifier reaches shownOrderTexts (r5 P2, r6 P2)', () => {
-    for (const label of ['Order #', 'Order number', 'Order no.', 'Order ID', 'Order ref', 'Order reference', 'Order confirmation', 'Confirmation #', 'Confirmation number', 'Confirmation no.', 'Confirmation ID', 'Confirmation ref', 'Confirmation reference']) {
+    for (const label of ['Order #', 'Order number', 'Order no.', 'Order ID', 'Order ref', 'Order reference', 'Order confirmation', 'Order:', 'Order is', 'Confirmation #', 'Confirmation number', 'Confirmation no.', 'Confirmation ID', 'Confirmation ref', 'Confirmation reference', 'Confirmation:', 'Confirmation is']) {
       const text = `${label} SO-778899`;
       expect(s1._internals.orderNumberIn(text)).toBe('SO-778899');
       // the selector's has-text() fragments are case-insensitive substrings of the rendered text
       expect(S.orderNumber.split(', ').some((part) => { const m = part.match(/:has-text\("([^"]+)"\)/); return m && text.toLowerCase().includes(m[1].toLowerCase()); })).toBe(true);
     }
+    // a bare label with neither qualifier, colon, nor "is" is not a confirmation the parser reads — no selector could scope it (r7 P2)
+    expect(s1._internals.orderNumberIn('Order SO-778899')).toBeNull();
+    expect(s1._internals.orderNumberIn('Confirmation SO-778899')).toBeNull();
   });
 
   test('the order number must be an identifier: a label word next to "Order" never becomes the recorded number (PR3 r1 P2)', async () => {

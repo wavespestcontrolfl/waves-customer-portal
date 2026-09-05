@@ -66,7 +66,7 @@ try { ({ chromium } = require('playwright')); } catch { chromium = null; }
 // Every label + qualifier the confirmation parser (`orderNumbersIn`) reads a
 // number after; `:has-text()` is case-insensitive, and "ref" covers
 // "reference". Mirrored by the selector test.
-const CONFIRMATION_LABELS = Object.freeze(['Order #', 'Order number', 'Order no', 'Order ID', 'Order ref', 'Order confirmation', 'Confirmation #', 'Confirmation number', 'Confirmation no', 'Confirmation ID', 'Confirmation ref']);
+const CONFIRMATION_LABELS = Object.freeze(['Order #', 'Order number', 'Order no', 'Order ID', 'Order ref', 'Order confirmation', 'Order:', 'Order is', 'Confirmation #', 'Confirmation number', 'Confirmation no', 'Confirmation ID', 'Confirmation ref', 'Confirmation:', 'Confirmation is']);
 
 const SELECTORS = Object.freeze({
   loginUser: 'input[name="username"], input[name="email"], input[type="email"], input#username, input#j_username',
@@ -1197,8 +1197,10 @@ function orderNumbersIn(text) {
   // A word boundary before the label, and no known prefix concept before
   // it: "Reorder # 12345", "Backorder # 12345", "Purchase Order # PO-12345",
   // "Back Order # BO-12345", "Sales order 778", "Work order 42" are other
-  // concepts, never the confirmation (Codex #3900 P2 ×2).
-  for (const m of String(text).matchAll(/(?<!\b(?:purchase|back|sales|work|change|pre|re)[\s-]*)\b(?:order|confirmation)(?!\s*date)(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))*(?:\s+is)?\s*:?\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1]) && !ids.some((x) => x.toUpperCase() === m[1].toUpperCase())) ids.push(m[1]);
+  // concepts, never the confirmation (Codex #3900 P2 ×2). A bare label needs
+  // a colon or "is" ("Order: SO-1", "Order is SO-1"): "Order SO-1" alone is
+  // not read, so every accepted form has a selector label (Codex #3900 r7 P2).
+  for (const m of String(text).matchAll(/(?<!\b(?:purchase|back|sales|work|change|pre|re)[\s-]*)\b(?:order|confirmation)(?!\s*date)(?:(?:\s*(?:confirmation|number|no\.?|id|ref(?:erence)?|#))+(?:\s+is)?\s*:?|\s+is\s*:?|\s*:)\s*([A-Z0-9][A-Z0-9/.-]{3,}[A-Z0-9])/gi)) if (isId(m[1]) && !ids.some((x) => x.toUpperCase() === m[1].toUpperCase())) ids.push(m[1]);
   if (ids.length) return ids;
   // A dedicated number element (`[data-test="order-number"]`, `.order-number`)
   // carries the bare identifier and no label: the WHOLE text, when it is one
