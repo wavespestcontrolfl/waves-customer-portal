@@ -58,6 +58,56 @@ function nonEmptyFields(fields) {
   return Object.keys(kept).length ? kept : null;
 }
 
+/** Scrub the ordered turn sequence before rendering socket boundaries. */
+function scrubStoredSegments(segments) {
+  const { scrubTurnsForStorage, CALLER_LABEL, AGENT_LABEL } = require('./relay-transcript');
+  const ordered = [...segments].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0));
+  const lines = ordered.flatMap((segment, index) => String(segment.text || '').split('\n').map((line) => {
+    const caller = line.startsWith(`${CALLER_LABEL}: `);
+    const agent = line.startsWith(`${AGENT_LABEL}: `);
+    const prefix = caller ? `${CALLER_LABEL}: ` : (agent ? `${AGENT_LABEL}: ` : '');
+    return { index, prefix, role: caller ? 'caller' : 'agent', text: line.slice(prefix.length) };
+  }));
+  const scrubbed = scrubTurnsForStorage(lines);
+  if (!scrubbed) throw new Error('Relay segment scrub unavailable');
+  const texts = ordered.map(() => []);
+  scrubbed.forEach((turn, i) => {
+    if (turn.text) texts[lines[i].index].push(lines[i].prefix + turn.text);
+  });
+  return ordered.map((segment, index) => ({ ...segment, text: texts[index].join('\n') }));
+}
+
+/**
+ * Serialize closes on the call row. Repair prior fragments and append the new
+ * leg in one transaction, so no reader sees a reconstructed card number and
+ * a concurrent late close cannot reintroduce a fragment from a stale read.
+ */
+async function appendSegment(db, callSid, segment) {
+  return db.transaction(async (trx) => {
+    const query = trx('call_log').where('twilio_call_sid', callSid)
+      .where((q) => q
+        .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
+        .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [segment.generation || 0]));
+    const row = await query.clone().forUpdate().first('metadata');
+    if (!row) return 0;
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    const prior = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
+    if (prior.some((s) => s.session_key === segment.session_key)) return 1;
+    const scrubbed = scrubStoredSegments([...prior, segment]);
+    const next = scrubbed.find((s) => s.session_key === segment.session_key);
+    const repaired = scrubbed.filter((s) => s !== next);
+    // The existing append owns all transcript/stash/composite updates. Only
+    // its input metadata changes here, under the same row lock.
+    if (JSON.stringify(repaired) !== JSON.stringify(prior)) {
+      await query.clone().update({ metadata: trx.raw(
+        "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segments', ?::jsonb)",
+        [JSON.stringify(repaired)],
+      ) });
+    }
+    return query.update(appendSegmentPatch(trx, next));
+  });
+}
+
 /** metadata := metadata || { relay_segments: existing || [segment] } — an append, never an overwrite. */
 function appendSegmentSql(db, segment) {
   return db.raw(
@@ -194,6 +244,6 @@ function latestPromises(segments) {
 
 
 module.exports = {
-  generationFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
+  appendSegment, scrubStoredSegments, generationFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
   appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText,
 };

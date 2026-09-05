@@ -55,6 +55,9 @@ function primeDb({ firstRow = null, updateImpl, db = require('../models/db') } =
     first: jest.fn(async () => firstRow),
     select: jest.fn(() => builder),
   };
+  builder.clone = jest.fn(() => builder);
+  builder.forUpdate = jest.fn(() => ({ first: jest.fn(async () => firstRow || { metadata: {} }) }));
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.mockReturnValue(builder);
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   return { db, builder, updates, guardQ };
@@ -277,29 +280,14 @@ describe('the conversation side', () => {
     expect(typeof updates[0].transcription).toBe('string');
   });
 
-  test('gate on, the append was UNCONFIRMED (0 rows / error) ⇒ the column write still composes the row\'s segments plus this socket\'s own, deduplicated by session key should the append land after all (hook r27 P1)', async () => {
+  test('an unconfirmed append never publishes an unscrubbed local/older-leg composite', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { updates } = primeDb({ updateImpl: jest.fn(async (patch) => { updates.push(patch); return updates.length === 1 ? 0 : 1; }) });
-    const convo = convoWithTurns();
-    await convo.end('ws_close');
-    const reconcile = updates[1];
-    expect(reconcile.transcription.sql).toBe('COALESCE(?, ?)');
-    const compose = reconcile.transcription.bindings[0];
-    expect(compose.sql).toContain("WHERE COALESCE(e->>'session_key', '') <> ?"); // the row's copy of THIS socket's segment is dropped
-    expect(compose.bindings[1]).toBe('nonce-1');
-    expect(JSON.parse(compose.bindings[2])[0]).toEqual(expect.objectContaining({ session_key: 'nonce-1', generation: 1725500001000 }));
-    expect(reconcile.transcription.bindings[1]).toContain('Caller: my ants are back');
-    expect(JSON.parse(reconcile.transcription_metadata).segments).toEqual({ this_generation: 1725500001000, appended: false });
-    // …and an append that THREW composes the same way
-    const { updates: u2 } = primeDb({ updateImpl: jest.fn(async (patch) => { u2.push(patch); if (u2.length === 1) throw new Error('pool gone'); return 1; }) });
-    const second = convoWithTurns();
-    await second.end('ws_close');
-    expect(u2[1].transcription.sql).toBe('COALESCE(?, ?)');
-    // an UNKEYED segment (no session key) unions without the filter
-    const { db } = primeDb();
-    const unkeyed = segmentStore.composeSegmentsSql(db, { generation: 1, text: 'x' });
-    expect(unkeyed.sql).not.toContain('session_key');
-    expect(unkeyed.bindings).toHaveLength(2);
+    const update = jest.fn(async () => 0);
+    primeDb({ updateImpl: update });
+    await convoWithTurns().end('ws_close');
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls[1][0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
+    expect(update.mock.calls[1][0]).not.toHaveProperty('transcription');
   });
 
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {
@@ -574,7 +562,8 @@ describe('the conversation side', () => {
     await convo.end('ws_close');
     const reconcile = updates.find((u) => u.call_outcome === 'ai_handled');
     expect(reconcile.duration_seconds.bindings[0]).toBeGreaterThanOrEqual(600);
-    const seg = JSON.parse(updates[0].metadata.bindings[1].bindings[0])[0];
+    const append = updates.find((u) => u.metadata?.bindings?.[1]?.bindings);
+    const seg = JSON.parse(append.metadata.bindings[1].bindings[0])[0];
     expect(seg.started_at).toBe(new Date(t0).toISOString()); // this leg's segment carries the CALL's start forward
   });
 
