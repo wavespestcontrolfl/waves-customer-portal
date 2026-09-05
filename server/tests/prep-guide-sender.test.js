@@ -995,6 +995,12 @@ describe('sprinkler timer guide', () => {
     const sms = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
     expect(sms).toMatchObject({ ok: true, smsSent: true });
     expect(sms.reason).toBeUndefined();
+    // Already sent beats the opt-out: Both must not text a second copy.
+    jest.clearAllMocks();
+    interactionMarkerRow = { id: 'i-1', subject: 'sprinkler_timer prep info sent', created_at: '2026-09-01T14:00:00Z' };
+    const again = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+    expect(again).toMatchObject({ ok: false, reason: 'guide_already_sent' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('sent once: a customer who already received the guide is refused, with the date', async () => {

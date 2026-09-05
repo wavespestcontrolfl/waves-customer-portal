@@ -805,15 +805,18 @@ async function guideRefusal(customer, config, pestType, { wantEmail = true } = {
   try {
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
     if (prefs && prefs.seasonal_tips === false) return { reason: 'seasonal_tips_off' };
-    // The customer's email opt-out (the weekly irrigation sweep's own
-    // np.email_enabled fence); a text-only send is unaffected by it.
-    if (wantEmail && prefs && prefs.email_enabled === false) return { reason: 'email_opted_out' };
+    // History BEFORE the email opt-out: on Both, that opt-out only drops the
+    // email leg, so a customer already sent the guide must be caught here
+    // or the text goes out twice (pre-push Codex P1 on 71346bab2).
     const prior = await db('customer_interactions')
       .where({ customer_id: customer.id })
       .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
       .orderBy('created_at', 'desc')
       .first();
     if (prior) return { reason: 'guide_already_sent', sentAt: prior.created_at || null };
+    // The customer's email opt-out (the weekly irrigation sweep's own
+    // np.email_enabled fence); a text-only send is unaffected by it.
+    if (wantEmail && prefs && prefs.email_enabled === false) return { reason: 'email_opted_out' };
     return null;
   } catch (err) {
     logger.warn(`[prep-guide-sender] guide preference / history read failed for customer ${customer.id}: ${err.message}`);
