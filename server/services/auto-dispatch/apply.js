@@ -142,6 +142,11 @@ async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
   if (!technicianId) return;
   const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
   if (!categories.length) return;
+  // Serialize with the Team tab's editor, which writes capabilities under
+  // FOR UPDATE on the technician row: a share lock here holds until this move
+  // commits, so an Off cannot land between the read below and the commit (the
+  // same technician-row lock assertAssignableTechnician takes).
+  await trx('technicians').where({ id: technicianId }).forShare().first('id');
   const caps = await trx('technician_capabilities')
     .where({ technician_id: technicianId }).whereIn('service_category', categories)
     .select('service_category', 'active');
@@ -150,16 +155,20 @@ async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
   if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
 }
 
-// The tapped row's own fence (standalone visits never reach the unit mover's
-// member guard). The receiving tech is the placement's, else the row's own.
+// Per-row fence the rebooker runs on the transaction that commits each move:
+// the tapped row, and — because the unit mover forwards it — every grouped
+// sibling's own move too (the member guard ran under the planning lock; this
+// is the commit-time recheck). The rebooker hands over the row it is moving
+// and the tech it lands on; the closure's values are the fallback.
 function makeMoveGuard({ service, best }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
     { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
   );
-  return async ({ trx, technicianId }) => {
-    const receiving = technicianId || best.technician_id || service.technician_id || null;
-    await assertCapabilitiesActive(trx, receiving, [service], refuse);
+  return async ({ trx, technicianId, service: movingRow }) => {
+    const row = movingRow || service;
+    const receiving = technicianId || best.technician_id || row.technician_id || null;
+    await assertCapabilitiesActive(trx, receiving, [row], refuse);
   };
 }
 
