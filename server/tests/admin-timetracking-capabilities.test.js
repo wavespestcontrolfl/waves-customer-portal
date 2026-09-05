@@ -258,6 +258,37 @@ describe('PUT /technicians/:id/capabilities — optimistic baseline', () => {
     expect(conn.writes).toHaveLength(0);
   });
 
+  test('a valid first entry followed by a stale second one: the error escapes the transaction (everything rolls back), response is 409', async () => {
+    const conn = fakeConn();
+    const inner = conn.getMockImplementation();
+    let capReads = 0;
+    conn.mockImplementation((table) => {
+      const chain = inner(table);
+      if (table === 'technician_capabilities') {
+        // first entry (general) matches its baseline; second (lawn) does not
+        chain.first = jest.fn(async () => (capReads++ === 0
+          ? { updated_at: new Date('2026-09-05T10:00:00.000Z') }
+          : { updated_at: new Date('2026-09-05T10:05:00.000Z') }));
+      }
+      return chain;
+    });
+    installDb(conn);
+    const res = await invoke(putTechnicianCapabilities, {
+      params: { id: 'tech-1' }, technicianId: 'adam',
+      body: { capabilities: [
+        { service_category: 'general', state: 'qualified', expected_updated_at: '2026-09-05T10:00:00Z' },
+        { service_category: 'lawn', state: 'off', expected_updated_at: '2026-09-05T10:00:00Z' },
+      ] },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toMatchObject({ code: 'CAPABILITY_STALE', service_category: 'lawn' });
+    // the first write was issued inside the transaction…
+    expect(conn.writes).toHaveLength(1);
+    // …and the transaction callback REJECTED, so Postgres rolls it back (a
+    // normal return would have committed it).
+    await expect(db.transaction.mock.results[0].value).rejects.toMatchObject({ code: 'CAPABILITY_STALE' });
+  });
+
   test('"I saw no row" (null) is stale once a row exists; an omitted baseline never reads the row', async () => {
     let conn = connWithRow(new Date('2026-09-05T10:00:00.000Z'));
     installDb(conn);

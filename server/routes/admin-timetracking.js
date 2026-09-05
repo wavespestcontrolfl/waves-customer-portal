@@ -891,27 +891,28 @@ async function putTechnicianCapabilities(req, res, next) {
     if (normalized.error) return res.status(400).json({ error: normalized.error });
     const { entries } = normalized;
 
-    const outcome = await db.transaction(async (trx) => {
-      const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first('id');
-      if (!target) return { notFound: true };
-      try {
+    // A stale entry must roll back EVERY entry in the request (an earlier
+    // category may already have been written), so the error escapes the
+    // transaction and is translated to 409 outside it.
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first('id');
+        if (!target) return { notFound: true };
         await writeCapabilities(trx, target.id, entries, req.technicianId);
-      } catch (err) {
-        if (err.code === 'CAPABILITY_STALE') return { stale: err };
-        throw err;
-      }
-      const turnedOff = new Set(entries.filter((e) => e.state === 'off').map((e) => e.service_category));
-      const futureAssignedVisits = turnedOff.size
-        ? (await listFutureAssignedVisits(trx, target.id))
-          .filter((v) => turnedOff.has(classifyServiceCategory(v.service_type)))
-        : [];
-      const capabilities = await listCapabilities(trx, target.id);
-      return { capabilities, futureAssignedVisits };
-    });
-    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
-    if (outcome.stale) {
-      return res.status(409).json({ error: outcome.stale.message, code: outcome.stale.code, service_category: outcome.stale.service_category });
+        const turnedOff = new Set(entries.filter((e) => e.state === 'off').map((e) => e.service_category));
+        const futureAssignedVisits = turnedOff.size
+          ? (await listFutureAssignedVisits(trx, target.id))
+            .filter((v) => turnedOff.has(classifyServiceCategory(v.service_type)))
+          : [];
+        const capabilities = await listCapabilities(trx, target.id);
+        return { capabilities, futureAssignedVisits };
+      });
+    } catch (err) {
+      if (err.code !== 'CAPABILITY_STALE') throw err;
+      return res.status(409).json({ error: err.message, code: err.code, service_category: err.service_category });
     }
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
 
     logger.info(`[team] Updated capabilities for technician id=${req.params.id} (${entries.map((e) => `${e.service_category}=${e.state}`).join(', ')}) by staff id=${req.technicianId}`);
     return res.json({
