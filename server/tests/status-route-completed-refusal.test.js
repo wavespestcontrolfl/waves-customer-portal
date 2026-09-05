@@ -129,7 +129,14 @@ test("admin-schedule PUT /:id/status refuses 'cancelled' with USE_DISPATCH_CANCE
 });
 
 test("admin-dispatch PUT /:id/status still accepts 'cancelled' (the live cancel writer)", async () => {
+  // This file's db mock is refusal-shaped (no persisted rows, no trx.fn), so
+  // the dispatch cancel cannot complete here and the response status proves
+  // nothing on its own (pre-push hook P1). What the retirement must not
+  // change is observable regardless: the dispatch route is NOT refused
+  // up front and reaches its write transaction — the exact thing the
+  // schedule route above no longer does.
   const { status, body } = await put('/api/admin/dispatch/svc-1/status', { status: 'cancelled' });
-  expect(status).not.toBe(409);
-  expect(body.code).not.toBe('USE_DISPATCH_CANCEL');
+  expect([404, 409]).not.toContain(status);
+  expect(body.code).toBeUndefined();
+  expect(db.__state.writes.some((w) => w.op === 'transaction')).toBe(true);
 });
