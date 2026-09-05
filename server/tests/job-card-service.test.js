@@ -63,7 +63,7 @@ describe('validateParagraph', () => {
   test('a grounded number moved to another fact is rejected; rephrased in place it passes (PR r3 P2)', () => {
     const lawn = 'Pets: dog. First visit on record. Irrigation Mon/Thu, 20 min, 1.2" rain in the last 7 days.';
     expect(jobCard.validateParagraph('There are 20 dogs. Irrigation runs Mon and Thu.', lawn, [])).toBe('ungrounded_number');
-    expect(jobCard.validateParagraph('One dog on site. Irrigation runs Mon and Thu for 20 min, with 1.2" of rain over the last 7 days.', lawn, [])).toBeNull();
+    expect(jobCard.validateParagraph('One dog. Irrigation on Mon and Thu for 20 min, with 1.2" of rain in the last 7 days.', lawn, [])).toBeNull();
   });
 
   test('a sentence the grounding never mentions is rejected, even without numbers (Codex r10 P1)', () => {
@@ -72,14 +72,15 @@ describe('validateParagraph', () => {
     // An instruction lifted from a visit note is not in the grounding either.
     expect(jobCard.validateParagraph('Skip the back yard today.', 'Pets: dog. First visit on record.', [])).toBe('ungrounded_sentence');
     expect(jobCard.validateParagraph('This is the first visit on record.', 'First visit on record.', [])).toBeNull();
-    expect(jobCard.validateParagraph('There are two dogs.', 'Pets: 2 dogs.', [])).toBeNull();
-    // One shared word never carries a sentence (hook P1): "dog" is grounded, the securing plan and the entry instruction are not.
+    expect(jobCard.validateParagraph('There are 2 dogs.', 'Pets: 2 dogs.', [])).toBeNull();
+    // A shared word never carries an invented one (hook P1 ×2): "dog" is grounded, a securing plan or an entry instruction is not — even as a single word.
     expect(jobCard.validateParagraph('The dog is secured, so enter the yard. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_sentence');
-    expect(jobCard.validateParagraph('A dog is on the property. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBeNull();
+    expect(jobCard.validateParagraph('Dog secured. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_sentence');
+    expect(jobCard.validateParagraph('A dog is here. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBeNull();
   });
 
   test('accepts a faithful 1–3 sentence rewrite', () => {
-    expect(jobCard.validateParagraph('There is a dog and a gate code on file you can show. Last visit on 2026-08-12 found chinch bugs on the east side.', grounding, codes)).toBeNull();
+    expect(jobCard.validateParagraph('There is a dog and a gate code on file you can show. Last visit on 2026-08-12: chinch bugs on the east side.', grounding, codes)).toBeNull();
   });
 
   test.each([
@@ -103,9 +104,9 @@ describe('writeParagraph', () => {
   const template = 'Pets: dog. First visit on record.';
 
   test('model text that passes validation is returned as source=model', async () => {
-    const callModel = jest.fn(async () => ({ ok: true, text: 'A dog lives here and this is the first visit on record.' }));
+    const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
     const out = await jobCard.writeParagraph(template, [], { callModel });
-    expect(out).toEqual({ text: 'A dog lives here and this is the first visit on record.', source: 'model' });
+    expect(out).toEqual({ text: 'A dog is here and this is the first visit on record.', source: 'model' });
     // The grounding sent to the model is the template — never a code.
     expect(callModel.mock.calls[0][0].text).toContain(template);
   });
