@@ -50,7 +50,7 @@ jest.mock('../models/db', () => {
       if (cols[0] === 'evidence' && table === 'vendor_orders') return { evidence: mockState.parkedEvidence || {} }; // attachLatePlacement
       if (cols[0] === 'amount_cents' && table === 'vendor_orders') { const r = [...mockState.updates].reverse().find((u) => u.table === 'vendor_orders' && u.row.amount_cents != null); return { amount_cents: r ? r.row.amount_cents : null, created_at: mockState.reservedAt || null }; } // settledFinalCents: the reserved amount
       if (table === 'product_restock_requests') {
-        if (cols[0] === 'status') return { status: mockState.freshRequestStatus };
+        if (cols[0] === 'status') return { status: mockState.freshRequestStatus, source: mockState.request?.source }; // the mid-flight re-reads (recordPlaced, bellUndispatchable's post-write re-check)
         if (cols[0] === 'id') return mockState.sibling; // the sibling live-request probe
         return mockState.request;
       }
@@ -676,7 +676,7 @@ test('a DB failure inside the late-placement attachment (the row already left pl
   const dbFn = require('../models/db');
   const realTx = dbFn.transaction;
   let n = 0;
-  dbFn.transaction = async (fn) => { n += 1; if (n === 3) throw new Error('late placement audit lost connection'); return fn(dbFn); };
+  dbFn.transaction = async (fn) => { n += 1; if (n >= 3) throw new Error('late placement audit lost connection'); return fn(dbFn); }; // the attachment AND the fallback's locked reservation (Codex r27 P1) both lose the connection
   try {
     const a = mockAdapter();
     const inner = a.place;
@@ -695,8 +695,23 @@ test('an undispatchable request whose hand-off bell was not persisted reports be
   expect(r.belled).toBeUndefined();
 });
 
+test('an order that lands after an OLDER pod received the request by hand parks placed_on_received_request, guards kept closed, request untouched (Codex r27 P1)', async () => {
+  mockState.freshRequestStatus = 'received';
+  const r = await run(mockAdapter());
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'placed_on_received_request' });
+  const ledger = lastLedgerPatch();
+  expect(ledger).toMatchObject({ status: 'needs_review', external_order_number: 'SM-1', amount_cents: 31400 });
+  expect(ledger.placed_at).toBeInstanceOf(Date);
+  expect(JSON.parse(ledger.evidence).landedAfterReceive).toEqual(expect.any(String)); // the marker every live-order guard reads
+  expect(mockState.updates.filter((u) => u.table === 'product_restock_requests')).toHaveLength(0); // received stays received: its stock was counted
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(notify.mock.calls[0][2]).toMatch(/landed after the restock request was received by hand/);
+  expect(notify.mock.calls[0][2]).toMatch(/Do NOT re-order/);
+});
+
 test('a DB failure after the vendor call parks as persist_after_placement, never failed', async () => {
   const dbFn = require('../models/db');
+  dbFn.raw.mockClear();
   const realTx = dbFn.transaction;
   // Transactions: 1 claim, 2 cap reservation, 3 the green-path write — make that one throw.
   let n = 0;
@@ -706,6 +721,8 @@ test('a DB failure after the vendor call parks as persist_after_placement, never
     expect(r).toMatchObject({ status: 'needs_review', reason: 'persist_after_placement' });
     expect(ledgerStatus()).toBe('needs_review');
     expect(requestStatus()).toBe('ordered'); // the fallback park restores the request like the green path (Codex r24 P1)
+    // The figure the park records reached the row under the cap lock first (Codex r27 P1): the pre-submit reservation, then the fallback's.
+    expect(dbFn.raw.mock.calls.filter((c) => /pg_advisory_xact_lock/.test(c[0]) && c[1] && c[1][0] === 'vendor-order-caps')).toHaveLength(2);
     const ledger = lastLedgerPatch();
     expect(ledger.external_order_number).toBe('SM-1');
     expect(notify).toHaveBeenCalledTimes(1);

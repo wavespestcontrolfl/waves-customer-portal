@@ -2961,10 +2961,13 @@ function RestockStatusCell({ request, receivingId, runAction }) {
 // Restock tab — the receive draft (quantity / unit) and the Receive / Cancel
 // actions; the dispatcher owns a placing request, and a dispatched order that
 // is neither received nor revoked cannot be cancelled (the server 409s both).
+// A received request whose automatic order landed after that receipt gets
+// ONE more receive — the late order's own (the server admits exactly that).
 function RestockActionCell({ request, draft, setReceiveDrafts, receivingId, runAction }) {
   const setDraft = (patch) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), ...patch } }));
   if (request.order?.status === "placing") return <td style={tdS}><span style={{ color: D.muted }}>Auto-order in progress</span></td>;
-  if (!["open", "ordered"].includes(request.status)) return <td style={tdS}><span style={{ color: D.muted }}>Closed</span></td>;
+  const lateOrderReceive = request.status === "received" && !!request.order?.landedAfterReceive;
+  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive) return <td style={tdS}><span style={{ color: D.muted }}>Closed</span></td>;
   const orderOut = !!request.order?.placedAt && !request.order?.revokedAt;
   return (
     <td style={tdS}>
@@ -2987,7 +2990,9 @@ function RestockActionCell({ request, draft, setReceiveDrafts, receivingId, runA
           <button onClick={() => runAction(request, "receive")} disabled={receivingId === request.id} style={sBtn(D.green, D.white)}>
             Receive
           </button>
-          {orderOut ? (
+          {lateOrderReceive ? (
+            <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Late auto-order — receive it, or revoke</span>
+          ) : orderOut ? (
             <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Order out — receive, or revoke first</span>
           ) : (
             <button onClick={() => runAction(request, "cancel")} disabled={receivingId === request.id} style={sBtn(D.card, D.red)}>

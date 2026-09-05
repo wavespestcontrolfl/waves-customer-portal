@@ -1308,7 +1308,7 @@ async function transitionRestockRequest(trx, { request, product, action }) {
 
 // The locked receive: quantity re-derived under the request + product locks,
 // the approved card's exact delta re-asserted, stock + movement + close.
-async function receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan }) {
+async function receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan, secondReceive = false }) {
   // receive — recompute against the locked product row, never the preview.
   // When the operator gave no quantity, the default is re-derived HERE,
   // under the request lock: an automatic order that went placing → placed
@@ -1365,8 +1365,12 @@ async function receiveRestockLocked(trx, { request, lockedRequest, input, receiv
       enteredQuantity: enteredQuantity,
       enteredUnit: receivePlan.enteredUnit,
       conversionConfidence: received.confidence,
+      ...(secondReceive ? { secondReceive: true } : {}),
     },
   }).returning('*');
+  // The late order's own receipt: the marker that kept the live-order
+  // guards closed comes off in this transaction (Codex r27 P1).
+  if (secondReceive) await require('../procurement/order-dispatch').settleLandedAfterReceive(trx, request.id);
   await trx('product_restock_requests').where('id', request.id).update({
     status: 'received', closed_at: new Date(), updated_at: new Date(),
   });
@@ -1393,7 +1397,12 @@ async function updateRestockRequest(input) {
 
   const request = await db('product_restock_requests').where('id', input.request_id).first();
   if (!request) return { error: 'Restock request not found' };
-  if (request.status === 'received' || request.status === 'cancelled') {
+  // ONE more receive on a received request whose automatic order landed
+  // after that receipt (ledger evidence.landedAfterReceive — Codex r27 P1);
+  // the locked guard below re-derives it before anything is written.
+  const secondReceive = action === 'receive' && request.status === 'received'
+    && await require('../procurement/order-dispatch').landedAfterReceiveFor(db, request.id);
+  if ((request.status === 'received' && !secondReceive) || request.status === 'cancelled') {
     return { error: `This request is already ${request.status} — no further actions allowed` };
   }
   const product = await db('products_catalog').where('id', request.product_id).first();
@@ -1444,16 +1453,18 @@ async function updateRestockRequest(input) {
     // the request-row lock, two receives would both add stock.
     const lockedRequest = await trx('product_restock_requests').where('id', request.id).forUpdate().first();
     if (!lockedRequest) return { error: 'Restock request not found' };
-    if (lockedRequest.status === 'received' || lockedRequest.status === 'cancelled') {
-      return { error: `This request is already ${lockedRequest.status} — no further actions allowed` };
-    }
     // Automatic-order guard (pre-push P0s): no action while the order is
     // placing; no cancel while a dispatched order is unreceived and unrevoked.
-    try { await require('../procurement/order-dispatch').assertManualActionAllowed(trx, request.id, action); }
+    let guard;
+    try { guard = await require('../procurement/order-dispatch').assertManualActionAllowed(trx, request.id, action); }
     catch (err) { if (err.code === 'auto_order_placing' || err.code === 'auto_order_out') return { error: err.message, [err.code]: true }; throw err; }
+    const lockedSecondReceive = secondReceive && lockedRequest.status === 'received' && !!guard.landedAfterReceive;
+    if ((lockedRequest.status === 'received' && !lockedSecondReceive) || lockedRequest.status === 'cancelled') {
+      return { error: `This request is already ${lockedRequest.status} — no further actions allowed` };
+    }
 
     if (action !== 'receive') return transitionRestockRequest(trx, { request, product, action });
-    return receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan });
+    return receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan, secondReceive: lockedSecondReceive });
   });
 
   if (result.success && action === 'receive') {

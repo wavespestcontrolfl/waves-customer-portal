@@ -294,22 +294,56 @@ test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14
   expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:lookup:svc-1');
 });
 
-test('a lookup bell rung after a concurrent retry already deducted the visit\'s kit is retired at once (Codex r24 P1)', async () => {
-  notifyAdmin.mockClear();
+// The lookup-failure bell's post-bell re-check re-runs the lookup: the bell is
+// retired only when EVERY kit product that applies to the line has a usage
+// movement; a lookup that fails again, or one product still owed, keeps the
+// bell and the owed marker (Codex r24 P1 → r27 P1).
+function lookupBellDb({ retryProducts, movements }) {
   const updates = [];
+  let lookups = 0;
   const db = (table) => {
-    if (table === 'products_catalog') throw new Error('relation lost');
-    const q = {};
-    for (const m of ['where', 'whereRaw', 'whereNull']) q[m] = () => q;
-    q.first = async () => ({ id: 'mv-race' }); // the visit-wide settled re-check finds the retry's movement
+    if (table === 'products_catalog') {
+      lookups += 1;
+      if (lookups === 1 || retryProducts === null) throw new Error('relation lost');
+      const q = {}; for (const m of ['where', 'whereNotNull']) q[m] = () => q; q.select = async () => retryProducts; return q;
+    }
+    const q = {}; let productId = null;
+    q.where = (w) => { if (w && w.product_id) productId = w.product_id; return q; };
+    for (const m of ['whereRaw', 'whereNull']) q[m] = () => q;
+    q.first = async () => (table === 'product_inventory_movements' && movements.includes(productId) ? { id: `mv-${productId}` } : null);
     q.update = async (row) => { updates.push({ table, row }); return 1; };
     return q;
   };
   db.raw = (sql) => sql;
-  const res = await consumeCompletionSupplies(db, args);
+  return { db, updates };
+}
+const card = { id: 'prod-card', name: 'Door card', per_completion_usage: '1', per_completion_service_lines: null };
+const lawnOnly = { id: 'prod-lawn', name: 'Lawn flag', per_completion_usage: '1', per_completion_service_lines: '["lawn"]' };
+
+test('a lookup bell is retired when the re-run lookup shows EVERY applicable kit product already deducted by the concurrent retry (Codex r24 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: [sign, card, lawnOnly], movements: ['prod-sign', 'prod-card'] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' }); // lawnOnly does not apply to a pest visit
   expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
   expect(updates).toEqual([{ table: 'notifications', row: expect.objectContaining({ read_at: expect.any(Date) }) }]);
+});
+
+test('a lookup bell STAYS when one applicable kit product has no movement yet — one movement is not visit-wide settlement (Codex r27 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: [sign, card], movements: ['prod-sign'] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(updates).toEqual([]);
+});
+
+test('a lookup bell STAYS when the re-run lookup fails again, whatever movements exist (Codex r27 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: null, movements: ['prod-sign'] });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(updates).toEqual([]);
 });
 
 test('a successful deduction retires the failure bells an earlier attempt rang for this product + visit (Codex r15 P2)', async () => {
