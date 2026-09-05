@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { applyAssignable } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
@@ -16156,7 +16157,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         GROUP BY technician_id
       ) today_agg ON today_agg.technician_id = t.id
       WHERE t.role IN ('admin','technician')
-        AND t.active = TRUE
+        AND t.employment_status = 'active'
+        -- Board columns are drop targets: only field-dispatchable staff
+        -- (technician-eligibility.js). Prospective placeholders and
+        -- office-only admins never get a column.
+        AND t.field_dispatchable = TRUE
         AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       ORDER BY t.name
       `,
@@ -16629,9 +16634,10 @@ router.post('/alerts/resolve-all', requireAdmin, async (req, res, next) => {
 // pinged today.
 router.get('/technicians', requireAdmin, async (req, res, next) => {
   try {
-    const techs = await db('technicians')
-      .where({ active: true })
-      .select('id', 'name', 'role')
+    // Assignment target list: assignable techs only (prospective placeholders
+    // and office-only accounts never appear as drop targets).
+    const techs = await applyAssignable(db('technicians'))
+      .select('technicians.id', 'technicians.name', 'technicians.role')
       .orderBy('name', 'asc');
     res.json({ technicians: techs });
   } catch (err) {

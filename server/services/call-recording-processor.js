@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { applyAssignable } = require('./technician-eligibility');
 const MODELS = require('../config/models');
 const twilio = require('twilio');
 
@@ -4595,33 +4596,22 @@ async function resolveDefaultCallBookingTechnician(conn = db) {
     if (!UUID_RE.test(configuredId)) {
       logger.warn(`[call-proc] CALL_BOOKING_DEFAULT_TECHNICIAN_ID is not a valid UUID: ${configuredId}`);
     } else {
-      const configuredTech = await conn('technicians')
-        .where({ id: configuredId })
-        .where(function () {
-          this.where({ active: true }).orWhereNull('active');
-        })
-        .first('id', 'name');
+      const configuredTech = await applyAssignable(conn('technicians').where({ 'technicians.id': configuredId }))
+        .first('technicians.id', 'technicians.name');
       if (configuredTech?.id) return { id: configuredTech.id, name: configuredTech.name || null };
       logger.warn(`[call-proc] CALL_BOOKING_DEFAULT_TECHNICIAN_ID did not match an active technician: ${configuredId}`);
     }
   }
 
-  const tech = await conn('technicians')
-    .whereRaw('LOWER(TRIM(name)) = LOWER(TRIM(?))', [DEFAULT_CALL_BOOKING_TECHNICIAN_NAME])
-    .where(function () {
-      this.where({ active: true }).orWhereNull('active');
-    })
-    .first('id', 'name');
+  const tech = await applyAssignable(conn('technicians')
+    .whereRaw('LOWER(TRIM(technicians.name)) = LOWER(TRIM(?))', [DEFAULT_CALL_BOOKING_TECHNICIAN_NAME]))
+    .first('technicians.id', 'technicians.name');
   if (tech?.id) return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
 
   // Name mismatch (e.g. the row is "Adam", not "Adam B.") used to silently
   // book with no technician. When exactly one active technician exists there
   // is no ambiguity — assign them and say so.
-  const activeTechs = await conn('technicians')
-    .where(function () {
-      this.where({ active: true }).orWhereNull('active');
-    })
-    .select('id', 'name');
+  const activeTechs = await applyAssignable(conn('technicians')).select('technicians.id', 'technicians.name');
   if (activeTechs.length === 1) {
     logger.info(`[call-proc] Default call-booking technician name "${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}" not found; using sole active technician ${activeTechs[0].name}`);
     return { id: activeTechs[0].id, name: activeTechs[0].name || null };

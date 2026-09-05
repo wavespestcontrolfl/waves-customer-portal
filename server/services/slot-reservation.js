@@ -31,6 +31,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { applyAssignable } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
@@ -843,15 +844,15 @@ async function reserveSlot({
         ? classifierStableServiceType(catalogLink.name, holdCanonicalLabel)
         : holdCanonicalLabel;
 
-      // Active-technician check: find-time only generates slots for
-      // technicians where({ active: true }), so a slotId naming an inactive
-      // or unknown tech was never offered. A crafted non-uuid techId makes
+      // Assignable-technician check: find-time only generates slots for
+      // assignable technicians (technician-eligibility.js), so a slotId naming
+      // a prospective, inactive, office-only, or unknown tech was never offered. A crafted non-uuid techId makes
       // the lookup itself throw (22P02) — treat that the same as unknown
       // (the txn rolls back on the throw below either way).
       if (techId) {
         let activeTech = null;
         try {
-          activeTech = await trx('technicians').where({ id: techId, active: true }).first('id');
+          activeTech = await applyAssignable(trx('technicians').where({ 'technicians.id': techId })).first('technicians.id');
         } catch (techErr) {
           logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
         }

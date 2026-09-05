@@ -117,6 +117,7 @@ function wireRescheduleMocks(service) {
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
     if (table === 'series_moves') return chain();
+    if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -368,6 +369,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -726,6 +728,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -798,6 +801,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');

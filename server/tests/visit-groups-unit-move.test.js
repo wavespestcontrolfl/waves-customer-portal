@@ -20,7 +20,14 @@ jest.mock('../models/db', () => {
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
       orderBy() { chain._ops.push(['orderBy', ...arguments]); return chain; },
       max() { chain._ops.push(['max', ...arguments]); return chain; },
-      first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops, cols) : null); },
+      first(...cols) {
+        log.push({ table, op: 'first', ops: chain._ops, cols });
+        if (script[table] && script[table].first) return Promise.resolve(script[table].first(chain._ops, cols));
+        // Save-time eligibility read (technician-eligibility.js): every tech a
+        // test assigns is on staff and field-dispatchable unless scripted.
+        if (table === 'technicians') return Promise.resolve({ id: 't9', employment_status: 'active', field_dispatchable: true });
+        return Promise.resolve(null);
+      },
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
       count() { chain._ops.push(['count', ...arguments]); return chain; },

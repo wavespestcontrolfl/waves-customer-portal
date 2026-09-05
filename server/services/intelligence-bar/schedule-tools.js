@@ -9,6 +9,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { assertAssignableTechnician } = require('../technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
@@ -623,6 +624,8 @@ async function assignTechnician(input) {
     // already on tech.id are a no-op reassignment: clearing them would
     // erase a valid manual/optimized position (uncapped audit r25 P1) —
     // the predicate is on the row value the UPDATE itself observes.
+    // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE).
+    await assertAssignableTechnician(tech.id, { conn: trx });
     const [{ count: alreadyOn }] = await trx('scheduled_services')
       .whereIn('id', serviceIds)
       .where('technician_id', tech.id)
@@ -1306,6 +1309,8 @@ async function swapTechAssignments(input) {
     // route_order: null on both real reassignments — each stop's sequence
     // number belonged to its OLD tech's run; carrying it into the new tech's
     // day would interleave stale numbers (consumers append NULLs last).
+      await assertAssignableTechnician(techA.id, { conn: trx });
+      await assertAssignableTechnician(techB.id, { conn: trx });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
       if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });

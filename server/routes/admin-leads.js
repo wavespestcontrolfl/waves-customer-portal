@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
+const { assertAssignableTechnician } = require('../services/technician-eligibility');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 // Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
@@ -1609,6 +1610,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
+      await assertAssignableTechnician(technicianId || null, { conn: trx });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,

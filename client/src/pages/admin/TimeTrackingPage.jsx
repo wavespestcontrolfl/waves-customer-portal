@@ -2352,6 +2352,12 @@ const EMPTY_TECH_FORM = {
   name: "",
   phone: "",
   email: "",
+  // Employment: "active" = on staff and can sign in; "prospective" = a
+  // hire who has not started (placeholder — no sign-in, no slots).
+  employmentStatus: "active",
+  // Field eligibility is separate from employment: an office admin stays
+  // active without ever appearing as a dispatch target.
+  fieldDispatchable: false,
   autoFlipEnabled: true,
   // Payroll profile
   payRate: "",
@@ -2485,10 +2491,17 @@ export function TeamTab({ showToast }) {
       )
     ) return;
     try {
-      await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
+      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "DELETE",
       });
-      showToast(`${tech.name} deactivated`);
+      const pending = (res && res.futureAssignedVisits) || [];
+      // Future work is left on the schedule for manual reassignment — the
+      // server never cancels or rewrites visits on deactivation.
+      showToast(
+        pending.length
+          ? `${tech.name} deactivated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
+          : `${tech.name} deactivated`,
+      );
       load();
     } catch (e) {
       showToast("Failed to deactivate: " + String(e.message || "Unknown error"));
@@ -2501,6 +2514,8 @@ export function TeamTab({ showToast }) {
       name: tech.name,
       phone: tech.phone || "",
       email: tech.email || "",
+      employmentStatus: tech.employment_status || (tech.active ? "active" : "inactive"),
+      fieldDispatchable: tech.field_dispatchable === true,
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
       payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
       hireDate: tech.hire_date ? String(tech.hire_date).split("T")[0] : "",
@@ -2626,7 +2641,54 @@ export function TeamTab({ showToast }) {
                 style={sInput}
               />{" "}
             </div>{" "}
+            <div>
+              {" "}
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                Employment
+              </div>{" "}
+              <select
+                value={form.employmentStatus}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, employmentStatus: e.target.value }))
+                }
+                style={sInput}
+              >
+                <option value="active">Active — on staff</option>
+                <option value="prospective">Prospective — not started</option>
+                {editingId && <option value="inactive">Inactive — offboarded</option>}
+              </select>{" "}
+            </div>{" "}
           </div>
+          {/* Field eligibility (Field Team Program, Phase 0). Employment
+              says whether someone is on staff; this says whether they may
+              take field work. Prospective placeholders and office-only
+              admins stay OFF, so no booking path can put a customer on
+              them. */}
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginBottom: 12,
+              cursor: "pointer",
+            }}
+          >
+            {" "}
+            <input
+              type="checkbox"
+              checked={form.fieldDispatchable === true}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, fieldDispatchable: e.target.checked }))
+              }
+              style={{ width: 14, height: 14, cursor: "pointer" }}
+            />{" "}
+            <span style={{ fontSize: 12, color: D.heading }}>
+              Can be assigned field work
+            </span>{" "}
+            <span style={{ fontSize: 11, color: D.muted }}>
+              (off: never offered as a booking slot or a dispatch target)
+            </span>{" "}
+          </label>
           {/* Auto-flip opt-out (Phase 2E). Default ON. When OFF, the
               vehicle-exit pipeline skips this tech entirely — useful
               for a tech generating false-positive auto-flip SMS while
@@ -2981,7 +3043,7 @@ export function TeamTab({ showToast }) {
           </thead>{" "}
           <tbody>
             {techs.map((t) => (
-              <tr key={t.id} style={{ opacity: t.active ? 1 : 0.5 }}>
+              <tr key={t.id} style={{ opacity: (t.employment_status || (t.active ? "active" : "inactive")) === "inactive" ? 0.5 : 1 }}>
                 {" "}
                 <td
                   style={{
@@ -3084,14 +3146,24 @@ export function TeamTab({ showToast }) {
                   }}
                 >
                   {" "}
-                  <span
-                    style={sBadge(
-                      t.active ? D.green + "22" : D.red + "22",
-                      t.active ? D.green : D.red,
-                    )}
-                  >
-                    {t.active ? "Active" : "Inactive"}
-                  </span>{" "}
+                  {(() => {
+                    const status = t.employment_status || (t.active ? "active" : "inactive");
+                    const tone = status === "active" ? D.green : status === "prospective" ? D.amber : D.red;
+                    const label = status === "active" ? "Active" : status === "prospective" ? "Prospective" : "Inactive";
+                    return (
+                      <span style={sBadge(tone + "22", tone)}>{label}</span>
+                    );
+                  })()}{" "}
+                  {t.employment_status === "active" && !t.field_dispatchable && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                      Office only
+                    </div>
+                  )}
+                  {t.employment_status === "active" && t.field_dispatchable && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                      Field dispatchable
+                    </div>
+                  )}
                 </td>{" "}
                 <td
                   style={{
@@ -3155,6 +3227,7 @@ export function TeamTab({ showToast }) {
                       onClick={() => (
                         t.active ? handleDeactivate(t) : handleActivate(t)
                       )}
+                      title={t.employment_status === "prospective" ? "Marks this hire as started (they still need credentials via register)" : undefined}
                       style={{
                         padding: "4px 10px",
                         background: "transparent",

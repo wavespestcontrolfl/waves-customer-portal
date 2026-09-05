@@ -224,7 +224,10 @@ describe('slot reservation helpers', () => {
         expiresAt: '2027-05-20T13:15:00.000Z',
       });
 
-      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-1', active: true });
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ 'technicians.id': 'tech-1' });
+      // Assignability (technician-eligibility.js), not just the legacy flag.
+      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.employment_status', 'active');
+      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.field_dispatchable', true);
       // ORDERING CONTRACT (services/scheduling/occupancy.js): rung 1
       // (date-occupancy) → rung 3 (tech) → rung 4 (zone). The hold row this
       // inserts is COUNTED by findConflictingVisits, so the estimate path is
@@ -676,7 +679,8 @@ describe('slot reservation helpers', () => {
         estimateId: 'estimate-456',
         slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-ghost' }),
       })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
-      expect(technicianBuilder.where).toHaveBeenCalledWith({ id: 'tech-ghost', active: true });
+      expect(technicianBuilder.where).toHaveBeenCalledWith({ 'technicians.id': 'tech-ghost' });
+      expect(technicianBuilder.where).toHaveBeenCalledWith('technicians.employment_status', 'active');
       // Rejected before any scheduled_services query or insert.
       expect(scheduledBuilders).toHaveLength(0);
     } finally {

@@ -72,7 +72,7 @@ function mockTables() {
     if (table === 'technicians') {
       return {
         where: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue({ id: TECH_ID, active: true }),
+        first: jest.fn().mockResolvedValue({ id: TECH_ID, employment_status: 'active', field_dispatchable: true }),
       };
     }
     if (table === 'customers') {
@@ -391,7 +391,7 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       if (table === 'technicians') {
         return {
           where: jest.fn().mockReturnThis(),
-          first: jest.fn().mockResolvedValue({ id: TECH_ID, active: true }),
+          first: jest.fn().mockResolvedValue({ id: TECH_ID, employment_status: 'active', field_dispatchable: true }),
         };
       }
       if (table === 'customers') {

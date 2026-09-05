@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { assertAssignableTechnician } = require('./technician-eligibility');
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
@@ -1392,6 +1393,12 @@ class SmartRebooker {
         }
       }
 
+      // Save-time eligibility for a tech change (422 TECH_NOT_ASSIGNABLE) on
+      // the same trx that writes it — a slot offered before the tech went
+      // prospective/inactive/office-only cannot land here.
+      if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
+        await assertAssignableTechnician(updates.technician_id, { conn: trx });
+      }
       const updated = await applyTrackLifecycleCas(
         trx('scheduled_services')
           // The full observed tracker/lifecycle snapshot is in the CAS (see
@@ -2290,6 +2297,7 @@ class SmartRebooker {
             : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
         ));
         if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+          await assertAssignableTechnician(options.technicianId || null, { conn: trx });
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the
           // single-reschedule path above).
