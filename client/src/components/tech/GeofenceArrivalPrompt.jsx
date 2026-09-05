@@ -379,7 +379,8 @@ function VisitCard({ n, onDismiss }) {
   } else {
     lines.push([p.service_type, p.when].filter(Boolean).join(' · '));
     if (n.type === 'visit_assigned' && p.address) lines.push(p.address);
-    if (n.type === 'visit_unassigned') lines.push(p.now_with ? `Now with ${p.now_with}` : 'Now unassigned');
+    // `ended`: the visit finished (cancelled / completed …) before this card landed — name that, not a holder.
+    if (n.type === 'visit_unassigned') lines.push(p.ended ? `Now ${p.ended}` : (p.now_with ? `Now with ${p.now_with}` : 'Now unassigned'));
   }
   if (p.actor) {
     const verb = { visit_assigned: 'Assigned', visit_unassigned: 'Reassigned', visit_rescheduled: 'Moved', visit_cancelled: 'Cancelled' }[n.type];

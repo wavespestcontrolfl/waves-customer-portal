@@ -160,13 +160,26 @@ describe('notifyTechVisitChange', () => {
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
     prime({ visit: { ...VISIT, status: 'completed' } });
     expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'rescheduled', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
-    // unassigned on a visit that has since ended: a delayed "Now with B" never lands on a completed / cancelled visit.
-    prime({ visit: { ...VISIT, status: 'completed', technician_id: ADAM_ID } });
-    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
-    prime({ visit: { ...VISIT, status: 'cancelled', technician_id: ADAM_ID } });
-    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' })).toEqual({ sent: false, skipped: 'stale' });
     expect(mockWriteCard).not.toHaveBeenCalled();
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test('a moved-off card on a visit that has since ended names the terminal state, never "Now with B" (the previous holder still hears it)', async () => {
+    prime({ visit: { ...VISIT, status: 'completed', technician_id: ADAM_ID } });
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(mockWriteCard.mock.calls[0][1]).toMatchObject({
+      type: 'visit_unassigned',
+      payload: { headline: 'Moved off your route', now_with: null, ended: 'completed', actor: 'by Adam' },
+    });
+    expect(mockWriteCard.mock.calls[0][1].message).toContain('Now completed');
+    expect(mockWriteCard.mock.calls[0][1].message).not.toContain('Now with');
+    prime({ visit: { ...VISIT, status: 'no_show', technician_id: ADAM_ID } });
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' });
+    expect(mockWriteCard.mock.calls[1][1].payload).toMatchObject({ now_with: null, ended: 'a no-show' });
+    // A live visit still names the holder.
+    prime({ visit: { ...VISIT, technician_id: ADAM_ID } });
+    await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1' });
+    expect(mockWriteCard.mock.calls[2][1].payload).toMatchObject({ now_with: 'Adam Benetti', ended: null });
   });
 
   test('a voice-agent booking still pending office review is silent to everyone — reassigned, moved, or cancelled; once confirmed it announces', async () => {

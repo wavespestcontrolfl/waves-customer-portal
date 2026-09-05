@@ -38,6 +38,10 @@ const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
 const KINDS = Object.freeze(['assigned', 'unassigned', 'rescheduled', 'cancelled']);
 // Lifecycle states with nothing left to announce for an assignment/move card.
 const TERMINAL_VISIT_STATUSES = new Set(['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show']);
+// How a moved-off card names an ended visit ("Now cancelled" instead of
+// "Now with B"): the previous holder still learns the stop left their route
+// even when the visit ended before their card landed.
+const ENDED_LABELS = Object.freeze({ cancelled: 'cancelled', completed: 'completed', skipped: 'skipped', rescheduled: 'rescheduled', no_show: 'a no-show' });
 
 // True when the caller's committed snapshot no longer matches the row — a
 // later change moved the visit on. Only the fields the caller supplied are
@@ -157,7 +161,7 @@ function placeLabel(visit) {
  * `newTechnicianName` names who holds an unassigned visit NOW (read off
  * the locked row, never the hook's own destination).
  */
-function composeCard({ kind, visit, actorText, previous, newTechnicianName }) {
+function composeCard({ kind, visit, actorText, previous, newTechnicianName, ended = null }) {
   const who = customerLabel(visit);
   const when = formatWhen(visit.scheduled_date, visit.window_start, visit.window_end);
   const where = placeLabel(visit);
@@ -172,7 +176,8 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName }) {
   } else if (kind === 'unassigned') {
     headline = 'Moved off your route';
     lines.push(`${service} · ${when}`);
-    lines.push(newTechnicianName ? `Now with ${newTechnicianName}` : 'Now unassigned');
+    if (ended) lines.push(`Now ${ended}`);
+    else lines.push(newTechnicianName ? `Now with ${newTechnicianName}` : 'Now unassigned');
     lines.push(`Reassigned ${actorText}`);
   } else if (kind === 'rescheduled') {
     headline = 'Visit moved';
@@ -199,7 +204,8 @@ function composeCard({ kind, visit, actorText, previous, newTechnicianName }) {
         ? formatWhen(previous.date, previous.windowStart, previous.windowEnd)
         : null,
       address: where,
-      now_with: kind === 'unassigned' ? (newTechnicianName || null) : null,
+      now_with: kind === 'unassigned' && !ended ? (newTechnicianName || null) : null,
+      ended: kind === 'unassigned' ? (ended || null) : null,
       actor: actorText,
     },
   };
@@ -252,13 +258,17 @@ function cardStands({ kind, technicianId, snapshot, previousStatus }, row) {
     // the newest card. The later move's own card is the one that lands.
     if (snapshotSuperseded(snapshot, row)) return false;
   }
-  // A moved-off card after the visit ended (codex r10 P2): a delayed A→B
-  // card across a deploy overlap would otherwise land "Now with B" on a
-  // visit B has since completed or cancelled — the final lifecycle change
-  // is the last word, and it was announced by its own path.
-  if (kind === 'unassigned' && (holder === recipient || TERMINAL_VISIT_STATUSES.has(String(row.status)))) return false;
+  if (kind === 'unassigned' && holder === recipient) return false;
   if (kind === 'cancelled' && String(row.status) !== 'cancelled') return false;
-  return { holder };
+  // A moved-off card after the visit ended (codex r10 P2 + pre-push audit):
+  // a delayed A→B card across a deploy overlap must not say "Now with B"
+  // about a visit B has since completed or cancelled — but A still has to
+  // hear the stop left their route (the cancel card went to B alone), so
+  // the card names the terminal state instead of being dropped.
+  const ended = kind === 'unassigned' && TERMINAL_VISIT_STATUSES.has(String(row.status))
+    ? (ENDED_LABELS[String(row.status)] || String(row.status).replace(/_/g, ' '))
+    : null;
+  return { holder, ended };
 }
 
 /**
@@ -321,11 +331,11 @@ async function writeCard(notice) {
       ...(notice.snapshot?.windowEnd !== undefined ? { window_end: notice.snapshot.windowEnd } : {}),
     };
     let newTechnicianName = null;
-    if (notice.kind === 'unassigned' && stands.holder) {
+    if (notice.kind === 'unassigned' && stands.holder && !stands.ended) {
       const next = await trx('technicians').where({ id: stands.holder }).first('name');
       newTechnicianName = next?.name || null;
     }
-    const card = composeCard({ kind: notice.kind, visit, actorText: notice.actorText, previous: notice.previous, newTechnicianName });
+    const card = composeCard({ kind: notice.kind, visit, actorText: notice.actorText, previous: notice.previous, newTechnicianName, ended: stands.ended || null });
     await trx('tech_notifications').insert({
       technician_id: notice.technicianId,
       type: notice.type,

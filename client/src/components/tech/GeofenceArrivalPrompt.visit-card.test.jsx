@@ -23,6 +23,10 @@ const OFF = notification('visit_unassigned', {
   headline: 'Moved off your route', customer_name: 'Ruiz', service_type: 'Pest Control',
   when: 'Thu Sep 10, 9–11 AM', now_with: 'Adam Benetti', actor: 'by Virginia',
 });
+const OFF_ENDED = notification('visit_unassigned', {
+  headline: 'Moved off your route', customer_name: 'Ruiz', service_type: 'Pest Control',
+  when: 'Thu Sep 10, 9–11 AM', now_with: null, ended: 'cancelled', actor: 'by Virginia',
+});
 const GONE = notification('visit_cancelled', {
   headline: 'Visit cancelled', customer_name: 'Ruiz', service_type: 'Pest Control',
   when: 'Thu Sep 10, 9–11 AM', actor: 'by the office',
@@ -64,6 +68,7 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     ['assigned', ASSIGNED, ['New visit on your route', 'Ruiz', 'Pest Control · Thu Sep 10, 9–11 AM', '4312 Cortez Rd W, Bradenton', 'Assigned by Virginia']],
     ['rescheduled', MOVED, ['Visit moved', 'Was Thu Sep 10, 9–11 AM', 'Now Fri Sep 11, 1–3 PM', 'Moved by the customer online']],
     ['unassigned', OFF, ['Moved off your route', 'Now with Adam Benetti', 'Reassigned by Virginia']],
+    ['unassigned (visit since ended)', OFF_ENDED, ['Moved off your route', 'Now cancelled', 'Reassigned by Virginia']],
     ['cancelled', GONE, ['Visit cancelled', 'Cancelled by the office']],
   ])('renders the %s card with its headline, customer, details, and who acted', async (_kind, fixture, expected) => {
     stubFeed([fixture]);
