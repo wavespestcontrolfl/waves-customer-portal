@@ -1182,7 +1182,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           }}>wavespestcontrol.com/register</a>
         </div>
         <div style={{
-          fontSize: FS.micro,
+          fontSize: FS.body,
           color: B.white,
           opacity: 0.85,
           marginTop: 8,
@@ -1196,7 +1196,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
         position: 'absolute',
         bottom: 7,
         right: 10,
-        fontSize: FS.micro,
+        fontSize: FS.body,
         color: ESTIMATE_MUTED,
         opacity: 0.8,
         letterSpacing: 0.5,

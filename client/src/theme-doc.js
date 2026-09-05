@@ -21,7 +21,10 @@
 //
 // Server twin: server/services/pdf/pdf-tokens.js mirrors the literal values
 // for PDFKit documents (CommonJS, can't import this ES module). Change
-// values in BOTH places or the print documents drift.
+// values in BOTH places or the print documents drift. Exception: the type
+// scale. PDF_TYPE is a print scale in points (h1 20 / h2 14 / body 10) and
+// stays put when the screen scale moves (h1 34→40, h2 24→26 on 2026-09-05
+// were screen-legibility calls; paper is batch D, separately approved).
 
 import { COLORS as B, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -34,19 +37,18 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 export const DOC_FONT = FONTS.body; // "'Inter', system-ui, sans-serif"
 export const DOC_FONT_SERIF = FONTS.serif;
 
-// Fixed type scale. 13px is banned on customer surfaces (glass ruling);
-// 11 exists only for uppercase micro-labels/eyebrows.
+// Fixed type scale. On a glass surface (every customer page) nothing renders
+// under 14px — the runtime sheet in glass/glass-theme.css floors it, so the
+// scale starts at 14 (no micro/caption; the PDF twin keeps its own 8/9).
 export const FS = {
-  micro: 11, // uppercase eyebrows, footnote labels ONLY
-  caption: 12, // captions, legal, meta rows
-  body: 14, // default body / buttons / table cells
+  body: 14, // meta rows, table cells, buttons, eyebrows, fine print
   bodyLg: 15, // primary prose paragraphs
   lead: 16, // lead-ins, input text (16 = no iOS zoom)
   sub: 18, // sub-headings, intro lines
   h4: 16,
   h3: 20,
-  h2: 24,
-  h1: 34,
+  h2: 26,
+  h1: 40,
 };
 
 // Standard weights. Variable-font one-offs (650/750/850) snap to these.

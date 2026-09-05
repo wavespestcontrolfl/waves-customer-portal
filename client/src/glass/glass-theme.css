@@ -81,24 +81,31 @@ html[data-glass-theme] *:not(svg):not(path) {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+/* Customer type sheet (owner ruling 2026-09-03, DECISIONS 2026-09-04): one
+   scale for every customer glass page. h1 32–40 (the phone floor is 32 —
+   "it's an h1 after all"), h2 26, h3/h4 20, eyebrow 14/600/.06em, nothing
+   under 14px. Weights stop at 700. */
 html[data-glass-theme] h1 {
-  font-size: clamp(2.125rem, 4.5vw, 3.3rem) !important;
+  font-size: clamp(32px, 4vw, 40px) !important;
   font-weight: 700 !important;
-  line-height: 1.04 !important;
-  letter-spacing: -0.035em !important;
-  color: var(--brand) !important;
-}
-html[data-glass-theme] h2 {
-  font-size: clamp(1.6rem, 2.6vw, 2rem) !important;
-  font-weight: 600 !important;
-  line-height: 1.1 !important;
+  line-height: 1.08 !important;
   letter-spacing: -0.03em !important;
   color: var(--brand) !important;
 }
-html[data-glass-theme] h3,
-html[data-glass-theme] h4 {
+html[data-glass-theme] h2,
+html[data-glass-theme] [data-gt="h2x"] {
+  font-size: 26px !important;
   font-weight: 600 !important;
-  line-height: 1.18 !important;
+  line-height: 1.15 !important;
+  letter-spacing: -0.02em !important;
+  color: var(--brand) !important;
+}
+html[data-glass-theme] h3,
+html[data-glass-theme] h4,
+html[data-glass-theme] [data-gt="h3x"] {
+  font-size: 20px !important;
+  font-weight: 600 !important;
+  line-height: 1.2 !important;
   letter-spacing: -0.02em !important;
   color: var(--brand) !important;
 }
@@ -118,9 +125,9 @@ html[data-glass-theme] a[data-glass="chip"] * {
   letter-spacing: 0 !important;
 }
 html[data-glass-theme] [data-gt="eyebrow"] {
-  font-size: 12px !important;
-  font-weight: 700 !important;
-  letter-spacing: 0.11em !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em !important;
   line-height: 1.2 !important;
   color: var(--ts) !important;
   text-transform: uppercase;
@@ -133,7 +140,7 @@ html[data-glass-theme] [data-gt="metric"] {
   color: var(--brand) !important;
 }
 html[data-glass-theme] [data-gt="fine"] {
-  font-size: 12px !important; /* 12px floor (was 11.5) — a11y pass 2026-07-06 */
+  font-size: 14px !important; /* 14px floor (was 12; 11.5 before the 2026-07-06 pass) */
   line-height: 1.45 !important;
   font-weight: 400 !important;
   letter-spacing: 0.005em !important;
@@ -143,20 +150,6 @@ html[data-glass-theme] [data-gt="body"] {
   line-height: 1.5 !important;
   letter-spacing: -0.005em !important;
 }
-html[data-glass-theme] [data-gt="h2x"] {
-  font-size: clamp(1.6rem, 2.6vw, 2rem) !important;
-  font-weight: 600 !important;
-  line-height: 1.1 !important;
-  letter-spacing: -0.03em !important;
-  color: var(--brand) !important;
-}
-html[data-glass-theme] [data-gt="h3x"] {
-  font-size: 1.35rem !important;
-  font-weight: 600 !important;
-  line-height: 1.18 !important;
-  letter-spacing: -0.02em !important;
-  color: var(--brand) !important;
-}
 html[data-glass-theme] [data-g-contact],
 html[data-glass-theme] [data-g-contact] * {
   font-weight: 700 !important;
@@ -165,7 +158,7 @@ html[data-glass-theme] [data-g-stattile] * {
   font-size: 15px !important;
 }
 html[data-glass-theme] [data-g-stattile] [data-gt="eyebrow"] {
-  font-size: 11px !important;
+  font-size: 14px !important;
 }
 html[data-glass-theme] [data-g-pricerow] {
   display: flex !important;
@@ -273,6 +266,10 @@ html[data-glass-theme] [data-glass]:focus-visible {
   outline-offset: 3px;
   box-shadow: 0 0 0 5px rgba(var(--accent), 0.18), 0 16px 48px rgba(4, 57, 94, 0.16) !important;
 }
+html[data-glass-theme] :is(button, a, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])):not([data-glass]):focus-visible {
+  outline: 2px solid rgba(var(--accent), 0.9) !important;
+  outline-offset: 2px !important;
+}
 html[data-glass-theme] button:not([data-glass]):not([data-glass-accent]) {
   transition: filter 0.2s ease, transform 0.2s ease;
 }
@@ -356,31 +353,6 @@ html[data-glass-theme] [data-glass-scrim] {
   -webkit-backdrop-filter: blur(8px);
 }
 
-/* ---------- pro variant (invoices / receipts / statements) ---------- */
-/* Financial documents keep the glass material but drop the theatrics: no
-   specular shine, no hover lift, flatter shadows, quieter scene. */
-html[data-glass-theme="pro"] [data-glass]::before {
-  display: none;
-}
-html[data-glass-theme="pro"] [data-glass="card"]:hover,
-html[data-glass-theme="pro"] [data-glass="chip"]:hover,
-html[data-glass-theme="pro"] [data-glass="card"]:active,
-html[data-glass-theme="pro"] [data-glass="chip"]:active {
-  transform: none;
-}
-html[data-glass-theme="pro"] [data-glass] {
-  box-shadow: 0 12px 36px rgba(4, 57, 94, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.5) !important;
-  transition: box-shadow 240ms ease, border-color 240ms ease !important;
-}
-html[data-glass-theme="pro"] [data-glass="soft"] {
-  box-shadow: 0 4px 14px rgba(4, 57, 94, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.45) !important;
-}
-html[data-glass-theme="pro"] [data-glass-accent]:hover {
-  transform: none;
-}
-html[data-glass-theme="pro"] h1 {
-  font-size: clamp(1.9rem, 3.4vw, 2.4rem) !important;
-}
 
 /* ---------- scene layers / misc ---------- */
 html[data-glass-theme] .glass-scene-orbs {
@@ -474,64 +446,18 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
   }
 }
 
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  html[data-glass-theme] [data-glass],
-  html[data-glass-theme] [data-glass="soft"],
-  html[data-glass-theme] [data-glass="chip"] {
-    background: rgba(255, 255, 255, 0.93) !important;
-  }
-}
 
-/* ---------- print (a11y/design audit 2026-07-06) ----------
-   Estimates had NO print path: grain printed over content, sticky bars
-   repeated every page, translucent cards collapsed to faint washes. */
-@media print {
-  .glass-scene-orbs,
-  .glass-scene-grain,
-  .gc-mbb,
-  html[data-glass-theme] .gc-mbb,
-  [data-waves-shell-header] {
-    display: none !important;
-    visibility: hidden !important;
-  }
-  /* Below-fold cards are opacity:0 until the reveal IntersectionObserver
-     fires — nothing scrolls in print, so without this everything below the
-     first viewport prints BLANK (verified via print-to-pdf 2026-07-07). */
-  html[data-glass-theme] [data-glass].glass-reveal-pending {
-    opacity: 1 !important;
-    transform: none !important;
-  }
-  [data-glass] {
-    break-inside: avoid;
-  }
-  html[data-glass-theme],
-  html[data-glass-theme] body {
-    background: #fff !important;
-  }
-  html[data-glass-theme] [data-glass],
-  html[data-glass-theme] [data-glass-clear],
-  html[data-glass-theme] [data-g-footer] {
-    background: #fff !important;
-    box-shadow: none !important;
-    -webkit-backdrop-filter: none !important;
-    backdrop-filter: none !important;
-    border-color: #d7d2c4 !important;
-  }
-}
-
-/* ===== Customer token sheet (owner ruling 2026-09-03, DECISIONS 2026-09-04): one
-   type scale + radius set for every customer glass page — h1 clamp 32–40, h2 26,
-   h3 20, eyebrow 14/600/.06em, 14px floor, r12 cards / r10 controls / pills. ===== */
-html[data-glass-theme] h1, html[data-glass-theme="pro"] h1 { font-size: clamp(32px, 4vw, 40px) !important; line-height: 1.08 !important; letter-spacing: -0.03em !important; }
-html[data-glass-theme] h2, html[data-glass-theme] [data-gt="h2x"] { font-size: 26px !important; line-height: 1.15 !important; letter-spacing: -0.02em !important; }
-html[data-glass-theme] h3, html[data-glass-theme] h4, html[data-glass-theme] [data-gt="h3x"] { font-size: 20px !important; line-height: 1.2 !important; }
-html[data-glass-theme] [data-gt="eyebrow"], html[data-glass-theme] [data-g-stattile] [data-gt="eyebrow"] { font-size: 14px !important; font-weight: 600 !important; letter-spacing: 0.06em !important; }
-html[data-glass-theme] [data-gt="fine"] { font-size: 14px !important; }
+/* ===== Geometry + controls (owner ruling 2026-09-03, DECISIONS 2026-09-04):
+   r12 cards, r10 controls, r999 pills; primary actions 48 (BrandButton), gold
+   accent actions 44 minimum, choice chips 40 minimum; 16px input text (no iOS
+   zoom) with a 14px placeholder in the muted grey. ===== */
 html[data-glass-theme] [data-glass] { border-radius: 12px !important; }
 html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
 html[data-glass-theme] button:not([data-glass-pill]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
+html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
+html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
 html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
-html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::placeholder { font-size: 14px !important; font-weight: 400 !important; opacity: 0.8; }
+html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::placeholder { font-size: 14px !important; font-weight: 400 !important; color: #64748B !important; opacity: 1; }
 
 /* ===== Estimate = the template (ruling 2026-09-03): every customer glass page
    takes the estimate card grammar — warm-tinted outer card, soft inner boxes,
@@ -570,3 +496,125 @@ html[data-glass-theme] .waves-ask-row[data-first] { border-top: 0 !important; }
 html[data-glass-theme] .waves-ask-go { font-size: 14px !important; font-weight: 600 !important; color: #3F4A65 !important; }
 html[data-glass-theme] .sr-shell section[data-glass], html[data-glass-theme] .sr-shell .pest-await { margin-bottom: 16px !important; }
 html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !important; }
+
+/* ---------- solid fallbacks: LAST on purpose ----------
+   The tint overrides above are !important; these must come later in the
+   cascade or a no-backdrop-filter / reduced-transparency / forced-colors
+   viewer keeps the translucent card (GH Codex pre-push P1). */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  /* Same coverage as the Reduce Transparency block below: :hover / :active
+     too, accent controls, and no sheen. */
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass]:hover,
+  html[data-glass-theme] [data-glass="soft"],
+  html[data-glass-theme] [data-glass="soft"]:hover,
+  html[data-glass-theme] [data-glass="chip"],
+  html[data-glass-theme] [data-glass="chip"]:hover,
+  html[data-glass-theme] [data-glass="chip"]:active {
+    background: rgba(255, 255, 255, 0.93) !important;
+    border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
+  }
+  html[data-glass-theme] [data-glass-accent],
+  html[data-glass-theme] [data-glass-accent]:hover,
+  html[data-glass-theme] [data-glass-accent]:active {
+    background: #F4B014 !important;
+    border-color: #9A6200 !important;
+  }
+  html[data-glass-theme] [data-glass]::before,
+  html[data-glass-theme] [data-glass]::after,
+  html[data-glass-theme] [data-glass-accent]::before,
+  html[data-glass-theme] [data-glass-accent]::after {
+    display: none !important;
+  }
+}
+/* Reduce Transparency (iOS / macOS) and Windows High Contrast: the same
+   solid fallback, no blur, and a real border so the card edge survives. */
+@media (prefers-reduced-transparency: reduce) {
+  /* :hover / :active listed too — the interactive rules above carry a
+     pseudo-class, so without them a hovered chip would win the cascade and
+     go translucent again. */
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass]:hover,
+  html[data-glass-theme] [data-glass="soft"],
+  html[data-glass-theme] [data-glass="soft"]:hover,
+  html[data-glass-theme] [data-glass="chip"],
+  html[data-glass-theme] [data-glass="chip"]:hover,
+  html[data-glass-theme] [data-glass="chip"]:active {
+    background: rgba(255, 255, 255, 0.93) !important;
+    border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  /* Accent controls too: solid gold, no blur, no sheen. */
+  html[data-glass-theme] [data-glass-accent],
+  html[data-glass-theme] [data-glass-accent]:hover,
+  html[data-glass-theme] [data-glass-accent]:active {
+    background: #F4B014 !important;
+    border-color: #9A6200 !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  html[data-glass-theme] [data-glass]::before,
+  html[data-glass-theme] [data-glass]::after,
+  html[data-glass-theme] [data-glass-accent]::before,
+  html[data-glass-theme] [data-glass-accent]::after {
+    display: none !important;
+  }
+}
+@media (forced-colors: active) {
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass="soft"],
+  html[data-glass-theme] [data-glass="chip"],
+  html[data-glass-theme] [data-glass-accent] {
+    background: Canvas !important;
+    color: CanvasText !important;
+    border: 1px solid CanvasText !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    box-shadow: none !important;
+  }
+  html[data-glass-theme] [data-glass]::before,
+  html[data-glass-theme] [data-glass]::after,
+  .glass-scene-orbs,
+  .glass-scene-grain {
+    display: none !important;
+  }
+}
+
+/* Print closes the file for the same reason as the solid fallbacks above. */
+/* ---------- print (a11y/design audit 2026-07-06) ----------
+   Estimates had NO print path: grain printed over content, sticky bars
+   repeated every page, translucent cards collapsed to faint washes. */
+@media print {
+  .glass-scene-orbs,
+  .glass-scene-grain,
+  .gc-mbb,
+  html[data-glass-theme] .gc-mbb,
+  [data-waves-shell-header] {
+    display: none !important;
+    visibility: hidden !important;
+  }
+  /* Below-fold cards are opacity:0 until the reveal IntersectionObserver
+     fires — nothing scrolls in print, so without this everything below the
+     first viewport prints BLANK (verified via print-to-pdf 2026-07-07). */
+  html[data-glass-theme] [data-glass].glass-reveal-pending {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  [data-glass] {
+    break-inside: avoid;
+  }
+  html[data-glass-theme],
+  html[data-glass-theme] body {
+    background: #fff !important;
+  }
+  html[data-glass-theme] [data-glass],
+  html[data-glass-theme] [data-glass-clear],
+  html[data-glass-theme] [data-g-footer] {
+    background: #fff !important;
+    box-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    border-color: #d7d2c4 !important;
+  }
+}
