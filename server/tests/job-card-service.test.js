@@ -899,17 +899,16 @@ describe('PR review r8', () => {
     await expect(jobCard._test.loadCatalog(dbh)).rejects.toMatchObject({ statusCode: 503, message: 'Product catalog unavailable' });
   });
 
-  test('pack sizes come from the active verified mapping, structured quantity first (P2)', async () => {
+  test('pack sizes come from the active verified mapping, highest confidence first; case_quantity is never a pack (P2 + hook P1)', async () => {
     const seen = [];
     const dbh = () => {
       const chain = {};
-      for (const m of ['whereIn', 'orderBy', 'select']) chain[m] = () => chain;
+      for (const m of ['whereIn', 'whereNotNull', 'orderBy', 'select']) chain[m] = () => chain;
       chain.where = (arg) => { seen.push(arg); return chain; };
       chain.catch = async () => [
-        { product_id: 'a', pack_size: '1 gal', case_quantity: '2.5', uom: 'gal' },
-        { product_id: 'a', pack_size: '1 gal', case_quantity: null, uom: null },
-        { product_id: 'b', pack_size: '32 fl_oz', case_quantity: null, uom: null },
-        { product_id: 'c', pack_size: null, case_quantity: null, uom: null },
+        { product_id: 'a', pack_size: '2.5 gal', case_quantity: '2', uom: 'gal' },
+        { product_id: 'a', pack_size: '1 gal' },
+        { product_id: 'b', pack_size: '32 fl_oz' },
       ];
       return chain;
     };

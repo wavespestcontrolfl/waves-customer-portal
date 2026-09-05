@@ -743,27 +743,22 @@ async function loadCatalog(dbh = db) {
 }
 
 // The canonical pack per product: the active, verified mapping with the
-// highest confidence; its structured case quantity + uom first, the free-
-// text pack_size only as a fallback. Null when the read failed (ordering is
-// withheld — a 1-unit fallback would under-order a multi-unit pack); {}
-// when nothing verified is mapped.
+// highest confidence, its pack_size (the package contents, "2.5 gal" —
+// case_quantity is units per case, not contents). Null when the read failed
+// (ordering is withheld — a 1-unit fallback would under-order a multi-unit
+// pack); {} when nothing verified is mapped.
 async function loadPackSizes(dbh, productIds) {
   if (!productIds.length) return {};
   const rows = await dbh('distributor_product_map')
     .whereIn('product_id', productIds)
     .where({ active: true, mapping_status: 'verified' })
+    .whereNotNull('pack_size')
     .orderBy('mapping_confidence', 'desc')
     .orderBy('updated_at', 'desc')
-    .select('product_id', 'pack_size', 'case_quantity', 'uom')
+    .select('product_id', 'pack_size')
     .catch(() => null);
   if (!rows) return null;
-  return rows.reduce((acc, r) => {
-    if (acc[r.product_id]) return acc;
-    const structured = Number(r.case_quantity) > 0 && r.uom ? `${Number(r.case_quantity)} ${r.uom}` : null;
-    const pack = structured || r.pack_size || null;
-    if (pack) acc[r.product_id] = pack;
-    return acc;
-  }, {});
+  return rows.reduce((acc, r) => { if (!acc[r.product_id] && r.pack_size) acc[r.product_id] = r.pack_size; return acc; }, {});
 }
 
 // The appointment's rig assignment (the Lawn plan's equipment pick).
