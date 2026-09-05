@@ -6161,10 +6161,10 @@ function EstimateViewPageInner() {
             setPrepayConsentChecked(false);
             throw new Error(body.error || 'Your total changed while confirming — please confirm the updated amount.');
           }
-          if (['PER_APPLICATION_ADD_ON_UNPRICED', 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE', 'INVOICE_MODE_PER_APPLICATION_UNRESOLVED'].includes(body.code)) {
-            // A fail-closed PRICING refusal (#3751, docs/public-route-
-            // contracts.md): nothing was booked and the office has to
-            // re-quote. NOT a scheduling conflict — keep the reservation,
+          if (['PER_APPLICATION_ADD_ON_UNPRICED', 'LEGACY_MONTHLY_TERMITE_UNCONVERTIBLE', 'INVOICE_MODE_PER_APPLICATION_UNRESOLVED', 'ANNUAL_PREPAY_OVERLAP'].includes(body.code)) {
+            // A fail-closed billing refusal (docs/public-route-
+            // contracts.md): nothing was booked and the office must resolve
+            // the billing issue. Keep the reservation,
             // preference and plan selections, and surface the server's
             // call-the-office message instead of a slot-picker retry loop.
             throw new Error(body.error || 'We couldn\'t confirm this plan\'s pricing online — please call the office and we\'ll finish it for you.');
@@ -7660,7 +7660,9 @@ function EstimateViewPageInner() {
         />
       ) : null}
 
-      {ctaPhase === 'review' && reservation ? (
+      {/* Keep the captured payment form mounted during accept/requote so its
+          authorization survives the round trip to the exact-total step. */}
+      {(ctaPhase === 'review' || (ctaPhase === 'submitting' && inlineCardIntent)) && reservation ? (
         <>
           {existingAppointment ? (
             <>
@@ -7822,7 +7824,7 @@ function EstimateViewPageInner() {
                 intent={inlineCardIntent}
                 loadStripeSdk={loadStripeSdk}
                 glassActive={!!glassContent}
-                busy={inlineConfirmBusy}
+                busy={ctaPhase === 'submitting' || inlineConfirmBusy}
                 onStateChange={handleInlineCardState}
                 prepay={paymentPreference === 'prepay_annual'}
               />
