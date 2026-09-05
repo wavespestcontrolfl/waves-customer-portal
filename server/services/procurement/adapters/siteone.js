@@ -94,7 +94,11 @@ const SELECTORS = Object.freeze({
   cardField: 'input[autocomplete="cc-number"], input[name*="cardNumber"], input[name*="card_number"], iframe[src*="card"]',
   mfaField: 'input[autocomplete="one-time-code"], input[name*="otp"], input[name*="verificationCode"]',
   termsCheckbox: 'input[type="checkbox"][name*="terms"], input[type="checkbox"][name*="Terms"]',
-  checkoutTotal: '.checkout-totals .total, .order-summary .grand-total, [data-test="order-total"], .order-total .value, .grand-total .price',
+  // Every checkout reading is scoped beneath a checkout / order-summary
+  // container: an unscoped fallback could match a header mini-cart total or
+  // an account widget elsewhere on the page and pass as the checkout's own
+  // reading after selector drift (Codex #3876 r21 P2) — drift fails closed.
+  checkoutTotal: '.checkout-totals .total, .order-summary .grand-total, .checkout [data-test="order-total"], .order-summary [data-test="order-total"], .checkout .order-total .value, .order-summary .order-total .value, .checkout .grand-total .price, .order-summary .grand-total .price',
   // The checkout's order-summary lines: proven exactly [SKU × packages] again
   // at the click (Codex #3876 r7 P1); their SKU / quantity nodes reuse the
   // cart-line child selectors.
@@ -105,12 +109,12 @@ const SELECTORS = Object.freeze({
   // Identity readings are SCOPED to the checkout's own billing / shipping
   // sections — never a header account menu, a footer address, or an
   // ancestor's text — and place() requires exactly ONE match (pre-push P0).
-  checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .payment-method.selected .account-number, [data-test="bill-to-account"] .account-number',
-  checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, [data-test="shipping-address"]',
+  checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .checkout .payment-method.selected .account-number, .checkout [data-test="bill-to-account"] .account-number',
+  checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, .checkout [data-test="shipping-address"]',
+  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, h1:has-text("Order #"), h2:has-text("Order #"), h3:has-text("Order #"), p:has-text("Order #"), strong:has-text("Order #")',
   placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
   // Confirmation-number element only — never a bare :has-text() that an
   // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
-  orderNumber: '[data-test="order-number"], .order-number, .confirmation-number, .order-confirmation-number, h1:has-text("Order #"), h2:has-text("Order #"), h3:has-text("Order #"), p:has-text("Order #"), strong:has-text("Order #")',
 });
 
 const NAV_TIMEOUT = 45000;
@@ -158,8 +162,10 @@ function parseMoney(text) {
   return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
 }
 
-// Digit runs (3+) in a checkout label: "Account # 12345" → ['12345'].
-const digitRuns = (s) => String(s || '').match(/\d{3,}/g) || [];
+// EVERY digit run in a checkout label: "Account # 12345" → ['12345'];
+// "Account # 12345 Branch 01" → ['12345', '01'] — a short subaccount
+// component is part of the account, never ignored (Codex #3876 r21 P2).
+const digitRuns = (s) => String(s || '').match(/\d+/g) || [];
 // A configured ship-to token must appear as a whole token, not inside a
 // longer run ("34205" does not match "342051").
 const hasToken = (text, token) => new RegExp(`(^|[^a-z0-9])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(text);
@@ -251,9 +257,26 @@ async function gotoCart(page) {
 // quantity and approve a line that never existed (Codex #3876 r11 P1). A
 // replaced row leaves a detached handle: no children, not visible → the
 // line reads unreadable and the proof fails closed.
+// The ONE shown child, or several that READ the same (a quantity input
+// beside a quantity label carrying the same figure). Shown children that
+// read differently — the input still showing the requested quantity beside
+// the label showing SiteOne's adjustment — are not a reading: null, which
+// the row proof fails closed on (Codex #3876 r21 P2).
 async function shownChild(rowHandle, selector) {
-  for (const h of await rowHandle.$$(selector).catch(() => [])) if (await h.isVisible().catch(() => false)) return h;
-  return null;
+  const shown = [];
+  for (const h of await rowHandle.$$(selector).catch(() => [])) if (await h.isVisible().catch(() => false)) shown.push(h);
+  if (shown.length <= 1) return shown[0] || null;
+  // The VALUE is compared, not its DOM form: an input carrying "2" beside
+  // a label reading "2" is one reading (pre-push hook P1 on def020079).
+  const reading = async (h) => {
+    const attr = await h.getAttribute('data-product-code').catch(() => null);
+    if (attr) return normalizeSku(attr);
+    const value = await h.inputValue().catch(() => null);
+    const raw = value != null ? value : await h.textContent().catch(() => '');
+    return String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  };
+  const readings = new Set(await Promise.all(shown.map(reading)));
+  return readings.size === 1 ? shown[0] : null;
 }
 
 // Returns null when the rows CHURNED while being read: a row whose
@@ -266,8 +289,9 @@ async function cartLines(page, lineSelector = SELECTORS.cartLine) {
   let shown;
   try { ({ all, shown } = await matches(page, lineSelector, { strict: true })); }
   catch { return null; }
+  const readRows = async (rows) => {
   const out = [];
-  for (const line of shown) {
+  for (const line of rows) {
     const row = await line.elementHandle({ timeout: 1500 }).catch(() => null);
     if (!row) { out.push({ sku: '', qty: NaN }); continue; }
     // Inside the row too, only the SHOWN SKU / quantity node is read: a
@@ -287,16 +311,26 @@ async function cartLines(page, lineSelector = SELECTORS.cartLine) {
     const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
     out.push({ sku, qty: !stillShown || qtyText == null || qtyText === '' ? NaN : qty });
   }
+  return out;
+  };
+  const out = await readRows(shown);
   // The rows read must still be the rows shown: the count AND the
   // visibility of every match are re-read after the scan — a row that was
   // hidden at the scan and is visible now (or the reverse) is churn the
   // snapshot missed, not a proof; the count alone would pass it (Codex #3876
-  // r18 P1, extending the r13 count check). Unreadable = fails closed.
+  // r18 P1, extending the r13 count check). Then the shown rows are READ
+  // AGAIN: a row replaced after its own stillShown check by a different
+  // visible row keeps the count and the mask — only a second reading that
+  // matches the first, SKU and quantity, is a proof (r20 P2). Unreadable =
+  // fails closed.
   const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
   let again;
   try { again = await matches(page, lineSelector, { strict: true }); }
   catch { return null; }
   if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return null;
+  const reread = await readRows(again.shown);
+  const key = (rows) => JSON.stringify(rows.map((r) => [r.sku, Number.isNaN(r.qty) ? 'NaN' : r.qty]));
+  if (key(reread) !== key(out)) return null;
   return out;
 }
 
@@ -623,8 +657,14 @@ async function verifyCheckoutLines(page, { vendorSku, qty, evidence, upload }) {
 // `.price` it contains) matches the ONE figure twice — shown matches that
 // all parse to the SAME value are one reading (the innermost text is
 // returned); different values stay ambiguous (Codex #3876 r17 P2).
+// Read STRICTLY (Codex #3876 r19 P2): a candidate whose visibility cannot
+// be read (it detached mid-enumeration) is not "hidden" — the reading is
+// unresolved, `count: null`, and every caller refuses on it.
 async function readExactlyOne(page, selector, { same } = {}) {
-  const { all, shown } = await matches(page, selector);
+  let all;
+  let shown;
+  try { ({ all, shown } = await matches(page, selector, { strict: true })); }
+  catch { return { count: null, text: '', visible: false }; }
   let target = shown[0] || (all.length === 1 ? all[0] : null);
   if (shown.length > 1) {
     const texts = same ? await Promise.all(shown.map((el) => el.textContent().then((t) => String(t || ''), () => null))) : [];
@@ -637,6 +677,14 @@ async function readExactlyOne(page, selector, { same } = {}) {
   if (!handle) return { count: 1, text: '', visible: false };
   const text = await handle.textContent().catch(() => '');
   const isVisible = await handle.isVisible().catch(() => false);
+  // Re-enumerated after the reads: a replacement node appended during them
+  // (the old one not yet removed) would otherwise validate the old value
+  // while a second, conflicting reading is on the page (Codex #3876 r21 P2).
+  const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
+  let again;
+  try { again = await matches(page, selector, { strict: true }); }
+  catch { return { count: null, text: '', visible: false }; }
+  if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return { count: null, text: '', visible: false };
   return { count: 1, text: String(text || ''), visible: isVisible };
 }
 
@@ -777,17 +825,20 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
   // Both readings must be VISIBLE (pre-push P0): a single hidden responsive
   // or stale node carrying the approved values is not what the checkout shows.
   const account = await readExactlyOne(page, SELECTORS.checkoutAccount);
+  if (account.count == null) await refuse('account_unverified', 'the billing-account readings at checkout could not be enumerated, or changed while being read — not verified');
   if (account.count > 1) await refuse('account_ambiguous', `${account.count} billing-account readings at checkout — cannot tell which the order bills`);
   const accountText = normalizeText(account.text);
   if (!accountText) await refuse('account_unverified', 'could not read the billing account shown at checkout');
   if (!account.visible) await refuse('account_hidden', 'the billing-account element at checkout is not visible — not what the order bills');
   const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
-  // A separator-formatted display ("12345-01", "12345.01") compares digit
-  // for digit: separators BETWEEN digits collapse, the one-whole-run rule
-  // still holds (Codex #3876 r7 P2).
-  const accountRuns = digitRuns(accountText.replace(/(\d)[-./](?=\d)/g, '$1'));
+  // A separator-formatted display ("12345-01", "12345.01", "12345 - 01")
+  // compares digit for digit: separators BETWEEN digits collapse, spaces
+  // around them included (Codex #3876 r7 P2, r19 P2), the one-whole-run
+  // rule still holds — "12345 - 01" is subaccount 1234501, never 12345.
+  const accountRuns = digitRuns(accountText.replace(/(\d)\s*[-./]\s*(?=\d)/g, '$1'));
   if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { evidence.checkoutAccount = accountText.slice(0, 60); await refuse('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`); }
   const shipTo = await readExactlyOne(page, SELECTORS.checkoutShipTo);
+  if (shipTo.count == null) await refuse('ship_to_unverified', 'the ship-to readings at checkout could not be enumerated, or changed while being read — not verified');
   if (shipTo.count > 1) await refuse('ship_to_ambiguous', `${shipTo.count} ship-to readings at checkout — cannot tell which the order ships to`);
   const shipToText = normalizeText(shipTo.text);
   if (!shipToText) await refuse('ship_to_unverified', 'could not read the ship-to address shown at checkout');
@@ -807,6 +858,7 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
 async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) {
   const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
   const total = await readExactlyOne(page, SELECTORS.checkoutTotal, { same: parseMoney });
+  if (total.count == null) await refuse('checkout_total_unreadable', 'the checkout-total readings could not be enumerated, or changed while being read — not the figure the order charges');
   if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
   if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
   const finalCents = parseMoney(total.text);
