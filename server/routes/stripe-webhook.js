@@ -4817,6 +4817,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       customerId: estimate.customer_id,
       scheduledServiceId: appt?.id ? String(appt.id) : null,
       throwOnError: true,
+    }).catch((err) => {
+      throw annotateSetupIntentWebhookError(err, {
+        handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'payer_lookup_failed',
+      });
     });
     if (payer?.payerId) return; // payer-billed — permanent skip
     const stripePmId = typeof setupIntent.payment_method === 'string'

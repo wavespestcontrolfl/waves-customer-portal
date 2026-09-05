@@ -294,7 +294,7 @@ test('setup_intent.succeeded expected-retry capture adds safe purpose/branch/rea
   expect(update).toHaveBeenCalledWith({ error: 'appointment card capture seti_retry_1 completion_in_progress — retry' });
 });
 
-test('raw one-word enrollment exception stays out of every Sentry field while Stripe still retries', async () => {
+test.each(['enrollment_transient', 'payer_lookup_failed'])('recurring %s keeps raw one-word exception private while Stripe still retries', async (reasonCode) => {
   const privateReason = 'PrivateCustomerWord';
   const update = jest.fn().mockResolvedValue(1);
   const ledger = ledgerBuilder({ update });
@@ -306,9 +306,13 @@ test('raw one-word enrollment exception stays out of every Sentry field while St
       : { billing_mode: 'per_application' };
     return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => row) };
   });
-  RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({
-    enrolled: false, transient: true, reason: privateReason,
-  });
+  if (reasonCode === 'payer_lookup_failed') {
+    Payer.resolveForInvoice.mockRejectedValueOnce(new Error(privateReason));
+  } else {
+    RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({
+      enrolled: false, transient: true, reason: privateReason,
+    });
+  }
   mockConstructEvent.mockReturnValue({
     id: 'evt_enrollment_transient', type: 'setup_intent.succeeded',
     data: { object: {
@@ -318,19 +322,25 @@ test('raw one-word enrollment exception stays out of every Sentry field while St
   });
 
   expect((await postWebhook()).status).toBe(500);
-  expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(1);
+  expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(reasonCode === 'payer_lookup_failed' ? 0 : 1);
+  expect(Payer.resolveForInvoice).toHaveBeenCalledWith({
+    customerId: 'customer_test', scheduledServiceId: 'appt_test', throwOnError: true,
+  });
   expect(Sentry.captureException).toHaveBeenCalledTimes(1);
   const [capturedErr, context] = Sentry.captureException.mock.calls[0];
-  expect(context.extra.reasonCode).toBe('enrollment_transient');
-  expect(context.extra.errorCode).toBe('enrollment_transient');
+  expect(context.extra.reasonCode).toBe(reasonCode);
+  expect(context.extra.errorCode).toBe(reasonCode);
   expect(context.fingerprint).toEqual([
     'stripe-webhook-handler', 'setup_intent.succeeded', 'Error',
-    'estimate_recurring_card', 'expected_retry', 'enrollment_transient',
+    'estimate_recurring_card', 'expected_retry', reasonCode,
   ]);
   expect(JSON.stringify([capturedErr.message, capturedErr.stack, context])).not.toContain(privateReason);
   expect(update).toHaveBeenCalledWith({
-    error: `recurring-cof webhook enrollment transient failure (${privateReason}) — retry`,
+    error: reasonCode === 'payer_lookup_failed'
+      ? privateReason
+      : `recurring-cof webhook enrollment transient failure (${privateReason}) — retry`,
   });
+  expect(update).not.toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
 });
 
 test.each([
