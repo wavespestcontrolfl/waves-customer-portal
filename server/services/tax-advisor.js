@@ -36,6 +36,7 @@ class TaxAdvisor {
     const taxRates = await this.getCurrentTaxRates();
     const exemptions = await this.getExemptionStatus();
     const procurement = await this.getProcurementSummary();
+    const staff = await this.getStaffSummary();
 
     const analysisData = {
       snapshot,
@@ -79,7 +80,7 @@ BUSINESS CONTEXT:
 - Equipment: Ford Transit van, spray systems, dethatcher, topdresser, injection equipment
 - Primary supplier: SiteOne Landscape Supply (Branch #238 Lakewood Ranch)
 - Has a Florida Annual Resale Certificate for product purchases used in taxable services
-- Employees: owner + technician (Adam Benetti)
+- Employees: ${staff}
 - Software stack: Stripe (payments/invoicing), Twilio (SMS), Railway (hosting), various SaaS
 
 YOUR WEEKLY TASKS:
@@ -198,6 +199,22 @@ Please search for current FL and federal tax changes, then provide your analysis
   }
 
   // ── Data Gathering Methods ─────────────────────────────────
+
+  // Live headcount for the prompt. technicians.employment_status is the
+  // payroll truth: prospective placeholders and offboarded rows are not
+  // employees. The owner-operator is one of the active rows.
+  async getStaffSummary() {
+    try {
+      const [{ count }] = await db('technicians').where({ employment_status: 'active' }).count({ count: '*' });
+      const n = Number(count) || 0;
+      return n <= 1
+        ? 'owner-operator, no other employees'
+        : `${n} active staff on payroll including the owner-operator`;
+    } catch (err) {
+      logger.warn(`[tax-advisor] staff count failed: ${err.message}`);
+      return 'owner-operator plus staff (live count unavailable)';
+    }
+  }
 
   async gatherFinancialSnapshot() {
     try {

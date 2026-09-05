@@ -95,7 +95,7 @@ describe('review outreach templates', () => {
 
   test('renderOutreachBody falls back to sensible defaults', () => {
     const out = renderOutreachBody('Hey {first}, {tech} here', {});
-    expect(out).toBe('Hey there, Adam here');
+    expect(out).toBe('Hey there, Your technician here');
   });
 
   test('requireLink appends the review URL when an edited body dropped it', () => {

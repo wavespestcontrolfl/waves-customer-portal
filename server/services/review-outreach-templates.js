@@ -209,7 +209,7 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
   const v = {
     first: vars.first || vars.name || 'there',
     name: vars.name || vars.first || 'there',
-    tech: vars.tech || 'Adam',
+    tech: vars.tech || 'Your technician',
     service_type: vars.service_type || 'service',
     review_url: vars.review_url || '',
     date: vars.date || '',
