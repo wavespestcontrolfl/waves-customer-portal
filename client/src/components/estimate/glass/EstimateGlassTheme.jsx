@@ -52,7 +52,7 @@ const ownText = (el) => {
   return s.trim();
 };
 
-function classify(revealIO, statIO, pro) {
+function classify(revealIO, statIO) {
   for (const el of document.querySelectorAll('#root *')) {
     if (el.closest('svg')) continue;
     const cs = getComputedStyle(el);
@@ -188,7 +188,7 @@ function classify(revealIO, statIO, pro) {
   // floating pill nav (estimate page only — financial pages keep their
   // headers; the standard WavesShell bar keeps its full-width layout, the
   // pill compaction hides its icon row behind the centered logo)
-  const header = pro ? null : document.querySelector('header:not([data-waves-shell-header]), [role="banner"]');
+  const header = document.querySelector('header:not([data-waves-shell-header]), [role="banner"]');
   if (header && !header.hasAttribute('data-g-nav')) {
     header.setAttribute('data-g-nav', '');
     Object.assign(header.style, { position: 'sticky', top: '10px', zIndex: '60', margin: '10px auto 0', maxWidth: '780px', borderRadius: '999px', padding: '8px 26px' });
@@ -235,9 +235,7 @@ export function useGlassTheme(active, variant = 'full') {
     const html = document.documentElement;
     const { orbs, cleanup: sceneCleanup } = applyGlassScene(variant);
     const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const pro = variant === 'pro';
-
-    const revealIO = pro ? null : new IntersectionObserver((ents) => {
+    const revealIO = new IntersectionObserver((ents) => {
       ents.forEach((en) => {
         if (!en.isIntersecting) return;
         en.target.classList.add('glass-reveal-in');
@@ -246,7 +244,7 @@ export function useGlassTheme(active, variant = 'full') {
       });
     }, { threshold: 0.06 });
 
-    const statIO = pro ? null : new IntersectionObserver((ents) => {
+    const statIO = new IntersectionObserver((ents) => {
       ents.forEach((en) => {
         if (!en.isIntersecting) return;
         statIO.unobserve(en.target);
@@ -266,7 +264,7 @@ export function useGlassTheme(active, variant = 'full') {
       });
     }, { threshold: 0.5 });
 
-    const run = () => classify(revealIO, statIO, pro);
+    const run = () => classify(revealIO, statIO);
     run();
 
     // Re-tag after React re-renders. childList covers mount/unmount;
@@ -304,7 +302,6 @@ export function useGlassTheme(active, variant = 'full') {
     if (rootEl) mo.observe(rootEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
 
     // cursor-follow specular + pointer/scroll parallax on the orbs
-    // (no orbs on the pro variant, so the engine attaches nothing there)
     const detachFx = attachGlassPointerFx(html, orbs, reduced);
 
     return () => {

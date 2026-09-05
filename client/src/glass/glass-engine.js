@@ -30,23 +30,16 @@ export function applyGlassScene(variant) {
   const prevHtmlBg = html.style.background;
   const prevBodyBg = document.body.style.background;
   html.setAttribute('data-glass-theme', variant);
-  // The 'pro' scene (invoices/receipts/statements) stays quiet: one soft
-  // brand-tinted wash, no orbs, no grain — financial documents should feel
-  // composed, not playful.
-  html.style.background = variant === 'pro'
-    ? [
-      'radial-gradient(900px 600px at 80% -10%, rgba(10,126,194,.14), transparent 60%)',
-      'radial-gradient(700px 500px at 0% 100%, rgba(4,57,94,.08), transparent 60%)',
-      'linear-gradient(180deg,#EDF3F9 0%,#F8FAFC 50%,#EEF3F8 100%)',
-    ].join(',')
-    : [
-      'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
-      'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
-      'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
-      'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
-      'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
-      'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
-    ].join(',');
+  // One scene for every customer page (owner 2026-09-03: invoices, receipts
+  // and statements look like the estimate — the quieter wash is gone).
+  html.style.background = [
+    'radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%)',
+    'radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%)',
+    'radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%)',
+    'radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%)',
+    'radial-gradient(140% 120% at 50% 40%, rgba(255,255,255,0) 55%, rgba(4,57,94,.14) 100%)',
+    'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
+  ].join(',');
   document.body.style.setProperty('background', 'transparent', 'important');
   const root = document.getElementById('root');
   if (root) {
@@ -56,7 +49,7 @@ export function applyGlassScene(variant) {
 
   let orbs = null;
   let grain = null;
-  if (variant !== 'pro') {
+  {
     orbs = document.createElement('div');
     orbs.className = 'glass-scene-orbs';
     orbs.setAttribute('aria-hidden', 'true');

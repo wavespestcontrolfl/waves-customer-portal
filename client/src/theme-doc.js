@@ -34,19 +34,20 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 export const DOC_FONT = FONTS.body; // "'Inter', system-ui, sans-serif"
 export const DOC_FONT_SERIF = FONTS.serif;
 
-// Fixed type scale. 13px is banned on customer surfaces (glass ruling);
-// 11 exists only for uppercase micro-labels/eyebrows.
+// Fixed type scale. On a glass surface (every customer page) nothing renders
+// under 14px — the runtime sheet in glass/glass-theme.css enforces it — so
+// micro/caption exist for the print/PDF twin and non-glass renders only.
 export const FS = {
-  micro: 11, // uppercase eyebrows, footnote labels ONLY
-  caption: 12, // captions, legal, meta rows
-  body: 14, // default body / buttons / table cells
+  micro: 11, // print/PDF footnote stamps ONLY (never on a glass surface)
+  caption: 12, // print/PDF captions and legal ONLY (never on a glass surface)
+  body: 14, // meta rows, table cells, buttons, eyebrows, fine print
   bodyLg: 15, // primary prose paragraphs
   lead: 16, // lead-ins, input text (16 = no iOS zoom)
   sub: 18, // sub-headings, intro lines
   h4: 16,
   h3: 20,
-  h2: 24,
-  h1: 34,
+  h2: 26,
+  h1: 40,
 };
 
 // Standard weights. Variable-font one-offs (650/750/850) snap to these.

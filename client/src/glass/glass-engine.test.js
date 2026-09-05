@@ -46,24 +46,9 @@ describe('applyGlassScene', () => {
     expect(document.body.style.background).toBe('rgb(4, 5, 6)');
   });
 
-  it('pro variant mounts no orbs and no grain', () => {
-    const { orbs, cleanup } = applyGlassScene('pro');
-    expect(document.documentElement.getAttribute('data-glass-theme')).toBe('pro');
-    expect(orbs).toBeNull();
-    expect(document.querySelector('.glass-scene-orbs')).toBeNull();
-    expect(document.querySelector('.glass-scene-grain')).toBeNull();
-    cleanup();
-    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
-  });
 });
 
 describe('attachGlassPointerFx', () => {
-  it('is a no-op without orbs (pro variant)', () => {
-    const add = vi.spyOn(document, 'addEventListener');
-    const detach = attachGlassPointerFx(document.documentElement, null, false);
-    expect(add).not.toHaveBeenCalledWith('pointermove', expect.any(Function), expect.anything());
-    expect(() => detach()).not.toThrow();
-  });
 
   it('detach removes listeners and the specular vars', () => {
     const { orbs, cleanup } = applyGlassScene('full');
@@ -113,10 +98,4 @@ describe('useGlassSurface', () => {
     unmount();
   });
 
-  it('pro variant mounts the quiet scene', () => {
-    const { unmount } = renderHook(() => useGlassSurface(true, 'pro'));
-    expect(document.documentElement.getAttribute('data-glass-theme')).toBe('pro');
-    expect(document.querySelector('.glass-scene-orbs')).toBeNull();
-    unmount();
-  });
 });
