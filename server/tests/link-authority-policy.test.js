@@ -430,3 +430,29 @@ describe('decision-inputs hash (§3.6b — per dimension + shared floors)', () =
     expect(() => P.decisionInputs('nope', {})).toThrow(/unknown authority dimension/);
   });
 });
+
+describe('the follow-up instance (§6.4)', () => {
+  const policy = P.normalizePolicyRow(null);
+  const domain = { spam_score: 1, score: 80 };
+  const path = { acquisition_type: 'resource_outreach', link_type: 'resource', confidence: 0.9, last_investigated_at: '2026-09-01', account_required: false, email_verification: false, payment_required: false, legal_attestation: false, terms_accepted_by_send: false, execution_after_send: true, baseline: false, currency: 'unknown', superseded_by: null, agent_completable: true, legal_terms_hash: null };
+  test('requiredInstances adds communication/followup only when the placement carries a follow-up, only on an outreach path', () => {
+    expect(P.requiredInstances(path).map((i) => i.instance_kind)).toEqual(['-']);
+    expect(P.requiredInstances(path, { followUp: true }).map((i) => `${i.dimension}|${i.instance_kind}`)).toEqual(['communication|-', 'communication|followup']);
+    expect(P.requiredInstances({ ...path, acquisition_type: 'directory_signup', link_type: 'directory' }, { followUp: true }).map((i) => `${i.dimension}|${i.instance_kind}`)).toEqual(['execution|-']);
+    expect(P.submitFirst({ ...path, execution_after_send: false })).toBe(false); // unaffected: no execution:- instance
+  });
+  test('decideAuthority decides the follow-up by the same 2c rule on ITS draft (draftClean is the follow-up\'s when followUp)', () => {
+    const auto = { ...policy, auto_outreach_min_score: 60, auto_outreach_daily_cap: 5 };
+    const clean = P.decideAuthority({ path, domain, policy: auto, score: 80, draftClean: true, followUp: true }).instances;
+    expect(clean.map((i) => [i.instance_kind, i.level])).toEqual([['-', 'AUTO_OUTREACH'], ['followup', 'AUTO_OUTREACH']]);
+    const unclean = P.decideAuthority({ path, domain, policy: auto, score: 80, draftClean: false, followUp: true }).instances;
+    expect(unclean.find((i) => i.instance_kind === 'followup')).toMatchObject({ level: 'OWNER_OUTREACH', reason: 'no lint-clean draft yet' });
+    const legal = P.decideAuthority({ path: { ...path, legal_attestation: true, legal_terms_hash: 'a'.repeat(64) }, domain, policy: auto, score: 80, draftClean: true, followUp: true }).instances;
+    expect(legal.find((i) => i.instance_kind === 'followup')).toMatchObject({ level: 'OWNER_LEGAL' });
+    expect(P.decideAuthority({ path, domain, policy: auto, score: 80, draftClean: true }).instances.some((i) => i.instance_kind === 'followup')).toBe(false);
+  });
+  test('the follow-up instance key has its own decision hash', () => {
+    const ctx = { path, domain, policy, score: 80 };
+    expect(P.decisionInputsHash('communication', { ...ctx, instanceKey: 'followup:1' })).not.toBe(P.decisionInputsHash('communication', { ...ctx, instanceKey: '-:1' }));
+  });
+});

@@ -14,6 +14,7 @@ const { WAVES_LOCATIONS } = require('../../config/locations');
 const { SIGNUP_LINK_TYPES } = require('./link-path-investigation-schema');
 const { isOutreachLocked } = require('./link-registry');
 const { requiredInstances } = require('./link-authority-policy');
+const { followUpPending, OWNER_MARKERS } = require('./link-outreach-mandate');
 
 const AUTH = 'seo_link_placement_authorities';
 // The aggregate states the bridge OWNS. `new`/`investigating`/`watching`/
@@ -30,10 +31,11 @@ const PARKABLE = 'prospect';
 // those moves either — and the verifier bumps updated_at on every live check. The aggregate is therefore re-run
 // exactly when the STORED state contradicts what the statuses imply: `acquired` needs a live link (off-shape links
 // count — they win the aggregate too); `acquiring` needs an in-shape placement that is leased or in an active
-// intermediate. Anything else the aggregate would say is held / pending — states the rows already re-select on.
+// intermediate — a CLOSED conversation (§13: conversation_closed_at, its inbox and domain released) is not one, so the
+// closure sweep's stamp re-selects the domain here and the bridge re-aggregates it. Anything else the aggregate would say is held / pending — states the rows already re-select on.
 const CONTRADICTED = Object.freeze({
   acquired: ({ all }) => !all.some((p) => LIVE_STATUSES.includes(p.status)),
-  acquiring: ({ mine }) => !mine.some((p) => p.claimed_at || ACQUIRING_STATUSES.includes(p.status)),
+  acquiring: ({ mine }) => !mine.some((p) => p.claimed_at || (ACQUIRING_STATUSES.includes(p.status) && !p.conversation_closed_at)),
   // pending authorized work means an UNLEASED `prospect` row; a worker that claimed and reported it moved the
   // placement straight to placed / contacted / live without the domain knowing
   ready_to_acquire: ({ mine }) => !mine.some((p) => p.status === PARKABLE && !p.claimed_at),
@@ -108,7 +110,7 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const forced = new Set(domainIds || []);
   // candidates: bridge-owned state, or owning an open row (satisfied or not), or carrying an active waiver, or explicitly requested
   const owned = await db('seo_link_domains').whereIn('agent_state', [...BRIDGE_STATES]).whereNotNull('best_path_id').orderBy('updated_at', 'asc').select('id');
-  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'path_revision', 'dimension', 'instance_kind', 'decided_at', 'satisfied_at', 'satisfied_reason', 'accepted_terms_hash');
+  const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'path_revision', 'dimension', 'instance_kind', 'level', 'decided_at', 'satisfied_at', 'satisfied_reason', 'accepted_terms_hash');
   const owners = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id') : [];
   const waivers = await db('seo_link_floor_waivers').whereNull('invalidated_at').select('domain_id', 'path_id', 'approved_at');
   const candidateIds = [...new Set([...owned.map((d) => d.id), ...owners.map((p) => p.domain_id), ...waivers.map((w) => w.domain_id), ...forced])]
@@ -117,10 +119,10 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   // no best_path_id filter: a domain whose route the investigator disproved (best_path_id cleared) still owns
   // open rows — it is selected once so the bridge retires them (see below), then drops out of the candidates
   const domains = await db('seo_link_domains').whereIn('id', candidateIds).select('id', 'domain', 'agent_state', 'best_path_id', 'updated_at');
-  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline');
+  const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(domains.map((d) => d.best_path_id).filter(Boolean))]).select('id', 'updated_at', 'link_type', 'acquisition_type', 'account_required', 'legal_attestation', 'legal_terms_hash', 'payment_required', 'fee_scope', 'revision_payment', 'revision', 'baseline', 'execution_after_send'); // execution_after_send: the follow-up's lifecycle set is path-dependent (followUpPending)
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // every placement the candidates own: "bridged" = one on the best path, carrying open rows, per expected location
-  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at');
+  const placements = await db('seo_link_prospects').whereIn('domain_id', candidateIds).select('id', 'domain_id', 'path_id', 'location_key', 'status', 'claimed_at', 'payment_group_id', 'updated_at', 'outreach_status', 'outreach_sent_at', 'follow_up_status', 'follow_up_skipped_reason', 'conversation_closed_at');
   const paid = await paidPlacementIds(db, placements.map((p) => p.id));
   const byDomain = new Map();
   for (const p of placements) byDomain.set(p.domain_id, [...(byDomain.get(p.domain_id) || []), p]);
@@ -130,7 +132,11 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   for (const w of waivers) waiverAt.set(`${w.domain_id}|${w.path_id}`, Math.max(waiverAt.get(`${w.domain_id}|${w.path_id}`) || 0, ts(w.approved_at)));
 
   const picked = [];
-  const rank = { forced: 0, unbridged: 1, stale: 2 };
+  // the nightly slice (limit) is spent in this order: forced → FOLLOW-UP work (a drafted / in-flight follow-up still
+  // without its communication/followup instance, or one the sender routed to the owner on a marker — dated §6.4 work
+  // the auto dispatcher and the owner queue cannot act on until the bridge decides it) → cold unbridged domains → the
+  // rest of the stale set. A sustained investigator backlog of unbridged domains must never starve the follow-ups.
+  const rank = { forced: 0, followup: 1, unbridged: 2, stale: 3 };
   for (const d of domains) {
     const best = pathById.get(d.best_path_id) || null;
     // a baseline placeholder (an imported existing backlink, never investigated) is not an executable path: nothing to bridge
@@ -160,16 +166,34 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     const pinned = (p) => isOutreachLocked(p);
     const frozen = (p) => pinned(p) && p.path_id !== d.best_path_id;
     const onBest = mine.filter((p) => p.path_id === d.best_path_id || pinned(p));
+    // a location is bridged when a LIVE placement there carries rows. A CLOSED conversation (§13: conversation_closed_at
+    // — silent, its inbox and domain released) keeps its satisfied rows as history and still counts as the slot's
+    // placement ONLY while no live row waits there unbridged: a prospect admitted for the released publisher must be
+    // selected and bridged, not shadowed by the closed row's coverage; with nothing else at the location the closed
+    // row covers it as before (nothing to bridge, no nightly slot spent)
+    const covered = (l) => {
+      const at = onBest.filter((p) => p.location_key === l);
+      const live = at.filter((p) => !p.conversation_closed_at);
+      return live.some((p) => rowsByProspect.has(p.id)) || (at.some((p) => rowsByProspect.has(p.id)) && !live.length);
+    };
     const cutoff = Math.max(ts(policyUpdatedAt), ts(d.updated_at), best ? ts(best.updated_at) : 0, waiverAt.get(`${d.id}|${d.best_path_id}`) || 0);
+    // an AUTOMATIC follow-up the sender refused for a reason only the owner resolves carries a marker on
+    // follow_up_skipped_reason (reply check failed, recipient review required — the draft still drafted): its authority
+    // is the owner's now (followUpReview reads the marker → OWNER_OUTREACH, §6.4). Stale by the MARKER, not by the
+    // clock — the nightly's own auto dispatch stamps the refusal with the run's `now`, EQUAL to decided_at, so the
+    // timestamp test alone would never re-select the row
+    const ownerByMarker = (r, p) => r.dimension === 'communication' && r.instance_kind === 'followup' && String(r.level || '').startsWith('AUTO_') && OWNER_MARKERS.includes(p.follow_up_skipped_reason);
     const staleRow = (r, p) => (best && rotationOutcome(r, best) !== null)
-      || (!r.satisfied_at && (ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
+      || (!r.satisfied_at && (ownerByMarker(r, p) || ts(r.decided_at) < cutoff || ts(r.decided_at) < ts(p.updated_at)));
     // the OPEN instance set must cover what the path REQUIRES now (policy requiredInstances): an in-place
     // re-investigation that adds a fee or legal terms needs a new row even when every existing row is satisfied;
     // an UNSATISFIED instance the path no longer requires must be ended (the bridge keeps a satisfied surplus row —
     // it is history — so it is never a reason to re-select)
-    const required = best ? new Set(requiredInstances(best).map((i) => `${i.dimension}|${i.instance_kind}`)) : null;
+    // (the communication/followup instance is required per PLACEMENT — while its follow-up is drafted / in flight, §6.4)
+    const requiredFor = (p) => new Set(requiredInstances(best, { followUp: followUpPending(p, best) }).map((i) => `${i.dimension}|${i.instance_kind}`));
     const instanceSetMoved = (p) => {
-      if (!required) return false;
+      if (!best) return false;
+      const required = requiredFor(p);
       const open = rowsByProspect.get(p.id) || [];
       const openKeys = new Set(open.map((r) => `${r.dimension}|${r.instance_kind}`));
       const unsatisfiedKeys = open.filter((r) => !r.satisfied_at).map((r) => `${r.dimension}|${r.instance_kind}`);
@@ -182,12 +206,14 @@ async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
     let why = null;
     if (forced.has(d.id)) why = 'forced';
     else if (!d.best_path_id) why = all.some((p) => (rowsByProspect.get(p.id) || []).some((r) => !r.satisfied_at)) ? 'stale' : null; // route gone: open unsatisfied rows to retire
-    else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !onBest.some((p) => p.location_key === l && rowsByProspect.has(p.id)))) why = 'unbridged';
+    else if (BRIDGE_STATES.includes(d.agent_state) && expected.some((l) => !covered(l))) why = 'unbridged';
     else if (contradicted || offShapeOpen || groupMismatch(best, mine) || withRows.some((p) => p.path_id !== d.best_path_id || instanceSetMoved(p) || rowsByProspect.get(p.id).some((r) => staleRow(r, p)))) why = 'stale';
     else if (waiverAt.has(`${d.id}|${d.best_path_id}`) && !withRows.length && !BRIDGE_STATES.includes(d.agent_state)) why = 'stale'; // a waiver on a rejected domain whose rows were all ended
-    if (why) picked.push({ id: d.id, domain: d.domain, why, at: ts(d.updated_at) });
+    const followUpWork = why === 'stale' && mine.some((p) => (followUpPending(p, best) && !(rowsByProspect.get(p.id) || []).some((r) => r.dimension === 'communication' && r.instance_kind === 'followup'))
+      || (rowsByProspect.get(p.id) || []).some((r) => ownerByMarker(r, p)));
+    if (why) picked.push({ id: d.id, domain: d.domain, why, tier: followUpWork ? 'followup' : why, at: ts(d.updated_at) });
   }
-  picked.sort((a, b) => rank[a.why] - rank[b.why] || a.at - b.at);
+  picked.sort((a, b) => rank[a.tier] - rank[b.tier] || a.at - b.at);
   return picked.slice(0, limit).map(({ id, domain, why }) => ({ id, domain, why }));
 }
 

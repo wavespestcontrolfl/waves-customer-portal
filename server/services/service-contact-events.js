@@ -34,6 +34,20 @@ const { getServiceContactSlots } = require('./customer-contact');
 
 const norm = (v) => String(v == null ? '' : v).trim().toLowerCase();
 const phoneKey = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
+
+// Exact, non-PII identity of a phone number for the audit row: an HMAC of
+// its 10-digit key under the server secret. Phone numbers are low-entropy,
+// so a bare hash would be reversible by enumeration — the key makes it a
+// fingerprint only this server can produce or compare (the triage evidence
+// sweep matches a caller against a service-contact change with it; the
+// masked …1234 alone is ambiguous). Null without a secret or a keyable
+// number — consumers fail closed.
+function phoneFingerprint(phone) {
+  const digits = phoneKey(phone);
+  const secret = require('../config').jwt?.secret;
+  if (digits.length !== 10 || !secret) return null;
+  return require('crypto').createHmac('sha256', secret).update(`service-contact-phone:${digits}`).digest('hex');
+}
 const maskPhone = (v) => {
   const key = phoneKey(v);
   return key ? `…${key.slice(-4)}` : '';
@@ -251,6 +265,7 @@ async function recordServiceContactChanges({
         // consumer actually ships and is reviewed.
         name: maskName(event.person.name) || null,
         phone: maskPhone(event.person.phone) || null,
+        phone_fingerprint: phoneFingerprint(event.person.phone),
         email: maskEmail(event.person.email) || null,
         role: event.person.role || null,
         source,
@@ -271,4 +286,5 @@ async function recordServiceContactChanges({
 module.exports = {
   recordServiceContactChanges,
   diffServiceContacts,
+  phoneFingerprint,
 };

@@ -163,7 +163,9 @@ async function enrollSequenceFromEvent({
     return { enrolled: false, reason: result?.reason || 'not_enrolled' };
   } catch (err) {
     logger.error(`[automation-enroll] ${source}: ${templateKey} enroll failed for customer ${customerId}: ${err.message}`);
-    return { enrolled: false, reason: 'error' };
+    // The original error rides along so a caller can classify it (the GBP
+    // sync's breaker needs the SQLSTATE / KnexTimeoutError, not the marker).
+    return { enrolled: false, reason: 'error', error: err };
   }
 }
 

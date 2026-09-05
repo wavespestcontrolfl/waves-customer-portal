@@ -416,6 +416,7 @@ function v2InexpressibleFamilyWords(callerText) {
 }
 
 module.exports = {
+  familiesIn,
   composeServiceInterest,
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,

@@ -200,19 +200,46 @@ describe('triage surfacing', () => {
     expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'address_unverified', extraction: unitExtraction }).payload).unit_ask_building).toBeUndefined();
   });
 
-  test('scheduling-shaped cards carry the captured window fields', () => {
-    const item = buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction });
+  test('scheduling-shaped cards carry the captured window fields and a filing-time service snapshot', () => {
+    const withService = { ...extraction, scheduling: { ...(extraction.scheduling || {}), blackout_dates: ['2026-07-15', null, ''] }, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control', null], specific_service_name: ' Flea Treatment ', service_intent: 'preventative_one_time' } };
+    const item = buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService });
     const payload = JSON.parse(item.payload);
     expect(payload.scheduling_window).toEqual({
+      requested_service_categories: ['pest_control', 'mosquito_control'],
+      requested_specific_service: 'Flea Treatment',
+      requested_service_intent: 'preventative_one_time',
+      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1, additional: [] },
       status: 'requested',
       confirmed_start_at: null,
       requested_date_range_start: '2026-07-14',
       requested_date_range_end: '2026-07-14',
       preferred_time_of_day: 'morning',
+      blackout_dates: ['2026-07-15'],
       callback_window_start: null,
       callback_window_end: null,
       scheduling_notes_raw: 'first slot of the day',
     });
+  });
+
+  test('quote_promised cards carry the filing-time quote scope — the same ask snapshot, under its own key', () => {
+    const withService = { ...extraction, service_request: { ...(extraction.service_request || {}), primary_service_category: 'pest_control', secondary_categories: ['mosquito_control'], specific_service_name: 'Flea Treatment', service_intent: 'preventative_one_time', quote_promised: true } };
+    const payload = JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'quote_promised', extraction: withService }).payload);
+    expect(payload.quote_scope).toEqual({
+      requested_service_categories: ['pest_control', 'mosquito_control'],
+      requested_specific_service: 'Flea Treatment',
+      requested_service_intent: 'preventative_one_time',
+      requested_address: { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 1, additional: [] },
+    });
+    expect(payload.scheduling_window).toBeUndefined();
+    expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: withService }).payload).quote_scope).toBeUndefined();
+  });
+
+  test('missing_last_name cards carry the names the call heard, at filing', () => {
+    const heard = { ...extraction, caller: { ...(extraction.caller || {}), first_name: 'Pat', last_name: null } };
+    const payload = JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'missing_last_name', extraction: heard, extraPayload: { heard_name_v1: { first_name: 'Pat', last_name: 'Sample' } } }).payload);
+    expect(payload.heard_name).toEqual({ first_name: 'Pat', last_name: null });
+    expect(payload.heard_name_v1).toEqual({ first_name: 'Pat', last_name: 'Sample' });
+    expect(JSON.parse(buildTriageItem({ callLogId: 'c1', flag: 'not_confirmed', extraction: heard }).payload).heard_name).toBeUndefined();
   });
 
   test('multi_property_call cards carry the extra addresses and file as address_review', () => {

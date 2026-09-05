@@ -321,6 +321,8 @@ function VerdictBadge({ verdict, wrongFields }) {
 export default function TriageInboxTabV2() {
   const [mode, setMode] = useState("triage"); // 'triage' | 'auto_routed'
   const [status, setStatus] = useState("open");
+  // Terminal tabs only: show just the cards the nightly sweep closed.
+  const [autoOnly, setAutoOnly] = useState(false);
   const [items, setItems] = useState([]);
   const [counts, setCounts] = useState({ open: 0, in_progress: 0, resolved: 0, dismissed: 0 });
   const [loading, setLoading] = useState(true);
@@ -330,10 +332,13 @@ export default function TriageInboxTabV2() {
   const [denyFor, setDenyFor] = useState(null); // { item, kind } — field-picker dialog
   const [denyFields, setDenyFields] = useState([]);
 
-  const load = useCallback((nextMode, nextStatus) => {
+  const load = useCallback((nextMode, nextStatus, nextAutoOnly = false) => {
     setLoading(true);
     setError("");
-    const url = nextMode === "auto_routed" ? `/admin/triage/auto-routed` : `/admin/triage?status=${nextStatus}`;
+    const terminal = nextStatus === "resolved" || nextStatus === "dismissed";
+    const url = nextMode === "auto_routed"
+      ? `/admin/triage/auto-routed`
+      : `/admin/triage?status=${nextStatus}${terminal && nextAutoOnly ? "&source=auto" : ""}`;
     adminFetch(url)
       .then((d) => {
         setItems(d.items || []);
@@ -346,7 +351,7 @@ export default function TriageInboxTabV2() {
       });
   }, []);
 
-  useEffect(() => { load(mode, status); }, [mode, status, load]);
+  useEffect(() => { load(mode, status, autoOnly); }, [mode, status, autoOnly, load]);
 
   // Record a verdict (accept, or deny with fields). kind = 'triage' | 'auto_routed'.
   const recordVerdict = (item, kind, verdict, wrongFields, note) => {
@@ -540,6 +545,21 @@ export default function TriageInboxTabV2() {
               </span>
             </button>
           ))}
+          {(status === "resolved" || status === "dismissed") && (
+            <button
+              type="button"
+              onClick={() => setAutoOnly((v) => !v)}
+              aria-pressed={autoOnly}
+              className={cn(
+                "inline-flex items-center gap-1.5 h-8 px-3 rounded-md border-hairline text-13 font-medium transition-colors",
+                autoOnly
+                  ? "bg-zinc-900 text-white border-zinc-900"
+                  : "bg-surface-card text-ink-secondary border-zinc-200 hover:bg-surface-hover"
+              )}
+            >
+              Auto-closed only
+            </button>
+          )}
         </div>
       )}
 
@@ -610,6 +630,9 @@ export default function TriageInboxTabV2() {
                             </Badge>
                           ) : (
                             <Badge tone="neutral">Auto-routed{item.sms_enqueued ? " · SMS sent" : ""}</Badge>
+                          )}
+                          {isTriage && item.resolution_source === "auto" && (
+                            <Badge tone="neutral">Auto-closed</Badge>
                           )}
                           {/* route_feedback joins by call_log_id, so a verdict
                               on the call's ROUTING card would render here as if

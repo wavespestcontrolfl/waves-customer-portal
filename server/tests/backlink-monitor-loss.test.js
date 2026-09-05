@@ -579,6 +579,38 @@ describe('lost-link recovery', () => {
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
     expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);
     expect(scorer.scoreCandidates).not.toHaveBeenCalled();
+    // the re-pitch is a NEW outreach cycle (§6.4): the previous cycle's follow-up state and the stale Gmail thread go
+    // with the pitch's, and the follow-up's attempt joins the same append-only ledger the cap counts
+    expect(updates[0].patch).toEqual(expect.objectContaining({ outreach_thread_ref: null, follow_up_status: 'none', follow_up_due_at: null, follow_up_subject: null, follow_up_body: null, follow_up_send_token: null, follow_up_attempted_at: null, follow_up_sent_at: null, follow_up_skipped_reason: null, follow_up_attempts: 0 }));
+    expect(updates[0].patch.quality_signals.__raw).toMatch(/\|\| COALESCE\(to_jsonb\(follow_up_attempted_at\), '\[\]'::jsonb\)/);
+  });
+
+  test('an ambiguous follow-up on a SIBLING placement of the domain (another page) defers recovery too — domain-wide, like the in-flight probe (Codex r14 P1)', async () => {
+    const updates = []; const inserts = [];
+    makeDb({ seo_link_prospects: (op, st) => {
+      if (op === 'first' && st.ins.some(([col]) => col === 'follow_up_status')) return { id: 'p-sib', status: 'lost', follow_up_status: 'sending', target_page: '/pest-control-bradenton-fl/' }; // the sibling, not the representative page
+      if (op === 'first') return null; // no in-flight row, no exact-page row
+      if (op === 'update') { updates.push(st.payload); return 1; }
+      if (op === 'insert') { inserts.push(st.payload); return [{ id: 'new' }]; }
+    } });
+    const scorer = { scoreCandidates: jest.fn() };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: expect.stringMatching(/follow-up is sending \(\/pest-control-bradenton-fl\/\) — deferred until it is reconciled/) }] }));
+    expect(r.results).toEqual([expect.objectContaining({ domain: 'blog.example', outcome: 'deferred' })]);
+    expect(updates).toHaveLength(0); expect(inserts).toHaveLength(0);
+    expect(scorer.scoreCandidates).not.toHaveBeenCalled();
+  });
+  test('a lost row whose follow-up send is still ambiguous (sending / send_error) is NOT reopened — the Sent folder settles it first', async () => {
+    const updates = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource', follow_up_status: 'send_error' }; if (op === 'update') { updates.push(st.payload); return 1; } } });
+    const scorer = { scoreCandidates: jest.fn() };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: expect.stringMatching(/follow-up is send_error — deferred until it is reconciled/) }] }));
+    // NOT terminal (Codex r3 P1): the monitor stamps recovery_queued_at on every outcome but error / deferred — a
+    // 'skipped' here would drop the loss for good once the operator reconciles the follow-up
+    expect(r.results).toEqual([expect.objectContaining({ domain: 'blog.example', outcome: 'deferred' })]);
+    expect(updates).toHaveLength(0);
+    expect(scorer.scoreCandidates).not.toHaveBeenCalled();
   });
 
   test('a concurrent insert of the same (domain, page) is ignored, counted as a skip, and does not abort the batch', async () => {

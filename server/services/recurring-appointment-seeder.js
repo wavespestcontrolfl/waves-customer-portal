@@ -9,6 +9,7 @@ const {
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
+const { isAssignable } = require('./technician-eligibility');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -1206,7 +1207,27 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
       notifySeedShortfall(parent, seedShortfall);
     }
   };
-  const rows = builtRows.map((row) => filterByColumns(row, columns));
+  let rows = builtRows.map((row) => filterByColumns(row, columns));
+  // Follow-ups inherit the parent's technician. If that tech is no longer
+  // assignable, seed the follow-ups unassigned so auto-dispatch places them —
+  // never onto a tech who cannot take them. Every production caller (booking
+  // wizard, estimate converter, admin-schedule) hands in its transaction, so
+  // the read is FOR SHARE on the writing trx and an offboarding's FOR UPDATE
+  // cannot commit underneath the insert below; a plain connection (tests)
+  // gets a point-in-time check. The insert lines themselves are frozen by the
+  // booking insert-site contract and stay untouched.
+  {
+    const inheritedTechId = rows.find((r) => r.technician_id)?.technician_id || null;
+    if (inheritedTechId) {
+      let techQuery = conn('technicians').where({ id: inheritedTechId });
+      if (conn.isTransaction) techQuery = techQuery.forShare();
+      const inheritedTech = await techQuery.first('id', 'employment_status', 'field_dispatchable');
+      if (!isAssignable(inheritedTech)) {
+        require('./logger').warn(`[recurring-seeder] parent ${parent.id} technician ${inheritedTechId} is not assignable; seeding follow-ups unassigned`);
+        rows = rows.map((r) => (r.technician_id === inheritedTechId ? { ...r, technician_id: null } : r));
+      }
+    }
+  }
 
   if (!rows.length) {
     // Even with no NEW follow-up rows (series dates already exist), the parent

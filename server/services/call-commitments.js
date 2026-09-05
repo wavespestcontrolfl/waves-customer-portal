@@ -778,6 +778,249 @@ function callEndedAt(call) {
 // resend that estimate" to an existing customer is kept by a send of an
 // estimate created long before the call — the promised-estimate watcher
 // this lane stands in for accepts exactly that send.
+
+// The ONE handoff witness every send_estimate proof applies — the single-
+// call path, the batch path, direct and association alike. sent_at alone
+// is not delivery (#3725 r13 P1 class): sendEstimateNow advances it on a
+// suppression-only attempt (SMS gate or template off — sent:true,
+// real:false) and report/plan-restart mints stamp it at publish, so the
+// witness is deliveryState.lastDeliveredAt — advanced only on a real
+// handoff — after the boundary, OR acceptance after the boundary (a
+// manual accept stamps sent_at with no delivery record, and an accepted
+// estimate was certainly handed off). A group-send sibling never carries
+// its own deliveryState (only the anchor does) — and a sibling that was
+// sent on its own BEFORE joining the group keeps its stale stamp — so BOTH
+// the sibling's own handoff and its anchor's are witnesses, each tested
+// against the window on its own (the later one may fall past `until`
+// while the earlier one qualifies).
+// A handoff stamp is JSON text the one writer (admin-estimates' delivery
+// state) sets to an ISO instant. Only text Postgres itself accepts as a
+// timestamptz is cast (pg_input_is_valid — a non-throwing check, PG16+;
+// prod is 18): a hand-edited or legacy value — free text OR an ISO-shaped
+// impossible date — reads NULL instead of aborting the whole witness query
+// and hiding every other estimate's proof in the batch (pre-push hook P1
+// on bafc4c4ae, codex r20 P2).
+const isoInstantSql = (text) => `(CASE WHEN pg_input_is_valid(${text}, 'timestamptz') THEN (${text})::timestamptz END)`;
+const OWN_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliveryState,lastDeliveredAt}'");
+// The FIRST real handoff is retained across resends (admin-estimates
+// carries deliveryState.firstDeliveredAt forward while lastDeliveredAt
+// advances): a delivery inside the window followed by a resend after it
+// must keep counting as the kept promise, or refreshFulfillment would
+// clear an association hint the facts still support (codex r29 P2).
+const FIRST_HANDOFF_SQL = isoInstantSql("estimates.estimate_data #>> '{deliveryState,firstDeliveredAt}'");
+// The durable send history (deliveryState.deliveredAt, every real handoff
+// oldest first — admin-estimates) carries the INTERMEDIATE handoffs first
+// and last cannot: delivered before the call, resent inside the window,
+// resent again after it (codex r30 P2). Read as a set of instants; a
+// malformed element is skipped, never fatal (same rule as isoInstantSql).
+const DELIVERIES_SQL = "(CASE WHEN jsonb_typeof(estimates.estimate_data #> '{deliveryState,deliveredAt}') = 'array' THEN estimates.estimate_data #> '{deliveryState,deliveredAt}' ELSE '[]'::jsonb END)";
+// Each element is cast ONLY under its own validity CASE (the scalar
+// witnesses' rule): a WHERE-term guard does not order evaluation in
+// PostgreSQL, so a bare cast beside it could still abort the batch on one
+// corrupt element (codex r31 P2).
+const historyInstants = (where) => `(SELECT MIN(h.t) FROM (SELECT ${isoInstantSql('d')} AS t FROM jsonb_array_elements_text(${DELIVERIES_SQL}) AS d) AS h WHERE h.t IS NOT NULL${where})`;
+// Acceptance is a witness only when the CUSTOMER accepted: a manual accept
+// (mark-accepted — an admin recording a verbal yes) stamps accepted_at and
+// locks the price as 'manual_accept' with no document delivered, so it
+// proves nothing about the promised estimate going out (codex r18 P1).
+const ACCEPT_WITNESS_SQL = `CASE WHEN estimates.price_locked_by IS DISTINCT FROM 'manual_accept' THEN estimates.accepted_at END`;
+// A sibling inherits its anchor's handoff only while it is one the anchor's
+// send carries: admin-estimates' live-sibling group reconciliation re-stamps
+// groupPublishedByEstimateId and extends expiry for the siblings that are
+// sent / viewed, unarchived and unlocked — an archived, expired, declined or
+// price-locked sibling keeps its old pointer but was not in the public group
+// the resend delivered, so the anchor's new lastDeliveredAt is no witness
+// for it (codex r24 P1). Its own handoff and accept witnesses still stand.
+// Read at sweep time: a sibling retired since the resend loses the
+// inheritance — fail closed.
+const ANCHOR_HANDOFF_SQL = `(SELECT ${isoInstantSql("a.estimate_data #>> '{deliveryState,lastDeliveredAt}'")} FROM estimates a
+     WHERE a.id::text = estimates.estimate_data ->> 'groupPublishedByEstimateId'
+       AND estimates.archived_at IS NULL AND estimates.status IN ('sent', 'viewed') AND estimates.price_locked_at IS NULL)`;
+
+// Rows with a witness in (after, until]: the SQL form for a single query,
+// the row form for a batch fetched with the witness columns below. The
+// witness time — not sent_at — is when the promise was kept: an estimate
+// sent BEFORE the call and accepted after it kept the promise at
+// acceptance (pre-push hook P1 on 3b5b2cb27).
+const handedOffWithin = (qb, after, until = null) => qb.where(function handoffWitness() {
+  const within = (expr) => `(${expr} > ?${until ? ` AND ${expr} <= ?` : ''})`;
+  const bind = until ? [after, until] : [after];
+  this.whereRaw(within(OWN_HANDOFF_SQL), bind)
+    .orWhereRaw(within(FIRST_HANDOFF_SQL), bind)
+    .orWhereRaw(`${historyInstants(` AND h.t > ?${until ? ' AND h.t <= ?' : ''}`)} IS NOT NULL`, bind)
+    .orWhereRaw(within(ANCHOR_HANDOFF_SQL), bind)
+    .orWhereRaw(within(ACCEPT_WITNESS_SQL), bind);
+});
+// Ordering by the QUALIFYING witness, not the earliest one on the row: a
+// row admitted for a post-call handoff may also carry a pre-call handoff
+// or acceptance, and sorting by that stale stamp would put it ahead of an
+// estimate actually handed off earlier after the call (codex r15 P2).
+// LEAST ignores NULLs, and every row here passed handedOffWithin on the
+// same window, so at least one CASE is non-null.
+const handoffOrder = (conn, after, until = null) => {
+  const inWindow = (expr) => `CASE WHEN ${expr} > ?${until ? ` AND ${expr} <= ?` : ''} THEN ${expr} END`;
+  const bind = until ? [after, until] : [after];
+  const history = historyInstants(` AND h.t > ?${until ? ' AND h.t <= ?' : ''}`);
+  return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(FIRST_HANDOFF_SQL)}, ${history}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow(ACCEPT_WITNESS_SQL)}) asc`, [...bind, ...bind, ...bind, ...bind, ...bind]);
+};
+const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${FIRST_HANDOFF_SQL} as first_handed_off_at`), conn.raw(`${DELIVERIES_SQL} as delivered_at_history`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`), conn.raw(`${ACCEPT_WITNESS_SQL} as accept_witness_at`)];
+// The EARLIEST post-boundary witness time on a fetched row, or null.
+const witnessAt = (row, after) => {
+  const history = Array.isArray(row.delivered_at_history) ? row.delivered_at_history : [];
+  const times = [row.handed_off_at, row.first_handed_off_at, ...history, row.anchor_handed_off_at, row.accept_witness_at]
+    .map((t) => (t ? new Date(t) : null))
+    .filter((d) => d && !Number.isNaN(d.getTime()) && d > after);
+  return times.length ? new Date(Math.min(...times.map((d) => d.getTime()))) : null;
+};
+
+// The send_estimate DIRECT routes — the estimator's own callLogId stamp,
+// and an estimate on a lead THIS call minted (carrying its SID) by the
+// lead FK or the estimate_data.lead_id mirror — for MANY calls in three
+// queries. resolveFulfillment's direct branch and the triage evidence
+// sweep both consume this; there is no second implementation. Never
+// association-strength matches.
+//
+// A lead "minted by this call" is one carrying the call's SID AND created
+// at or after the call started: lead-attribution re-stamps a REUSED lead's
+// twilio_call_sid with each newer call, so the SID alone is not filing-
+// time provenance — a lead older than the call is a reused one, and its
+// estimate is association-strength at most. A probe without callStartedAt
+// mints nothing (fails closed).
+const mintedByCall = (lead, probe) => {
+  const started = probe.callStartedAt ? new Date(probe.callStartedAt) : null;
+  const created = lead.created_at ? new Date(lead.created_at) : null;
+  return Boolean(started && created && !Number.isNaN(started.getTime()) && !Number.isNaN(created.getTime()) && created >= started);
+};
+
+// An estimate's owner must agree with the call it is proof for: a relink
+// (admin-call-recordings) moves the call and its call-created lead to the
+// new customer but leaves the estimates behind, so a stamp alone would let
+// customer A's estimate keep a promise made to customer B. An owned
+// estimate must be owned by the call's customer; an unowned one (commercial
+// proposals carry only customer_phone) must carry the caller's number when
+// the call is linked, and contradicts nothing when the call is unlinked too.
+const ownerAgrees = (row, probe) => {
+  if (row.customer_id) return Boolean(probe.customerId) && String(row.customer_id) === String(probe.customerId);
+  if (!probe.customerId) return true;
+  const caller = phoneDigits(probe.phone);
+  return Boolean(caller) && phoneDigits(row.customer_phone) === caller;
+};
+
+// probes: [{ key, callId, twilioCallSid, callStartedAt, customerId, phone,
+// after, covers? }] — one per card, with its own boundary and the call's
+// CURRENT customer / caller number. covers(row, siblings) — optional — is
+// the probe's own scope test (the triage sweep binds a delivered estimate
+// to the card's quote_scope); siblings are the other rows of the
+// estimate's group, so a multi-property proposal is judged as a whole.
+// Returns Map key → the EARLIEST qualifying direct proof.
+async function directEstimatesSentAfter(conn, probes) {
+  const out = new Map();
+  if (!probes.length) return out;
+  const probesByCall = new Map();
+  for (const p of probes) {
+    const list = probesByCall.get(String(p.callId)) || [];
+    list.push(p);
+    probesByCall.set(String(p.callId), list);
+  }
+  const minAfter = new Date(Math.min(...probes.map((p) => new Date(p.after).getTime())));
+  // The columns a scope test reads: what the estimate prices (service
+  // words + recurring / one-time totals) and where (address column or the
+  // property row) — on the candidate AND on every group sibling.
+  const SCOPE_COLS = ["service_interest", "estimate_data", "estimate_group_id", "monthly_total", "annual_total", "onetime_total", "address", "created_at"];
+  const PROPERTY_COLS = [
+    conn.raw("(SELECT cp.address_line1 FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_address_line1"),
+    conn.raw("(SELECT cp.address_line2 FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_address_line2"),
+    conn.raw("(SELECT cp.city FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_city"),
+    conn.raw("(SELECT cp.zip FROM customer_properties cp WHERE cp.id = estimates.property_id) as property_zip"),
+  ];
+  const cols = [
+    ...HANDOFF_COLS(conn), "source", "customer_id", "customer_phone", ...SCOPE_COLS, ...PROPERTY_COLS,
+    conn.raw("estimate_data #>> '{estimatorEngine,callLogId}' as stamped_call_id"),
+    conn.raw("estimate_data ->> 'lead_id' as mirror_lead_id"),
+  ];
+  // Candidates are judged after BOTH routes ran: a scope test needs the
+  // group siblings, fetched once for every candidate that has any.
+  const candidates = [];
+  const scoped = probes.some((p) => typeof p.covers === "function");
+  const consider = (callId, row, basis) => candidates.push({ callId, row, basis });
+  const judge = async () => {
+    const groupIds = scoped ? [...new Set(candidates.map((c) => c.row.estimate_group_id).filter(Boolean))] : [];
+    const siblingsByGroup = new Map();
+    if (groupIds.length) {
+      const rows = await conn("estimates").whereIn("estimate_group_id", groupIds).select(...HANDOFF_COLS(conn), ...SCOPE_COLS, ...PROPERTY_COLS);
+      for (const r of rows) siblingsByGroup.set(String(r.estimate_group_id), [...(siblingsByGroup.get(String(r.estimate_group_id)) || []), r]);
+    }
+    for (const { callId, row, basis } of candidates) {
+      const siblings = row.estimate_group_id ? (siblingsByGroup.get(String(row.estimate_group_id)) || []).filter((s) => String(s.id) !== String(row.id)) : [];
+      for (const p of probesByCall.get(String(callId)) || []) {
+        if (!ownerAgrees(row, p)) continue;
+        if (typeof p.covers === "function") {
+          // Only siblings that were IN a qualifying handoff count toward the
+          // scope: one with no post-boundary witness of its own, or created
+          // after the handoff it would inherit (a service added to the group
+          // after the anchor went out), was never delivered (codex r18 P1).
+          const after = new Date(p.after);
+          const delivered = siblings.filter((s) => {
+            const w = witnessAt(s, after);
+            return Boolean(w) && Boolean(s.created_at) && new Date(s.created_at) <= w;
+          });
+          if (!p.covers(row, delivered)) continue;
+        }
+        const at = witnessAt(row, new Date(p.after));
+        if (!at) continue;
+        const cur = out.get(p.key);
+        if (!cur || at < new Date(cur.matched_at)) {
+          out.set(p.key, { kind: "estimate_sent", record_type: "estimate", record_id: row.id, matched_at: at, strength: "direct", basis });
+        }
+      }
+    }
+    return out;
+  };
+  const callIds = [...probesByCall.keys()];
+  // No sent_at prefilter anywhere below: the handoff witness is the whole
+  // contract, and an estimate accepted during its first send keeps
+  // accepted_at + lastDeliveredAt with sent_at still null (admin-estimates
+  // finalization) — it is delivered proof all the same.
+  const stamped = await handedOffWithin(conn("estimates")
+    .whereRaw(`estimate_data #>> '{estimatorEngine,callLogId}' IN (${callIds.map(() => "?").join(", ")})`, callIds), minAfter)
+    .select(cols);
+  for (const r of stamped) consider(r.stamped_call_id, r, "estimate_stamped_with_this_call");
+
+  const probeBySid = new Map(probes.filter((p) => p.twilioCallSid).map((p) => [p.twilioCallSid, p]));
+  if (!probeBySid.size) return judge();
+  const leads = (await conn("leads")
+    .whereIn("twilio_call_sid", [...probeBySid.keys()])
+    .select("id", "estimate_id", "twilio_call_sid", "created_at"))
+    .filter((l) => mintedByCall(l, probeBySid.get(l.twilio_call_sid)));
+  if (!leads.length) return judge();
+  const callBySid = new Map([...probeBySid].map(([sid, p]) => [sid, String(p.callId)]));
+  const estimateIds = leads.map((l) => l.estimate_id).filter(Boolean);
+  const leadIds = leads.map((l) => String(l.id));
+  const linked = await handedOffWithin(conn("estimates")
+    .where(function linkedToLeads() {
+      if (estimateIds.length) this.orWhereIn("id", estimateIds);
+      this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${leadIds.map(() => "?").join(", ")})`, leadIds);
+    }), minAfter)
+    .select(cols);
+  // Several leads can share one estimate_id — every call behind them is a
+  // match, not an arbitrary one of them.
+  const leadsByEstimateId = new Map();
+  for (const l of leads) {
+    if (!l.estimate_id) continue;
+    const k = String(l.estimate_id);
+    leadsByEstimateId.set(k, [...(leadsByEstimateId.get(k) || []), l]);
+  }
+  const leadById = new Map(leads.map((l) => [String(l.id), l]));
+  for (const r of linked) {
+    const matched = [...(leadsByEstimateId.get(String(r.id)) || [])];
+    const mirror = leadById.get(String(r.mirror_lead_id || ""));
+    if (mirror) matched.push(mirror);
+    const callIds = new Set(matched.map((l) => callBySid.get(l.twilio_call_sid)).filter(Boolean));
+    for (const callId of callIds) consider(callId, r, "estimate_linked_to_this_call_sent");
+  }
+  return judge();
+}
+
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
   const after = callEndedAt(call);
@@ -789,73 +1032,40 @@ async function resolveFulfillment(conn, commitment, call) {
 
   switch (commitment.kind) {
     case "send_estimate": {
-      // Direct: an estimate LINKED to this call by any exact route the
-      // promised-estimate watcher honours — the lead FK (leads.estimate_id)
-      // on the lead this call minted, was stamped with, or that carries its
-      // SID; the estimator's own provenance stamp
-      // (estimate_data.estimatorEngine.callLogId); or the public-quote
-      // mirror (estimate_data.lead_id) on a standalone estimate that never
-      // got the lead FK. Association: any later estimate sent to the call's
-      // customer inside the window.
-      // sent_at alone is not delivery (#3725 r13 P1 class): report
-      // click-to-estimate and plan_restart mints stamp sent_at for the
-      // publish-without-delivery shape. For those sources the witness is
-      // deliveryState.lastDeliveredAt — advanced only on a real handoff —
-      // and it must fall after the call, the same rule the promised-
-      // estimate watcher applies.
-      const reallyDelivered = (qb) => qb.where(function deliveredWitness() {
-        this.whereRaw("COALESCE(source, '') NOT IN ('service_report_cta', 'plan_restart')")
-          .orWhereRaw("(COALESCE(estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> '' AND (estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > ?)", [after]);
-      });
-      // The estimator's own provenance stamp is explicit call provenance:
-      // direct, whatever lead it sits on.
-      const stamped = await reallyDelivered(conn("estimates")
-        .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
-        .whereNotNull("sent_at")
-        .where("sent_at", ">", after))
-        .orderBy("sent_at", "asc")
-        .first("id", "sent_at", "status")
-        .catch(() => null);
-      if (stamped) return { kind: "estimate_sent", record_type: "estimate", record_id: stamped.id, matched_at: stamped.sent_at, strength: "direct", basis: "estimate_stamped_with_this_call" };
-      // Same guard as buildCallOutcomes: no lead key, no lead lookup.
-      const leads = (leadIds.length || call.twilio_call_sid) ? await conn("leads")
+      // Direct: the shared primitive above (estimator stamp; lead FK or
+      // public-quote mirror on a lead this call minted).
+      const probe = { key: "call", callId: call.id, twilioCallSid: call.twilio_call_sid, callStartedAt: call.created_at, customerId, phone, after };
+      const direct = (await directEstimatesSentAfter(conn, [probe])).get("call");
+      if (direct) return direct;
+      // A REUSED earlier call's lead — reached through the lead_id /
+      // relay_lead_id stamp, or carrying this call's SID only because
+      // attribution re-stamped a lead older than the call — is a hint,
+      // never direct proof (Codex #3738 r13 P1): an estimate later sent on
+      // it is not necessarily this call's. Same guard as buildCallOutcomes:
+      // no lead key, no lead lookup. No local catch: a failed lead lookup
+      // reaches refreshFulfillment's failed accounting (r13 P2) instead of
+      // reading as "no leads".
+      const stampedLeads = (leadIds.length || call.twilio_call_sid) ? await conn("leads")
         .where(function scope() {
           if (leadIds.length) this.orWhereIn("id", leadIds);
           if (call.twilio_call_sid) this.orWhere("twilio_call_sid", call.twilio_call_sid);
         })
-        // No local catch: a failed lead lookup reaches refreshFulfillment's
-        // failed accounting (r13 P2) instead of reading as "no leads".
-        .select("id", "estimate_id", "twilio_call_sid") : [];
-      // A lead that carries THIS call's SID was minted by this call (the
-      // processor and the relay both stamp the SID at INSERT and never on
-      // reuse). A lead reached only through the lead_id / relay_lead_id
-      // stamp is a REUSED earlier call's lead: an estimate later sent on it
-      // is not necessarily this call's, so it is a hint, never direct proof
-      // (Codex #3738 r13 P1). Either way the estimate must have been SENT
-      // (delivered) after THIS call ended; when it was created does not
-      // matter (r14).
-      const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid;
-      const minted = leads.filter(mintedHere);
-      const reused = leads.filter((l) => !mintedHere(l));
-      const mintedLeadIds = minted.map((l) => String(l.id));
-      const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedLeadIds.includes(id)), ...reused.map((l) => String(l.id))])];
-      const estimateOnLeads = (leadRows, leadIdList) => {
-        const estimateIds = leadRows.map((l) => l.estimate_id).filter(Boolean);
-        if (!estimateIds.length && !leadIdList.length) return null;
-        return reallyDelivered(conn("estimates")
+        .select("id", "estimate_id", "twilio_call_sid", "created_at") : [];
+      const mintedHere = (lead) => Boolean(lead.twilio_call_sid) && lead.twilio_call_sid === call.twilio_call_sid && mintedByCall(lead, probe);
+      const mintedIds = new Set(stampedLeads.filter(mintedHere).map((l) => String(l.id)));
+      const reused = stampedLeads.filter((l) => !mintedHere(l));
+      const reusedLeadIds = [...new Set([...leadIds.filter((id) => !mintedIds.has(id)), ...reused.map((l) => String(l.id))])];
+      const reusedEstimateIds = reused.map((l) => l.estimate_id).filter(Boolean);
+      if (reusedEstimateIds.length || reusedLeadIds.length) {
+        const onReused = await handedOffWithin(conn("estimates")
           .where(function linkedToLeads() {
-            if (estimateIds.length) this.orWhereIn("id", estimateIds);
-            if (leadIdList.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${leadIdList.map(() => "?").join(", ")})`, leadIdList);
-          })
-          .whereNotNull("sent_at")
-          .where("sent_at", ">", after)
-          .orderBy("sent_at", "asc")
-          .first("id", "sent_at", "status"));
-      };
-      const linked = await estimateOnLeads(minted, mintedLeadIds);
-      if (linked) return { kind: "estimate_sent", record_type: "estimate", record_id: linked.id, matched_at: linked.sent_at, strength: "direct", basis: "estimate_linked_to_this_call_sent" };
-      const onReused = await estimateOnLeads(reused, reusedLeadIds);
-      if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: onReused.sent_at, strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
+            if (reusedEstimateIds.length) this.orWhereIn("id", reusedEstimateIds);
+            if (reusedLeadIds.length) this.orWhereRaw(`estimate_data ->> 'lead_id' IN (${reusedLeadIds.map(() => "?").join(", ")})`, reusedLeadIds);
+          }), after)
+          .orderByRaw(handoffOrder(conn, after))
+          .first(...HANDOFF_COLS(conn));
+        if (onReused) return { kind: "estimate_sent", record_type: "estimate", record_id: onReused.id, matched_at: witnessAt(onReused, after), strength: "association", basis: "estimate_sent_on_a_lead_reused_from_an_earlier_call" };
+      }
       // An estimate linked only through estimates.customer_phone still keeps
       // the promise (commercial proposals store the phone with a NULL
       // customer_id, so a same-customer lookup misses them). Mirror the
@@ -864,10 +1074,7 @@ async function resolveFulfillment(conn, commitment, call) {
       // by an UNLINKED estimate whose phone matches the caller — a shared
       // household number never lets one customer's estimate clear another's
       // promise.
-      const estQ = reallyDelivered(conn("estimates")
-        .whereNotNull("sent_at")
-        .where("sent_at", ">", after)
-        .where("sent_at", "<=", until));
+      const estQ = handedOffWithin(conn("estimates"), after, until);
       if (customerId) {
         estQ.where("customer_id", customerId);
       } else if (phone) {
@@ -875,8 +1082,8 @@ async function resolveFulfillment(conn, commitment, call) {
       } else {
         return null;
       }
-      const est = await estQ.orderBy("sent_at", "asc").first("id", "sent_at", "status");
-      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: est.sent_at, strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
+      const est = await estQ.orderByRaw(handoffOrder(conn, after, until)).first(...HANDOFF_COLS(conn));
+      return est ? { kind: "estimate_sent", record_type: "estimate", record_id: est.id, matched_at: witnessAt(est, after), strength: "association", basis: customerId ? `estimate_sent_to_same_customer_within_${ASSOCIATION_WINDOW_DAYS}_days` : `estimate_sent_to_caller_phone_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "send_appointment_confirmation": {
       if (!phone) return null;
@@ -1579,6 +1786,7 @@ module.exports = {
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,
+  directEstimatesSentAfter,
   implicitDueAt,
   staleAiRowSql,
   stillOpenIds,

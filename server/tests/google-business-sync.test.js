@@ -326,6 +326,387 @@ describe('Google Business review sync', () => {
     ]));
   });
 
+  test('one review row failing to store does not abort the location: the rest sync, reconcile is skipped, the alert names the row error', async () => {
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [
+        { name: 'accounts/1/locations/2/reviews/rev-bad', reviewer: { displayName: 'Reviewer Alpha' }, starRating: 'FIVE', comment: 'Superb', createTime: '2026-05-26T19:52:51Z' },
+        { name: 'accounts/1/locations/2/reviews/rev-ok', reviewer: { displayName: 'Reviewer Beta' }, starRating: 'FIVE', comment: 'Great', createTime: '2026-05-14T01:22:29Z' },
+      ] });
+    });
+    const realUpsert = service._upsertGbpReview.bind(service);
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async (normalized, ...rest) => {
+      if (normalized.gbp_review_name.endsWith('rev-bad')) {
+        throw new Error('update "google_reviews" set "google_review_id" = $1 - duplicate key value violates unique constraint "google_reviews_google_review_id_unique"');
+      }
+      return realUpsert(normalized, ...rest);
+    });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation');
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(result.synced).toBe(1);
+    expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
+      expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-ok', reviewer_name: 'Reviewer Beta' }),
+    ]));
+    // No Places fallback: the pull itself succeeded.
+    expect(places).not.toHaveBeenCalled();
+    // The failed row never advanced synced_at — reconcile runs for the rest of the location with that row excluded.
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.any(Date), { excludeReviewNames: ['accounts/1/locations/2/reviews/rev-bad'] });
+    // The cause names the row, not only the error text (codex r10 P2).
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringMatching(/1 of 2 review row\(s\) failed to store \(1 stored\) — first: accounts\/1\/locations\/2\/reviews\/rev-bad: /) })]);
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 1 of 2 .*duplicate key value/), { reconcileFailed: false });
+    // Alerted AFTER the reconcile, so the body can state its outcome truthfully.
+    expect(reconcile.mock.invocationCallOrder[0]).toBeLessThan(degraded.mock.invocationCallOrder[0]);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a post-write side-effect failure is NOT a row storage failure: no gbp_row error, reconcile still runs', async () => {
+    db.__state.rows.customers.push({ id: 'cust-1', first_name: 'Reviewer', last_name: 'Gamma', active: true, has_left_google_review: false });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [
+        { name: 'accounts/1/locations/2/reviews/rev-3', reviewer: { displayName: 'Reviewer Gamma' }, starRating: 'FIVE', comment: 'Great', createTime: '2026-05-14T01:22:29Z' },
+      ] });
+    });
+    const mark = jest.spyOn(service, '_markCustomerLeftReview').mockRejectedValue(new Error('suppression write failed'));
+    const enrollReviewThankYou = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: false, reason: 'error' });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+
+    const result = await service.syncAllReviews();
+
+    expect(mark).toHaveBeenCalled();
+    // Independent side effects: the failed suppression mark must not skip the attribution-moment thank-you.
+    expect(enrollReviewThankYou).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', source: 'google_review' }));
+    expect(result.synced).toBe(1);
+    // Surfaced, but not as a storage failure.
+    // The first failure is the one reported; a RESOLVED failure marker from the enrollment helper counts too.
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_side_effect', error: expect.stringContaining('suppression write failed') })]);
+    expect(enrollReviewThankYou).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(degraded).not.toHaveBeenCalled();
+    expect(db.__state.rows.google_reviews).toEqual(expect.arrayContaining([
+      expect.objectContaining({ gbp_review_name: 'accounts/1/locations/2/reviews/rev-3', customer_id: 'cust-1' }),
+    ]));
+    mark.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); enrollReviewThankYou.mockRestore();
+  });
+
+  test('row-specific failures never trip the breaker: every row is still visited and reconcile excludes the failed ones', async () => {
+    const reviews = Array.from({ length: 5 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    const dup = Object.assign(new Error('duplicate key value violates unique constraint "google_reviews_google_review_id_unique"'), { code: '23505' });
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockRejectedValue(dup);
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation');
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(5);
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(places).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledWith(expect.anything(), expect.any(Date), { excludeReviewNames: reviews.map((r) => r.name) });
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringContaining('5 of 5 review row(s) failed to store (0 stored)') })]);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('three CONNECTION-class failures in a run trip the breaker (adjacent or not): the location aborts to the Places fallback with the error', async () => {
+    const reviews = Array.from({ length: 6 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    // A socket-level code (not a SQLSTATE) is connection-class too (pre-push audit r6);
+    // intermittent: fail, store, fail, store, fail → three systemic failures
+    // in the run trip the breaker even though none were adjacent (codex r4 P1).
+    let calls = 0;
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async () => {
+      calls++;
+      if (calls === 2 || calls === 4) return { id: `stored-${calls}`, inserted: calls === 2 };
+      throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(5);
+    expect(reconcile).not.toHaveBeenCalled();
+    // The two rows stored before the trip are counted (codex r3 P2).
+    expect(result.synced).toBe(2);
+    expect(result.new).toBe(1);
+    // A trip is a database-WRITE failure: it carries the row-failure source and
+    // prefix so the alert and the health line never call it a pull failure (codex r5 P2).
+    expect(result.errors).toEqual([expect.objectContaining({ source: 'gbp_row', error: expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors this run.*\(2 stored; last: read ECONNRESET\)/) })]);
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors/));
+    expect(places).toHaveBeenCalledTimes(1);
+    // Two GBP rows stored and the sample landed nothing: the run is partial,
+    // not "none" (codex r10 P2).
+    expect(result.sources.bradenton).toBe('gbp_partial');
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a breaker-trip alert says no Places fallback runs when GOOGLE_MAPS_API_KEY is unset (codex r10 P2)', async () => {
+    const NotificationService = require('../services/notification-service');
+    const notify = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    const trip = 'review upsert failed: 3 review rows failed on connection-class errors this run — aborting the location (2 stored; last: read ECONNRESET)';
+    const loc = { id: 'bradenton', name: 'Bradenton' };
+    const saved = process.env.GOOGLE_MAPS_API_KEY;
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    await service._notifyDegradedSync(loc, trip);
+    expect(notify.mock.calls[0][2]).toMatch(/no Places fallback is available \(GOOGLE_MAPS_API_KEY is not set\)/);
+    expect(notify.mock.calls[0][2]).not.toMatch(/will attempt/);
+    process.env.GOOGLE_MAPS_API_KEY = 'test-key';
+    db.__state.rows.notifications = [];
+    await service._notifyDegradedSync({ ...loc, id: 'sarasota', name: 'Sarasota' }, trip);
+    expect(notify.mock.calls[1][2]).toMatch(/will attempt the Places sample fallback/);
+    // A breaker trip before any row stored uses the `(0 stored; last: …)`
+    // format — the body must not claim the stored reviews are current (codex r11 P2).
+    db.__state.rows.notifications = [];
+    await service._notifyDegradedSync({ ...loc, id: 'venice', name: 'Venice' }, trip.replace('(2 stored;', '(0 stored;'));
+    expect(notify.mock.calls[2][2]).toMatch(/NO review from this pull was stored/);
+    expect(notify.mock.calls[1][2]).toMatch(/The stored reviews are current/);
+    if (saved === undefined) delete process.env.GOOGLE_MAPS_API_KEY; else process.env.GOOGLE_MAPS_API_KEY = saved;
+    notify.mockRestore();
+  });
+
+  test('a connection-class failure inside a post-write step counts toward the breaker (codex r5 P1)', async () => {
+    const reviews = Array.from({ length: 6 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    // Rows store, but the pool times out inside every post-write step: the
+    // rows are durable (no rowFailures), yet the database is just as dead.
+    let calls = 0;
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async () => {
+      calls++;
+      const timeout = Object.assign(new Error('Knex: Timeout acquiring a connection. The pool is probably full.'), { name: 'KnexTimeoutError' });
+      return { id: `stored-${calls}`, inserted: true, sideEffectError: timeout.message, systemicError: timeout };
+    });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(3);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(result.synced).toBe(3);
+    expect(result.new).toBe(3);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'gbp_side_effect' }),
+      expect.objectContaining({ source: 'gbp_row', error: expect.stringMatching(/^review upsert failed: 3 review rows failed on connection-class errors this run.*\(3 stored; last: Knex: Timeout/) }),
+    ]));
+    expect(places).toHaveBeenCalledTimes(1);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); places.mockRestore();
+  });
+
+  test('a breaker-trip partial store and its Places fallback count each review once (codex r6 P2)', async () => {
+    const reviews = Array.from({ length: 6 }, (_, i) => ({
+      name: `accounts/1/locations/2/reviews/rev-${i}`, reviewer: { displayName: `Reviewer ${i}` }, starRating: 'FIVE', comment: 'ok', createTime: '2026-05-14T01:22:29Z',
+    }));
+    // The two rows the GBP store lands before the trip (calls 2 and 4 →
+    // rev-1 and rev-3), as the sample will find them: GBP-linked, same content.
+    for (const i of [1, 3]) {
+      db.__state.rows.google_reviews.push({
+        id: `stored-${i + 1}`,
+        google_review_id: `accounts/1/locations/2/reviews/rev-${i}`,
+        gbp_review_name: `accounts/1/locations/2/reviews/rev-${i}`,
+        location_id: 'bradenton',
+        reviewer_name: `Reviewer ${i}`,
+        star_rating: 5,
+        review_text: 'ok',
+        review_created_at: '2026-05-14T01:22:29Z',
+      });
+    }
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        // The sample carries both stored reviews plus one the GBP loop never reached.
+        return { json: async () => ({ status: 'OK', result: { reviews: [
+          { author_name: 'Reviewer 1', rating: 5, text: 'ok', time: 1778721749 },
+          { author_name: 'Reviewer 3', rating: 5, text: 'ok', time: 1778721749 },
+          { author_name: 'Reviewer Fresh', rating: 5, text: 'new', time: 1778800000 },
+        ] } }) };
+      }
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+    let calls = 0;
+    const upsert = jest.spyOn(service, '_upsertGbpReview').mockImplementation(async () => {
+      calls++;
+      if (calls === 2 || calls === 4) return { id: `stored-${calls}`, inserted: calls === 2 };
+      throw Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    });
+    const reconcile = jest.spyOn(service, '_reconcileMissingReviews').mockResolvedValue({ ok: true });
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const unlinked = jest.spyOn(service, '_notifyUnlinkedReview').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation');
+
+    const result = await service.syncAllReviews();
+
+    expect(upsert).toHaveBeenCalledTimes(5);
+    expect(reconcile).not.toHaveBeenCalled();
+    // The fallback received the partial store's row ids and still updated those rows.
+    expect(places).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), 'maps-key', expect.any(Array), expect.any(Array), new Set(['stored-2', 'stored-4']));
+    await expect(places.mock.results[0].value).resolves.toEqual({ synced: 3, new: 1, alreadyCounted: 2 });
+    expect(db.__state.updates.filter((u) => u.table === 'google_reviews' && ['stored-2', 'stored-4'].includes(u.id)).length).toBeGreaterThanOrEqual(2);
+    // 2 stored by GBP + 1 the sample alone carried = 3, never 2 + 3.
+    expect(result.synced).toBe(3);
+    expect(result.new).toBe(2);
+    expect(result.sources).toEqual({ bradenton: 'places_fallback' });
+    expect(db.__state.rows.google_reviews.filter((r) => r.reviewer_name !== '_stats')).toHaveLength(3);
+    upsert.mockRestore(); reconcile.mockRestore(); degraded.mockRestore(); unlinked.mockRestore(); places.mockRestore();
+  });
+
+  test('a real post-write connection failure is tagged systemic on the result; a row-specific one is only a side-effect error', async () => {
+    const run = async (err) => {
+      const result = { id: 'r1', inserted: false };
+      // The reinstatement clear is the first post-write step: fail its UPDATE.
+      const real = db.getMockImplementation();
+      db.mockImplementationOnce((table) => { const q = real(table); q.update = async () => { throw err; }; return q; });
+      await service._applyPostWriteSideEffects({ result, row: {}, normalized: { gbp_review_name: 'n' }, existing: { customer_id: null }, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
+      return result;
+    };
+    const timeout = Object.assign(new Error('Knex: Timeout acquiring a connection'), { name: 'KnexTimeoutError' });
+    const tagged = await run(timeout);
+    expect(tagged.sideEffectError).toBe(timeout.message);
+    expect(tagged.systemicError).toBe(timeout);
+    const rowErr = Object.assign(new Error('invalid input syntax'), { code: '22P02' });
+    const untagged = await run(rowErr);
+    expect(untagged.sideEffectError).toBe(rowErr.message);
+    expect(untagged.systemicError).toBeUndefined();
+    // DNS / route failures are connection-wide too (codex r7 P1): a host that
+    // does not resolve or route fails every row the same way.
+    for (const dead of [
+      Object.assign(new Error('getaddrinfo ENOTFOUND postgres.railway.internal'), { code: 'ENOTFOUND' }),
+      Object.assign(new Error('connect ENETUNREACH 10.0.0.5:5432'), { code: 'ENETUNREACH' }),
+      new Error('getaddrinfo EAI_AGAIN postgres.railway.internal'),
+      Object.assign(new Error('resolver failure'), { code: 'EAI_NODATA' }),
+      Object.assign(new Error('resolver failure'), { code: 'EAI_ADDRFAMILY' }),
+    ]) {
+      const tagged = await run(dead);
+      expect(tagged.systemicError).toBe(dead);
+    }
+
+    // Self-catching helpers resolve a marker: the ORIGINAL error is what gets
+    // classified (pre-push audit on codex r5 P1) — for both the suppression
+    // mark and the thank-you enrollment.
+    const canceled = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+    const mark = jest.spyOn(service, '_markCustomerLeftReview').mockResolvedValue({ failed: true, error: canceled });
+    const marked = { id: 'r2', inserted: true };
+    await service._applyPostWriteSideEffects({ result: marked, row: { customer_id: 'cust-1' }, normalized: { gbp_review_name: 'n' }, existing: null, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
+    expect(marked.sideEffectError).toMatch(/suppression mark resolved a failure \(canceling statement/);
+    expect(marked.systemicError).toBe(canceled);
+    mark.mockRestore();
+
+    const poolTimeout = Object.assign(new Error('Knex: Timeout acquiring a connection'), { name: 'KnexTimeoutError' });
+    const markOk = jest.spyOn(service, '_markCustomerLeftReview').mockResolvedValue(true);
+    const enroll = jest.spyOn(require('../services/automation-enroll'), 'enrollReviewThankYou').mockResolvedValue({ enrolled: false, reason: 'error', error: poolTimeout });
+    const enrolled = { id: 'r3', inserted: true };
+    await service._applyPostWriteSideEffects({ result: enrolled, row: { customer_id: 'cust-1', location_id: 'bradenton', star_rating: 5 }, normalized: { gbp_review_name: 'n' }, existing: null, syncStart: new Date(), pendingRestoredNotifications: [], pendingUnlinkedNotifications: [] });
+    expect(enrolled.systemicError).toBe(poolTimeout);
+    markOk.mockRestore(); enroll.mockRestore();
+  });
+
+  test('GBP path: a connection-class failure in the edited-after-post bell is tagged systemic (codex r9 P1); the park itself is durable', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Paula! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'Paula Placeholder' },
+        starRating: 'ONE',
+        comment: 'Completely different text',
+        reviewReply: { comment: 'Hello Paula! Thanks!' },
+        createTime: '2026-04-09T20:54:35Z',
+      }] });
+    });
+    const timeout = Object.assign(new Error('Knex: Timeout acquiring a connection. The pool is probably full.'), { name: 'KnexTimeoutError' });
+    const bell = jest.spyOn(service, '_bellEditedAfterPost').mockRejectedValue(timeout);
+    const upsert = jest.spyOn(service, '_upsertGbpReview');
+
+    await service.syncAllReviews();
+
+    expect(bell).toHaveBeenCalledTimes(1);
+    const outcome = await upsert.mock.results[0].value;
+    expect(outcome).toMatchObject({ id: 'gbp-row-1', inserted: false, sideEffectError: timeout.message, systemicError: timeout });
+    const row = db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1');
+    expect(row).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+
+    // A row-specific bell failure stays a side-effect error only.
+    db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1').auto_reply_status = 'posted';
+    db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1').auto_reply_reason = null;
+    db.__state.rows.google_reviews.find(r => r.id === 'gbp-row-1').review_text = 'Original text';
+    const rowErr = Object.assign(new Error('invalid input syntax'), { code: '22P02' });
+    bell.mockRejectedValue(rowErr);
+    upsert.mockClear();
+    await service.syncAllReviews();
+    const second = await upsert.mock.results[0].value;
+    expect(second.sideEffectError).toBe(rowErr.message);
+    expect(second.systemicError).toBeUndefined();
+    bell.mockRestore(); upsert.mockRestore();
+  });
+
+  test('a null client after a FAILED stored-token lookup is reported as that failure, never as missing credentials', async () => {
+    // _getStoredTokens records the failure and resolves {} → _getClient resolves null.
+    service._getClient = jest.fn(async () => null);
+    service._tokenLookupErrors.bradenton = 'Knex: Timeout acquiring a connection';
+    global.fetch = jest.fn(async () => ({ json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) }));
+    const degraded = jest.spyOn(service, '_notifyDegradedSync').mockResolvedValue();
+    const places = jest.spyOn(service, '_syncPlacesReviewSampleForLocation').mockResolvedValue({ synced: 0, new: 0 });
+    const health = jest.spyOn(service, '_assessReviewSyncHealth').mockResolvedValue({});
+
+    await service.syncAllReviews();
+
+    expect(degraded).toHaveBeenCalledWith(expect.objectContaining({ id: 'bradenton' }), expect.stringMatching(/^stored-token lookup failed: Knex: Timeout/));
+    expect(health).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ bradenton: expect.stringMatching(/^stored-token lookup failed/) }));
+    expect(service._classifyLocationSyncHealth({ hasResource: true, source: 'places_fallback', gbpFailure: 'stored-token lookup failed: Knex: Timeout' }).detail).not.toMatch(/credentials/);
+    delete service._tokenLookupErrors.bradenton;
+    degraded.mockRestore(); places.mockRestore(); health.mockRestore();
+  });
+
   test('upgrades a legacy Places row to the GBP review resource identity', async () => {
     db.__state.rows.google_reviews.push({
       id: 'legacy-1',
@@ -1683,6 +2064,9 @@ describe('Google Business review sync', () => {
       clickedAt: '2026-05-25T11:58:00.000Z',
       clickOffsetMs: 2 * 60000,
       clickOffsetLabel: '2m before',
+      rung: 'sole_click',
+      evidence: 'only click in the window, same location',
+      locationTrusted: true,
     };
 
     function feedWithUnmatchedReview() {
@@ -1727,6 +2111,163 @@ describe('Google Business review sync', () => {
       expect(notifs).toHaveLength(1);
       expect(notifs[0].title).toContain('Auto-linked');
       expect(notifs[0].body).toContain('2m before');
+      expect(notifs[0].body).toContain('only click in the window');
+    });
+
+    test('correlates on the LIVE row, not the collector payload: a reviewer_name rewritten by a newer runner reaches the matcher and the bell (GH codex r4 P1)', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      const createdAt = new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString();
+      const matcher = jest.fn(async () => ({
+        ...CONFIDENT_MATCH,
+        clickedAt: new Date(Date.parse(createdAt) - 10 * 60000).toISOString(),
+        clickOffsetMs: 10 * 60000,
+        clickOffsetLabel: '10m before',
+        rung: 'click_name',
+        locationTrusted: false,
+        evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
+      }));
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: matcher,
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Pat', last_name: 'OConnor',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      db.__state.rows.google_reviews.push({
+        id: 'rev-stale',
+        google_review_id: 'accounts/1/locations/2/reviews/rev-stale',
+        gbp_review_name: 'accounts/1/locations/2/reviews/rev-stale',
+        location_id: 'bradenton',
+        reviewer_name: 'Pat O’Connor', // rewritten by a newer runner after the payload was queued
+        star_rating: 4,
+        review_text: 'Great',
+        review_created_at: createdAt,
+        customer_id: null,
+        missing_since: null,
+        review_reply: null,
+      });
+      // The deferred payload still carries the name the review had when it
+      // was queued, under an earlier hold of the location lock.
+      const linked = await service._attemptClickAutoLink({
+        google_review_id: 'accounts/1/locations/2/reviews/rev-stale',
+        location_id: 'bradenton',
+        reviewer_name: 'SunshineGal88',
+        review_created_at: createdAt,
+        star_rating: 4,
+      });
+      expect(linked).toBe(true);
+      expect(matcher).toHaveBeenCalledTimes(1);
+      expect(matcher.mock.calls[0][0]).toMatchObject({ reviewer_name: 'Pat O’Connor', location_id: 'bradenton', review_created_at: createdAt });
+      const review = db.__state.rows.google_reviews.find(r => r.id === 'rev-stale');
+      expect(review.customer_id).toBe('cust-clicker');
+      const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
+      expect(notifs).toHaveLength(1);
+      expect(notifs[0].title).toBe('Auto-linked Google review from Pat O’Connor');
+    });
+
+    test('a click_name match links with link_source click_auto and carries the matcher\'s own evidence into the bell', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: jest.fn(async () => ({
+          ...CONFIDENT_MATCH,
+          rung: 'click_name',
+          locationTrusted: false,
+          evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
+        })),
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Jane', last_name: 'Doe',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      feedWithUnmatchedReview();
+
+      await service.syncAllReviews();
+
+      const review = db.__state.rows.google_reviews.find(r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-click');
+      expect(review.customer_id).toBe('cust-clicker');
+      expect(review.link_source).toBe('click_auto');
+      const notifs = (db.__state.rows.notifications || []).filter(n => n.category === 'review');
+      expect(notifs).toHaveLength(1);
+      // The WHY is the matcher's evidence verbatim — no canned claim about
+      // other clicks the rung never checked (GH codex r2 P2).
+      expect(notifs[0].body).toContain("(the reviewer's last name matches this customer's; no other clicker at this location in the window)");
+      expect(notifs[0].body).not.toContain('other clicks in the window were other names');
+    });
+
+    test('a location-less legacy click_name match refuses when a second unlinked review at ANOTHER location shares its forward window; alone it links; a trusted location keeps the guard scoped (GH codex r2 P1)', async () => {
+      process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
+      const recent = Date.now() - 2 * 24 * 3600 * 1000;
+      const clickedAt = new Date(recent - 10 * 60000).toISOString();
+      // Held by closure so the location trust can flip between runs.
+      const match = {
+        customerId: 'cust-clicker',
+        clickedAt,
+        clickOffsetMs: 10 * 60000,
+        clickOffsetLabel: '10m before',
+        rung: 'click_name',
+        evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
+        locationTrusted: false,
+      };
+      jest.doMock('../services/review-click-correlation', () => ({
+        AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
+        findConfidentClickMatch: jest.fn(async () => match),
+        findLikelyReviewers: jest.fn(async () => []),
+      }));
+      db.__state.rows.customers.push({
+        id: 'cust-clicker', first_name: 'Sam', last_name: 'Northgate',
+        has_left_google_review: false, review_marked_at: null,
+      });
+      // Two same-surname unlinked reviews inside the click's forward window,
+      // one per GBP location. The legacy click carries no location, so
+      // neither review can claim it — whichever location synced first
+      // would otherwise take the customer.
+      const seedRival = (n, locationId) => db.__state.rows.google_reviews.push({
+        id: `rival-${n}`,
+        google_review_id: `accounts/1/locations/${n}/reviews/rival-${n}`,
+        gbp_review_name: `accounts/1/locations/${n}/reviews/rival-${n}`,
+        location_id: locationId,
+        reviewer_name: 'slim northgate',
+        star_rating: 5,
+        review_text: 'Nice',
+        review_created_at: new Date(recent + n * 60000).toISOString(),
+        customer_id: null,
+        missing_since: null,
+        review_reply: null,
+      });
+      seedRival(1, 'bradenton');
+      seedRival(2, 'sarasota');
+      global.fetch = jest.fn(async (url) => {
+        if (String(url).includes('maps.googleapis.com')) {
+          return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+        }
+        return jsonResponse({ reviews: [] });
+      });
+
+      await service.syncAllReviews();
+
+      const rivals = () => db.__state.rows.google_reviews.filter(r => String(r.id).startsWith('rival-'));
+      expect(rivals().every(r => r.customer_id == null)).toBe(true);
+      expect(db.__state.rows.customers[0].has_left_google_review).toBe(false);
+
+      // Alone in its forward window across every location: links.
+      db.__state.rows.google_reviews = db.__state.rows.google_reviews.filter(r => r.id !== 'rival-2');
+      await service.syncAllReviews();
+      expect(rivals().map(r => [r.id, r.customer_id])).toEqual([['rival-1', 'cust-clicker']]);
+      expect(db.__state.rows.customers[0].has_left_google_review).toBe(true);
+
+      // A trusted, location-matched click (sole_click / click_near / a
+      // stamped click_name pair) keeps the guard scoped to its own GBP: the
+      // other location's review does not block.
+      db.__state.rows.google_reviews[db.__state.rows.google_reviews.findIndex(r => r.id === 'rival-1')].customer_id = null;
+      db.__state.rows.customers[0].has_left_google_review = false;
+      seedRival(2, 'sarasota');
+      match.locationTrusted = true;
+      await service.syncAllReviews();
+      expect(rivals().find(r => r.id === 'rival-1').customer_id).toBe('cust-clicker');
     });
 
     test('gate OFF: even a confident match stays a manual-queue notification, no link', async () => {

@@ -36,7 +36,7 @@ const STATUS_LABELS = {
   on_site: 'On Site', completed: 'Completed', skipped: 'Skipped', cancelled: 'Cancelled',
 };
 
-export default function ScheduleListView({ technicians = [], onEdit, onRefresh }) {
+export default function ScheduleListView({ technicians = [], onEdit, onRefresh, refreshKey = 0, lastSave = null }) {
   const [services, setServices] = useState([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -48,7 +48,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   // bulk conflict check must cover rows no longer loaded. Entries follow
   // the selection: deleted on deselect, cleared when it empties.
   const selectedMetaRef = useRef(new Map());
-  const rememberSelectedMeta = (s) => {
+  const rememberSelectedMeta = useCallback((s) => {
     selectedMetaRef.current.set(s.id, {
       id: s.id,
       windowStart: s.windowStart,
@@ -58,8 +58,14 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       // on other pages.
       scheduledDate: s.scheduledDate ? String(s.scheduledDate).split('T')[0] : '',
       isRecurring: !!(s.isRecurring ?? s.is_recurring),
+      // Plan membership for the bulk-cancel notice: boosters are stored
+      // is_recurring=false but carry recurring_parent_id, and legacy series
+      // rows carry only recurring_pattern (the shape #3857 handles in the
+      // mobile sheet); cancelling either alone leaves its plan running just
+      // the same (Codex #3868 r1 + r4).
+      inPlan: !!(s.isRecurring ?? s.is_recurring) || !!(s.recurringParentId ?? s.recurring_parent_id) || !!(s.recurringPattern ?? s.recurring_pattern),
     });
-  };
+  }, []);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [sortCol, setSortCol] = useState('scheduledDate');
   const [sortDir, setSortDir] = useState('asc');
@@ -92,27 +98,66 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   // cancel defaults to texting (matching the appointment sidebar).
   const [bulkNotify, setBulkNotify] = useState('none');
 
-  const fetchList = useCallback(async () => {
+  // Only the newest request commits rows, meta and loading: a slower
+  // filter/page response landing after the save-driven refresh must not
+  // restore pre-edit meta (pre-push hook P1).
+  const fetchSeqRef = useRef(0);
+  const pendingSaveRef = useRef(null);
+  const fetchList = useCallback(async (editedId = null) => {
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (filterFrom) params.set('from', filterFrom);
-      if (filterTo) params.set('to', filterTo);
-      if (filterStatus) params.set('status', filterStatus);
-      if (filterTech) params.set('techId', filterTech);
-      if (filterService) params.set('serviceType', filterService);
-      if (filterPrepaid) params.set('prepaid', filterPrepaid);
-      if (filterSearch) params.set('search', filterSearch);
-      params.set('page', page);
-      params.set('limit', 50);
-      const data = await adminFetch(`/admin/schedule/list?${params}`);
-      setServices(data.services || []);
-      setTotal(data.total || 0);
-    } catch { setServices([]); setTotal(0); }
+    const params = new URLSearchParams();
+    if (filterFrom) params.set('from', filterFrom);
+    if (filterTo) params.set('to', filterTo);
+    if (filterStatus) params.set('status', filterStatus);
+    if (filterTech) params.set('techId', filterTech);
+    if (filterService) params.set('serviceType', filterService);
+    if (filterPrepaid) params.set('prepaid', filterPrepaid);
+    if (filterSearch) params.set('search', filterSearch);
+    params.set('page', page);
+    params.set('limit', 50);
+    // A failed fetch commits an empty page (existing behaviour), which
+    // also makes the saved-row check below fail closed (Codex #3868 r4).
+    const data = await adminFetch(`/admin/schedule/list?${params}`).catch(() => null);
+    if (seq !== fetchSeqRef.current) return;
+    const rows = data?.services || [];
+    setServices(rows);
+    setTotal(data?.total || 0);
+    // A selected row edited meanwhile (e.g. made recurring in the Edit
+    // modal) comes back changed — refresh its meta from the fresh page
+    // so the bulk pre-flights read the saved row (Codex #3868 r2 P2).
+    rows.forEach((s) => { if (selectedMetaRef.current.has(s.id)) rememberSelectedMeta(s); });
+    // The row the host just saved may have left the filtered page
+    // (date/status/tech/service changed) or the refresh may have failed.
+    // Its cached meta is then unverifiable, so drop it from the selection
+    // rather than bulk-act on a pre-edit snapshot (Codex #3868 r3 P2).
+    // Other-page selections are untouched: only the saved id is checked.
+    if (editedId) {
+      pendingSaveRef.current = null;
+      if (selectedMetaRef.current.has(editedId) && !rows.some((s) => s.id === editedId)) {
+        selectedMetaRef.current.delete(editedId);
+        setSelected((prev) => { const next = new Set(prev); next.delete(editedId); return next; });
+      }
+    }
     setLoading(false);
-  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page]);
+  }, [filterFrom, filterTo, filterStatus, filterTech, filterService, filterPrepaid, filterSearch, page, rememberSelectedMeta]);
 
-  useEffect(() => { fetchList(); }, [fetchList]);
+  // refreshKey: the host bumps it after any mutation (edit, create,
+  // completion, payment…) so the list re-reads rows it did not itself
+  // change. lastSave: the host names the visit its Edit / prepay modal
+  // just saved (a fresh object per save, so a nested Mark prepaid save
+  // followed by the real edit counts twice); only that row is re-verified
+  // against the fresh page — a generic bump or a dismissed modal never
+  // drops a selection (Codex r3/r5 + pre-push hook P1s).
+  // The saved id stays pending until a request carrying it commits: a
+  // filter/page fetch started during the save-driven refresh supersedes
+  // it (fetchSeqRef) and must verify the row instead (Codex r6).
+  const seenSaveRef = useRef(lastSave);
+  useEffect(() => {
+    if (lastSave && lastSave !== seenSaveRef.current) pendingSaveRef.current = lastSave.id;
+    seenSaveRef.current = lastSave;
+    fetchList(pendingSaveRef.current);
+  }, [fetchList, refreshKey, lastSave]);
 
   const sorted = useMemo(() => {
     const arr = [...services];
@@ -180,8 +225,21 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
     enabled: bulkAction === 'reschedule' && !!bulkDate,
   });
 
+  // Bulk cancel writes one row per selected id — the bulk-action route
+  // has no scope, so a selected visit of a recurring plan is cancelled
+  // alone and its plan keeps generating visits. Say so in the bar while
+  // Cancel is chosen, and once more on Apply. Ending a plan stays with the
+  // scoped cancel (appointment sidebar / Edit appointment modal). Computed
+  // per render (not memoised on `selected`) so a meta refresh after an
+  // edit is picked up without a version counter.
+  const inPlanSelectedCount = Array.from(selected).filter((id) => selectedMetaRef.current.get(id)?.inPlan).length;
+  const bulkCancelPlanNotice = bulkAction === 'cancel' && inPlanSelectedCount > 0
+    ? `Selected visits that belong to a recurring plan: ${inPlanSelectedCount}. Only those visits are cancelled and each plan continues. To end a plan, cancel it from the appointment sidebar or the Edit appointment modal.`
+    : '';
+
   const executeBulkAction = async () => {
     if (!bulkAction || selected.size === 0) return;
+    if (bulkCancelPlanNotice && !window.confirm(`${bulkCancelPlanNotice}\n\nCancel ${selected.size} selected?`)) return;
     setBulkBusy(true);
     try {
       // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this bulk mover
@@ -391,7 +449,9 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
               size="sm"
               variant="secondary"
               onClick={executeBulkAction}
-              disabled={bulkBusy || (bulkAction === 'reschedule' && !bulkDate) || (bulkAction === 'mark_prepaid' && !bulkPrepaidAmount)}
+              // loading: a bulk action must not read selection meta while
+              // the save-driven refresh is still in flight (Codex #3868 r4).
+              disabled={bulkBusy || loading || (bulkAction === 'reschedule' && !bulkDate) || (bulkAction === 'mark_prepaid' && !bulkPrepaidAmount)}
               className="rounded-sm"
             >
               {bulkBusy ? 'Applying…' : 'Apply'}
@@ -406,6 +466,11 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
                 ? `⚠️ ${bulkConflicts.conflictCount} of the selected visits overlap existing appointments on ${bulkDate}.`
                 : '⚠️ Overlap check covered only the first 25 selected visits.'}
               {bulkConflicts.conflictCount > 0 && bulkConflicts.truncated ? ' (checked first 25)' : ''}
+            </span>
+          )}
+          {bulkCancelPlanNotice && (
+            <span className="basis-full text-11" style={{ color: '#FDE68A' }}>
+              ⚠️ {bulkCancelPlanNotice}
             </span>
           )}
         </div>
