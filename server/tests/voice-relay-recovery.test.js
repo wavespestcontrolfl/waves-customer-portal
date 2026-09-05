@@ -316,6 +316,31 @@ describe('the conversation side', () => {
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-rec');
   });
 
+  test.each([false, true])('late-segment inbox sync follows the duration repair and survives its failure (%s)', async (repairFails) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { syncVoiceMessageForCall } = require('../services/conversations');
+    const row = {
+      duration_seconds: 15,
+      metadata: {
+        relay_session_claim_owner: 'nonce-2',
+        relay_segments: [{ started_at: '2026-01-01T12:00:00Z', ended_at: '2026-01-01T12:02:00Z' }],
+      },
+    };
+    primeDb({ firstRow: row, updateImpl: jest.fn(async (patch) => {
+      if (patch.duration_seconds) {
+        if (repairFails) throw new Error('repair unavailable');
+        row.duration_seconds = 120;
+      }
+      return 1;
+    }) });
+    const inboxDurations = [];
+    syncVoiceMessageForCall.mockImplementationOnce(async () => { inboxDurations.push(row.duration_seconds); });
+    const convo = convoWithTurns();
+    convo._sessionSuperseded = jest.fn(async () => true);
+    await convo.end('ws_close');
+    expect(inboxDurations).toEqual([repairFails ? 15 : 120]);
+  });
+
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { db, builder, updates, guardQ } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });

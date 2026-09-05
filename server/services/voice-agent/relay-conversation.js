@@ -2120,9 +2120,6 @@ class RelayConversation {
       // the replacement already finalized (appendSegmentPatch): the unified
       // message row follows it. Bounded, best-effort.
       if (segmentAppended) {
-        try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
-          logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
-        }
         // …and the replacement's commitments pass may already have run on a
         // transcript without this segment: reconcile once more, on the
         // PERSISTED composed transcript, under the row's CURRENT owner (the
@@ -2152,6 +2149,11 @@ class RelayConversation {
           await this._refreshCallSummary(meta);
         } catch (err) {
           logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
+        // Copy the repaired whole-call duration and summary into the inbox.
+        // Still sync the appended transcript if any best-effort repair failed.
+        try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
+          logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
         }
       }
       return;
