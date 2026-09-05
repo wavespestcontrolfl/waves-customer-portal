@@ -51,7 +51,7 @@ jest.mock('../models/db', () => {
       andWhere(...a) { return b.where(...a); },
       orWhere() { return b; },
       whereIn() { return b; },
-      whereNotIn() { return b; },
+      whereNotIn(col, vals) { if (col === 'status') b._statusNotIn = vals; return b; },
       whereNot() { return b; },
       whereNull() { return b; },
       whereNotNull() { return b; },
@@ -66,7 +66,19 @@ jest.mock('../models/db', () => {
         return found ? { ...found } : undefined;
       },
       async columnInfo() { return { recurring_ongoing: {} }; },
-      async update(u) { state.writes.push({ table, op: 'update', u }); return 1; },
+      update(u) {
+        // Honour the id + status predicates so a terminal row matches 0 rows
+        // (the single-visit prepaid guard) — other updates match everything.
+        const match = (r) => Object.entries(b._where).every(([k, v]) => r[k] === v)
+          && !(b._statusNotIn && b._statusNotIn.includes(r.status));
+        const rows = table === 'scheduled_services' && b._where.id
+          ? state.rows.filter(match) : [{ id: null }];
+        if (rows.length) state.writes.push({ table, op: 'update', u });
+        return {
+          returning: async () => rows.map((r) => ({ ...r, ...u })),
+          then: (res, rej) => Promise.resolve(rows.length).then(res, rej),
+        };
+      },
       async insert(r) { state.writes.push({ table, op: 'insert', r }); return [1]; },
       // Awaiting the builder (the target select) resolves every scheduled
       // service — the harness owns the scope filtering by what it seeds.
@@ -106,6 +118,7 @@ jest.mock('../models/db', () => {
 const express = require('express');
 const db = require('../models/db');
 const dispatchRouter = require('../routes/admin-dispatch');
+const scheduleRouter = require('../routes/admin-schedule');
 
 let server;
 let baseUrl;
@@ -113,6 +126,7 @@ beforeAll(() => new Promise((resolve) => {
   const app = express();
   app.use(express.json());
   app.use('/api/admin/dispatch', dispatchRouter);
+  app.use('/api/admin/schedule', scheduleRouter);
   server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; resolve(); });
 }));
 afterAll(() => new Promise((r) => server.close(r)));
@@ -194,4 +208,27 @@ test('an unpaid series still cancels through the same branch (guard is not a bla
   const ops = db.__state.writes.map((w) => `${w.table}:${w.op}`);
   expect(ops).toContain('<trx>:commit');
   expect(db.__state.writes.some((w) => w.table === 'scheduled_services' && w.op === 'update' && w.u.recurring_ongoing === false)).toBe(true);
+});
+
+test("POST /admin/schedule/:id/prepaid refuses a cancelled visit with 409 visit_terminal (the writer side of the race — Codex #3878 r1 P1)", async () => {
+  seed();
+  db.__state.rows.find((r) => r.id === 'child-2').status = 'cancelled';
+  const res = await fetch(`${baseUrl}/api/admin/schedule/child-2/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: 95, method: 'cash' }),
+  });
+  const body = await res.json();
+  expect(res.status).toBe(409);
+  expect(body.code).toBe('visit_terminal');
+  expect(db.__state.writes.filter((w) => w.op === 'update')).toHaveLength(0);
+});
+
+test('POST /admin/schedule/:id/prepaid still stamps a live visit', async () => {
+  seed();
+  const res = await fetch(`${baseUrl}/api/admin/schedule/child-2/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: 95, method: 'cash' }),
+  });
+  expect(res.status).toBe(200);
+  expect(db.__state.writes.some((w) => w.op === 'update' && Number(w.u.prepaid_amount) === 95)).toBe(true);
 });

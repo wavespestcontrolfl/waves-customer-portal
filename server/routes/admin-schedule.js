@@ -64,6 +64,7 @@ const {
   stampSeriesPrepaid,
   resolveSeriesParentId,
   buildPrepaidSeriesContext,
+  TERMINAL_STATUSES: PREPAID_TERMINAL_STATUSES,
 } = require('../services/prepaid-series');
 const {
   auditRecurringScheduleAnomalies,
@@ -10963,8 +10964,13 @@ router.post('/:id/prepaid', async (req, res, next) => {
       );
       return res.json({ success: true, ...result });
     }
+    // Terminal rows never take a stamp (same set the series fan-out
+    // skips): a visit cancelled between the ownership read and this write
+    // — including by a concurrent series cancel — must not end up holding
+    // money for a visit that never runs (Codex #3878 r1 P1 / hook r2).
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
+      .whereNotIn('status', [...PREPAID_TERMINAL_STATUSES])
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
@@ -10973,7 +10979,16 @@ router.post('/:id/prepaid', async (req, res, next) => {
         prepaid_at: db.fn.now(),
       })
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
-    if (!updated.length) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (!updated.length) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('status');
+      if (current && PREPAID_TERMINAL_STATUSES.has(String(current.status || '').toLowerCase())) {
+        return res.status(409).json({
+          error: `This visit is already ${current.status} — it can't be marked prepaid. Refresh and try again.`,
+          code: 'visit_terminal',
+        });
+      }
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
 
     // Optional: mint the visit's invoice, apply this prepayment, and email/text
