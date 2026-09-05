@@ -151,19 +151,20 @@ async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STA
 }
 
 // …and a submit-first placement past its outcome (placed / live / indexed — the Judge's statuses, outside every
-// caller's active set) whose ONE follow-up is still OWED (§6.4, M.followUpOwed — the inbox guard's reader) is an
-// open conversation for the publisher: the domain is held until the follow-up is sent or skipped, so no writer admits
-// a second placement (and a second recipient) beside it
+// caller's active set) whose ONE follow-up is still OWED (§6.4, M.followUpOwed — the inbox guard's reader) or whose
+// follow-up send is AMBIGUOUS (sending / send_error: Gmail may have delivered it — held whatever the path, as the
+// inbox guard holds it) is an open conversation for the publisher: the domain is held until the follow-up is sent or
+// skipped, so no writer admits a second placement (and a second recipient) beside it
 async function followUpOwedRow(trx, key, lanes) {
   const M = require('./link-outreach-mandate');
-  let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...M.FOLLOW_UP_JUDGE_STATUSES]).where({ outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due', 'drafted']);
+  let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...M.FOLLOW_UP_JUDGE_STATUSES]).where({ outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due', 'drafted', ...M.AMBIGUOUS_SEND_STATUSES]);
   if (lanes === 'outreach') qb = qb.whereRaw(`COALESCE(link_type, '') NOT IN (${SIGNUP_TYPES.map(() => '?').join(', ')})`, [...SIGNUP_TYPES]);
   const rows = (await qb.select('id', 'status', 'target_page', 'path_id', 'outreach_status', 'follow_up_status', 'follow_up_due_at')) || [];
   if (!rows.length) return null;
   const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
   const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'execution_after_send', 'acquisition_type', 'account_required') : [];
   const pathById = new Map(paths.map((p) => [p.id, p]));
-  const owed = rows.find((r) => M.followUpOwed(r, pathById.get(r.path_id) || null));
+  const owed = rows.find((r) => M.AMBIGUOUS_SEND_STATUSES.includes(r.follow_up_status) || M.followUpOwed(r, pathById.get(r.path_id) || null));
   return owed ? { id: owed.id, status: owed.status, target_page: owed.target_page } : null;
 }
 

@@ -588,7 +588,8 @@ function followUpReportPatch({ outcome, moved, gone, blocked, row, body, note, r
 }
 async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
   if (!FOLLOW_UP_OUTCOMES.includes(outcome)) return { ok: false, code: 'not_follow_up_outcome', error: `a follow-up lease reports drafted, failed or skipped — not ${outcome}` };
-  if (outcome === 'drafted' && (!body.outreach_subject || !body.outreach_body)) return { ok: false, code: 'draft_incomplete', error: 'a drafted follow-up requires outreach_subject and outreach_body (the recipient is the thread\'s)' };
+  const blank = (v) => !String(v || '').trim(); // whitespace is no draft: the review would pass it and the dispatcher send it
+  if (outcome === 'drafted' && (blank(body.outreach_subject) || blank(body.outreach_body))) return { ok: false, code: 'draft_incomplete', error: 'a drafted follow-up requires outreach_subject and outreach_body (the recipient is the thread\'s)' };
   const now = new Date();
   const release = { claimed_at: null, claimed_by: null, updated_at: now };
   const note = body.notes || null;

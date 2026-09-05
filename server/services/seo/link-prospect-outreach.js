@@ -981,6 +981,16 @@ async function reconcileInitial({ prospect, outcome, approvedBy }) {
   return { ok: true, prospect: rows[0] };
 }
 
+// whether a drafted follow-up is the OWNER'S to settle (§6.4): the contract off (nothing else sends it), an owner
+// marker from the automatic attempt, or the open follow-up instance decided OWNER_* by the policy. Read once before
+// the reconcile's locks (the fast refusal) and AGAIN under them: the bridge may re-decide the instance AUTO between
+// the card's read and the click, and a stale Skip must not settle a follow-up the queue now sends
+async function ownerRoutedFollowUp(q, row) {
+  if (!isEnabled('linkAuthority') || M.OWNER_MARKERS.includes(row.follow_up_skipped_reason)) return true;
+  const open = await q(AUTH).where({ prospect_id: row.id, dimension: 'communication', instance_kind: 'followup' }).whereNull('ended_at').whereNull('satisfied_at').select('level');
+  return open.some((r) => String(r.level || '').startsWith('OWNER_'));
+}
+
 // the reconcile's write (pure): 'sent' settles the follow-up sent; a retirement (`gone` — the owner's skip, or a route
 // the requeue could not re-draft on) settles it skipped with the reason; a plain requeue returns it to drafted. The
 // attempt stamp is cleared ONLY on a confirmed-not-sent requeue: a SKIP of an ambiguous attempt keeps it — Gmail may
@@ -1015,8 +1025,7 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   // and the conversation holds its inbox and domain until it is settled. Only an owner-routed drafted follow-up and the
   // ambiguous send states skip: an AUTO-decided draft is the queue's to send — unless the contract is OFF (nothing
   // sends it: the owner's skip is the one action left).
-  const ownerRouted = st === 'drafted' && (!isEnabled('linkAuthority') || M.OWNER_MARKERS.includes(prospect.follow_up_skipped_reason)
-    || (await db(AUTH).where({ prospect_id: prospect.id, dimension: 'communication', instance_kind: 'followup' }).whereNull('ended_at').whereNull('satisfied_at').select('level')).some((r) => String(r.level || '').startsWith('OWNER_')));
+  const ownerRouted = st === 'drafted' && await ownerRoutedFollowUp(db, prospect);
   if (outcome === 'skip' && !ownerRouted && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable', error: 'only a follow-up that is yours to send (routed to you by the automatic attempt or the policy), or an ambiguous send, can be skipped' };
   if (outcome !== 'skip' && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
   const now = new Date();
@@ -1031,8 +1040,9 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
     // lease's and the send's order): a supersede / re-rank orders before or after this decision, never between the
     // route read and the CAS, so a requeue never parks a draft on a route that just moved
     await lockProspectDomain(trx, prospect.target_domain);
-    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first('id', 'status', 'path_id', 'domain_id', 'notes', 'follow_up_sent_at');
+    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first('id', 'status', 'path_id', 'domain_id', 'notes', 'follow_up_sent_at', 'follow_up_skipped_reason');
     if (!row) return [];
+    if (outcome === 'skip' && st === 'drafted' && !(await ownerRoutedFollowUp(trx, row))) return []; // re-decided AUTO meanwhile: the queue's to send
     const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).forUpdate().first('id', 'execution_after_send', 'acquisition_type', 'account_required', 'superseded_by') : null;
     const dom = row.domain_id ? await trx('seo_link_domains').where({ id: row.domain_id }).first('best_path_id') : null;
     // …and a requeue cannot yield a sendable draft either when the ROUTE moved on under the pinned conversation — the
@@ -1047,6 +1057,12 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
     q = prospect.follow_up_send_token ? q.where({ follow_up_send_token: prospect.follow_up_send_token }) : q.whereNull('follow_up_send_token');
     const r = await q.update(patch).returning('*');
     if (outcome === 'sent' && r && r.length === 1) await satisfySendInstance(trx, { prospectId: prospect.id, now, followUp: true });
+    // a requeue after a NOT-sent attempt: the owner's approval for THAT attempt is spent — invalidated, so the card
+    // offers Send / Skip again instead of a stale "approved" label (the queue reads the approval as live authority)
+    if (outcome === 'requeue' && r && r.length === 1) {
+      const open = await trx(AUTH).where({ prospect_id: prospect.id, dimension: 'communication', instance_kind: 'followup' }).whereNull('ended_at').whereNull('satisfied_at').whereNotNull('approval_id').select('approval_id');
+      if (open.length) await trx('seo_link_approvals').whereIn('id', open.map((x) => x.approval_id)).whereNull('invalidated_at').update({ invalidated_at: now, invalidated_reason: 'follow-up send re-queued after an ambiguous attempt — the next send needs a new click', updated_at: now });
+    }
     return r;
   });
   if (!rows || rows.length === 0) return { ok: false, code: 'not_reconcilable' };

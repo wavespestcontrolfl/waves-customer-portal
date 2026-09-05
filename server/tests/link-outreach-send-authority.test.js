@@ -1377,6 +1377,41 @@ describe('Codex r2 on #3854', () => {
     isEnabled.mockImplementation(() => true);
     expect(placement(s.db).follow_up_status).toBe('due'); // no retirement write from a preview
   });
+  test('P1 (Codex r25): the DOMAIN guard holds a Judge-owned placement whose follow-up send is AMBIGUOUS (sending / send_error) — whatever the path', async () => {
+    const t = scenario({ policy: AUTO_POLICY }); // send-first: no follow-up past live — but an ambiguous one may have been delivered
+    await nightly(t.db);
+    Object.assign(placement(t.db), { status: 'placed', parked_from_status: null, outreach_status: 'sent', outreach_sent_at: NOW, follow_up_status: 'send_error', follow_up_due_at: null });
+    expect((await claimProspectDomain(t.db, 'example.org')).inFlight?.id).toBe(t.row.id);
+    placement(t.db).follow_up_status = 'sending';
+    expect((await claimProspectDomain(t.db, 'example.org')).inFlight?.id).toBe(t.row.id);
+    placement(t.db).follow_up_status = 'skipped';
+    expect((await claimProspectDomain(t.db, 'example.org')).inFlight).toBeNull();
+  });
+  test('P2 (Codex r25): a stale Skip on a follow-up the bridge re-decided AUTO meanwhile is refused under the lock', async () => {
+    const s = await conversation();
+    followUpRow(s.db).level = 'OWNER_OUTREACH';
+    let reads = 0; // the pre-read passes the fast check; the bridge re-decides between it and the LOCKED row read
+    s.db._beforeResolve = (table, db) => { if (table === 'seo_link_prospects' && ++reads === 2) { db._tables.seo_link_placement_authorities.forEach((r) => { if (r.instance_kind === 'followup') r.level = 'AUTO_OUTREACH'; }); db._beforeResolve = null; } };
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'not_reconcilable' });
+    expect(placement(s.db).follow_up_status).toBe('drafted');
+  });
+  test('P2 (Codex r25): a whitespace-only follow-up draft is refused (draft_incomplete), never parked for the review', async () => {
+    const s = await conversation({ decide: false });
+    Object.assign(placement(s.db), { follow_up_status: 'due', follow_up_subject: null, follow_up_body: null, follow_up_due_at: new Date(Date.now() - DAY) });
+    const [l] = await worker.claim({ n: 10, type: 'outreach', followUp: true });
+    expect(await worker.report({ prospect_id: s.row.id, outcome: 'drafted', lease_token: l.lease_token, outreach_subject: 'Re: hi', outreach_body: '   \n\t ' })).toMatchObject({ ok: false, code: 'draft_incomplete' });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'due', follow_up_body: null });
+  });
+  test('P2 (Codex r25): a requeue after an OWNER follow-up\'s ambiguous attempt invalidates the click\'s approval — the card offers Send again', async () => {
+    const s = await conversation({ followUpBody: `${FOLLOW_UP_BODY}\nWe would gladly link back to you.` }); // OWNER_OUTREACH (unclean copy)
+    gmail.sendMessage.mockRejectedValueOnce(new Error('ETIMEDOUT'));
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER })).toMatchObject({ ok: false, code: 'send_failed' });
+    expect(approvals(s.db)).toHaveLength(1);
+    expect(approvals(s.db)[0].invalidated_at).toBeFalsy();
+    expect(await Outreach.reconcileSendError({ prospectId: s.row.id, outcome: 'requeue', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true });
+    expect(approvals(s.db)[0].invalidated_at).toBeTruthy();
+    expect(placement(s.db).follow_up_status).toBe('drafted');
+  });
   test('P2 (Codex r19): a SKIP of an ambiguous follow-up keeps the attempt stamp (Gmail may have delivered it — the ET-day cap counts every attempt); only a confirmed-not-sent requeue clears it', async () => {
     const s = await conversation();
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: NOW })).ok).toBe(true);
