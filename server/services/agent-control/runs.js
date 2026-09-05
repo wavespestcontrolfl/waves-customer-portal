@@ -277,7 +277,8 @@ async function startRun(args = {}) {
 function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, traceId, workflowId }) {
   const runId = run.id;
   const budget = policy.budget || {};
-  let seq = Number(run.max_seq || 0); // continues across attempts (openAttempt reads the max)
+  let seq = Number(run.max_seq || 0); // timeline numbering, continues across attempts (openAttempt reads the max)
+  let stepsThisAttempt = 0; // the budget's unit: this attempt starts its budget over
   let toolCalls = 0;
   let budgetFlagged = false;
   let progress = Number(run.progress_sequence || 0);
@@ -323,8 +324,9 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   async function step({ key, label = null, toolName = null } = {}, fn) {
     if (spent()) return context.withStep(crypto.randomUUID(), () => fn());
     seq += 1;
+    stepsThisAttempt += 1;
     if (toolName) toolCalls += 1;
-    if (budget.max_steps && seq > budget.max_steps) await flagBudget('steps');
+    if (budget.max_steps && stepsThisAttempt > budget.max_steps) await flagBudget('steps');
     else if (toolName && budget.max_tool_calls && toolCalls > budget.max_tool_calls) await flagBudget('tool_calls');
     const stepId = crypto.randomUUID();
     const startedAt = new Date();

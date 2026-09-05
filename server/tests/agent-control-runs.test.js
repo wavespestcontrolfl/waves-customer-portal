@@ -294,6 +294,12 @@ describe('a spent handle', () => {
     const b = await runs.startRun({ ...base, maxAttempts: 2 });
     await b.step({ key: 'three' }, async () => 3);
     expect(store.agent_run_steps.map((s) => [s.step_key, s.seq])).toEqual([['one', 1], ['two', 2], ['three', 3]]);
+    // the budget counts THIS attempt's steps, not the timeline position
+    const max = policyFor('blog_draft').budget.max_steps;
+    for (let i = 0; i < max - 1; i += 1) await b.step({ key: `s${i}` }, async () => i);
+    expect(events(b.id)).not.toContain('budget_exceeded');
+    await b.step({ key: 'over' }, async () => 1);
+    expect(events(b.id).filter((e) => e === 'budget_exceeded')).toHaveLength(1);
   });
 });
 
