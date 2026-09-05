@@ -143,8 +143,11 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
     );
     const shownVisits = visitsNewestFirst.slice(0, MAX_VISIT_CARDS);
+    // Order: actionable prompts, then storm warnings (both on a timer that
+    // marks them read), then the persistent visit cards — nothing that can
+    // expire unseen ever sits below something that waits for a tap.
     return {
-      cards: [...otherCards, ...shownVisits, ...shownStorms],
+      cards: [...otherCards, ...shownStorms, ...shownVisits],
       hiddenStormCount: stormAlerts.length - shownStorms.length,
       hiddenVisitCount: visitsNewestFirst.length - shownVisits.length,
     };
@@ -221,6 +224,9 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     <div style={{
       position: 'fixed', top: 12, left: 12, right: 12, zIndex: 10_000,
       display: 'flex', flexDirection: 'column', gap: 10, pointerEvents: 'none',
+      // The stack scrolls inside the viewport instead of running past it:
+      // a phone-height screen must still reach every card.
+      maxHeight: 'calc(100vh - 24px)', overflowY: 'auto',
     }}>
       {cards.map((n) => (
         <div key={n.id} style={{ pointerEvents: 'auto' }}>

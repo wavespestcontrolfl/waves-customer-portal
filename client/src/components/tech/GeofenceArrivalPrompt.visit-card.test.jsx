@@ -71,11 +71,12 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
 
   it('caps the stack at two visit cards (newest first) behind any geofence prompt, and summarizes the rest', async () => {
     const prompt = notification('geofence_arrival_reminder', { customer_name: 'Okafor' }, 'n-prompt');
+    const storm = { ...notification('storm_watch_alert', { job_id: 'j-storm', city: 'Venice' }, 'n-storm'), created_at: new Date().toISOString() };
     const many = [1, 2, 3, 4, 5].map((i) => ({
       ...notification('visit_assigned', { headline: 'New visit on your route', customer_name: `Customer ${i}` }, `n-v${i}`),
       created_at: `2026-09-08T18:4${i}:00Z`,
     }));
-    stubFeed([...many, prompt]);
+    stubFeed([...many, prompt, storm]);
     render(<GeofenceArrivalPrompt />);
     await act(async () => { await Promise.resolve(); });
 
@@ -84,9 +85,12 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     expect(cards[0]).toHaveTextContent('Customer 5');
     expect(cards[1]).toHaveTextContent('Customer 4');
     expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('3 more schedule changes');
-    // The actionable arrival prompt renders ABOVE the visit cards.
+    // Anything on an auto-dismiss timer (arrival prompt, storm warning)
+    // renders ABOVE the persistent visit cards so it cannot expire unseen.
     const promptCard = screen.getByText('Okafor');
+    const stormCard = screen.getByText(/Storm watch/);
     expect(promptCard.compareDocumentPosition(cards[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(stormCard.compareDocumentPosition(cards[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     // Clearing one promotes the next unread card; held-back cards were never marked read.
     fireEvent.click(screen.getAllByRole('button', { name: 'Got it' })[0]);
