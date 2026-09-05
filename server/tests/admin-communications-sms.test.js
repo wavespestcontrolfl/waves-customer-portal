@@ -705,6 +705,77 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    // A composer-carried project report link: the project send flow's own
+    // delivery claim is taken before the provider call and handed back once
+    // the provider has answered, so a resend that starts meanwhile 409s on
+    // its claim instead of texting the same report twice (GH Codex #3893
+    // r11 P1).
+    describe('project report link in the body', () => {
+      const REPORT_BODY = `Your report: portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`;
+      const REPORTS = [{ id: 'p1', deliveryStatus: 'sent' }];
+      const CLAIM = { projects: [{ id: 'p1', token: 't1', previousStatus: 'sent' }] };
+      const ccl = () => require('../services/composer-customer-links');
+      let bearerSpy;
+      let claimSpy;
+      let releaseSpy;
+      beforeEach(() => {
+        bearerSpy = jest.spyOn(ccl(), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, projectReports: REPORTS });
+        claimSpy = jest.spyOn(ccl(), 'claimProjectReportSends').mockResolvedValue({ ok: true, claim: CLAIM });
+        releaseSpy = jest.spyOn(ccl(), 'releaseProjectReportSends').mockResolvedValue(undefined);
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), del: jest.fn(async () => 1) };
+        });
+      });
+      afterEach(() => {
+        bearerSpy.mockRestore();
+        claimSpy.mockRestore();
+        releaseSpy.mockRestore();
+      });
+
+      test('a real send: the claim is taken BEFORE the provider call and handed back AFTER it', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9', provider: 'twilio' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(200);
+          expect(claimSpy).toHaveBeenCalledWith(REPORTS);
+          expect(claimSpy.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+          expect(releaseSpy).toHaveBeenCalledWith(CLAIM);
+          expect(releaseSpy.mock.invocationCallOrder[0]).toBeGreaterThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+        });
+      });
+
+      test('an AMBIGUOUS provider outcome (retryable / deferred) keeps the claim — the provider may still hold the text (GH Codex #3893 r12 P1)', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, retryable: true, code: 'PROVIDER_TIMEOUT', reason: 'timed out' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(422);
+          expect(claimSpy).toHaveBeenCalledWith(REPORTS);
+          expect(releaseSpy).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a blocked send hands the claim back; a lost claim (the flow is sending) refuses before the provider', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SMS_OPTED_OUT', reason: 'opted out' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(422);
+          expect(releaseSpy).toHaveBeenCalledWith(CLAIM);
+        });
+        sendCustomerMessage.mockClear();
+        releaseSpy.mockClear();
+        claimSpy.mockResolvedValue({ ok: false, error: 'This project report is being re-sent right now — give it a moment, then send again.' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(409);
+          expect((await res.json()).error).toMatch(/being re-sent right now/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(releaseSpy).not.toHaveBeenCalled();
+        });
+      });
+    });
+
     // A composer-carried prep guide link: the provider call and the tagger's
     // replay marker run under the manual prep sender's per-customer lock, so
     // a manual send of another guide cannot re-key the page's token while

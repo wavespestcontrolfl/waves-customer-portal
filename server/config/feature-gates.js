@@ -43,6 +43,7 @@
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
  *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
+ *   GATE_AGENT_RUNS=true      (agent run ledger WRITES — services/agent-control/runs.js records work_items / agent_runs / steps / events for lanes that call it; off = every handle is inert; the /control/runs reads stay on GATE_AGENT_CONTROL_READ; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -1488,19 +1489,9 @@ const gates = {
   // unset.
   blogBodyImages: process.env.GATE_BLOG_BODY_IMAGES === 'true',
 
-  // Named-competitor drafts that PASS every comparison/quality gate publish
-  // autonomously instead of parking at named_competitor_review (owner
-  // directive 2026-08-26: the intercept lane runs with no human review queue,
-  // matching the brief set's standing "fully autonomous — no UAT hold"
-  // override of 2026-06-11). Gate failures (disparagement, unsourced facts,
-  // unknown competitor, …) still block exactly as before — this flag only
-  // removes the review park on CLEAN drafts. Consumers require
-  // namedCompetitorComparison to ALSO be on (enforced at both read sites —
-  // this flag alone never lifts a park). OFF in EVERY environment
-  // unless set to exactly 'true' (same posture as GATE_COMPLIANCE — a
-  // policy flag, not a dev feature, so dev/test keep the review-park
-  // default); kill switch = unset GATE_NAMED_COMPETITOR_AUTOPUBLISH.
-  namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
+  // Owner-authorized unattended blog publishing. Explicit false disables
+  // competitor autopublishing; comparison/content checks remain mandatory.
+  namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH == null || process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
   // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
   // When ON, content-guardrails resolves <AffiliateLink product="…"> tags
@@ -2392,6 +2383,16 @@ const gates = {
   // logGateStatus; the route reads gateEnvValue at CALL time.
   agentControlRead: gateEnvValue('GATE_AGENT_CONTROL_READ'),
 
+  // Agent run ledger writes — services/agent-control/runs.js. ON: startRun /
+  // runManaged record work_items, agent_runs, agent_attempts, agent_run_steps,
+  // run_artifacts and run_events (migration 20260905000010) for every lane
+  // that calls them, and the hub probe reports features.runs = true. OFF
+  // (default, dev AND prod): every handle is inert — the wrapped work runs
+  // exactly as before and nothing is written. The /control/runs reads are
+  // gated by GATE_AGENT_CONTROL_READ, not this. Kill switch: unset. This
+  // entry is for logGateStatus; the writer reads gateEnvValue at CALL time.
+  agentRuns: gateEnvValue('GATE_AGENT_RUNS'),
+
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
   // ops_digest bell rows the Activity feed lists, and the email is skipped
@@ -2401,6 +2402,15 @@ const gates = {
   // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
   // FIX alerts are not routed here. Kill switch: unset. This entry is for
   // logGateStatus; the helper reads both env vars at CALL time.
+  // Tech visit notifications (Field Team Program Phase 0 item 2,
+  // services/tech-visit-notifications.js): the assigned field technician gets
+  // a tech-home card + a one-line push when a visit is assigned to them, taken
+  // off them, moved, or cancelled. Staff-only — never a customer channel.
+  // OFF unless set, dev AND prod; unset is the kill switch. The service reads
+  // gateEnvValue at CALL time, so a flip needs no redeploy; this entry is for
+  // logGateStatus.
+  techVisitNotifications: gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS'),
+
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
   // Closeout money + comms alerts — services/closeout-alerts.js maps three

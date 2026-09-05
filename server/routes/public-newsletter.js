@@ -348,7 +348,7 @@ router.get('/feedback/:token/:reaction', feedbackLimiter, async (req, res) => {
     if (reaction && reaction.key === 'needs-work') {
       heading = 'Ouch — help us fix it.';
       const options = MISSING_OPTIONS.map((o) => `
-            <label style="display:block;margin:0 0 10px;font-size:15px;color:#3F4A65;cursor:pointer;">
+            <label style="display:block;margin:0 0 10px;font-size:16px;color:#3F4A65;cursor:pointer;">
               <input type="checkbox" name="missing" value="${escapeHtml(o.key)}" style="margin-right:8px;vertical-align:middle;" />${escapeHtml(o.label)}
             </label>`).join('');
       bodyHtml = `
@@ -484,11 +484,11 @@ function renderConfirmPage(heading, bodyHtml) {
           body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Inter, Arial, sans-serif; margin: 0; padding: clamp(40px, 8vw, 72px) 20px; color: #04395E; min-height: 100vh; background: #EDF4FA; background-image: radial-gradient(1200px 800px at -8% 12%,rgba(10,126,194,.22),transparent 60%),radial-gradient(1000px 700px at 108% 0%,rgba(56,170,225,.16),transparent 60%),radial-gradient(900px 700px at 96% 90%,rgba(6,90,140,.13),transparent 62%),radial-gradient(800px 600px at -6% 100%,rgba(240,165,0,.15),transparent 58%),linear-gradient(180deg,#EAF3FB 0%,#F6FAFE 48%,#EAF2F9 100%); background-attachment: fixed; }
           main { max-width: 520px; margin: 0 auto; }
           h1 { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Inter, Arial, sans-serif; font-size: 30px; line-height: 1.15; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 10px; color: #04395E; }
-          p { line-height: 1.6; color: #2A3F5F; font-size: 15px; }
-          .box { background: #FFFFFF; background: rgba(255,255,255,0.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border: 1px solid #EFF6FC; border-radius: 20px; padding: 26px; margin-top: 24px; box-shadow: 0 18px 60px rgba(4,57,94,0.12), inset 0 1px 0 rgba(255,255,255,0.6); }
+          p { line-height: 1.6; color: #2A3F5F; font-size:16px; }
+          .box { background: #FFFFFF; background: rgba(255,255,255,0.55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border: 1px solid #EFF6FC; border-radius:12px; padding: 26px; margin-top: 24px; box-shadow: 0 18px 60px rgba(4,57,94,0.12), inset 0 1px 0 rgba(255,255,255,0.6); }
           .email { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #04395E; }
           a { color: #0A7EC2; }
-          .btn { display:block; width:100%; text-align:center; background:#F5B520; background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%); color:#1B2C5B; border:1px solid #FFEEB4; border-radius:10px; padding:13px 24px; font-weight:800; letter-spacing:0; cursor:pointer; font-size:15px; font-family:inherit; text-decoration:none; }
+          .btn { display:block; width:100%; text-align:center; background:#F5B520; background-image:linear-gradient(135deg,#FFDE78 0%,#F4B014 100%); color:#1B2C5B; border:1px solid #FFEEB4; border-radius:10px; padding:13px 24px; font-weight:700; letter-spacing:0; cursor:pointer; font-size:16px; font-family:inherit; text-decoration:none; }
           .btn:hover { filter: brightness(0.97); }
           form { margin: 0; padding: 0; }
           .footer { margin-top: 32px; font-size: 14px; color: #4F5B70; text-align: center; }

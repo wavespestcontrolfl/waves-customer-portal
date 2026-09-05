@@ -66,7 +66,7 @@ const PATH_LINK_TYPES = Object.freeze([...CLAIMABLE_LINK_TYPES]);
 const ATTEMPT_PROVIDERS = Object.freeze(['deterministic_runner', 'openai_cua', 'claude_cu', 'stagehand', 'grok', 'human']);
 const ATTEMPT_ACTIONS = Object.freeze(['investigate', 'create_account', 'complete_form', 'submit', 'resume', 'outreach_send']);
 const ATTEMPT_OUTCOMES = Object.freeze([
-  'slot_reserved', 'submitting', 'submit_ambiguous',
+  'slot_reserved', 'slot_released', 'submitting', 'submit_ambiguous',
   'placed', 'pending', 'drafted', 'sent', 'failed', 'skipped', 'blocked', 'captcha',
   'needs_owner', 'human_step_done', 'ready_for_payment', 'ready_for_credentials',
   'no_payment_required', 'price_changed', 'instrument_unavailable', 'auto_renew_unavoidable',
@@ -465,7 +465,7 @@ function movePatch(row, target, now, { syncUrl = false } = {}) {
   // The transition CONSUMES the lease stamp: a same-path reconcile at release
   // fires once per lease, never again on every later release or operator
   // draft of the same (now settled) row.
-  const patch = { path_id: target.id, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
+  const patch = { path_id: target.id, outreach_draft_attempts: 0, updated_at: now, automation_policy: null, last_classified_at: null, leased_path_revision: null };
   // The execution URL follows the successor; a URL-less successor (outreach)
   // CLEARS it — the retired route must not survive as the page the outreach
   // drafter fetches and cites. A release-time reconcile of the SAME path
@@ -485,6 +485,14 @@ function movePatch(row, target, now, { syncUrl = false } = {}) {
 }
 
 async function settleRetiredPlacements(q, { pathIds = null, successor = null, prospectIds = null, now = new Date() } = {}) {
+  const movable = async (rows) => {
+    if (!rows.length) return rows;
+    // Every unleased settlement also settles its durable submission slot before path movement.
+    await require('./link-execution-authority').releaseSlots(q, rows.map((r) => r.id), now);
+    const held = await q('seo_link_attempts').whereIn('prospect_id', rows.map((r) => r.id)).where({ action: 'submit', outcome: 'submit_ambiguous' }).select('prospect_id');
+    const pinned = new Set(held.map((a) => a.prospect_id));
+    return rows.filter((r) => !pinned.has(r.id));
+  };
   const moveRows = async (rows, target, opts) => {
     let moved = 0;
     for (const row of rows) {
@@ -496,8 +504,8 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   };
   if (successor && successor.id && Array.isArray(pathIds)) {
     if (!pathIds.length) return 0;
-    const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').select(...PLACEMENT_MOVE_COLUMNS);
-    return moveRows(rows || [], successor);
+    const rows = await q('seo_link_prospects').whereIn('path_id', pathIds).whereNull('claimed_at').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
+    return moveRows(await movable(rows || []), successor);
   }
   if (successor && successor.id && Array.isArray(prospectIds)) {
     // exactly THESE unleased placements onto `successor` (the bridge's re-rank
@@ -505,7 +513,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
     // follow; a sibling on the same old path stays put)
     if (!prospectIds.length) return 0;
     const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
-    return moveRows(rows || [], successor);
+    return moveRows(await movable(rows || []), successor);
   }
   if (!Array.isArray(prospectIds) || !prospectIds.length) return 0;
   // Lock order everywhere is prospect → path: the placement rows are locked
@@ -513,7 +521,7 @@ async function settleRetiredPlacements(q, { pathIds = null, successor = null, pr
   // path rows below — a save holding a prospect and a send holding a path
   // can no longer wait on each other.
   const rows = await q('seo_link_prospects').whereIn('id', prospectIds).whereNull('claimed_at').whereNotNull('path_id').forUpdate().select(...PLACEMENT_MOVE_COLUMNS);
-  const linked = (rows || []).filter((r) => r.path_id); // an un-backfilled legacy row has no path to follow
+  const linked = await movable((rows || []).filter((r) => r.path_id)); // an un-backfilled legacy row has no path to follow
   if (!linked.length) return 0;
   // Pass 1 — resolve every chain WITHOUT locks, collecting the path ids
   // involved. Cycle-safe rather than hop-capped: a chain is followed to its

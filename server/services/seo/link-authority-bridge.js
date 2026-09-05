@@ -134,7 +134,8 @@ const DEFERRABLE_PAYMENT_LEVELS = Object.freeze(['OWNER_PAYMENT', 'AUTO_PAID_WIT
 // hold the aggregate at qualified, so the send-first conversation could never begin. `p` = { outreach, sendFirst }.
 const deferred = (r, p) => p.outreach === true && (
   (r.dimension === 'payment' && DEFERRABLE_PAYMENT_LEVELS.includes(r.level))
-  || (p.sendFirst === true && r.dimension === 'execution' && r.instance_kind === '-'));
+  || (p.sendFirst === true && r.dimension === 'execution' && r.instance_kind === '-')
+  || (p.sendFirst === false && r.dimension === 'communication'));
 
 const freshCounters = () => ({ placementsCreated: 0, rowsWritten: 0, redecided: 0, ended: 0, parked: 0, released: 0, invalidatedApprovals: 0, invalidatedWaivers: 0, aggregateChanges: 0, skippedLeased: 0, pinned: 0, parkedDomains: [] });
 const defaultSend = (args) => require('./link-prospect-outreach').sendOutreach(args);
@@ -169,16 +170,16 @@ async function dispatchBatch(db, out, { send, now, followUp, limit }) {
   const rows = await db(AUTH).where({ dimension: 'communication', instance_kind: kind, level: P.LEVELS.AUTO_OUTREACH }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'path_id');
   if (!rows.length) return false;
   const paths = await db('seo_link_acquisition_paths').whereIn('id', [...new Set(rows.map((r) => r.path_id).filter(Boolean))]).select('id', 'acquisition_type', 'account_required', 'execution_after_send');
-  // a SUBMIT-FIRST path (execution_after_send=false) sends its pitch only after the acquisition — never from here.
-  // Its drafts are excluded BEFORE the batch limit: a backlog of them at the head of the ordering would otherwise
-  // fill every batch and starve the send-first drafts behind it on every nightly run. (A follow-up presupposes the
-  // pitch went out, so every path qualifies there; the sender narrows the lifecycle against the path.)
-  const eligible = new Set(paths.filter((x) => followUp || !P.submitFirst(x)).map((x) => x.id));
+  // Submit-first pitches become eligible only after placement. Filter lifecycle and
+  // path ordering before LIMIT so waiting submissions cannot starve ready drafts.
+  const eligible = new Set(paths.map((x) => x.id));
+  const submitFirstIds = paths.filter(P.submitFirst).map((x) => x.id);
   const decidedPath = new Map(rows.filter((r) => eligible.has(r.path_id)).map((r) => [r.prospect_id, r.path_id]));
   if (!decidedPath.size) return false;
   const statusCol = followUp ? 'follow_up_status' : 'outreach_status';
   let q = db('seo_link_prospects').whereIn('id', [...decidedPath.keys()]).whereIn('path_id', [...eligible]).where({ [statusCol]: 'drafted' }).whereNull('claimed_at');
-  q = followUp ? q.where({ outreach_status: 'sent' }).whereIn('status', [...M.FOLLOW_UP_STATUSES_ANY]) : q.where({ status: PARKABLE }).whereNull('outreach_sent_at');
+  q = followUp ? q.where({ outreach_status: 'sent' }).whereIn('status', [...M.FOLLOW_UP_STATUSES_ANY]) : q.where((b) => b.where((x) => x.where({ status: PARKABLE }).whereNotIn('path_id', submitFirstIds))
+    .orWhere((x) => x.whereIn('status', ['placed', 'live', 'indexed']).whereIn('path_id', submitFirstIds))).whereNull('outreach_sent_at');
   const batch = await q.orderBy('updated_at', 'asc').limit(limit).select('id', 'path_id', 'updated_at');
   for (const p of batch) {
     if (decidedPath.get(p.id) !== p.path_id) continue; // the row left the path its instance was decided on — the bridge rotates it
@@ -698,17 +699,24 @@ async function runAuthorityBridge(db, {
   if (ran && ran.skipped) out.skipped = ran.reason || 'lease_held';
   // the §6.4 sweep runs even when the DECISION lease was held (a manual / inline run holds it with autoSend false, so
   // no other holder would send): the sender claims every row under its own locks and needs no bridge lease
-  if (autoSend) await dispatchAutoSends(db, out, { send, now });
+  if (autoSend) await dispatchAutoSends(db, out, { send, now, exclusive });
   await bellForParked(notify, out, parkedDomains, now);
   return out;
 }
 
 // §6.4 — every pending authorized draft (this run's and the ones the cap deferred); the outreach gate is the
 // sender's own first check. A failure is one error entry on the run, never a thrown nightly.
-async function dispatchAutoSends(db, out, { send, now }) {
+async function dispatchAutoSends(db, out, { send, now, exclusive }) {
   if (!isEnabled('linkProspectOutreach')) return;
   try {
-    out.autoSend = await autoSendDecided(db, { send, now });
+    // Share the scan lease through reconciliation AND dispatch: no weekly scan
+    // can still be publishing evidence while this bridge chooses a follow-up.
+    const result = await exclusive('backlink-scan', async () => {
+      await require('./link-prospect-verifier').reconcileOutreach({ now });
+      return autoSendDecided(db, { send, now });
+    }, { recordHealth: false });
+    out.autoSend = result?.skipped === true
+      ? { attempted: 0, sent: 0, skipped: [{ code: 'backlink_scan_busy' }] } : result;
     const skipped = out.autoSend.skipped.length ? ` (${out.autoSend.skipped.map((s) => s.code).join(', ')})` : '';
     if (out.autoSend.attempted) logger.info(`[link-authority] auto-outreach: ${out.autoSend.sent}/${out.autoSend.attempted} sent${skipped}`);
   } catch (err) {

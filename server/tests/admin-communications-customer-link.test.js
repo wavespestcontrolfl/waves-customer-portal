@@ -86,6 +86,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildServiceReportLink: jest.fn(),
   buildContractSigningLink: jest.fn(),
   buildStatementLink: jest.fn(),
+  buildProjectReportLink: jest.fn(),
 }));
 jest.mock('../services/prep-guide-sender', () => ({
   isSupportedPestType: () => true,
@@ -312,6 +313,19 @@ describe('POST /admin/communications/customer-link', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toMatchObject({ kind: 'autopay_setup', url: null, autoSecured: true, firstName: 'PersonA' });
+    });
+  });
+
+  test('project_report: dispatch the whole account id set; rides the owner back (account-scoped customer bearer — /sms applies the recipient\'s consent policy)', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildProjectReportLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff', line: 'Here is your WDO report: https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff\n\n', immediateOnly: true, projectReport: { id: 'p1', title: 'WDO', projectType: 'wdo', projectDate: '2026-08-10' } });
+    await withServer(async (baseUrl) => {
+      wireDb({ customers: soloCustomer() });
+      const report = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'project_report' });
+      expect(report.status).toBe(200);
+      expect(builders.buildProjectReportLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      const reportBody = await report.json();
+      expect(reportBody).toMatchObject({ kind: 'project_report', immediateOnly: true, projectReport: { title: 'WDO' }, customerId: CUSTOMER_UUID });
     });
   });
 
