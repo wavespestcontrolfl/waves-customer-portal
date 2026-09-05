@@ -223,8 +223,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       count: async () => { if (spec.countThrows) throw new Error('locator.count: Target closed'); return spec.count ?? 0; },
       evaluate: async (fn) => fn({ tagName: (spec.tag || 'input').toUpperCase(), id: spec.id || '', name: spec.name || '', value: spec.value ?? '' }),
       getAttribute: async (n) => (spec.attrs ? spec.attrs[n] ?? null : null),
-      // firstSeq: each first() call resolves to the NEXT spec (models Playwright re-resolving a locator whose node was replaced between operations — r10 P1)
-      first() { if (spec.firstSeq) { const i = Math.min(spec.firstIdx = (spec.firstIdx || 0) + 1, spec.firstSeq.length) - 1; return el(spec.firstSeq[i]); } return this; },
+      first() { return this; },
       elementHandle() { return Promise.resolve(spec.detached ? { textContent: async () => spec.text ?? null, isVisible: async () => false, $$: async () => [] } : this); },
       // ElementHandle.$$: the handle's OWN children — a row detached since (detachedWhen) has none (r11 P1)
       $$: async (sub) => { if (spec.detachedWhen && spec.detachedWhen()) return []; const l = spec.sub ? spec.sub(sub) : el(); const n = await l.count(); return Array.from({ length: n }, (_, i) => l.nth(i)); },
@@ -327,10 +326,11 @@ describe('siteone bot cart + tender rules (fake page)', () => {
         // billVisibleCopies: N visible copies, each its OWN radio (distinct ids)
         if (st.billVisibleCopies) return el({ count: st.billVisibleCopies, nth: (i) => el({ count: 1, id: `acct-${i}`, visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) });
         // billLabelAndRadio: ordinary markup — the selector union matches the visible radio AND its visible label (for=acct-radio) = ONE option
-        if (st.billLabelAndRadio) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, id: 'acct-radio', visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) : el({ count: 1, visible: true, tag: 'label', attrs: { for: 'acct-radio' }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } })) });
+        // labelForId: the label's `for` target id (a legal id with punctuation must resolve exactly — r12 P2)
+        if (st.billLabelAndRadio) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, id: st.labelForId || 'acct-radio', visible: true, tag: 'input', get checked() { return st.accountChecked === true; }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } }) : el({ count: 1, visible: true, tag: 'label', attrs: { for: st.labelForId || 'acct-radio' }, onClick: () => { if (st.accountSelectable) st.accountChecked = true; } })) });
         return billOption();
       }
-      if (sel === '#acct-radio') return radio();
+      if (sel === `[id="${st.labelForId || 'acct-radio'}"]`) return radio(st.labelForId || 'acct-radio');
       // extraCheckedAccounts = checked account radios ELSEWHERE on the page (hidden responsive duplicates, stale nodes)
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       if (sel === S.billToAccountSelected) return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
@@ -343,7 +343,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // totalByRead: a function of the read index for a total that keeps moving
       // totalNodeReplacedMidRead: at the click boundary the total node is replaced between the text read and the visibility read —
       // the first resolution is the OLD node (detached once read), the second the NEW visible node with the recalculated figure (r10 P1)
-      if (sel === S.checkoutTotal && st.totalNodeReplacedMidRead && st.atClick) return el({ count: 1, firstSeq: [{ count: 1, visible: true, detached: true, text: st.checkoutTotalText || 'Order total $99.00' }, { count: 1, visible: true, text: 'Order total $999.00' }] });
+      if (sel === S.checkoutTotal && st.totalNodeReplacedMidRead && st.atClick) return el({ count: 1, nth: () => el({ count: 1, visible: true, detached: true, text: st.checkoutTotalText || 'Order total $99.00' }) });
+      // responsiveIdentity: a HIDDEN stale copy of the account / ship-to / total precedes the one visible reading (r12 P2)
+      const hiddenThen = (stale, live) => el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: stale }) : el({ count: 1, visible: true, text: live })) });
+      if (st.responsiveIdentity && sel === S.checkoutAccount) return hiddenThen('Account # 99999', 'Account # 12345');
+      if (st.responsiveIdentity && sel === S.checkoutShipTo) return hiddenThen('Ship to: 9 Other Rd', 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205');
+      if (st.responsiveIdentity && sel === S.checkoutTotal) return hiddenThen('Order total $999.00', st.checkoutTotalText || 'Order total $99.00');
       if (sel === S.checkoutTotal) { st.totalReads = (st.totalReads || 0) + 1; return el({ count: st.totalCount ?? 1, visible: st.totalVisible ?? true, text: st.totalByRead ? st.totalByRead(st.totalReads) : st.totalAtClick && st.totalReads > 1 ? st.totalAtClick : (st.checkoutTotalText || 'Order total $99.00') }); }
       // placeOrderHiddenFirst: a hidden responsive copy of Place Order precedes the visible one (only the visible one may be clicked)
       if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
@@ -361,6 +366,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
       if (sel === S.orderNumber && st.orderNumberLate) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.confReads <= 3 ? (st.orderNumberLateText || 'Processing order…') : 'Order # SO-778899' }); }
+      // orderNumberNested: the h1 wrapping the strong — both match, both shown, one identifier (r12 P2); orderNumberNestedDifferent: two shown nodes, different ids
+      if (sel === S.orderNumber && st.orderNumberNested) return el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? 'Order # SO-778899 — thank you for your order' : 'Order # SO-778899' }) });
+      if (sel === S.orderNumber && st.orderNumberNestedDifferent) return el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? 'Order # SO-778899' : 'Order # SO-000001' }) });
       if (sel === S.orderNumber) return st.orderNumberHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'Order # SO-000001' }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' })) }) : el({ count: 1, visible: true, text: st.orderNumberText || 'Order # SO-778899' });
       return el();
     };
@@ -919,6 +927,25 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
     expect(st.rowSwapped).toBe(true);
     expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('a hidden responsive copy beside the ONE visible account / ship-to / total reading is not ambiguity — the dry run reports the visible total (r12 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ responsiveIdentity: true, checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args({ dryRun: true }), deps)).resolves.toMatchObject({ dryRun: true, amountCents: 10593 });
+    expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('nested confirmation matches (h1 wrapping the strong) carrying ONE identifier are the confirmation; two shown nodes with different ids stay ambiguous (r12 P2)', async () => {
+    const ok = fakeSiteOne({ orderNumberNested: true });
+    await expect(s1.place(args(), ok.deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    const bad = fakeSiteOne({ orderNumberNestedDifferent: true, checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), bad.deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+  });
+
+  test('a bill-to label whose `for` target is a legal id with punctuation (payment:account) resolves its radio exactly — the order places (r12 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ billLabelAndRadio: true, labelForId: 'payment:account' });
+    await expect(s1.place(args(), deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
+    expect(st.placeClicked).toBe(1);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {

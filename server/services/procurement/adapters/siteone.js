@@ -597,15 +597,19 @@ async function verifyCheckoutLines(page, { vendorSku, qty, evidence, upload }) {
 // yield the old node's text and the new node's visibility, approving a
 // figure that is not the one charged (Codex #3876 r10 P1). A replaced node
 // leaves a detached handle, which reads as not visible → refused.
+// Counted among SHOWN matches: a hidden responsive copy beside the one
+// visible reading is not ambiguity (Codex #3876 r12 P2) — the lone hidden
+// match still reports as hidden, and two visible readings stay ambiguous.
 async function readExactlyOne(page, selector) {
-  const els = page.locator(selector);
-  const count = await els.count().catch(() => 0);
-  if (count !== 1) return { count, text: '', visible: false };
-  const handle = await els.first().elementHandle({ timeout: 1500 }).catch(() => null);
-  if (!handle) return { count, text: '', visible: false };
+  const { all, shown } = await matches(page, selector);
+  if (shown.length > 1) return { count: shown.length, text: '', visible: false };
+  const target = shown[0] || (all.length === 1 ? all[0] : null);
+  if (!target) return { count: 0, text: '', visible: false };
+  const handle = await target.elementHandle({ timeout: 1500 }).catch(() => null);
+  if (!handle) return { count: 1, text: '', visible: false };
   const text = await handle.textContent().catch(() => '');
   const isVisible = await handle.isVisible().catch(() => false);
-  return { count, text: String(text || ''), visible: isVisible };
+  return { count: 1, text: String(text || ''), visible: isVisible };
 }
 
 // The bill-to selector unions radio inputs and their labels, so ordinary
@@ -632,7 +636,10 @@ async function associatedRadio(page, option) {
   if (tag === 'input') return option;
   if (tag !== 'label') return null;
   const target = await option.getAttribute('for').catch(() => null);
-  const radio = target ? page.locator(`#${target.replace(/[^\w-]/g, '')}`).first() : option.locator('input[type="radio"]').first();
+  // The exact id, attribute-matched: a legal id with punctuation
+  // (`for="payment:account"`) must resolve to that element, not to a
+  // rewritten one (Codex #3876 r12 P2).
+  const radio = target ? page.locator(`[id="${target.replace(/["\\]/g, '\\$&')}"]`).first() : option.locator('input[type="radio"]').first();
   return (await radio.count().catch(() => 0)) ? radio : null;
 }
 
@@ -769,11 +776,19 @@ async function readCheckoutTotal(page, { evidence, upload, screenshot = true }) 
 // Returns the order number; calls markSubmitted() at the click boundary — the
 // caller's cart cleanup guard flips only when the click actually happened
 // (a pre-click refusal here still cleans the cart — Codex #3853 r15 P2).
-// The text of the ONE shown confirmation-number node, or null.
+// The text of the ONE shown confirmation-number node, or null. Nested
+// matches (an h1 wrapping the strong that carries the number) are one node
+// when every shown match parses to the SAME identifier — the innermost text
+// is returned; different identifiers stay ambiguous (Codex #3876 r12 P2).
 async function shownOrderText(page) {
   const nodes = (await matches(page, SELECTORS.orderNumber).catch(() => ({ shown: [] }))).shown;
-  if (nodes.length !== 1) return null;
-  return (await nodes[0].textContent().catch(() => '') || '').replace(/\s+/g, ' ');
+  if (!nodes.length) return null;
+  const texts = [];
+  for (const n of nodes) texts.push((await n.textContent().catch(() => '') || '').replace(/\s+/g, ' '));
+  if (texts.length === 1) return texts[0];
+  const ids = new Set(texts.map((t) => orderNumberIn(t)));
+  if (ids.size !== 1 || ids.has(null)) return null;
+  return texts.reduce((a, b) => (b.length < a.length ? b : a));
 }
 
 // EVERY shown confirmation-selector node before the click — each text and
