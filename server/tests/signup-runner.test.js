@@ -294,13 +294,13 @@ describe('run — outcomes', () => {
       expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, last_classified_at: expect.any(Date) }));
     }
   });
-  test('no_submit_evidence → retryable failed (nothing observably submitted → safe to retry)', async () => {
+  test('no_submit_evidence retains its screenshot for the worker to reconcile against the mutation boundary)', async () => {
     worker.claim.mockResolvedValue([prospect()]);
-    fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'no_submit_evidence' });
+    fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'no_submit_evidence', screenshot: Buffer.from('png') });
     const r = await runner.run({ allow: ['citysquares.com'] });
     expect(r.failed).toBe(1);
     expect(r.skipped).toBe(0);
-    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed' }));
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', evidence_url: 'backlink-evidence/x.png' }));
   });
   test('a run-level config error (no_anthropic) ABORTS the batch + releases claims, NO ledger write, no attempts burned', async () => {
     worker.claim.mockResolvedValue([prospect({ id: 'p1' }), prospect({ id: 'p2' })]);

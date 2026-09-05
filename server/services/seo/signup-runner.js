@@ -324,7 +324,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
       counts.skipped++;
     } else {
       // The worker retries only failures before submit; uncertainty after submit is quarantined.
-      await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'failed', lease_token: p.lease_token, notes: `runner: ${result.errorCode || 'failed'}` });
+      await worker.report({ prospect_id: p.id, provider: 'deterministic_runner', outcome: 'failed', lease_token: p.lease_token, evidence_url: evidenceKey || null, notes: `runner: ${result.errorCode || 'failed'}` });
       counts.failed++;
     }
   }

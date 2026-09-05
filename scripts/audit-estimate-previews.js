@@ -85,9 +85,12 @@ const auditPageInBrowser = () => {
     overflowElements,
     buttons: [...document.querySelectorAll('button,a')].map((el) => el.textContent.trim()).filter(Boolean),
     slots: {
-      offered: document.querySelectorAll('[data-estimate-slot]').length,
-      stale: document.querySelectorAll('[data-estimate-slot].gc-slot-stale').length,
-      selected: document.querySelectorAll('[data-estimate-slot][aria-pressed="true"]').length,
+      // The shared SchedulePicker renders the picked day's times as
+      // [data-schedule-slot] buttons; stale windows are filtered out before
+      // render, so an empty list is the drift signal.
+      offered: document.querySelectorAll('[data-schedule-slot]').length,
+      stale: 0,
+      selected: document.querySelectorAll('[data-schedule-slot][aria-pressed="true"]').length,
       approveCta: /Approve — /.test(bodyText),
     },
   };
@@ -139,7 +142,7 @@ const auditPageInBrowser = () => {
         // to a pre-selection screenshot.
         let selected = null;
         if (audit.slots.offered - audit.slots.stale > 0) {
-          await page.locator('[data-estimate-slot]:not([disabled])').first().click();
+          await page.locator('[data-schedule-slot]:not([disabled])').first().click();
           await page.waitForTimeout(250);
           await revealWholePage(page);
           selected = await page.evaluate(auditPageInBrowser);

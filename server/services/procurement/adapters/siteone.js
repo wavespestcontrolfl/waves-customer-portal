@@ -6,12 +6,14 @@
  * the product's SKU, sets the quantity (PACKAGES — the dispatcher converts
  * the inventory-unit request through the price row's pack size), verifies
  * the cart holds exactly that one line at that count, reads the CART TOTAL
- * (cap pre-check, dry-run stop). PR 3a ENDS HERE: the checkout-verification
- * and submit stages (bill-to-account proof, displayed account + ship-to,
- * the FINAL total cap check, the place-order click, the confirmation
- * number) ship in PR 3b — until then a non-dry-run call refuses
- * `checkout_not_shipped` and nothing is ever submitted. Whatever the bot
- * left in the cart (dry run, refusal) it clears again before closing.
+ * (cap pre-check, dry-run stop), then at checkout selects bill-to-account,
+ * VERIFIES it is selected, reads the FINAL total with tax + shipping and
+ * runs the dispatcher's beforeSubmit(totalCents) cap check on it immediately
+ * before the place-order click, and proves the Place Order control
+ * actionable. The submit stage itself (the click, the confirmation number)
+ * ships in PR 3c — until then a non-dry-run call refuses
+ * `checkout_not_shipped` and nothing is ever submitted. Whatever it left in
+ * the cart (dry run, refusal) it clears again before closing.
  *
  * Hard rules (same boundary as the backlink signup runner):
  *   - the bot NEVER types payment data; a checkout that asks for a card,
@@ -90,6 +92,30 @@ const SELECTORS = Object.freeze({
   cartLineQty: 'input[name*="qty" i], input[name*="quantity" i], input.qty, input[type="number"], .qty-value, .quantity-value',
   cartRemove: 'button.remove, a.remove, button[data-action="remove"], .remove-item, button:has-text("Remove"), a:has-text("Remove")',
   cartTotal: '.cart-totals .total, .order-total .value, [data-test="cart-total"], .grand-total .price, .cart-total-value',
+  checkoutButton: 'a.checkout-button, button.checkout-button, a:has-text("Checkout"), button:has-text("Checkout")',
+  cardField: 'input[autocomplete="cc-number"], input[name*="cardNumber"], input[name*="card_number"], iframe[src*="card"]',
+  mfaField: 'input[autocomplete="one-time-code"], input[name*="otp"], input[name*="verificationCode"]',
+  termsCheckbox: 'input[type="checkbox"][name*="terms"], input[type="checkbox"][name*="Terms"]',
+  // Every checkout reading is scoped beneath a checkout / order-summary
+  // container: an unscoped fallback could match a header mini-cart total or
+  // an account widget elsewhere on the page and pass as the checkout's own
+  // reading after selector drift (Codex #3876 r21 P2) — drift fails closed.
+  checkoutTotal: '.checkout-totals .total, .order-summary .grand-total, .checkout [data-test="order-total"], .order-summary [data-test="order-total"], .checkout .order-total .value, .order-summary .order-total .value, .checkout .grand-total .price, .order-summary .grand-total .price',
+  // The checkout's order-summary lines: proven exactly [SKU × packages] again
+  // at the click (Codex #3876 r7 P1); their SKU / quantity nodes reuse the
+  // cart-line child selectors.
+  checkoutLine: '.checkout .cart-item, .checkout .entry-item, .checkout .cart-entry, .order-summary .cart-item, .order-summary .entry-item, .order-summary .item, .checkout-order-summary .item, [data-test="checkout-line"]',
+  billToAccount: 'input[type="radio"][value*="account" i], label:has-text("Bill to account")', // case-insensitive: value="billToAccount" is the account tender too (Codex #3876 r24 P2)
+  // Only the fallback for an UNNAMED radio: a named one is counted in its own
+  // group (Codex #3876 r16 P2 — an opaque value="12345" is a valid tender).
+  // Identity readings are SCOPED to the checkout's own billing / shipping
+  // sections — never a header account menu, a footer address, or an
+  // ancestor's text — and place() requires exactly ONE match (pre-push P0).
+  checkoutAccount: '.checkout [data-test="account-number"], .checkout-billing .account-number, .checkout .billing-account .account-number, .checkout .payment-method.selected .account-number, .checkout [data-test="bill-to-account"] .account-number',
+  checkoutShipTo: '.checkout [data-test="ship-to"], .checkout-shipping .shipping-address, .checkout .ship-to address, .checkout .delivery-address address, .checkout [data-test="shipping-address"]',
+  placeOrder: 'button#placeOrder, button.place-order, button:has-text("Place Order")',
+  // Confirmation-number element only — never a bare :has-text() that an
+  // ancestor (the body) would satisfy ahead of the real node (Codex r3 P1).
 });
 
 const NAV_TIMEOUT = 45000;
@@ -136,6 +162,14 @@ function parseMoney(text) {
   return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
 }
 
+// EVERY digit run in a checkout label: "Account # 12345" → ['12345'];
+// "Account # 12345 Branch 01" → ['12345', '01'] — a short subaccount
+// component is part of the account, never ignored (Codex #3876 r21 P2).
+const digitRuns = (s) => String(s || '').match(/\d+/g) || [];
+// A configured ship-to token must appear as a whole token, not inside a
+// longer run ("34205" does not match "342051").
+const hasToken = (text, token) => new RegExp(`(^|[^a-z0-9])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^a-z0-9])`).test(text);
+
 const defaultLaunch = ({ hostResolverRules } = {}) => chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', ...(hostResolverRules ? [`--host-resolver-rules=${hostResolverRules}`] : [])],
@@ -153,7 +187,10 @@ async function shot(page, label, evidence, upload) {
 // the visible node), so no check may judge `.first()`: every match is
 // resolved, and the VISIBLE ones are what the checkout shows (Codex #3853 r11
 // P1, r12 P1 + P2s). Returns { all, shown } as locators.
-async function matches(page, selector) {
+// `strict`: a visibility read that THROWS (element detached mid-rerender)
+// propagates instead of reading as hidden — the checkout blockers (MFA,
+// card) must fail closed on an unreadable check (Codex #3876 r2 P1).
+async function matches(page, selector, { strict = false } = {}) {
   const els = page.locator(selector);
   const n = await els.count();
   const all = [];
@@ -161,9 +198,18 @@ async function matches(page, selector) {
   for (let i = 0; i < n; i += 1) {
     const el = els.nth(i);
     all.push(el);
-    if (await el.isVisible({ timeout: 1500 }).catch(() => false)) shown.push(el);
+    const isShown = strict ? await el.isVisible({ timeout: 1500 }) : await el.isVisible({ timeout: 1500 }).catch(() => false);
+    if (isShown) shown.push(el);
   }
   return { all, shown };
+}
+
+// A checkout blocker's presence, read strictly: unreadable = refused, never
+// "absent" (Codex #3876 r2 P1).
+async function blockerShown(page, selector, what, refuse) {
+  try { return (await matches(page, selector, { strict: true })).shown.length > 0; }
+  catch (e) { await refuse(`${what}_unreadable`, `SiteOne checkout: the ${what.replace(/_/g, ' ')} check could not be read (${String(e.message).slice(0, 80)}) — owner action`); }
+  return true; // unreachable: refuse throws
 }
 
 // Wait (bounded) until at least one match is SHOWN — the login form's
@@ -205,24 +251,86 @@ async function gotoCart(page) {
 // Only SHOWN lines count: SiteOne renders each item again in a hidden
 // desktop / mobile container, and the one-line proof must not refuse a
 // valid single-item cart on its responsive copy (Codex #3853 r16 P2).
-async function cartLines(page) {
-  const { shown } = await matches(page, SELECTORS.cartLine);
+// The first SHOWN child of a row HANDLE (not a re-resolving locator): SKU
+// and quantity must come from the same DOM row — a summary SiteOne rerenders
+// mid-check would otherwise pair the old row's SKU with its replacement's
+// quantity and approve a line that never existed (Codex #3876 r11 P1). A
+// replaced row leaves a detached handle: no children, not visible → the
+// line reads unreadable and the proof fails closed.
+// The ONE shown child, or several that READ the same (a quantity input
+// beside a quantity label carrying the same figure). Shown children that
+// read differently — the input still showing the requested quantity beside
+// the label showing SiteOne's adjustment — are not a reading: null, which
+// the row proof fails closed on (Codex #3876 r21 P2).
+async function shownChild(rowHandle, selector) {
+  const shown = [];
+  for (const h of await rowHandle.$$(selector).catch(() => [])) if (await h.isVisible().catch(() => false)) shown.push(h);
+  if (shown.length <= 1) return shown[0] || null;
+  // The VALUE is compared, not its DOM form: an input carrying "2" beside
+  // a label reading "2" is one reading (pre-push hook P1 on def020079).
+  const reading = async (h) => {
+    const attr = await h.getAttribute('data-product-code').catch(() => null);
+    if (attr) return normalizeSku(attr);
+    const value = await h.inputValue().catch(() => null);
+    const raw = value != null ? value : await h.textContent().catch(() => '');
+    return String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  };
+  const readings = new Set(await Promise.all(shown.map(reading)));
+  return readings.size === 1 ? shown[0] : null;
+}
+
+// Returns null when the rows CHURNED while being read: a row whose
+// visibility cannot be read (detached mid-scan), or a row count that differs
+// after the scan from before it. A summary that briefly held the expected
+// line plus one that vanished during the scan would otherwise read as
+// exactly [SKU × qty] (Codex #3876 r13 P1) — null fails every proof closed.
+async function cartLines(page, lineSelector = SELECTORS.cartLine) {
+  let all;
+  let shown;
+  try { ({ all, shown } = await matches(page, lineSelector, { strict: true })); }
+  catch { return null; }
+  const readRows = async (rows) => {
   const out = [];
-  for (const line of shown) {
+  for (const line of rows) {
+    const row = await line.elementHandle({ timeout: 1500 }).catch(() => null);
+    if (!row) { out.push({ sku: '', qty: NaN }); continue; }
     // Inside the row too, only the SHOWN SKU / quantity node is read: a
     // hidden responsive child or a stale copy must not feed the exact-cart
     // proof (Codex #3853 r20 P2). None shown = unreadable = fails closed.
-    const skuEl = (await matches(line, SELECTORS.cartLineSku)).shown[0];
+    const skuEl = await shownChild(row, SELECTORS.cartLineSku);
     // Attribute-first, like the product page: a row that exposes its code
     // only through data-product-code shows unrelated text (Codex #3853 r21 P2).
     const skuAttr = skuEl ? await skuEl.getAttribute('data-product-code').catch(() => null) : null;
     const sku = (skuAttr || (skuEl ? (await skuEl.textContent().catch(() => '') || '') : '')).replace(/\s+/g, ' ').trim();
-    const qtyEl = (await matches(line, SELECTORS.cartLineQty)).shown[0];
+    const qtyEl = await shownChild(row, SELECTORS.cartLineQty);
     let qtyText = qtyEl ? await qtyEl.inputValue().catch(() => null) : null;
     if (qtyText == null && qtyEl) qtyText = await qtyEl.textContent().catch(() => null);
+    // The row read must still be the row shown: replaced after both reads =
+    // the values belong to a node that is gone (r11 P1).
+    const stillShown = await row.isVisible().catch(() => false);
     const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
-    out.push({ sku, qty: qtyText == null || qtyText === '' ? NaN : qty });
+    out.push({ sku, qty: !stillShown || qtyText == null || qtyText === '' ? NaN : qty });
   }
+  return out;
+  };
+  const out = await readRows(shown);
+  // The rows read must still be the rows shown: the count AND the
+  // visibility of every match are re-read after the scan — a row that was
+  // hidden at the scan and is visible now (or the reverse) is churn the
+  // snapshot missed, not a proof; the count alone would pass it (Codex #3876
+  // r18 P1, extending the r13 count check). Then the shown rows are READ
+  // AGAIN: a row replaced after its own stillShown check by a different
+  // visible row keeps the count and the mask — only a second reading that
+  // matches the first, SKU and quantity, is a proof (r20 P2). Unreadable =
+  // fails closed.
+  const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
+  let again;
+  try { again = await matches(page, lineSelector, { strict: true }); }
+  catch { return null; }
+  if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return null;
+  const reread = await readRows(again.shown);
+  const key = (rows) => JSON.stringify(rows.map((r) => [r.sku, Number.isNaN(r.qty) ? 'NaN' : r.qty]));
+  if (key(reread) !== key(out)) return null;
   return out;
 }
 
@@ -496,14 +604,17 @@ async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
 // The cart must be exactly [this SKU × qty packages] — one line, the right
 // code, the right count — before its total means anything. Returns the cart
 // total in cents (the dry-run stop / cap screen; the checkout total binds).
+const linesExact = (lines, vendorSku, qty) => !!lines && lines.length === 1 && normalizeSku(lines[0].sku) === normalizeSku(vendorSku) && lines[0].qty === qty;
+const describeLines = (lines) => (!lines ? 'rows changed while being read' : lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty');
+const linesEvidence = (lines) => (lines || []).map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
+
 async function verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload }) {
   await gotoCart(page);
   const lines = await cartLines(page);
-  const exact = lines.length === 1 && normalizeSku(lines[0].sku) === normalizeSku(vendorSku) && lines[0].qty === qty;
-  if (!exact) {
+  if (!linesExact(lines, vendorSku, qty)) {
     await shot(page, 'cart', evidence, upload);
-    evidence.cartLines = lines.map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
-    throw new RefusedError('cart_mismatch', `SiteOne cart is not exactly ${vendorSku} × ${qty}: ${lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty'}`, evidence);
+    evidence.cartLines = linesEvidence(lines);
+    throw new RefusedError('cart_mismatch', `SiteOne cart is not exactly ${vendorSku} × ${qty}: ${describeLines(lines)}`, evidence);
   }
   // The ONE visible total (a hidden responsive copy can carry a stale figure
   // that would park a valid order at the cap gate or misreport a dry run — r12 P2).
@@ -517,12 +628,310 @@ async function verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload }
   return amountCents;
 }
 
+// The checkout's order summary must STILL be exactly [this SKU × qty
+// packages] (Codex #3876 r7 P1): SiteOne can adjust a quantity for
+// availability during checkout, and another session on the account can change
+// the cart — the tender, identity and total checks all pass for the altered
+// order. Checked at the stage and again inside the click loop.
+async function verifyCheckoutLines(page, { vendorSku, qty, evidence, upload }) {
+  const lines = await cartLines(page, SELECTORS.checkoutLine);
+  if (linesExact(lines, vendorSku, qty)) return;
+  await shot(page, 'checkout', evidence, upload);
+  evidence.checkoutLines = linesEvidence(lines);
+  throw new RefusedError('checkout_lines_mismatch', `SiteOne checkout order is not exactly ${vendorSku} × ${qty}: ${describeLines(lines)} — not submitted`, evidence);
+}
+
+// Exactly ONE element for an identity / money reading, inside the checkout:
+// zero is unreadable, more than one is ambiguous — the text the bot would
+// compare might not be the order's (pre-push P0s). Returns { count, text,
+// visible }; the caller names the refusal.
+// Text and visibility come from ONE element handle, not two locator
+// resolutions: a node SiteOne replaces mid-recalculation would otherwise
+// yield the old node's text and the new node's visibility, approving a
+// figure that is not the one charged (Codex #3876 r10 P1). A replaced node
+// leaves a detached handle, which reads as not visible → refused.
+// Counted among SHOWN matches: a hidden responsive copy beside the one
+// visible reading is not ambiguity (Codex #3876 r12 P2) — the lone hidden
+// match still reports as hidden, and two visible readings stay ambiguous.
+// `same(text)`: nested markup (`.order-summary .grand-total` wrapping the
+// `.price` it contains) matches the ONE figure twice — shown matches that
+// all parse to the SAME value are one reading (the innermost text is
+// returned); different values stay ambiguous (Codex #3876 r17 P2).
+// Read STRICTLY (Codex #3876 r19 P2): a candidate whose visibility cannot
+// be read (it detached mid-enumeration) is not "hidden" — the reading is
+// unresolved, `count: null`, and every caller refuses on it.
+// `nested: true`: the identity readings have no parsed value — shown matches
+// are one reading when every text is CONTAINED in the longest (a wrapper
+// around its child); the LONGEST text is the reading, never the innermost —
+// a wrapper "Account # 12345 Branch 01" around a "12345" child carries the
+// subaccount the child drops (pre-push hook P1 on 85f4bd1ae); unrelated
+// texts stay ambiguous (Codex #3876 r24 P2).
+const NESTED = (texts) => {
+  const norm = texts.map((t) => String(t).replace(/\s+/g, ' ').trim().toLowerCase());
+  const longest = norm.reduce((a, b) => (b.length > a.length ? b : a), '');
+  return norm.every((t) => t && longest.includes(t)) ? longest : null;
+};
+async function readExactlyOne(page, selector, { same, nested = false } = {}) {
+  let all;
+  let shown;
+  try { ({ all, shown } = await matches(page, selector, { strict: true })); }
+  catch { return { count: null, text: '', visible: false }; }
+  // The target among the matches: the one shown match, else the lone
+  // hidden match; several shown matches only when `same` proves them one
+  // reading (the innermost text wins).
+  const pick = async ({ all, shown }) => {
+    if (shown.length <= 1) return { target: shown[0] || (all.length === 1 ? all[0] : null) };
+    const texts = same || nested ? await Promise.all(shown.map((el) => el.textContent().then((t) => String(t || ''), () => null))) : [];
+    if (texts.some((t) => t == null)) return { ambiguous: shown.length };
+    const values = new Set(nested ? [NESTED(texts)] : texts.map(same));
+    if (values.size !== 1 || values.has(null)) return { ambiguous: shown.length };
+    const better = nested ? (a, b) => a.length > b.length : (a, b) => a.length < b.length; // identity: the longest (complete) text; totals: the innermost figure
+    return { target: shown[texts.reduce((best, t, i) => (better(t, texts[best]) ? i : best), 0)] };
+  };
+  const first = await pick({ all, shown });
+  if (first.ambiguous) return { count: first.ambiguous, text: '', visible: false };
+  if (!first.target) return { count: 0, text: '', visible: false };
+  const handle = await first.target.elementHandle({ timeout: 1500 }).catch(() => null);
+  if (!handle) return { count: 1, text: '', visible: false };
+  const text = await handle.textContent().catch(() => '');
+  const isVisible = await handle.isVisible().catch(() => false);
+  // Re-enumerated AND re-read after the reads: a replacement node appended
+  // during them (the old one not yet removed) would otherwise validate the
+  // old value while a second, conflicting reading is on the page (Codex
+  // #3876 r21 P2); a node replaced in place — same count, same visibility
+  // pattern — would otherwise return the old handle's text while the page
+  // shows another figure (r22 P2), so the re-enumerated target's text must
+  // equal the first reading, as `cartLines` requires of the rows.
+  const mask = (m) => m.all.map((el) => m.shown.includes(el)).join('');
+  let again;
+  try { again = await matches(page, selector, { strict: true }); }
+  catch { return { count: null, text: '', visible: false }; }
+  if (again.all.length !== all.length || mask(again) !== mask({ all, shown })) return { count: null, text: '', visible: false };
+  // The re-read is ONE element snapshot: text and visibility both from the
+  // second target's handle, so a node swapped after the re-enumeration for a
+  // hidden one carrying the same text reads as hidden, never as the
+  // displayed reading (Codex #3876 r23 P2).
+  const second = await pick(again);
+  const handle2 = second.target ? await second.target.elementHandle({ timeout: 1500 }).catch(() => null) : null;
+  if (!handle2) return { count: null, text: '', visible: false };
+  const reread = await handle2.textContent().catch(() => null);
+  const visible2 = await handle2.isVisible().catch(() => false);
+  if (reread == null || String(reread).replace(/\s+/g, ' ').trim() !== String(text || '').replace(/\s+/g, ' ').trim()) return { count: null, text: '', visible: false };
+  return { count: 1, text: String(text || ''), visible: isVisible && visible2 };
+}
+
+// The bill-to selector unions radio inputs and their labels, so ordinary
+// markup (a visible radio + its visible "Bill to account" label) matches the
+// SAME control twice. Options are counted by the radio they resolve to, not by
+// locator — one labeled radio is one option (Codex #3853 r13 P1). An option
+// with no associated radio counts on its own (it will refuse as unverified).
+async function distinctBillToOptions(page, shown) {
+  const byRadio = new Map();
+  for (let i = 0; i < shown.length; i += 1) {
+    const radio = await associatedRadio(page, shown[i]);
+    const key = radio ? await radio.evaluate((el) => `${el.id}|${el.name}|${el.value}`).catch(() => null) : null;
+    const k = key || `option-${i}`;
+    if (!byRadio.has(k)) byRadio.set(k, shown[i]);
+  }
+  return [...byRadio.values()];
+}
+
+// How many radios read as selected in the verified radio's OWN group
+// (`name`), so a label-associated radio with an opaque value counts (Codex
+// #3876 r16 P2); an unnamed radio falls back to the account-value selector.
+// Null = unreadable (the caller refuses).
+// The count of checked radios in the verified radio's OWN group (its
+// `name`). An UNNAMED radio has no group: unnamed radios are not mutually
+// exclusive, so a checked saved-card radio beside it would go uncounted and
+// the tender would be ambiguous — null, which the callers refuse (Codex
+// #3876 r18 P1; replaces the r16 account-value fallback).
+async function selectedTenderCount(page, radio) {
+  const name = await radio.getAttribute('name').catch(() => null);
+  if (!name) return null;
+  return page.locator(`input[type="radio"][name="${name.replace(/["\\]/g, '\\$&')}"]:checked`).count().catch(() => null);
+}
+
+// The radio input a bill-to option resolves to: the element itself when it
+// is an input; for a label, its `for` target or the radio it wraps. Null
+// when no radio is associated (never fall back to a document-wide search).
+async function associatedRadio(page, option) {
+  const tag = await option.evaluate((el) => el.tagName.toLowerCase()).catch(() => null);
+  if (tag === 'input') return option;
+  if (tag !== 'label') return null;
+  const target = await option.getAttribute('for').catch(() => null);
+  // The exact id, attribute-matched: a legal id with punctuation
+  // (`for="payment:account"`) must resolve to that element, not to a
+  // rewritten one (Codex #3876 r12 P2).
+  const radio = target ? page.locator(`[id="${target.replace(/["\\]/g, '\\$&')}"]`).first() : option.locator('input[type="radio"]').first();
+  return (await radio.count().catch(() => 0)) ? radio : null;
+}
+
+// Checkout tender: no MFA / terms prompt (the bot never answers them),
+// bill-to-account offered AND confirmed CHECKED — the click is not proof; a
+// checkout defaulting to a saved card shows no card field (Codex r1 P1).
+// The card field is judged AFTER the bill-to option is selected: a checkout
+// that defaults to card entry shows the field until the tender is switched,
+// and only a field still demanded afterwards refuses (Codex r6 P1).
+// The blockers the bot never answers: an MFA challenge, and every terms
+// checkbox the checkout SHOWS must be accepted — a hidden checked copy ahead
+// of a visible unchecked one is not acceptance (r12 P1); with no visible copy
+// at all the hidden ones are judged (never skipped); an unreadable state fails
+// CLOSED (Codex r4 P2): unknown ≠ accepted. Scanned BEFORE and AFTER the
+// tender change — selecting bill-to-account can reveal an account-specific
+// terms box or verification step (Codex #3853 r14 P1).
+async function scanCheckoutBlockers(page, refuse) {
+  if (await blockerShown(page, SELECTORS.mfaField, 'mfa', refuse)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
+  // Strict: a terms box whose visibility cannot be read is refused, never
+  // dropped from the scan as "hidden" (Codex #3876 r4 P1).
+  let terms;
+  try { terms = await matches(page, SELECTORS.termsCheckbox, { strict: true }); }
+  catch (e) { await refuse('terms_unreadable', `SiteOne checkout shows a terms checkbox whose visibility could not be read (${String(e.message).slice(0, 80)}) — owner action`); }
+  for (const box of terms.shown.length ? terms.shown : terms.all) {
+    let accepted = null;
+    try { accepted = await box.isChecked(); } catch { await refuse('terms_unreadable', 'SiteOne checkout shows a terms checkbox whose state could not be read — owner action'); }
+    if (accepted !== true) await refuse('terms_required', 'SiteOne checkout requires accepting terms — owner action');
+  }
+}
+
+async function verifyBillToAccount(page, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  await scanCheckoutBlockers(page, refuse);
+  // The tender is the ONE visible bill-to option; a hidden responsive copy
+  // ahead of it is neither refused on nor clicked (r12 P2).
+  const billOptions = await matches(page, SELECTORS.billToAccount);
+  if (!billOptions.all.length) await refuse('no_bill_to_account', 'bill-to-account option not offered at checkout');
+  if (!billOptions.shown.length) await refuse('bill_to_account_hidden', 'the bill-to-account option at checkout is not visible — not the tender the checkout shows');
+  const options = await distinctBillToOptions(page, billOptions.shown);
+  if (options.length > 1) await refuse('bill_to_account_ambiguous', `${options.length} visible bill-to-account options at checkout — cannot tell which the order bills`);
+  const bill = options[0];
+  try { await bill.click({ timeout: 5000 }); }
+  catch (e) { await refuse('bill_to_account_unselectable', `bill-to-account option could not be selected (${String(e.message).slice(0, 80)})`); }
+  await page.waitForTimeout(1500);
+  await scanCheckoutBlockers(page, refuse); // the tender change may have revealed a terms box / MFA step (r14 P1)
+  if (await blockerShown(page, SELECTORS.cardField, 'card', refuse)) await refuse('card_required', 'SiteOne checkout still asks for card entry with bill-to-account selected — bot never supplies it');
+  // Proof is on the radio ASSOCIATED with the option just clicked (the
+  // click target may be its label — Codex PR3 r1 + r3 P1): that radio's own
+  // checked state, read directly, must be true and it must be visible; and
+  // it must be the ONLY checked account radio on the page — a checked
+  // duplicate elsewhere cannot tell which tender the order bills (Codex r7 P1).
+  const radio = await associatedRadio(page, bill);
+  if (!radio) await refuse('bill_to_account_unverified', 'no radio input is associated with the bill-to-account option — the bot never submits on another tender');
+  let checked = null;
+  try { checked = await radio.isChecked(); } catch { checked = null; }
+  if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is not confirmed selected at checkout — the bot never submits on another tender');
+  if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is not visible — not the tender the checkout shows');
+  const checkedCount = await selectedTenderCount(page, radio);
+  if (checkedCount == null) await refuse('bill_to_account_unverified', 'the selected radio\'s tender group cannot be counted (unnamed radio, or an unreadable count) — the bot never submits on an unverifiable tender');
+  if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount} tenders read as selected in the bill-to-account radio's group at checkout — cannot tell which the order bills`);
+  evidence.billToAccountVerified = true;
+  return radio;
+}
+
+
+// WHICH account, and WHERE to: the displayed values, compared to what the
+// owner configured — a saved default that drifted (another branch account,
+// an old address) is exactly the unattended order this refuses. The account
+// must be the ONE whole digit run equal to the vendor row's number (12345 is
+// not 912345); every approved ship-to token must appear whole.
+async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  // Both readings must be VISIBLE (pre-push P0): a single hidden responsive
+  // or stale node carrying the approved values is not what the checkout shows.
+  const account = await readExactlyOne(page, SELECTORS.checkoutAccount, { nested: true });
+  if (account.count == null) await refuse('account_unverified', 'the billing-account readings at checkout could not be enumerated, or changed while being read — not verified');
+  if (account.count > 1) await refuse('account_ambiguous', `${account.count} billing-account readings at checkout — cannot tell which the order bills`);
+  const accountText = normalizeText(account.text);
+  if (!accountText) await refuse('account_unverified', 'could not read the billing account shown at checkout');
+  if (!account.visible) await refuse('account_hidden', 'the billing-account element at checkout is not visible — not what the order bills');
+  const wantDigits = String(credentials.accountNumber).replace(/\D/g, '');
+  // A separator-formatted display ("12345-01", "12345.01", "12345 - 01")
+  // compares digit for digit: separators BETWEEN digits collapse, spaces
+  // around them included (Codex #3876 r7 P2, r19 P2), the one-whole-run
+  // rule still holds — "12345 - 01" is subaccount 1234501, never 12345.
+  const accountRuns = digitRuns(accountText.replace(/(\d)\s*[-./]\s*(?=\d)/g, '$1'));
+  if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { evidence.checkoutAccount = accountText.slice(0, 60); await refuse('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`); }
+  const shipTo = await readExactlyOne(page, SELECTORS.checkoutShipTo, { nested: true });
+  if (shipTo.count == null) await refuse('ship_to_unverified', 'the ship-to readings at checkout could not be enumerated, or changed while being read — not verified');
+  if (shipTo.count > 1) await refuse('ship_to_ambiguous', `${shipTo.count} ship-to readings at checkout — cannot tell which the order ships to`);
+  const shipToText = normalizeText(shipTo.text);
+  if (!shipToText) await refuse('ship_to_unverified', 'could not read the ship-to address shown at checkout');
+  if (!shipTo.visible) await refuse('ship_to_hidden', 'the ship-to element at checkout is not visible — not where the order ships');
+  const missing = shipToTokens.filter((t) => !hasToken(shipToText, t));
+  if (missing.length) { evidence.checkoutShipTo = shipToText.slice(0, 120); await refuse('ship_to_mismatch', `checkout ships to "${shipToText.slice(0, 80)}" — approved ship-to token(s) not found: ${missing.join(', ')}`); }
+  evidence.accountVerified = true;
+  evidence.shipToVerified = shipToText.slice(0, 120);
+}
+
+// The CHECKOUT total (tax + shipping applied) is the binding amount: exactly
+// one VISIBLE element (responsive checkouts keep hidden desktop/mobile
+// copies; a stale hidden node is not the figure the vendor charges), parsed
+// as exactly one $ amount. Returns cents. (PR 3c's at-click re-read adds a
+// pure, screenshot-free variant with the click that consumes it.)
+async function readCheckoutTotal(page, { evidence, upload }) {
+  const refuse = async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); };
+  const total = await readExactlyOne(page, SELECTORS.checkoutTotal, { same: parseMoney });
+  if (total.count == null) await refuse('checkout_total_unreadable', 'the checkout-total readings could not be enumerated, or changed while being read — not the figure the order charges');
+  if (total.count !== 1) await refuse(total.count ? 'checkout_total_ambiguous' : 'no_checkout_total', total.count ? `${total.count} checkout-total elements — cannot tell which the order charges` : 'no checkout-total element at checkout');
+  if (!total.visible) await refuse('checkout_total_hidden', 'the checkout-total element is not visible — not the figure the order charges');
+  const finalCents = parseMoney(total.text);
+  await shot(page, 'pre-submit', evidence, upload);
+  if (!finalCents) throw new RefusedError('no_checkout_total', `could not read the checkout total ("${total.text.trim().slice(0, 40)}")`, evidence);
+  evidence.checkoutTotalCents = finalCents;
+  return finalCents;
+}
+
+// The Place Order control, proven actionable WITHOUT dispatching: the one
+// visible control, resolved to an element handle, trial-clicked (Playwright's
+// actionability checks — a disabled / covered control refuses here). Runs
+// at the checkout stage's end (PR 3c runs it again on every pass of the
+// pre-click loop), so a green dry run has exercised the control the first
+// live order will click (Codex #3876 r17 P2). Returns the handle.
+async function trialPlaceOrder(page, placeOrder, refuse) {
+  const handle = await placeOrder.elementHandle({ timeout: 1500 }).catch(() => null);
+  if (!handle) await refuse('place_order_unactionable', 'the Place Order control could not be resolved — nothing submitted');
+  try { await handle.click({ trial: true, timeout: 5000 }); }
+  catch (e) { await refuse('place_order_unactionable', `the Place Order control cannot be clicked (${String(e.message).slice(0, 80)}) — nothing submitted`); }
+  return handle;
+}
+
+// The checkout stage: bill-to proof, identity + final total, the cap gate on
+// that total, the one click, the confirmation number. Every check refuses
+// BEFORE the click; only the click flips the caller's cart-cleanup guard.
+async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, dryRun = false }) {
+  await (await visibleControl(page, SELECTORS.checkoutButton, 'checkout_button', evidence)).click();
+  await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
+  await page.waitForTimeout(2000);
+  if (!isTrustedSiteOneUrl(page.url())) throw runLevel('siteone bot: checkout left the trusted host');
+  await verifyBillToAccount(page, { evidence, upload }); // PR 3c keeps the radio for its at-click re-check
+  await verifyCheckoutIdentity(page, { credentials, shipToTokens, evidence, upload });
+  await verifyCheckoutLines(page, { vendorSku, qty, evidence, upload });
+  const finalCents = await readCheckoutTotal(page, { evidence, upload });
+  await gate(finalCents, 'checkout total');
+  // A dry run has now exercised every checkout selector and the final cap
+  // check; it stops HERE, before the one click, and bells the checkout
+  // total — selector drift is caught before any live purchase (Codex #3876
+  // r2 P1).
+  // The Place Order control is resolved and trial-clicked too, so a missing
+  // / ambiguous / disabled control is a dry-run refusal, not the first live
+  // order's park (r17 P2). The caller's finally empties the cart.
+  const placeOrder = await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence);
+  await trialPlaceOrder(page, placeOrder, async (reason, message) => { await shot(page, 'pre-submit', evidence, upload); throw new RefusedError(reason, message, evidence); });
+  evidence.placeOrderValidated = true;
+  if (dryRun) { await shot(page, 'dry-run-stop', evidence, upload); return { dryRun: true, amountCents: finalCents, externalOrderNumber: null, evidence }; }
+  // The submit stage (the stable-total click loop, the one click, the
+  // confirmation number) ships in PR 3c. Until then a real placement is
+  // refused — parked with a bell, nothing submitted (Adam's ruling on the
+  // #3876 r18 round-cap stop, 2026-09-05).
+  await shot(page, 'pre-submit', evidence, upload);
+  throw new RefusedError('checkout_not_shipped', 'SiteOne submit is not shipped yet (PR 3c) — run with SITEONE_BOT_DRY_RUN=true or order by hand', evidence, finalCents);
+}
+
 async function place(
   { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
   { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence } = {},
 ) {
   if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');
-  const { qty } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
+  const { qty, shipToTokens } = validatePlaceArgs({ vendorSku, quantity, credentials, approvedShipTo });
   const evidence = { blockedHosts: {}, dryRun };
   // A cap verdict of { ok: false } is an ordinary refusal (parks). The cap
   // check THROWING (the reservation transaction hit a transient DB error) is
@@ -547,12 +956,12 @@ async function place(
     await addProductToCart(page, { vendorSku, qty, evidence, upload });
     const amountCents = await verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload });
     await gate(amountCents, 'order');
-    if (dryRun) return { dryRun: true, amountCents, externalOrderNumber: null, evidence };
-    // PR 3a ends at the cart: the checkout-verification + submit stages
-    // (bill-to-account proof, identity + final-total readings, the
-    // Place Order click, the confirmation number) ship in PR 3b. Until then a
-    // real placement is refused — parked with a bell, nothing submitted.
-    throw new RefusedError('checkout_not_shipped', 'SiteOne checkout + submit are not shipped yet (PR 3b) — run with SITEONE_BOT_DRY_RUN=true or order by hand', evidence, amountCents);
+    // The dry run continues into the checkout verifications (r2 P1) and
+    // stops inside checkoutAndSubmit, before the click; a real placement
+    // refuses there until PR 3c ships the submit stage.
+    // `await` is load-bearing: the finally below must run AFTER the stage
+    // (a bare `return promise` runs finally first).
+    return await checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToTokens, gate, evidence, upload, dryRun });
   } finally {
     // Nothing was submitted (dry run, refusal, error): leave no cart behind
     // for the next run to find. Best effort — the next run clears it anyway.
@@ -570,7 +979,7 @@ module.exports = {
   loginConfigured,
   quotesAtPlace: true,
   packagedQuantity: true, // cart quantity = packages (pack size from the price row)
-  preSubmitTotal: 'vendor', // the vendor's own total is read live (the cart total here; the checkout total from PR 3b)
+  preSubmitTotal: 'vendor', // the checkout total is read live, immediately before the click
   quote: () => null,
   place,
   RefusedError,

@@ -22,6 +22,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { FLOW_COLUMN_MAX } from '../theme-doc';
 import { WavesShell } from '../components/brand';
 import Icon from '../components/Icon';
+import VanScene from '../components/VanScene';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -523,6 +524,12 @@ export default function AppointmentPage() {
 
       {/* GATE_VAN_SCENE: the van to look for, under the header card. The
           technician block above already names the tech, so no tech pill. */}
+      {data.vanScene ? (
+        <VanScene
+          title={`${data.tech?.firstName || 'Your technician'} will be there ${formatDateLabel(appt.date)}`}
+          stamp={appt.arrivalWindow || null}
+        />
+      ) : null}
 
       {data.rescheduleToken ? (
         <Card>

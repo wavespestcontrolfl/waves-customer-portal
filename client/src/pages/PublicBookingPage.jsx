@@ -3,10 +3,12 @@ import { useSearchParams } from 'react-router-dom';
 import AddressAutocomplete from '../components/AddressAutocomplete';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
+import VanScene from '../components/VanScene';
 import { WavesShell } from '../components/brand';
 import { COLORS, FONTS } from '../theme-brand';
 import { fireGlassConfetti, useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
+import SchedulePicker from '../components/booking/SchedulePicker';
 import { track, FUNNEL_EVENTS } from '../lib/analytics/events';
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../utils/api';
@@ -158,6 +160,8 @@ export default function PublicBookingPage() {
   // its refusal carries the quote link, so nothing insecure leaks through.
   const { customer: authCustomer, isAuthenticated, sendCode, verifyCode, clearError: clearAuthError, error: authError } = useAuth();
   const [customersOnly, setCustomersOnly] = useState(null);
+  // GATE_VAN_SCENE via /booking/config — the confirmation step's van scene.
+  const [vanScene, setVanScene] = useState(false);
   // Multi-service selector (GATE_MULTI_SERVICE_BOOKING) — fail-closed:
   // renders only when /booking/config affirms; the server also refuses
   // composite service keys while the gate is off.
@@ -180,6 +184,7 @@ export default function PublicBookingPage() {
       .then((cfg) => {
         if (cancelled) return;
         setCustomersOnly(cfg?.customers_only === true);
+        setVanScene(cfg?.van_scene === true);
         const multiOn = cfg?.multi_service === true;
         setMultiServiceEnabled(multiOn);
         // Kill-switch fail-closed for deep/recovery links: a composite
@@ -235,11 +240,11 @@ export default function PublicBookingPage() {
     // AI-search/browse/open-day slot sources so step 2 refetches for the
     // new scope.
     setAvailability([]);
+    setRankedSlots([]);
     setSelectedDate(null);
     setSelectedSlot(null);
     setSearchResult(null);
     setBrowseDays(null);
-    setOpenDay(null);
     // Bump the same sequence the address edit uses: any IN-FLIGHT
     // find-slots/browse/availability response for the old service scope
     // fails its seq guard instead of repopulating stale-scope slot_sigs
@@ -249,6 +254,9 @@ export default function PublicBookingPage() {
   const [address, setAddress] = useState({ line1: '', line2: '', formatted: '', city: '', state: 'FL', zip: '' });
   const [coords, setCoords] = useState(null);
   const [availability, setAvailability] = useState([]);
+  // Engine-ranked picks from the same response (the shared picker's "Our
+  // best times" strip); cleared with availability.
+  const [rankedSlots, setRankedSlots] = useState([]);
   const [selectedDate, setSelectedDate] = useState(null);
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [contact, setContact] = useState({ firstName: '', lastName: '', phone: '', email: '' });
@@ -261,12 +269,18 @@ export default function PublicBookingPage() {
   const [secureCardUrl, setSecureCardUrl] = useState(null);
   // Custom date/time finder — Waves AI search + 90-day date picker
   const [searchResult, setSearchResult] = useState(null);
+  // Bumped by "Show all open times"; keys the search card so its recap
+  // clears with the results (a stale "Two openings Tuesday afternoon" line
+  // must not sit above the full calendar).
+  const [aiSession, setAiSession] = useState(0);
+  // True while the model-backed search is in flight — Continue waits for it
+  // (a late result clears the selection, so advancing meanwhile would land
+  // on the contact step with no time).
+  const [aiSearching, setAiSearching] = useState(false);
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
   const [pickedDate, setPickedDate] = useState(null);
-  // Day the customer has drilled into to see its 1-hour openings (null = day list)
-  const [openDay, setOpenDay] = useState(null);
   const latestPickedDateRef = useRef(null);
   // Guards booking_availability_loaded against double-firing when a manually
   // typed address is geocoded server-side (setCoords re-runs loadAvailability).
@@ -318,6 +332,7 @@ export default function PublicBookingPage() {
     // invalidator, this is belt-and-suspenders for the date-race path).
     latestPickedDateRef.current = null;
     setAvailability([]);
+    setRankedSlots([]);
     setSelectedDate(null);
     setSelectedSlot(null);
     setExistingCustomerId(null);
@@ -332,7 +347,6 @@ export default function PublicBookingPage() {
     // shows "Loading times…" forever with no active request.
     setBrowseLoading(false);
     setPickedDate(null);
-    setOpenDay(null);
   }, []);
 
   // Step 2 → load availability whenever we enter it
@@ -370,6 +384,7 @@ export default function PublicBookingPage() {
       if (seq !== addressLookupSeqRef.current) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
       setAvailability(data.days || []);
+      setRankedSlots(data.slots || []);
       // Fire once per resolved address: loadAvailability re-runs when the server
       // returns coords for a manually typed address (setCoords → new callback
       // identity → step-2 effect re-fetches), which would otherwise double-count
@@ -396,6 +411,7 @@ export default function PublicBookingPage() {
       if (seq !== addressLookupSeqRef.current) return;
       setError(err.message);
       setAvailability([]);
+    setRankedSlots([]);
     } finally {
       // Only the current request owns the loading flag.
       if (seq === addressLookupSeqRef.current) setLoading(false);
@@ -746,7 +762,6 @@ export default function PublicBookingPage() {
   const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
 
   const selectSlot = (date, slot) => { setSelectedDate(date); setSelectedSlot({ ...slot, date }); track(FUNNEL_EVENTS.BOOKING_SLOT_SELECTED, { date }); };
-  const isSlotSelected = (date, slot) => selectedDate === date && selectedSlot?.start_time === slot.start_time;
 
   const slotSearchBody = () => ({
     address: address.formatted || address.line1,
@@ -757,24 +772,29 @@ export default function PublicBookingPage() {
 
   const runAiSearch = async (query) => {
     const seq = addressLookupSeqRef.current;
-    const res = await fetch(`${API_BASE}/booking/find-slots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, ...slotSearchBody() }),
-    });
-    // Same non-JSON tolerance as loadAvailability (audit S3-17).
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || "We couldn't run that search right now — try again in a moment.");
-    // Address edited mid-search: don't restore this address's result or
-    // capture token onto the new one.
-    if (seq !== addressLookupSeqRef.current) return { summary: data.summary };
-    if (data.capture_token) captureTokenRef.current = data.capture_token;
-    setPickedDate(null);
-    setSelectedDate(null);
-    setSelectedSlot(null);
-    setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [] });
-    track(FUNNEL_EVENTS.BOOKING_AI_SEARCH_USED);
-    return { summary: data.summary };
+    setAiSearching(true);
+    try {
+      const res = await fetch(`${API_BASE}/booking/find-slots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, ...slotSearchBody() }),
+      });
+      // Same non-JSON tolerance as loadAvailability (audit S3-17).
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "We couldn't run that search right now — try again in a moment.");
+      // Address edited mid-search: don't restore this address's result or
+      // capture token onto the new one.
+      if (seq !== addressLookupSeqRef.current) return { summary: data.summary };
+      if (data.capture_token) captureTokenRef.current = data.capture_token;
+      setPickedDate(null);
+      setSelectedDate(null);
+      setSelectedSlot(null);
+      setSearchResult({ summary: data.summary, nearby: data.nearby, days: data.days || [], slots: data.slots || [] });
+      track(FUNNEL_EVENTS.BOOKING_AI_SEARCH_USED);
+      return { summary: data.summary };
+    } finally {
+      setAiSearching(false);
+    }
   };
 
   const onPickDate = async (date) => {
@@ -809,6 +829,11 @@ export default function PublicBookingPage() {
       if (!res.ok) throw new Error(data.error || 'Could not check that date');
       if (!isCurrent()) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
+      // The full window stays tappable while the browse loads; a slot picked
+      // there must not survive the swap to the browsed day (Continue would
+      // carry a time that is no longer on screen).
+      setSelectedDate(null);
+      setSelectedSlot(null);
       setBrowseDays(data.days || []);
     } catch {
       if (!isCurrent()) return;
@@ -831,57 +856,9 @@ export default function PublicBookingPage() {
   )?.fullDate;
   // Slot length follows the service (60 → "1-hour", else "<n>-minute").
   const slotLenLabel = service.duration === 60 ? '1-hour' : `${service.duration}-minute`;
-  // Only advance when the open day matches the selected slot — a stale selection
-  // from another day must not advance while a different day is being viewed.
-  const continueDisabled = !selectedSlot || (openDay !== null && openDay !== selectedDate);
-
-  const SoftRouteBanner = () => (
-    <div style={{
-      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
-      padding: '10px 12px', fontSize: 14, color: '#9A3412', marginBottom: 12, lineHeight: 1.4,
-    }}>
-      No route near you that day yet — here&apos;s what&apos;s close.
-    </div>
-  );
-
-  const renderDayGroups = (days) => days.map((day) => (
-    <div key={day.date} style={{ marginBottom: 14 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-        <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.slate600 }}>{day.fullDate}</span>
-        {/* Rain chip (GATE_BOOKING_RAIN_CHIPS): soft muted amber only, ≥40%
-            days — NEVER red in this funnel. Field absent → nothing renders. */}
-        {Number.isFinite(day.rainChance) && day.rainChance >= 40 && (
-          <span style={{
-            fontSize: 12, fontWeight: 600, color: '#B45309', background: '#FFF7ED',
-            border: '1px solid #FED7AA', borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap',
-          }}>
-            <Icon name="cloudRain" size={12} style={{ verticalAlign: '-2px', marginRight: 3 }} /> {Math.round(day.rainChance)}% rain
-          </span>
-        )}
-      </div>
-      <div style={{ display: 'grid', gap: 8 }}>
-        {day.slots.map((slot, i) => {
-          const sel = isSlotSelected(day.date, slot);
-          return (
-            <button
-              key={`${day.date}-${slot.start_time}-${i}`}
-              onClick={() => selectSlot(day.date, slot)}
-              style={{
-                width: '100%', padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
-                background: sel ? COLORS.wavesBlue : COLORS.white,
-                color: sel ? '#fff' : COLORS.glassNavy,
-                border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
-                textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
-              }}
-            >
-              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 2 }}>{slot.start_label}</div>
-              <div style={{ fontSize: 14, color: sel ? 'rgba(255,255,255,.86)' : COLORS.slate600 }}>{slot.reason}</div>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  ));
+  // A pending custom-date lookup will replace the picker (and clear the
+  // selection) when it lands — Continue waits for it.
+  const continueDisabled = !selectedSlot || browseLoading || aiSearching;
 
   return (
     <WavesShell variant="customer" topBar="solid">
@@ -1167,26 +1144,12 @@ export default function PublicBookingPage() {
         {/* STEP 2 — Times */}
         {step === 2 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            {!openDay ? (
-              <>
-                <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
-                  Pick a day
-                </h2>
-                <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
-                  Choose a day and we'll show the open 1-hour windows. Days where a tech is already working nearby are marked.
-                </p>
-              </>
-            ) : (
-              <button
-                onClick={() => setOpenDay(null)}
-                style={{
-                  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-                  color: COLORS.wavesBlue, fontSize: 15, fontWeight: 600, marginBottom: 14,
-                }}
-              >
-                ← Pick a different day
-              </button>
-            )}
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
+              Find a time
+            </h2>
+            <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
+              Pick a day and we'll show the open {slotLenLabel} windows. Days where a tech is already working nearby are marked.
+            </p>
 
             {loading && (
               <div style={{ textAlign: 'center', padding: 40, color: COLORS.slate600 }}>
@@ -1201,121 +1164,53 @@ export default function PublicBookingPage() {
               }}>{error}</div>
             )}
 
-            {/* Selected-time recap — keeps the choice visible after drilling back to the day list */}
-            {!loading && !openDay && selectedSlot && (
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
-                background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
-                borderRadius: 10, padding: '10px 12px', fontSize: 14, color: COLORS.glassNavy,
-              }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 700 }}>
-                  <Icon name="check" size={14} strokeWidth={3} /> Selected
-                </span>
-                <span>{selectedDayLabel ? `${selectedDayLabel} · ` : ''}{selectedSlot.start_label}</span>
-              </div>
+            {/* The shared picker (best times → day grid → the day's windows).
+                A Waves AI search or a custom-date browse swaps its own days
+                in — ONE picker, one selection; the reset link restores the
+                full window. */}
+            {!loading && (
+              <>
+                <SchedulePicker
+                  availability={pickedDayObj ? { days: [pickedDayObj] } : searchResult ? { days: searchResult.days } : { days: availability }}
+                  rankedSlots={pickedDayObj ? null : searchResult ? searchResult.slots : rankedSlots}
+                  selectedDate={pickedDayObj ? pickedDayObj.date : selectedDate}
+                  onSelectDay={(date) => { setSelectedDate(date); setSelectedSlot(null); }}
+                  selectedSlot={selectedSlot}
+                  onSelectSlot={(slot) => (slot ? selectSlot(slot.date, slot) : setSelectedSlot(null))}
+                  intro={pickedDayObj && !pickedDayObj.nearby
+                    ? "No route near you that day yet — here's what's close."
+                    : `Tap a time — each is a ${slotLenLabel} window.`}
+                  slotDetail={(slot) => slot.reason || null}
+                  empty={searchResult ? (
+                    <div style={{ marginBottom: 16, fontSize: 14, color: COLORS.slate600 }}>
+                      Nothing open for that search. Try another day, or call (941) 297-5749.
+                    </div>
+                  ) : null}
+                />
+                {searchResult || pickedDayObj ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchResult(null);
+                      setPickedDate(null);
+                      setBrowseDays(null);
+                      setSelectedDate(null);
+                      setSelectedSlot(null);
+                      setAiSession((n) => n + 1);
+                    }}
+                    style={{
+                      background: 'transparent', border: 'none', padding: 0, marginBottom: 16,
+                      color: COLORS.wavesBlue, fontSize: 14, fontWeight: 700, cursor: 'pointer', textDecoration: 'underline',
+                    }}
+                  >
+                    Show all open times
+                  </button>
+                ) : null}
+              </>
             )}
 
-            {/* STEP 2a — day list */}
-            {!loading && !openDay && availability.length > 0 && (
-              <div style={{ display: 'grid', gap: 10 }}>
-                {availability.map((day) => {
-                  const isSelectedDay = selectedDate === day.date;
-                  const count = (day.slots || []).length;
-                  return (
-                    <button
-                      key={day.date}
-                      onClick={() => setOpenDay(day.date)}
-                      style={{
-                        width: '100%', padding: '14px 16px', borderRadius: 12, cursor: 'pointer',
-                        background: COLORS.white,
-                        border: `1.5px solid ${isSelectedDay ? COLORS.wavesBlue : COLORS.slate200}`,
-                        textAlign: 'left', display: 'flex', alignItems: 'center',
-                        justifyContent: 'space-between', gap: 12,
-                        transition: 'border-color 0.15s',
-                      }}
-                    >
-                      <div>
-                        <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.glassNavy }}>{day.fullDate}</div>
-                        <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
-                          {count} {count === 1 ? 'opening' : 'openings'}
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-                        {day.nearby && (
-                          <span style={{
-                            fontSize: 12, fontWeight: 600, color: '#047857', background: '#ECFDF5',
-                            border: '1px solid #A7F3D0', borderRadius: 999, padding: '3px 9px', whiteSpace: 'nowrap',
-                          }}>
-                            tech nearby
-                          </span>
-                        )}
-                        {/* Rain chip (GATE_BOOKING_RAIN_CHIPS): soft muted amber
-                            only, ≥40% days — NEVER red in this funnel. Field
-                            absent (gate off) → nothing renders. */}
-                        {Number.isFinite(day.rainChance) && day.rainChance >= 40 && (
-                          <span style={{
-                            fontSize: 12, fontWeight: 600, color: '#B45309', background: '#FFF7ED',
-                            border: '1px solid #FED7AA', borderRadius: 999, padding: '3px 9px', whiteSpace: 'nowrap',
-                          }}>
-                            <Icon name="cloudRain" size={12} style={{ verticalAlign: '-2px', marginRight: 3 }} /> {Math.round(day.rainChance)}% rain
-                          </span>
-                        )}
-                        <span style={{ fontSize: 22, color: COLORS.slate600, lineHeight: 1 }}>›</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* STEP 2b — the chosen day's 1-hour openings */}
-            {!loading && openDay && (() => {
-              const day = availability.find((d) => d.date === openDay);
-              if (!day) {
-                return (
-                  <div style={{ fontSize: 14, color: COLORS.slate600, lineHeight: 1.45 }}>
-                    That day is no longer open. Pick another day above.
-                  </div>
-                );
-              }
-              return (
-                <div>
-                  <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
-                    {day.fullDate}
-                  </h2>
-                  <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 16, lineHeight: 1.5 }}>
-                    Choose a time — each is a {slotLenLabel} window.
-                  </p>
-                  {!day.nearby && <SoftRouteBanner />}
-                  <div style={{ display: 'grid', gap: 8 }}>
-                    {(day.slots || []).map((slot, i) => {
-                      const sel = isSlotSelected(day.date, slot);
-                      return (
-                        <button
-                          key={`${day.date}-${slot.start_time}-${i}`}
-                          onClick={() => selectSlot(day.date, slot)}
-                          style={{
-                            width: '100%', padding: '14px 16px', borderRadius: 12, cursor: 'pointer',
-                            background: sel ? COLORS.wavesBlue : COLORS.white,
-                            color: sel ? '#fff' : COLORS.glassNavy,
-                            border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
-                            textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
-                          }}
-                        >
-                          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 3 }}>{slot.start_label}</div>
-                          <div style={{ fontSize: 14, color: sel ? 'rgba(255,255,255,0.86)' : COLORS.slate600, lineHeight: 1.35 }}>
-                            {slot.reason}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Secondary finders — only on the day list */}
-            {!loading && !openDay && (
+            {/* Secondary finders — a date past the window, and Waves AI */}
+            {!loading && (
               <>
                 <div data-glass="soft" style={{ position: 'relative', background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
                   <label htmlFor="booking-custom-date" style={{ ...labelStyle, color: COLORS.glassNavy, fontWeight: 700 }}>
@@ -1351,12 +1246,6 @@ export default function PublicBookingPage() {
                     </button>
                   </div>
                 )}
-                {pickedDayObj && (
-                  <div style={{ marginTop: 14 }}>
-                    {!pickedDayObj.nearby && <SoftRouteBanner />}
-                    {renderDayGroups([pickedDayObj])}
-                  </div>
-                )}
                 {pickedDateHasNoOpenTimes && (
                   <div style={{ marginTop: 14, fontSize: 14, color: COLORS.slate600, lineHeight: 1.45 }}>
                     No open times on that date. Try another day, or call (941) 297-5749 and we'll fit you in.
@@ -1366,22 +1255,12 @@ export default function PublicBookingPage() {
                 {/* Waves AI date/time search */}
                 <div style={{ marginTop: 20 }}>
                   <WavesAIScheduleSearch
+                    key={aiSession}
                     theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.glassNavy, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
                     onSearch={runAiSearch}
                   />
                 </div>
 
-                {searchResult && searchResult.days.length > 0 && (
-                  <div style={{ marginTop: 16 }}>
-                    {!searchResult.nearby && <SoftRouteBanner />}
-                    {renderDayGroups(searchResult.days)}
-                  </div>
-                )}
-                {searchResult && searchResult.days.length === 0 && (
-                  <div style={{ marginTop: 12, fontSize: 14, color: COLORS.slate600 }}>
-                    Nothing open for that search. Try another day, or call (941) 297-5749.
-                  </div>
-                )}
               </>
             )}
 
@@ -1657,6 +1536,19 @@ export default function PublicBookingPage() {
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
               </div>
             </div>
+            {vanScene ? (
+              <VanScene
+                title="Here's the van to look for in your driveway"
+                stamp={(() => {
+                  // Same day · full arrival window the recap above quotes —
+                  // never the bare start (the window is the promise).
+                  const end = arrivalEndLabel(selectedSlot?.start_time || selectedSlot?.startTime24);
+                  const window = selectedSlot?.start_label ? `${selectedSlot.start_label}${end ? ` – ${end}` : ''}` : null;
+                  return [selectedSlot?.fullDate || selectedDayLabel, window].filter(Boolean).join(' · ') || null;
+                })()}
+                style={{ marginBottom: 20, borderRadius: 12, border: `1px solid ${COLORS.slate200}` }}
+              />
+            ) : null}
             {secureCardUrl ? (
               <div data-glass="card" style={{
                 position: 'relative',
