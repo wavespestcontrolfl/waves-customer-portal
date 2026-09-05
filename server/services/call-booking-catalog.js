@@ -641,10 +641,11 @@ function followUpProbeEnd(windowStart, windowEnd, estimatedDurationMinutes) {
 // so the helper rings the durable schedule_conflict admin card itself
 // (codex r12 P2) — a follow-up that silently lost its spacing is an
 // operator problem either way.
-async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, plan = null, report = null }) {
+async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, plan = null, report = null, noticeActorId = null, suppressTechNotice = false }) {
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
+  const noticeRows = [];
   const filter = pendingCallFollowUpFilter(parentServiceId);
   // Tech-day membership fence + route_order clear (uncapped audit r26 P1):
   // a date shift moves the child between tech-days, so it must hold the
@@ -740,6 +741,8 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
       if (Number(wrote) === 1) {
         shifted += 1;
         shiftedRows.push({ id: k.id, date: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
+        // The CAS pinned technician_id, so k.technician_id IS the committed holder.
+        if (k.technician_id) noticeRows.push({ id: k.id, technicianId: k.technician_id, fromDay: k.day, toDay: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
       } else {
         skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'changed' }); // CAS miss = drift too
       }
@@ -770,7 +773,24 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
     }
     return shifted;
   };
-  return conn.isTransaction ? run(conn) : conn.transaction(run);
+  const shiftedCount = await (conn.isTransaction ? run(conn) : conn.transaction(run));
+  // Tech-facing move cards for the children that moved with the parent
+  // (tech-visit-notifications.js): each shifted visit is its own card, to
+  // its own holder. Waits for the caller's outermost commit when this ran
+  // inside one; gate-dark, never awaited. A caller whose parent move may
+  // still be compensated (suppressTechNotice) keeps these quiet too.
+  if (!suppressTechNotice && noticeRows.length) {
+    const techNotices = require('./tech-visit-notifications');
+    for (const n of noticeRows) {
+      void techNotices.notifyVisitRescheduled({
+        visitId: n.id, technicianId: n.technicianId, actorId: noticeActorId,
+        previous: { date: n.fromDay, windowStart: n.windowStart, windowEnd: n.windowEnd },
+        snapshot: { date: n.toDay, windowStart: n.windowStart, windowEnd: n.windowEnd },
+        trx: conn.isTransaction ? conn : null,
+      });
+    }
+  }
+  return shiftedCount;
 }
 
 // A call-created follow-up (visit 2) is part of the same package as its
@@ -786,7 +806,12 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // parent-linked flow untouched. Best-effort per child, and callers invoke
 // this after their own parent-cancel commits — a cascade failure must
 // never fail the parent cancel.
-async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId }) {
+// actorId: the staff row cancelling the parent (a technicians.id, or null)
+// — rides into each child's history + the child's tech cancel card, so a
+// technician cancelling their own booking hears nothing about its follow-up
+// (codex #3887 r10 P2). Labels never come here: job_status_history's
+// transitioned_by is a uuid column.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null }) {
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
@@ -806,7 +831,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId }) {
           jobId: child.id,
           fromStatus: 'pending',
           toStatus: 'cancelled',
-          transitionedBy: null,
+          transitionedBy: actorId || null,
           notes: `Cancelled with parent call booking ${parentServiceId}`,
           trx,
         });

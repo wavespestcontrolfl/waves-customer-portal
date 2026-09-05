@@ -1,4 +1,5 @@
 import React from 'react';
+import BrandFooter from '../BrandFooter';
 import HelpPhoneLink from './HelpPhoneLink';
 import HeaderStoreLinks from './HeaderStoreLinks';
 import TrustFooter from './TrustFooter';
@@ -9,7 +10,10 @@ import { WavesShellContext } from './WavesShellContext';
 // Top bar layout (owner spec 2026-07-06): App Store / Google Play icon
 // links on the LEFT, Waves logo CENTERED, phone CTA on the RIGHT.
 //
-// variant="customer" → standard top bar, trust footer, guarantee line.
+// variant="customer" → standard top bar; ONE shell-owned footer landmark =
+//                      BrandFooter identity block + TrustFooter legal lines,
+//                      identical on every page (owner 2026-09-03: the
+//                      universal footer) — pages never mount their own.
 // variant="admin"    → neutral tone, stripped footer ("Internal system ...").
 // topBar="solid"     → surface-on-page top bar (default).
 // topBar="transparent" → transparent top bar for /login video hero; phone
@@ -99,8 +103,15 @@ export default function WavesShell({
         <main id="waves-shell-main" tabIndex={-1} style={{ flex: 1, display: 'flex', flexDirection: 'column', outline: 'none' }}>
           {children}
         </main>
+        {/* The ONE contentinfo landmark. Owning the footer here (not in each
+            page column) keeps the rule full-width like the header's and
+            stops short pages from sinking the legal lines under an empty
+            band (chrome audit 2026-09-03). */}
         {showFooter && (
-          <TrustFooter tone={resolvedFooterTone} variant={variant} />
+          <footer role="contentinfo" data-waves-shell-footer="">
+            {variant === 'customer' ? <BrandFooter /> : null}
+            <TrustFooter tone={resolvedFooterTone} variant={variant} />
+          </footer>
         )}
       </div>
     </WavesShellContext.Provider>

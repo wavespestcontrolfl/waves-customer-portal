@@ -76,15 +76,29 @@ function clean(value, max = 240) {
  * model-safe facts: the keyword redactor cannot catch a bare "4545#" pasted
  * into a note, but the loader knows the exact values it must never ground.
  */
-function scrubKnownCodes(value, codes) {
-  // Every non-empty stored value (the property API sets no minimum length);
-  // a short code is matched as a whole token so "12" does not eat dates.
-  const known = codes.map((c) => String(c.code || '').trim()).filter(Boolean);
-  if (!known.length) return value;
+// The known codes as one pattern: every non-empty stored value (the property
+// API sets no minimum length) plus its bare alphanumeric form, so "4545#"
+// on file also catches a note's "Try 4545 first". A short or bare form is
+// matched as a whole token so "12" does not eat dates ("-12", "08.12").
+// Case-insensitive: a code stored as BLUE pasted as blue is still the code.
+function knownCodePattern(codes, flags = 'i') {
   const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Case-insensitive: a code stored as BLUE pasted as blue is still the code.
-  // (a date's "-12" or "08.12" is not the code "12")
-  const re = new RegExp(known.map((c) => (c.length < 4 ? `(?<![A-Za-z0-9.-])${esc(c)}(?![A-Za-z0-9.-])` : esc(c))).join('|'), 'gi');
+  const bounded = (c) => `(?<![A-Za-z0-9.-])${esc(c)}(?![A-Za-z0-9.-])`;
+  // Literal forms before bare forms: "1234+" must be eaten whole, not as
+  // another code's bare "1234" leaving the "+".
+  const literals = [];
+  const bares = [];
+  for (const code of codes.map((c) => String(c.code || '').trim()).filter(Boolean)) {
+    literals.push(code.length < 4 ? bounded(code) : esc(code));
+    const bare = code.replace(/[^A-Za-z0-9]/g, '');
+    if (bare && bare !== code) bares.push(bounded(bare));
+  }
+  const parts = [...literals, ...bares];
+  return parts.length ? new RegExp(parts.join('|'), flags) : null;
+}
+function scrubKnownCodes(value, codes) {
+  const re = knownCodePattern(codes, 'gi');
+  if (!re) return value;
   const walk = (v) => {
     if (typeof v === 'string') return v.replace(re, '[code]');
     if (Array.isArray(v)) return v.map(walk);
@@ -159,13 +173,16 @@ function propertyCoords(latRaw, lngRaw) {
   return { lat, lng };
 }
 
-async function loadRain7d(dbh, customer) {
+// The 7 days ending on the viewed visit's date (today at the latest): a
+// historical card's grounding is that week's rain, not this week's.
+async function loadRain7d(dbh, customer, serviceDate = null, deps = {}) {
   if (!customer?.lawn_water_area_id) return null;
+  const today = etDateString(new Date());
+  const until = serviceDate && serviceDate < today ? serviceDate : today;
+  const since = etDateString(addETDays(parseETDateTime(`${until}T12:00`), -6));
   // The canonical reader: null unless every day of the window is on file,
   // so a missed sync day never reads as a dry week.
-  const today = etDateString(new Date());
-  const since = etDateString(addETDays(new Date(), -6));
-  return getAreaRainfall(customer.lawn_water_area_id, since, today, dbh);
+  return (deps.getAreaRainfall || getAreaRainfall)(customer.lawn_water_area_id, since, until, dbh);
 }
 
 async function loadLastVisit(dbh, customerId, serviceLine, beforeDate = null) {
@@ -249,13 +266,16 @@ async function loadOpenIssues(dbh, customerId) {
  * into the briefing. Its 60-day / 4-call window bounds the read. Null when
  * the lookup failed: the template says so instead of "no calls".
  */
-async function loadCallsSince(customerId, sinceInstant, deps = {}) {
+// Calls between the previous visit and THIS visit's start: a historical
+// card must not show later conversations as its pre-visit context.
+async function loadCallsSince(customerId, sinceInstant, deps = {}, untilInstant = null) {
   const read = deps.getRecentCalls || ((id, opts) => contextAggregator.getRecentCalls(id, opts));
   const rows = await read(customerId, { sentinelOnError: true });
   if (!Array.isArray(rows)) return null;
   const since = sinceInstant ? new Date(sinceInstant).getTime() : 0;
+  const until = untilInstant ? new Date(untilInstant).getTime() : Infinity;
   return rows
-    .filter((r) => new Date(r.created_at).getTime() > since)
+    .filter((r) => { const t = new Date(r.created_at).getTime(); return t > since && t < until; })
     .slice(0, 3)
     .map((r) => ({ summary: clean(r.call_summary, 140), direction: r.direction || null, date: etDateString(r.created_at) }));
 }
@@ -325,7 +345,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       // The primary line's catalog identity (booking snapshot, else the live
       // row); null on legacy rows booked before the catalog link existed.
       dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
-      'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
+      'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
       'c.first_name', 'c.last_name', 'c.phone', 'c.lawn_water_area_id',
       // The booked property's pin: the visit's own lat/lng first; the
       // customer's primary pin only when the stamped address does not
@@ -352,8 +372,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     loadAddons(dbh, svc.id),
   ]);
   const [calls, rain7d] = await Promise.all([
-    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps),
-    serviceLine === 'lawn' ? loadRain7d(dbh, svc) : Promise.resolve(null),
+    loadCallsSince(svc.customer_id, lastVisit?.startedAt || null, deps, svc.scheduled_date ? serviceStartInstant(etCalendarDayOf(svc.scheduled_date), svc.window_start) : null),
+    serviceLine === 'lawn' ? loadRain7d(dbh, svc, etCalendarDayOf(svc.scheduled_date), deps) : Promise.resolve(null),
   ]);
 
   const alternateAddress = Boolean(svc.address_diverges);
@@ -379,7 +399,17 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     addons,
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     rig: rigAssignment(svc),
+    windowStart: svc.window_start || null,
     access: { codes },
+    // Display copies of the notes, complete and code-scrubbed: the facts
+    // below are bounded for the model grounding and may lose a restriction
+    // stated later in the text.
+    notes: scrubKnownCodes({
+      instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
+      visitNotes: clean(svc.notes, 2000) || null,
+      chemicalSensitivity: prefs?.chemical_sensitivities ? (clean(prefs.chemical_sensitivity_details, 2000) || 'yes') : null,
+      petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
+    }, knownCodes),
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
     // one) → no forecast at all: an office forecast would judge a property
@@ -388,16 +418,17 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     // Model-safe facts. Nothing below carries a code or a phone number:
     // keyword redaction in clean(), then the known code values themselves.
     facts: scrubKnownCodes({
-      pets: petLine(prefs),
-      petsSecured: clean(prefs?.pets_secured_plan, 80),
+      // Pets are the primary home's too: unknown at an alternate address.
+      pets: petLine(propertyPrefs),
+      petsSecured: clean(propertyPrefs?.pets_secured_plan, 80),
       gates: codes.map((c) => c.label),
       entry: clean(propertyPrefs?.access_notes || propertyPrefs?.side_gate_access, 120),
       parking: clean(propertyPrefs?.parking_notes, 80),
       alternateAddress,
-      instructions: clean(prefs?.special_instructions, 120),
+      instructions: clean(propertyPrefs?.special_instructions, 120),
       contactPreference: prefs?.contact_preference || null,
       chemicalSensitivity: prefs?.chemical_sensitivities ? clean(prefs.chemical_sensitivity_details, 80) || 'yes' : '',
-      awayUntil: awayUntil(prefs),
+      awayUntil: awayUntil(propertyPrefs),
       visitNotes: clean(svc.notes, 140),
       lastVisit: lastVisitFact,
       issues,
@@ -430,7 +461,7 @@ function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   if (facts.pets) add(1, `Pets: ${facts.pets}${facts.petsSecured ? ` (${facts.petsSecured})` : ''}`);
   else if (facts.petsSecured) add(1, `Pets secured: ${facts.petsSecured}`);
   if (facts.gates.length) add(1, `${facts.gates.join(' and ').toLowerCase()} code on file, tap to show`);
-  if (facts.alternateAddress) add(1, 'visit at a non-primary address — the home\'s access details are not shown');
+  if (facts.alternateAddress) add(1, 'visit at a non-primary address — the home\'s pets and access details are not shown');
   add(1, facts.entry, 4);
   add(1, facts.parking, 9);
   if (facts.chemicalSensitivity) add(1, `chemical sensitivity${facts.chemicalSensitivity !== 'yes' ? `: ${facts.chemicalSensitivity}` : ''}`);
@@ -494,11 +525,12 @@ const SYSTEM_PROMPT = [
 ].join(' ');
 
 const EMOJI_RE = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
+const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|free of)\b|n't\b/;
 
 /**
  * Model output is accepted only when it is 1–3 sentences, ≤ 60 words, carries
- * no emoji, no bullet/heading markup, no code-looking token, and no number
- * that the grounding does not contain.
+ * no emoji, no bullet/heading markup, no code-looking token, every critical
+ * fact, and every clause inside one grounding clause with its polarity.
  */
 function validateParagraph(text, grounding, codes = [], critical = []) {
   // Raw text on purpose: the code check below must see a code as written.
@@ -513,19 +545,12 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   if (sentences.length < 1 || sentences.length > 3) return 'sentence_count';
   if (wordCount(body) > MAX_PARAGRAPH_WORDS) return 'too_long';
   const lower = body.toLowerCase();
-  for (const { code } of codes) {
-    if (code && lower.includes(String(code).toLowerCase())) return 'code_leak';
-  }
-  // Every numeric token must come from the grounding AND keep its clause:
-  // a content word within three words of it in the output must sit within
-  // three words of the same token in the grounding (a "20" moved from
-  // "runs 20 min" to "20 dogs" is an invented fact, not a rephrase).
-  if (numbersOutOfContext(body, grounding)) return 'ungrounded_number';
+  const codeRe = knownCodePattern(codes);
+  if (codeRe && codeRe.test(body)) return 'code_leak';
   // A rewrite that drops a safety-critical fact is not a rewrite.
-  for (const fact of critical) {
-    if (fact && !lower.includes(String(fact).toLowerCase())) return 'critical_fact_dropped';
-  }
-  return null;
+  if (critical.some((fact) => fact && !lower.includes(String(fact).toLowerCase()))) return 'critical_fact_dropped';
+  // Clause by clause against the grounding (see clauseMismatch).
+  return clauseMismatch(body, grounding);
 }
 
 /**
@@ -545,38 +570,42 @@ function criticalFacts(facts) {
   return out;
 }
 
-const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next']);
+const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next', 'no', 'not', 'there', 'you', 'your', 'can', 'will', 'any', 'all', 'so', 'if', 'but', 'also', 'then', 'they', 'them', 'their', 'one',
+  // Function words a rewrite adds freely; never a fact on their own.
+  'over', 'under', 'here', 'into', 'onto', 'after', 'before', 'during', 'while', 'when', 'where', 'which', 'who', 'what', 'how', 'than', 'still', 'just', 'now', 'only', 'very', 'much', 'more', 'most', 'some', 'such', 'each', 'every', 'other', 'same', 'both', 'too', 'again', 'ever', 'already', 'yet', 'once', 'out', 'up', 'down', 'off', 'back', 'please', 'today', 'customer', 'we', 'our', 'he', 'she', 'his', 'her', 'i', 'my', 'do', 'does', 'did', 'done', 'been', 'being', 'am', 'may', 'might', 'should', 'would', 'could', 'must', 'shall',
+  "isn't", "aren't", "wasn't", "weren't", "don't", "doesn't", "didn't", "hasn't", "haven't", "won't", "can't", "cannot"]);
+// Loose stem so "dogs" grounds "dog" and "sprayed" grounds "spray".
+const stem = (w) => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w).slice(0, 6);
 function contextWords(text) {
-  return String(text || '').toLowerCase().split(/\s+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
+  // "Mon/Thu" is two words.
+  return String(text || '').toLowerCase().split(/[\s/]+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
 }
-function neighbours(words, i) {
-  return words.slice(Math.max(0, i - 3), i).concat(words.slice(i + 1, i + 4)).filter((w) => !/\d/.test(w) && !CONTEXT_STOPWORDS.has(w));
+// Clauses: the template's facts are comma / colon / dash separated inside
+// one sentence, and "and" joins whole clauses — so that is the grain a
+// rewrite is checked at. A parenthetical stays with its fact ("dog (crated
+// in garage)" is one clause).
+function clauses(text) {
+  return String(text || '').split(/[,;:.!?]|\s[—–-]\s|\band\b/).map((c) => c.replace(/[()]/g, ' ').trim().toLowerCase()).filter(Boolean);
 }
-// Neighbours never cross a sentence: "20 dogs. Irrigation …" must not
-// borrow "irrigation" from the next sentence.
-function sentenceWords(text) {
-  return String(text || '').split(/(?<=[.!?])\s+/).map(contextWords).filter((w) => w.length);
+function contentStems(text) {
+  return contextWords(text).filter((w) => !CONTEXT_STOPWORDS.has(w)).map(stem);
 }
-function numbersOutOfContext(body, grounding) {
-  const src = sentenceWords(grounding);
-  for (const out of sentenceWords(body)) {
-    for (let i = 0; i < out.length; i += 1) {
-      if (!/\d/.test(out[i])) continue;
-      const mine = neighbours(out, i);
-      let seen = false;
-      let bound = false;
-      for (const s of src) {
-        for (let j = 0; j < s.length; j += 1) {
-          if (s[j] !== out[i]) continue;
-          seen = true;
-          const theirs = neighbours(s, j);
-          if (!mine.length || !theirs.length || mine.some((w) => theirs.includes(w))) bound = true;
-        }
-      }
-      if (!seen || !bound) return true;
-    }
+// Every rewritten clause must sit inside ONE grounding clause — all of its
+// content words (numbers included), with the same polarity. Words from two
+// facts recombined into one clause ("Dog at side gate" over "Pets: dog,
+// side gate"), an invented word ("Dog secured."), a moved number ("20
+// dogs") or a reversed instruction ("No side gate.") are not rephrases.
+function clauseMismatch(body, grounding) {
+  const src = clauses(grounding).map((c) => ({ negated: NEGATION_RE.test(c), stems: new Set(contentStems(c)) }));
+  for (const c of clauses(body)) {
+    const stems = contentStems(c);
+    if (!stems.length) continue;
+    const within = src.filter((g) => stems.every((w) => g.stems.has(w)));
+    if (!within.length) return 'ungrounded_clause';
+    const negated = NEGATION_RE.test(c);
+    if (!within.some((g) => g.negated === negated)) return 'polarity_flip';
   }
-  return false;
+  return null;
 }
 
 function groundingHash(template) {
@@ -642,7 +671,9 @@ async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
       else this.whereNull('job_card_generated_at');
     })
     .update({ job_card: JSON.stringify(row), job_card_generated_at: new Date() })
-    .catch((err) => logger.warn(`[job-card] cache write skipped: ${err.message}`));
+    // Knex error messages carry the SQL with its bindings — the paragraph
+    // itself. Log the visit and the driver code only, never the message.
+    .catch((err) => logger.warn(`[job-card] cache write skipped for ${facts.serviceId}: ${err.code || err.name || 'error'}`));
   return { ...written, cached: false };
 }
 
@@ -765,7 +796,7 @@ const PRODUCT_COLUMNS = [
   'mixing_order_category', 'mixing_instructions', 'rainfast_minutes', 'rei_hours',
   'labeled_turf_species', 'excluded_turf_species', 'requires_surfactant', 'allows_surfactant',
   'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
-  'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_required', 'reentry_text',
+  'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_text', 'ppe_required', 'reentry_text',
   'customer_safety_summary', 'pet_kid_guidance_text', 'service_report_summary',
   'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
   'best_price_amount_cached', 'best_price_updated_at', 'label_verified_at',
@@ -816,14 +847,12 @@ function rigAssignment(svc) {
   return { equipmentSystemId: svc?.assigned_equipment_system_id || null, calibrationId: svc?.assigned_calibration_id || null };
 }
 
-// The plan engine's calibration resolution and validation (assigned rig
-// first, one active rig otherwise, ambiguous / expired / not field
-// verified = no mix) decide the tank; only the wording is the card's.
+// The plan engine's calibration resolution (assigned rig first, one active
+// rig otherwise, none / ambiguous = no mix) decides the tank; only the
+// wording is the card's.
 const TANK_BLOCK_REASON = {
   missing_calibration: 'No rig calibration on file',
   equipment_selection_required: 'More than one rig is active — assign the rig on the Lawn plan',
-  expired_calibration: 'Rig calibration expired',
-  calibration_not_field_verified: 'Rig calibration not field verified',
 };
 
 async function loadRigCalibrations(dbh, rig) {
@@ -831,14 +860,22 @@ async function loadRigCalibrations(dbh, rig) {
 }
 
 // The instant a calibration must still be valid at: the later of now and
-// noon ET on the service day.
-function serviceDayInstant(serviceDate, now = new Date()) {
-  const noon = serviceDate ? parseETDateTime(`${serviceDate}T12:00`) : null;
-  return noon && noon.getTime() > now.getTime() ? noon : now;
+// the appointment start — window_start on the service day, noon ET when no
+// window is booked. The spray check is judged from it: a 3 pm stop opened
+// at 8 am is checked against the 3 pm hours.
+function serviceStartInstant(serviceDate, windowStart = null) {
+  const wall = /^\d{2}:\d{2}/.exec(String(windowStart || ''));
+  return serviceDate ? parseETDateTime(`${serviceDate}T${wall ? wall[0] : '12:00'}`) : null;
+}
+function serviceDayInstant(serviceDate, now = new Date(), windowStart = null) {
+  const start = serviceStartInstant(serviceDate, windowStart);
+  return start && start.getTime() > now.getTime() ? start : now;
 }
 
-function tankFromCalibrations(rows, now = new Date()) {
-  const { selected: cal, blocks } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [], date: now });
+// Calibration expiry / field verification no longer block (owner ruling,
+// #3935): the engine's remaining blocks are no rig and an ambiguous rig.
+function tankFromCalibrations(rows) {
+  const { selected: cal, blocks } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [] });
   const block = blocks[0] || null;
   const carrier = Number(cal?.carrier_gal_per_1000 || 0);
   return {
@@ -888,8 +925,10 @@ function precautionText(product) {
   // The product-specific pet / child guidance carries the actionable detail
   // (bait stations, keep pets off treated turf) the generic summary omits.
   const parts = [clean(product.customer_safety_summary, 160), clean(product.pet_kid_guidance_text, 160), clean(product.reentry_text, 100)].filter(Boolean);
+  // Label-derived PPE (ppe_text, the tech-tools reader's source) first; the
+  // legacy ppe_required list only when no verified text exists.
   const ppe = parseJson(product.ppe_required);
-  const ppeText = Array.isArray(ppe) ? ppe.map((p) => clean(p, 30)).filter(Boolean).join(', ') : clean(ppe, 80);
+  const ppeText = clean(product.ppe_text, 120) || (Array.isArray(ppe) ? ppe.map((p) => clean(p, 30)).filter(Boolean).join(', ') : clean(ppe, 80));
   if (ppeText) parts.push(`PPE: ${ppeText}`);
   return parts.join(' ') || null;
 }
@@ -917,7 +956,8 @@ async function loadLawnPlan(serviceId, { dbh = db, deps = {}, now = new Date() }
   }
 }
 
-function planBlocksOf({ plan }) {
+function planBlocksOf({ plan, blocks }) {
+  if (blocks) return blocks;
   if (!plan) return [PLAN_UNAVAILABLE];
   return (plan.propertyGate?.blocks || []).map((b) => ({ code: b.code || null, message: clean(b.message, 200) })).filter((b) => b.message);
 }
@@ -941,6 +981,11 @@ function productBlocksUnderPlan({ plan }, product) {
   return blocks;
 }
 
+// The lawn plan is built from the customer's singleton turf profile — the
+// primary home's grass, area, assessments and nutrient history. A lawn
+// visit stamped elsewhere gets no plan and no amounts.
+const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
+
 async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
   // Identity gates the primary line before any branch — a catalog
   // inspection or assessment resolves no treatment products even when its
@@ -950,6 +995,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
   if (identityKey === null) return { visit: null, lines: [], blocks: [], note: `No treatment protocol for this service (${facts.serviceCategory})` };
   const isLawn = identityKey === undefined ? facts.isLawn : identityKey === 'lawn';
   if (isLawn) {
+    if (facts.facts?.alternateAddress) return { visit: null, lines: [], blocks: [ALTERNATE_ADDRESS_BLOCK] };
     const loaded = await loadLawnPlan(facts.serviceId, { dbh, deps, now });
     const plan = loaded.plan;
     if (!plan) return { visit: null, lines: [], blocks: planBlocksOf(loaded) };
@@ -1050,20 +1096,19 @@ function seasonalVisit(program, scheduledDate) {
  */
 function linesFromLineMeta(visit, catalog) {
   const secondary = String(visit?.secondary || '');
-  const hints = new Map();
+  const lines = [];
+  // One line per (raw line, product): a product on two treatment lines
+  // (Alpine WSG perimeter + interior) keeps both — buildProductCards folds
+  // them onto one card as extraLines.
   for (const [raw, meta] of Object.entries(visit?.lineMeta || {})) {
     for (const hint of meta?.catalogProductHints || []) {
-      if (!hints.has(hint)) hints.set(hint, raw);
+      const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
+      if (!product || lines.some((l) => l.raw === raw && l.product.id === product.id)) continue;
+      // Conditional when the line sits in the visit's secondary text OR is
+      // phrased as a condition (isConditionalLine).
+      const conditional = Boolean(raw && (secondary.includes(raw) || isConditionalLine(raw)));
+      lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
     }
-  }
-  const lines = [];
-  for (const [hint, raw] of hints) {
-    const product = matchCatalogProduct({ raw: hint, catalogProductHints: [hint] }, catalog);
-    if (!product || lines.some((l) => l.product.id === product.id)) continue;
-    // Conditional when the line sits in the visit's secondary text OR is
-    // phrased as a condition (isConditionalLine).
-    const conditional = Boolean(raw && (secondary.includes(raw) || isConditionalLine(raw)));
-    lines.push({ raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
   }
   return lines;
 }
@@ -1079,16 +1124,45 @@ function isConditionalLine(raw) {
   return CONDITIONAL_LINE_RE.test(String(raw || ''));
 }
 
+// A line may name more than one product ("Distance or Talus", "Iron Plus
+// + Mn Combo"): the whole line first (its best match), then each
+// alternative segment, one card per product. Only " or " and " + " split —
+// "/" would hand tiny fragments ("Mg") to the reverse alias match.
+const LINE_ALTERNATIVES = /\s+or\s+|\s\+\s/i;
+// A segment's trailing words ("Mn Combo foliar") defeat the alias match, so
+// each segment is probed by its leading words down to two — never one, a
+// lone word would reverse-match inside many aliases.
+function leadingProbes(text) {
+  const words = text.split(/\s+/);
+  const out = [];
+  for (let n = words.length; n >= 2; n -= 1) out.push(words.slice(0, n).join(' '));
+  return out;
+}
+function productsOnLine(line, catalog) {
+  const segments = String(line.raw || '').split(LINE_ALTERNATIVES).map((t) => t.trim()).filter(Boolean);
+  const found = [];
+  const add = (raw) => {
+    const product = matchCatalogProduct({ ...line, raw }, catalog);
+    if (product && !found.some((f) => f.id === product.id)) found.push(product);
+    return Boolean(product);
+  };
+  add(line.raw);
+  if (segments.length > 1) {
+    for (const segment of segments) leadingProbes(segment).some(add);
+  }
+  return found;
+}
 function linesFromProtocolText(visit, catalog) {
   const parsed = [...parseProtocolLines(visit?.primary, 'base'), ...parseProtocolLines(visit?.secondary, 'conditional')];
   const out = [];
   for (const line of parsed) {
-    const product = matchCatalogProduct(line, catalog);
     // The parser's own flag (secondary text, "if …") plus the wider
     // condition phrasing the protocols use: a primary line the tech has to
     // justify is conditional work, never selected base work.
     const conditional = Boolean(line.conditional) || isConditionalLine(line.raw);
-    if (product && !out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
+    for (const product of productsOnLine(line, catalog)) {
+      if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional });
+    }
   }
   return out;
 }
@@ -1136,10 +1210,8 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // The catalog contract holds on this path too: a rate whose label
     // provenance is unverified is not shown as an actionable amount.
     const unverified = line.planMix?.amount > 0 && !p.label_verified_at;
-    // The plan validates the rig at noon on the service day; the card judges
-    // it at the later of noon and now (tankFromCalibrations). A rig that
-    // lapsed since noon withholds every planned amount here too, with the
-    // Tank section's own reason.
+    // No usable rig (none on file, ambiguous) withholds every planned
+    // amount here too, with the Tank section's own reason.
     const demandMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
     // A spray-check Hold withholds the amount on the card exactly as it does
     // in the tank search — a held product is not dosed anywhere.
@@ -1226,11 +1298,14 @@ async function rotationNote(dbh, facts, product) {
   const group = ['frac', 'irac', 'hrac', 'moa'].find((g) => product[`${g}_group`]);
   if (!group) return null;
   try {
-    const last = await latestComparableGroupApplication(dbh, facts.customerId, product, group, product[`${group}_group`], facts.scheduledDate);
+    // strict: a failed history read must not read as "no history".
+    const last = await latestComparableGroupApplication(dbh, facts.customerId, product, group, product[`${group}_group`], facts.scheduledDate, { strict: true });
     if (!last) return null;
     return `${group.toUpperCase()} ${product[`${group}_group`]} last used ${etCalendarDayOf(last.service_date)}${last.product_name && last.product_name !== product.name ? ` (${clean(last.product_name, 40)})` : ''}`;
   } catch {
-    return null;
+    // Non-lawn cards have no strict plan pass to surface the outage, so the
+    // card says it: the group may repeat and nobody checked.
+    return `${group.toUpperCase()} ${product[`${group}_group`]} rotation check unavailable — verify before applying`;
   }
 }
 
@@ -1254,18 +1329,20 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 
-  // The rig must still be in calibration ON the service day.
-  const serviceInstant = serviceDayInstant(facts.scheduledDate, now);
+  // The spray-check limits are judged from the appointment start.
+  const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
   const [paragraph, catalog, calibrations, { isToday, hourly }] = await Promise.all([
     paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
     loadRigCalibrations(dbh, facts.rig),
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
-  const tank = tankFromCalibrations(calibrations, serviceInstant);
+  const tank = tankFromCalibrations(calibrations);
   const { visit, lines, blocks, addons, note } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
-  const sprayCheck = buildSprayCheck({ products, hourly, now });
+  // Limits are judged from the appointment start (now once the window has
+  // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
+  const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 
@@ -1276,6 +1353,10 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     serviceLine: facts.serviceLine,
     strip: { ...facts.strip, access: facts.access },
     paragraph,
+    // Shown complete under the paragraph: the 60-word budget may trim them
+    // out of the template, the rewrite need not keep them, and the grounding
+    // copies are bounded.
+    notes: facts.notes,
     sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source, window: isToday ? 'today' : 'not_today' },
     tank,
     products: cards,
@@ -1291,6 +1372,19 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
  * product for 110 or 1 gallons of water on the visit's rig (the
  * appointment's assigned equipment, else the one active rig).
  */
+// A base line the lawn resolver left unselected — the losing BRANCH_ONE_OF
+// fertilizer for the property's soil-P result, PREMIUM_ONLY on an ineligible
+// plan — sits in neither mixCalculator list, and the approval engine treats
+// every protocol.base item as planned. The search blocks it itself.
+const UNSELECTED_BASE_REASONS = {
+  mutually_exclusive_branch_not_selected: 'Not the fertilizer branch this property\'s plan selected — amount withheld',
+  premium_or_drought_prep_not_selected: 'Premium-only line, not on this plan — amount withheld',
+};
+function unselectedBaseBlock(plan, product) {
+  const item = (plan?.protocol?.base || []).find((i) => i.product?.id === product.id && i.selected === false);
+  return item ? { code: 'base_not_selected', message: UNSELECTED_BASE_REASONS[item.selectionReason] || 'Not selected by this visit\'s plan — amount withheld' } : null;
+}
+
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
     dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'rainfast_minutes').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
@@ -1300,12 +1394,13 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
         .leftJoin('services as s', 'ss.service_id', 's.id')
         .where('ss.id', serviceId)
         .select(
-          'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id',
+          'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
           // The primary line's catalog identity, by the card's own rule.
           dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
           // The booked property's pin, by the card's own rule (see loadJobCardFacts).
           dbh.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
           dbh.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`),
+          dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`),
         )
         .first()
         .catch(() => null)
@@ -1314,7 +1409,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
-  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now));
+  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)));
   // The non-lawn protocol line (primary visit or add-on) that names this
   // product: an add-on's product is judged under that add-on's protocol,
   // not the primary lawn plan (an off-protocol / blackout block of the lawn
@@ -1325,7 +1420,8 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
-  const plan = !protocolLine && primaryIsLawn ? await loadLawnPlan(serviceId, { dbh, deps, now }) : null;
+  // Same rule as the card: no plan at a non-primary address.
+  const plan = !protocolLine && primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
   const planned = plan?.plan ? [...(plan.plan.mixCalculator?.items || []), ...(plan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
   const ratePer1000 = planned?.mix?.ratePer1000 != null ? planned.mix.ratePer1000 : product.default_rate_per_1000;
   const rateUnit = planned?.mix?.rateUnit || product.rate_unit;
@@ -1338,8 +1434,10 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
   // ordinance blackout — the search is not a way around the plan.
   const planWide = plan ? planBlocksOf(plan) : [];
+  const unselectedBase = planned ? null : unselectedBaseBlock(plan?.plan, product);
   const productBlocks = plan?.plan
     ? [
+      ...(unselectedBase ? [unselectedBase] : []),
       ...productBlocksUnderPlan(plan, product),
       ...(await (deps.evaluateApprovals || evaluateWaveGuardManagerApprovals)(dbh, {
         customerId: svc.customer_id,
@@ -1359,7 +1457,8 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // The same spray check as a card product, at the same forecast.
   const coords = propertyCoords(svc.latitude, svc.longitude);
   const { isToday, hourly } = await forecastAt({ coords, scheduledDate: etCalendarDayOf(svc.scheduled_date || now), now, deps });
-  const sprayVerdict = buildSprayCheck({ products: [product], hourly, now }).verdicts[0];
+  // Limits are judged from the appointment start, as on the card.
+  const sprayVerdict = buildSprayCheck({ products: [product], hourly, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
   const sprayCheck = !isToday
     ? { verdict: 'unknown', reason: 'Judged on the visit day' }
     : (!coords ? { verdict: 'unknown', reason: 'No property pin on file — no forecast' } : { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason });
@@ -1475,5 +1574,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine },
+  _test: { accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine },
 };

@@ -35,6 +35,7 @@ from urllib.parse import urlsplit, parse_qsl, quote
 SECRET_FILES = {
     "hermes": "/data/workspace/.waves-link-worker-secret",
     "hermes_vendor": "/data/workspace/.waves-link-worker-secret-vendor",
+    "hermes_commitments": "/data/workspace/.waves-link-worker-secret-commitments",
     "hermes_watchdog": "/data/workspace/.waves-link-worker-secret-watchdog",
 }
 

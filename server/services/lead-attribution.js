@@ -1,4 +1,4 @@
-const { scopeToProspects } = require('./lead-statuses');
+const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -177,7 +177,7 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // write must lose rather than overwrite its customer, codex #3834 r18 P1):
 // 0 rows ⇒ a concurrent transition wins and nothing below runs.
 // Returns whether the lead converted.
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, estimateId } = {}) {
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -191,12 +191,29 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   };
   const supplied = [['customer_id', customerId], ['monthly_value', monthlyValue], ['initial_service_value', initialServiceValue], ['waveguard_tier', waveguardTier]];
   for (const [column, value] of supplied) if (value !== undefined) updates[column] = value || null;
+  // The estimate this conversion closed is persisted on the lead's own row
+  // (extracted_data.won_estimate_id — never the estimate_id FK, which stays
+  // the draft's own link per the #3834 rules) so a later re-convert that
+  // carries no estimate settles under the SAME scope: without it, an admin
+  // replay after a deposit on estimate B let the root linked to estimate A
+  // take the funnel row and dropped the repeat's (codex #3834 r37 P1).
+  if (estimateId) updates.extracted_data = db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ won_estimate_id: String(estimateId) })]);
 
   // Soft-deleted leads are out of every live mutation path: 0 rows updated
   // means the lead is missing or deleted, and nothing below should run.
   const claim = db('leads').where('id', leadId).whereNull('deleted_at');
   if (onlyIfStatusIn) claim.whereIn('status', onlyIfStatusIn);
   if (onlyIfIdentity) claim.where(onlyIfIdentity);
+  // The wizard-fallback conversions (a 'duplicate' row standing in for the
+  // deal) win only while NO other live row of the accepted estimate is open
+  // or already won — judged in the same statement as the status write, so
+  // two overlapping acceptance retries, or a retry racing a link of the
+  // original to this estimate, cannot leave two won rows on one estimate
+  // (codex #3883 r1 P1).
+  if (onlyIfSoleLinkedRow) {
+    claim.whereNotExists(db('leads').select(db.raw('1')).where('estimate_id', onlyIfSoleLinkedRow).whereNot('id', leadId).whereNull('deleted_at')
+      .where((q) => q.where('status', 'won').orWhereIn('status', OPEN_LEAD_STATUSES)));
+  }
   const updatedRows = await claim.update(updates);
   if (!updatedRows) {
     logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing, deleted, or no longer in the state the caller read`);

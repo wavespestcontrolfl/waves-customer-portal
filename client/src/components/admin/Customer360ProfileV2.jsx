@@ -46,7 +46,7 @@
  *   Switching filter should clear stale rows / not mix categories.
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useId } from "react";
 import { createPortal } from "react-dom";
 import {
   Bell,
@@ -301,6 +301,7 @@ function annualPrepayCadencePrefix(cadence) {
 function normalizeAnnualPrepayLabelKey(value) {
   return String(value || "")
     .toLowerCase()
+    .replace(/\bevery\s*(?:(?:2|3|4|6|12)\s*months?|6\s*weeks?)\b/g, " ")
     .replace(/\b(every|monthly|bimonthly|bi-monthly|quarterly|triannual|semiannual|semi-annual|annual|yearly|six|weeks?|days?)\b/g, " ")
     .replace(/[^a-z0-9]+/g, "")
     .trim();
@@ -923,6 +924,7 @@ function ElectronicAuthorizationContractV2({
   const requestAutopaySetupLink = async (delivery) => {
     if (setupLinkBusy) return;
     if (delivery === "sms" && !window.confirm("Text this customer an Auto Pay setup link now?")) return;
+    if (delivery === "email" && !window.confirm("Email this customer an Auto Pay setup link now?")) return;
     setSetupLinkBusy(true);
     setSetupLinkResult(null);
     try {
@@ -1197,6 +1199,15 @@ function ElectronicAuthorizationContractV2({
               title="Text this customer an Auto Pay setup link"
             >
               Text Auto Pay link
+            </Button>{" "}
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => requestAutopaySetupLink("email")}
+              disabled={setupLinkBusy}
+              title="Email this customer an Auto Pay setup link"
+            >
+              Email Auto Pay link
             </Button>{" "}
             <Button
               size="sm"
@@ -3743,6 +3754,62 @@ export function estimateSuggestionMatchesService(suggestion, serviceType, covera
   return !!suggestionKey && !!serviceKey && suggestionKey === serviceKey;
 }
 
+// Both prepay paths use the service library for label selection only; prices
+// and coverage still come from their existing, independently guarded handlers.
+function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
+  const listId = useId();
+  const [catalog, setCatalog] = useState([]);
+  const [catalogError, setCatalogError] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch("/admin/services/dropdown")
+      .then((rows) => { if (!cancelled) setCatalog(rows); })
+      .catch(() => { if (!cancelled) setCatalogError(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const options = [...serviceOptions];
+  for (const service of catalog) {
+    if (service.name && !options.some((option) => option.value === service.name)) {
+      options.push({ value: service.name, label: service.name });
+    }
+  }
+  const serviceKey = annualPrepaySuggestionLabelKey(serviceType);
+  const selected = options.find((option) => option.value === serviceType)
+    || options.find((option) => serviceKey && annualPrepaySuggestionLabelKey(option.value) === serviceKey);
+
+  return <>
+    <label className="block sm:col-span-2">
+      <div className="u-label text-ink-secondary mb-1">Service plan</div>
+      <select
+        value={selected?.value || "__custom__"}
+        onChange={(e) => onChange(e.target.value === "__custom__" ? "" : e.target.value)}
+        className="w-full h-9 px-2.5 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+      >
+        {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        <option value="__custom__">Custom label</option>
+      </select>
+    </label>
+    <label className="block sm:col-span-2">
+      <div className="u-label text-ink-secondary mb-1">Service covered</div>
+      <input
+        value={serviceType}
+        onChange={(e) => onChange(e.target.value)}
+        list={listId}
+        aria-label="Service covered"
+        aria-describedby={catalogError ? `${listId}-error` : undefined}
+        autoComplete="off"
+        placeholder="Search services or enter a custom label"
+        className="w-full h-9 px-2.5 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+      />
+      <datalist id={listId}>
+        {options.map((option) => <option key={option.value} value={option.value} />)}
+      </datalist>
+      {catalogError && <div id={`${listId}-error`} className="text-14 text-ink-secondary mt-1">Service library unavailable. You can still enter a service label.</div>}
+    </label>
+  </>;
+}
+
 export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
@@ -3877,11 +3944,6 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
       }
     }
     updateSuggestedAmount(value, cadenceApplies ? inferredCadence : coverageCadence, nextVisitCount);
-  };
-
-  const handleServiceOptionChange = (value) => {
-    if (value === "__custom__") return;
-    handleServiceTypeChange(value);
   };
 
   const handleCadenceChange = (value) => {
@@ -4029,30 +4091,11 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
               Current term ends {fmtDate(activeTermEnd)}
             </div>
           )}
-          <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Service plan</div>
-            <select
-              value={serviceOptions.some((option) => option.value === serviceType) ? serviceType : "__custom__"}
-              onChange={(e) => handleServiceOptionChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-            >
-              {serviceOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-              <option value="__custom__">Custom label</option>
-            </select>
-          </label>
-          <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Service covered</div>
-            <input
-              value={serviceType}
-              onChange={(e) => handleServiceTypeChange(e.target.value)}
-              placeholder="Enter custom service label"
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-            />
-          </label>
+          <AnnualPrepayServiceFields
+            serviceOptions={serviceOptions}
+            serviceType={serviceType}
+            onChange={handleServiceTypeChange}
+          />
           <label className="block">
             <div className="u-label text-ink-secondary mb-1">Cadence</div>
             <select
@@ -4308,11 +4351,6 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     updateSuggestedAmount(value, inferredCadence || coverageCadence);
   };
 
-  const handleServiceOptionChange = (value) => {
-    if (value === "__custom__") return;
-    handleServiceTypeChange(value);
-  };
-
   const handleCadenceChange = (value) => {
     cadenceTouchedRef.current = true;
     setCoverageCadence(value);
@@ -4506,30 +4544,11 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               </label>
             </div>
           )}
-          <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Service plan</div>
-            <select
-              value={serviceOptions.some((option) => option.value === serviceType) ? serviceType : "__custom__"}
-              onChange={(e) => handleServiceOptionChange(e.target.value)}
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-            >
-              {serviceOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-              <option value="__custom__">Custom label</option>
-            </select>
-          </label>
-          <label className="block sm:col-span-2">
-            <div className="u-label text-ink-secondary mb-1">Service covered</div>
-            <input
-              value={serviceType}
-              onChange={(e) => handleServiceTypeChange(e.target.value)}
-              placeholder="Enter custom service label"
-              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-            />
-          </label>
+          <AnnualPrepayServiceFields
+            serviceOptions={serviceOptions}
+            serviceType={serviceType}
+            onChange={handleServiceTypeChange}
+          />
           <label className="block">
             <div className="u-label text-ink-secondary mb-1">Cadence</div>
             <select
@@ -5127,6 +5146,8 @@ export default function Customer360ProfileV2({
   const [activeTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timeline, setTimeline] = useState([]);
+  const [timelineError, setTimelineError] = useState(false);
+  const [timelineRetrying, setTimelineRetrying] = useState(false);
   const [comms, setComms] = useState([]);
   const [commsLoaded, setCommsLoaded] = useState(false);
   const [commsLoading, setCommsLoading] = useState(false);
@@ -5142,6 +5163,7 @@ export default function Customer360ProfileV2({
   const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
   const [editForm, setEditForm] = useState({});
+  const initialEditForm = useRef({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState("");
   const [recipientPrefsDraft, setRecipientPrefsDraft] = useState({
@@ -5363,6 +5385,7 @@ export default function Customer360ProfileV2({
     setLoading(true);
     setData(null);
     setProfileLoadError("");
+    setTimelineRetrying(false);
     setProfileActionErr("");
     setCommsLoading(false);
     setMenuOpen(false);
@@ -5378,17 +5401,18 @@ export default function Customer360ProfileV2({
     setRefundPayment(null);
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
-      adminFetch(`/admin/customers/${customerId}/timeline`, {
+      isAdmin ? adminFetch(`/admin/customers/${customerId}/timeline`, {
         signal: ctrl.signal,
       }).catch((err) => {
         if (err.name === "AbortError") throw err;
-        return { timeline: [] };
-      }),
+        return null;
+      }) : Promise.resolve({ timeline: [] }),
     ])
       .then(([detail, tl]) => {
         if (seq !== profileSeqRef.current) return;
         setData(detail);
-        setTimeline(tl.timeline || []);
+        setTimeline(tl?.timeline || []);
+        setTimelineError(tl === null);
         setComms([]);
         setCommsLoaded(false);
         setCommsErr("");
@@ -5400,7 +5424,23 @@ export default function Customer360ProfileV2({
         setLoading(false);
       });
     return () => ctrl.abort();
-  }, [customerId, profileReloadKey]);
+  }, [customerId, profileReloadKey, isAdmin]);
+
+  const retryTimeline = async () => {
+    const seq = profileSeqRef.current;
+    const signal = profileAbortRef.current.signal;
+    setTimelineRetrying(true);
+    try {
+      const result = await adminFetch(`/admin/customers/${customerId}/timeline`, { signal });
+      if (signal.aborted || seq !== profileSeqRef.current) return;
+      setTimeline(result.timeline || []);
+      setTimelineError(false);
+    } catch {
+      // Keep the loaded profile and recovery action when history is still unavailable.
+    } finally {
+      if (!signal.aborted && seq === profileSeqRef.current) setTimelineRetrying(false);
+    }
+  };
 
   useEffect(() => {
     if (activeTab !== "comms" || commsLoaded || commsLoading) return;
@@ -5529,7 +5569,7 @@ export default function Customer360ProfileV2({
   // mobile Edit pill, and the ⋯ menu item must prefill identical fields (the
   // menu copy once dropped profileLabel, so the mobile modal showed it blank).
   const openEditModal = () => {
-    setEditForm({
+    const form = {
       firstName: c.firstName || "",
       lastName: c.lastName || "",
       email: c.email || "",
@@ -5544,7 +5584,9 @@ export default function Customer360ProfileV2({
       tier: c.tier || "",
       pipelineStage: c.pipelineStage || "new_lead",
       contactRole: c.contactRole || "",
-    });
+    };
+    initialEditForm.current = form;
+    setEditForm(form);
     setEditErr("");
     setEditOpen(true);
   };
@@ -7897,13 +7939,13 @@ export default function Customer360ProfileV2({
             </div>
           )}
         </div>
-        {/* ZONE 4 — TIMELINE */}
-        <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
+        {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
+        {isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
           {" "}
           <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">
             {" "}
             <SectionTitle className="mb-0">
-              Timeline ({filteredTimeline.length})
+              Timeline{!timelineError && ` (${filteredTimeline.length})`}
             </SectionTitle>{" "}
             <div className="flex gap-1 flex-wrap">
               {[
@@ -7917,6 +7959,7 @@ export default function Customer360ProfileV2({
                 <button
                   key={f.key}
                   onClick={() => setTimelineFilter(f.key)}
+                  disabled={timelineError}
                   className={cn(
                     "h-6 px-2.5 text-10 uppercase tracking-label font-medium rounded-xs border-hairline u-focus-ring transition-colors",
                     timelineFilter === f.key
@@ -7969,17 +8012,32 @@ export default function Customer360ProfileV2({
                 </div>
               );
             })}
-            {filteredTimeline.length === 0 && (
+            {timelineError && (
+              <div className="flex flex-col items-center gap-3 py-4">
+                <p role="alert" className="text-14 text-alert-fg">
+                  Could not load customer history.
+                </p>
+                <Button
+                  variant="secondary"
+                  aria-label="Retry customer history"
+                  onClick={retryTimeline}
+                  disabled={timelineRetrying}
+                >
+                  {timelineRetrying ? "Retrying…" : "Retry"}
+                </Button>
+              </div>
+            )}
+            {!timelineError && filteredTimeline.length === 0 && (
               <div className="text-ink-secondary text-12 text-center py-4">
                 No timeline events
               </div>
             )}
           </div>{" "}
-        </div>
+        </div>}
         {/* Mobile spacer for sticky action bar — tracks the same keyboard
             inset as the bar itself so content still scrolls clear of it. */}
         <div
-          className="c360-mobile-footer-spacer"
+          className="c360-mobile-footer-spacer shrink-0"
           style={{
             height:
               "calc(56px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px))",
@@ -8346,15 +8404,16 @@ export default function Customer360ProfileV2({
                     setSavingEdit(true);
                     setEditErr("");
                     try {
-                      const payload = {
-                        ...editForm,
-                        monthlyRate:
-                          editForm.monthlyRate === ""
-                            ? null
-                            : parseFloat(editForm.monthlyRate),
-                        tier: editForm.tier || null,
-                        contactRole: editForm.contactRole || null,
-                      };
+                      // Keep address resaves for the server's mirror repair, but
+                      // don't re-submit unchanged contacts or billing settings:
+                      // legacy shared contacts can block an unrelated city edit.
+                      const addressFields = ["addressLine1", "addressLine2", "city", "state", "zip"];
+                      const payload = Object.fromEntries(Object.entries(editForm).filter(
+                        ([key, value]) => addressFields.includes(key) || value !== initialEditForm.current[key],
+                      ));
+                      if ("monthlyRate" in payload) payload.monthlyRate = payload.monthlyRate === "" ? null : parseFloat(payload.monthlyRate);
+                      if ("tier" in payload) payload.tier = payload.tier || null;
+                      if ("contactRole" in payload) payload.contactRole = payload.contactRole || null;
                       await adminFetch(`/admin/customers/${customerId}`, {
                         method: "PUT",
                         body: JSON.stringify(payload),
@@ -8362,7 +8421,7 @@ export default function Customer360ProfileV2({
                       await reloadCustomer();
                       setEditOpen(false);
                     } catch (e) {
-                      setEditErr(e.message || "Save failed");
+                      setEditErr(e.body?.message || e.message || "Save failed");
                     }
                     setSavingEdit(false);
                   }}

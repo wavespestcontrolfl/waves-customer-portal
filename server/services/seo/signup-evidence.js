@@ -29,9 +29,11 @@ function safeName(s) {
   return String(s || 'site').toLowerCase().replace(/[^a-z0-9.-]/g, '_').slice(0, 60);
 }
 
-async function uploadEvidence(buffer, domain, { ts = Date.now(), s3 = client() } = {}) {
+// prefix: callers outside the backlink lane (procurement/adapters/siteone.js)
+// keep their evidence under their own S3 prefix; the bucket + client are shared.
+async function uploadEvidence(buffer, domain, { ts = Date.now(), s3 = client(), prefix = PREFIX } = {}) {
   if (!s3 || !buffer || !buffer.length) return null;
-  const key = `${PREFIX}${safeName(domain)}_${ts}.png`;
+  const key = `${prefix}${safeName(domain)}_${ts}.png`;
   try {
     await s3.send(new PutObjectCommand({ Bucket: config.s3.bucket, Key: key, Body: buffer, ContentType: 'image/png' }));
     return key;

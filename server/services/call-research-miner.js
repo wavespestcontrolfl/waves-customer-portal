@@ -222,7 +222,10 @@ function eligibleCallsQuery({ onlyUnmined = true } = {}) {
     // evaluate UNKNOWN on NULL, dropping every legacy human call.
     .where(function () {
       this.whereNull('transcription_provider').orWhereNot('transcription_provider', 'conversation_relay');
-    });
+    })
+    // …and a TRANSFERRED call's composite (Sandy PR 2A): stored under the
+    // recording's provider, but it opens with the relay's "[AI segment]".
+    .whereRaw("COALESCE(transcription, '') NOT LIKE '[AI segment]%'");
   if (onlyUnmined) {
     q = q.where(function () {
       this.whereNull('research_mined_at')

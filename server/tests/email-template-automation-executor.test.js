@@ -7,6 +7,12 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// The per-customer prep-send lease (the manual sender's and the composer's):
+// pass-through by default; a test flips it to "held elsewhere".
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_name, fn) => fn()),
+  wasLockSkipped: jest.requireActual('../utils/cron-lock').wasLockSkipped,
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
@@ -929,10 +935,12 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e2' }] }),
         chain({ returning: [{ id: 'e3' }] }),
       ],
-      // 1st: live-payload refresh of the visit row; 2nd: the
+      // 1st: live-payload refresh of the visit row; 2nd: the pre-dispatch
+      // FRESH page claim (unkeyed → this guide); 3rd: the
       // markServicePrepSent confirmed-delivery stamp.
       scheduled_services: [
         chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
         stampQuery,
       ],
     });
@@ -992,6 +1000,7 @@ describe('email template automation executor', () => {
       }),
     });
     const blockedRun = { ...queuedRun, status: 'blocked' };
+    const releaseQuery = chain({});
 
     setDbQueues({
       'email_template_automations as a': [chain({ result: [prepAutomation] })],
@@ -1006,10 +1015,13 @@ describe('email template automation executor', () => {
         chain({ returning: [{ id: 'e2' }] }),
         chain({ returning: [{ id: 'e3' }] }),
       ],
-      // Only the live-payload read — NO stamp query is queued; a stamp
+      // The live-payload read, the FRESH page claim, then — blocked, nothing
+      // delivered — the claim's release. NO stamp query is queued; a stamp
       // attempt would throw "Unexpected db table" and fail this test.
       scheduled_services: [
         chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
+        releaseQuery,
       ],
     });
     EmailTemplates.sendTemplate.mockResolvedValue({ blocked: true, reason: 'suppressed' });
@@ -1028,6 +1040,426 @@ describe('email template automation executor', () => {
     });
 
     expect(result.results[0].run.status).toBe('blocked');
+    // A fresh claim on a blocked send is handed back, fenced on delivery/view.
+    expect(releaseQuery.update).toHaveBeenCalledWith({ prep_template_key: null });
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_sent_at');
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_first_viewed_at');
+  });
+
+  test('a prep guide run whose visit page is keyed to ANOTHER guide is skipped before dispatch — one page per visit across lanes (GH Codex #3856 r19 P0)', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({ stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const skippedRun = { ...queuedRun, status: 'skipped', exit_reason: 'prep page owned by another guide' };
+
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [skippedRun] }),
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'e1' }] }),
+        chain({ returning: [{ id: 'e2' }] }),
+        chain({ returning: [{ id: 'e3' }] }),
+      ],
+      // The live-payload read; the FRESH claim matches nothing (keyed
+      // meanwhile) and the same-key ownership read finds another guide's.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [] }),
+        chain({ first: undefined }),
+      ],
+    });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: {
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+
+    expect(result.results[0].run.status).toBe('skipped');
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a prep run claims, sends and settles under the per-customer prep-send lock; a held lease (a manual or composer prep send mid-flight) retries later without claiming (pre-push Codex P1 on d5c33f299)', async () => {
+    const { runExclusive } = require('../utils/cron-lock');
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({}),
+      retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      recipient_id: 'cust-1',
+      max_attempts: 2,
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const trigger = () => AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+
+    // Sent: the claim, the provider call and the stamp all run inside the lease.
+    const stampQuery = chain({});
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [{ ...queuedRun, status: 'sent' }] }),
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
+        stampQuery,
+      ],
+    });
+    db.fn = { now: jest.fn(() => 'NOW()') };
+    const lockReleased = jest.fn();
+    runExclusive.mockImplementation(async (key, fn) => { const out = await fn(); lockReleased(key); return out; });
+    EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, message: { id: 'message-1' } });
+    expect((await trigger()).results[0].run.status).toBe('sent');
+    expect(runExclusive).toHaveBeenCalledWith('prep-send:cust-1', expect.any(Function), { recordHealth: false, waitForSlot: false });
+    const lockTaken = runExclusive.mock.invocationCallOrder[runExclusive.mock.calls.findIndex(([key]) => key === 'prep-send:cust-1')];
+    expect(lockTaken).toBeLessThan(EmailTemplates.sendTemplate.mock.invocationCallOrder[0]);
+    expect(stampQuery.update.mock.invocationCallOrder[0]).toBeLessThan(lockReleased.mock.invocationCallOrder[0]);
+
+    // Held elsewhere: no claim, no provider call — deferred a minute out
+    // WITHOUT consuming the attempt (contention is not a delivery attempt;
+    // r27 P2).
+    const deferQuery = chain({ returning: [{ ...queuedRun, status: 'retry_scheduled', attempts: 0 }] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        deferQuery,
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
+      // Only the live-payload read: a claim or release would throw "Unexpected db table".
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      ],
+    });
+    EmailTemplates.sendTemplate.mockClear();
+    runExclusive.mockImplementation(async () => ({ skipped: true, reason: 'lease_held' }));
+    expect((await trigger()).results[0].run.status).toBe('retry_scheduled');
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(deferQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'retry_scheduled', attempts: 0, run_after: expect.any(Date) }));
+    runExclusive.mockImplementation(async (_name, fn) => fn());
+  });
+
+  test('a prep run whose first attempt fails before dispatch hands its fresh claim back BEFORE the retry — the retry re-claims, so a conclusive final failure cannot pin the page (GH Codex #3856 r24 P2)', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({}),
+      retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      max_attempts: 2,
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const retryRun = { ...queuedRun, status: 'retry_scheduled', attempts: 1 };
+    const releaseQuery = chain({});
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [retryRun] }),
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'e1' }] }),
+        chain({ returning: [{ id: 'e2' }] }),
+        chain({ returning: [{ id: 'e3' }] }),
+      ],
+      // Live read, FRESH claim, then — pre-dispatch throw, retry ahead — the
+      // release: the page is not carried into the retry.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
+        releaseQuery,
+      ],
+    });
+    EmailTemplates.sendTemplate.mockRejectedValue(new Error('template missing'));
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+    expect(result.results[0].run.status).toBe('retry_scheduled');
+    expect(releaseQuery.update).toHaveBeenCalledWith({ prep_template_key: null });
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_sent_at');
+
+    // A post-dispatch ambiguous throw before a retry keeps the page (a
+    // release would throw "Unexpected db table" here).
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [retryRun] }),
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [{ id: 'svc-1' }] }),
+      ],
+    });
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); throw new Error('post-dispatch bookkeeping'); });
+    expect((await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    })).results[0].run.status).toBe('retry_scheduled');
+  });
+
+  test('a same-guide page already stamped delivered (a manual or composer send landed after the run was queued) skips the run as already delivered — never a second send (GH Codex #3856 r26 P1)', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({}),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      payload: JSON.stringify({ scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' }),
+    });
+    const skippedRun = { ...queuedRun, status: 'skipped', exit_reason: 'prep guide already delivered for this visit' };
+    const skipQuery = chain({ returning: [skippedRun] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        skipQuery,
+      ],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'e1' }] }), chain({ returning: [{ id: 'e2' }] }), chain({ returning: [{ id: 'e3' }] })],
+      // Live read; the fresh claim matches nothing (already keyed); the
+      // same-key read finds OUR key — stamped delivered.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        chain({ returning: [] }),
+        chain({ first: { id: 'svc-1', prep_sent_at: new Date() } }),
+      ],
+    });
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+    expect(result.results[0].run.status).toBe('skipped');
+    expect(skipQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'skipped', exit_reason: 'prep guide already delivered for this visit' }));
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a prep run that finally FAILS before dispatch hands its fresh page claim back; a post-dispatch throw keeps it (pre-push Codex P1 on e493a0711)', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({ stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] }),
+      retry_policy: JSON.stringify({ max_attempts: 1, backoff_minutes: [] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      max_attempts: 1,
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const failedRun = { ...queuedRun, status: 'failed' };
+    const trigger = () => AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: { scheduled_service_id: 'svc-1', customer_email: 'sam@example.com', first_name: 'Sam', service_type: 'Flea Control Service', service_date_ymd: '2199-01-01' },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+    const queues = (scheduledServices) => ({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [failedRun] }),
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'e1' }] }),
+        chain({ returning: [{ id: 'e2' }] }),
+        chain({ returning: [{ id: 'e3' }] }),
+      ],
+      scheduled_services: scheduledServices,
+    });
+
+    // Pre-dispatch throw (onQueued never fired): live read, fresh claim, release.
+    const releaseQuery = chain({});
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+      releaseQuery,
+    ]));
+    EmailTemplates.sendTemplate.mockRejectedValue(new Error('template missing'));
+    expect((await trigger()).results[0].run.status).toBe('failed');
+    expect(releaseQuery.update).toHaveBeenCalledWith({ prep_template_key: null });
+    expect(releaseQuery.whereNull).toHaveBeenCalledWith('prep_first_viewed_at');
+
+    // Post-dispatch throw: the page may have been delivered — no release
+    // (a release attempt would throw "Unexpected db table" here).
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+    ]));
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); throw new Error('post-dispatch bookkeeping'); });
+    expect((await trigger()).results[0].run.status).toBe('failed');
+
+    // Post-dispatch DEFINITE provider rejection (SendGrid 4xx from the shared
+    // classifier): the payload was conclusively not accepted, so the fresh
+    // claim is handed back — otherwise the failed email_messages row would
+    // pin the visit's page to a guide nobody received (GH Codex #3856 r22 P2).
+    const rejectedRelease = chain({});
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+      rejectedRelease,
+    ]));
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => {
+      await opts.onQueued({ id: 'em-1' });
+      const err = new Error('SendGrid 400: bad address');
+      err.status = 400;
+      throw err;
+    });
+    expect((await trigger()).results[0].run.status).toBe('failed');
+    expect(rejectedRelease.update).toHaveBeenCalledWith({ prep_template_key: null });
+
+    // A 408 / 5xx stays ambiguous — the page is kept (a release would throw
+    // "Unexpected db table" here).
+    setDbQueues(queues([
+      chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      chain({ returning: [{ id: 'svc-1' }] }),
+    ]));
+    EmailTemplates.sendTemplate.mockImplementation(async (opts) => {
+      await opts.onQueued({ id: 'em-1' });
+      const err = new Error('SendGrid 503');
+      err.status = 503;
+      throw err;
+    });
+    expect((await trigger()).results[0].run.status).toBe('failed');
   });
 
   describe('processDueRuns preview mode', () => {

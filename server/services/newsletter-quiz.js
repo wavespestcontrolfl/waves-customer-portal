@@ -280,7 +280,7 @@ function renderQuizHtml({ token, quizId = DEFAULT_QUIZ_ID } = {}) {
   const buttons = quiz.answers.map((a) => {
     const url = quizAnswerUrl(token, quizId, a.key);
     return `<td style="padding:6px;">
-<a href="${esc(url)}" class="dm-onnavy" style="display:block;background:${C.navy};color:#ffffff;text-decoration:none;border-radius:8px;padding:12px 10px;font-weight:700;font-size:15px;text-align:center;font-family:Inter,Arial,sans-serif;">${esc(a.label)}</a>
+<a href="${esc(url)}" class="dm-onnavy" style="display:block;background:${C.navy};color:#ffffff;text-decoration:none;border-radius:10px;padding:12px 10px;font-weight:700;font-size:16px;text-align:center;font-family:Inter,Arial,sans-serif;">${esc(a.label)}</a>
 </td>`;
   });
   // Two-per-row grid so up to 4 answers read as a tidy grid on mobile + desktop.
@@ -290,11 +290,11 @@ function renderQuizHtml({ token, quizId = DEFAULT_QUIZ_ID } = {}) {
   }
 
   return `<div class="dm-box" style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;">
-<p style="margin:0 0 14px 0;font-size:17px;font-weight:800;color:${C.navy};font-family:Inter,Arial,sans-serif;text-align:center;">${esc(quiz.question)}</p>
+<p style="margin:0 0 14px 0;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;text-align:center;">${esc(quiz.question)}</p>
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:separate;">
 ${rows.join('\n')}
 </table>
-<p style="margin:12px 0 0 0;font-size:12px;color:${C.muted};text-align:center;font-family:Inter,Arial,sans-serif;">${esc(quiz.emailCta || "Tap one — we'll follow up on your next visit.")}</p>
+<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};text-align:center;font-family:Inter,Arial,sans-serif;">${esc(quiz.emailCta || "Tap one — we'll follow up on your next visit.")}</p>
 </div>`;
 }
 
@@ -313,12 +313,12 @@ function renderQuizNeutralHtml({ quizId = DEFAULT_QUIZ_ID } = {}) {
   const quiz = getQuiz(quizId);
   if (!quiz) return '';
   const chips = quiz.answers.map((a) =>
-    `<span class="dm-chip-lite" style="display:inline-block;margin:4px;padding:9px 14px;background:#ffffff;border:1px solid ${C.rule};border-radius:8px;font-size:14px;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(a.label)}</span>`,
+    `<span class="dm-chip-lite" style="display:inline-block;margin:4px;padding:9px 14px;background:#ffffff;border:1px solid ${C.rule};border-radius:10px;font-size:14px;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(a.label)}</span>`,
   ).join('');
   return `<div class="dm-box" style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;text-align:center;">
-<p style="margin:0 0 12px 0;font-size:17px;font-weight:800;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(quiz.question)}</p>
+<p style="margin:0 0 12px 0;font-size:18px;font-weight:700;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(quiz.question)}</p>
 <div>${chips}</div>
-<p style="margin:12px 0 0 0;font-size:12px;color:${C.muted};font-family:Inter,Arial,sans-serif;">Subscribers tap an answer right in the email to get a free check.</p>
+<p style="margin:12px 0 0 0;font-size:14px;color:${C.muted};font-family:Inter,Arial,sans-serif;">Subscribers tap an answer right in the email to get a free check.</p>
 </div>`;
 }
 

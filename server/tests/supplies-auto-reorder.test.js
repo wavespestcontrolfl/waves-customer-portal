@@ -17,7 +17,7 @@ const mockState = { candidates: [], existing: null, pricing: null, lockedPricing
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
-    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'orWhereExists', 'whereExists', 'from']) q[m] = () => q;
+    for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'select', 'orderBy', 'orWhereExists', 'whereExists', 'from']) q[m] = () => q;
     // The product row lock: from here on the pricing row is the LOCKED one
     // (a test sets lockedPricing to simulate a pricing edit that committed
     // between an unlocked read and the lock).
@@ -57,6 +57,13 @@ jest.mock('../models/db', () => {
   dbFn.transaction = async (fn) => fn(dbFn);
   return dbFn;
 });
+
+jest.mock('../services/procurement/order-dispatch', () => ({
+  canAutoOrder: jest.fn(async ({ vendorId }) => mockState.autoOrder === true && (!mockState.autoOrderVendor || vendorId === mockState.autoOrderVendor)),
+  findLiveAutoOrder: jest.fn(async () => mockState.liveAutoOrder || null), // the product's unreconciled automatic order
+  // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
+  settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
+}));
 
 const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
 
@@ -269,6 +276,19 @@ test('a restock bell that rejects, or resolves null (not persisted), is a sweep 
   expect(nullRow.errors).toEqual([expect.objectContaining({ message: 'bell: notification not persisted' })]);
 });
 
+test('an open auto request pinned to a vendor the product has left (no vendorId learnable) still rings — the dispatcher never claims it (Codex r10 P1)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-old', status: 'open', source: 'auto_reorder', vendor: 'Old Vendor', metadata: {} };
+  mockState.pricing = { vendor_sku: '127544', vendor_product_url: 'https://gemplers.com/x' };
+  mockState.autoOrder = true; // vendor B (the product's current vendor) IS auto-orderable
+  const notify = jest.fn(async () => ({}));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(mockState.updates).toHaveLength(0); // not the request's vendor: nothing learned
+  expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-old' }]);
+  expect(notify).toHaveBeenCalledTimes(1);
+  mockState.autoOrder = false;
+});
+
 test('reorder quantity cleared under the lock → unconfigured, no row', async () => {
   mockState.candidates = [lowSign];
   mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: null, auto_reorder_vendor_id: 'vend-gemplers', inventory_unit: 'each' };
@@ -285,6 +305,54 @@ test('an open auto request still re-rings when the product\'s reorder quantity w
   expect(r.unconfigured).toHaveLength(0);
   expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
   expect(notify).toHaveBeenCalledTimes(1);
+});
+
+test('a low product whose received request carries a late automatic order (landedAfterReceive) gets NO fresh request and no bell (hook r27 P1)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = null; // the received request is not a live request
+  mockState.liveAutoOrder = { status: 'needs_review', external_order_number: 'S1-9', vendor_name: 'SiteOne' };
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.created).toEqual([]);
+    expect(r.deduped).toEqual([expect.objectContaining({ productId: 'prod-sign', reason: 'auto_order_live' })]);
+    expect(notify).not.toHaveBeenCalled();
+  } finally { mockState.liveAutoOrder = null; }
+});
+
+test('an open auto request with an automatic order already OUT (ambiguous submit / stale recovery park) is NOT re-belled "order manually" when the dispatcher no longer orders — the ledger bell owns it (hook r27 P0)', async () => {
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Sticker Mule', metadata: { vendorId: 'vend-sm' } };
+  mockState.autoOrder = false; // gate closed since the order went out
+  mockState.liveAutoOrder = { status: 'needs_review', external_order_number: null, vendor_name: 'Sticker Mule' };
+  const notify = jest.fn(async () => ({}));
+  try {
+    const r = await runSuppliesAutoReorderSweep({ notify });
+    expect(r.renotified).toEqual([]);
+    expect(r.deduped).toEqual([expect.objectContaining({ requestId: 'req-auto' }), expect.objectContaining({ requestId: 'req-auto', reason: 'auto_order_live' })]);
+    expect(notify).not.toHaveBeenCalled();
+  } finally { mockState.liveAutoOrder = null; }
+});
+
+test('a re-ring settles the request\'s parked ledger bell (a pre-submit park\'s "order manually") BEFORE the generic hand-off rings; a failed settle withholds the hand-off and is a sweep error (Codex r31 P2)', async () => {
+  const { settleRequestLedgerBells } = require('../services/procurement/order-dispatch');
+  settleRequestLedgerBells.mockClear();
+  mockState.candidates = [lowSign];
+  mockState.existing = { id: 'req-auto', status: 'open', source: 'auto_reorder', vendor: 'Sticker Mule', metadata: { vendorId: 'vend-sm' } };
+  mockState.autoOrder = false; // the vendor gate closed after a no_price park
+  const order = [];
+  settleRequestLedgerBells.mockImplementationOnce(async () => { order.push('settle'); });
+  const notify = jest.fn(async () => { order.push('bell'); return {}; });
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.renotified).toEqual([{ productId: 'prod-sign', requestId: 'req-auto' }]);
+  expect(settleRequestLedgerBells).toHaveBeenCalledWith(expect.anything(), 'req-auto');
+  expect(order).toEqual(['settle', 'bell']);
+  mockState.ledgerBellThrows = true;
+  try {
+    const bad = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+    expect(bad.renotified).toEqual([]);
+    expect(bad.errors).toEqual([{ productId: 'prod-sign', name: lowSign.name, requestId: 'req-auto', message: 'ledger bell: ledger bell lost connection' }]);
+  } finally { mockState.ledgerBellThrows = false; }
 });
 
 test('an open auto request is found and re-belled even after the product\'s low-stock threshold was cleared (Codex r15 P2)', async () => {
@@ -349,6 +417,49 @@ test('a per-product failure is recorded and the sweep continues — and the run 
   expect(failure.message).toMatch(/2 product\(s\) failed: .*Yard sign stake \(insert boom\)/);
   expect(sweepFailureError({ errors: [] })).toBeNull();
   expect(sweepFailureError({ skipped: 'gated' })).toBeNull();
+});
+
+test('PR 2: when the dispatcher will order from the vendor, the request is raised with NO manual bell', async () => {
+  mockState.autoOrder = true;
+  mockState.candidates = [lowSign];
+  const notify = jest.fn(async () => ({ id: 'n' }));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.created).toHaveLength(1);
+  expect(r.autoOrder).toEqual([r.created[0].requestId]);
+  expect(notify).not.toHaveBeenCalled();
+  // …and the re-bell branch for an already-open auto request stays silent too.
+  mockState.existing = { id: 'req-open', status: 'open', source: 'auto_reorder', metadata: {} };
+  const r2 = await runSuppliesAutoReorderSweep({ notify });
+  expect(r2.deduped).toHaveLength(1);
+  expect(notify).not.toHaveBeenCalled();
+  // …and the sweep touches no bell on the hand-off — the dispatcher's claim retires it (Codex r20 P1).
+  expect(mockState.updates.filter((u) => u.table === 'notifications')).toHaveLength(0);
+  mockState.autoOrder = false;
+});
+
+test('a dispatcher eligibility check that THROWS (credential lookup infrastructure failure) records the product as an error and rings NO "order manually" bell (Codex #3853 r17 P1)', async () => {
+  const { canAutoOrder } = require('../services/procurement/order-dispatch');
+  canAutoOrder.mockRejectedValueOnce(new Error('canAutoOrder: credential lookup for SiteOne failed: ECONNRESET'));
+  mockState.candidates = [lowSign];
+  const notify = jest.fn(async () => ({ id: 'n' }));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.errors).toEqual([expect.objectContaining({ productId: lowSign.id, message: expect.stringContaining('ECONNRESET') })]);
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test('PR 2: the bell decision follows the LOCKED vendor — a switch to a manual vendor mid-sweep still bells', async () => {
+  mockState.autoOrder = true;
+  mockState.autoOrderVendor = 'vend-gemplers'; // only the scan-time vendor auto-orders
+  mockState.candidates = [lowSign];
+  // Between the scan and the locked insert the admin moved the product to a manual vendor.
+  mockState.fresh = { inventory_on_hand: '80', low_stock_threshold: '100', auto_reorder_enabled: true, active: true, reorder_quantity: '650', auto_reorder_vendor_id: 'vend-manual', inventory_unit: 'each' };
+  const notify = jest.fn(async () => ({ id: 'n' }));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.created).toHaveLength(1);
+  expect(r.autoOrder).toBeUndefined();
+  expect(notify).toHaveBeenCalledTimes(1);
+  mockState.autoOrder = false;
+  mockState.autoOrderVendor = null;
 });
 
 test('re-bell on an open auto request says what the REQUEST says, not the product\'s edited config (Codex r6 P2)', async () => {

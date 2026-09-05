@@ -62,12 +62,28 @@ describe('validateParagraph', () => {
 
   test('a grounded number moved to another fact is rejected; rephrased in place it passes (PR r3 P2)', () => {
     const lawn = 'Pets: dog. First visit on record. Irrigation Mon/Thu, 20 min, 1.2" rain in the last 7 days.';
-    expect(jobCard.validateParagraph('There are 20 dogs. Irrigation runs Mon and Thu.', lawn, [])).toBe('ungrounded_number');
-    expect(jobCard.validateParagraph('One dog on site. Irrigation runs Mon and Thu for 20 min, with 1.2" of rain over the last 7 days.', lawn, [])).toBeNull();
+    expect(jobCard.validateParagraph('There are 20 dogs. Irrigation runs Mon and Thu.', lawn, [])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('One dog. Irrigation Mon and Thu, 20 min, 1.2" of rain in the last 7 days.', lawn, [])).toBeNull();
+  });
+
+  test('a sentence the grounding never mentions is rejected, even without numbers (Codex r10 P1)', () => {
+    expect(jobCard.validateParagraph('No pets are present.', 'First visit on record.', [])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('First visit here. The side gate is unlocked.', 'First visit on record.', [])).toBe('ungrounded_clause');
+    // An instruction lifted from a visit note is not in the grounding either.
+    expect(jobCard.validateParagraph('Skip the back yard today.', 'Pets: dog. First visit on record.', [])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('This is the first visit on record.', 'First visit on record.', [])).toBeNull();
+    expect(jobCard.validateParagraph('There are 2 dogs.', 'Pets: 2 dogs.', [])).toBeNull();
+    // A shared word never carries an invented one (hook P1 ×2): "dog" is grounded, a securing plan or an entry instruction is not — even as a single word.
+    expect(jobCard.validateParagraph('The dog is secured, so enter the yard. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('Dog secured. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('A dog is here. First visit on record.', 'Pets: dog. First visit on record.', [], ['dog'])).toBeNull();
   });
 
   test('accepts a faithful 1–3 sentence rewrite', () => {
-    expect(jobCard.validateParagraph('There is a dog and a gate code on file you can show. Last visit on 2026-08-12 found chinch bugs on the east side.', grounding, codes)).toBeNull();
+    expect(jobCard.validateParagraph('There is a dog and a gate code on file, tap to show. Last visit 2026-08-12: chinch bugs on the east side.', grounding, codes)).toBeNull();
+    // Grounded words recombined into a new association are not a rephrase (Codex r14 P1): the dog is not at the gate.
+    expect(jobCard.validateParagraph('Dog at side gate, crated in garage.', 'Pets: dog (crated in garage), side gate.', [], ['dog', 'crated in garage'])).toBe('ungrounded_clause');
+    expect(jobCard.validateParagraph('Dog, crated in garage. Side gate.', 'Pets: dog (crated in garage), side gate.', [], ['dog', 'crated in garage'])).toBeNull();
   });
 
   test.each([
@@ -75,7 +91,7 @@ describe('validateParagraph', () => {
     ['emoji', 'Dog on site 🐶. Gate code on file.', 'emoji'],
     ['bullet markup', '- dog\n- gate', 'markup'],
     ['leaked code', 'Gate code is 4545#. Dog on site.', 'code_leak'],
-    ['invented number', 'Two dogs and 3 cats are on site.', 'ungrounded_number'],
+    ['invented number', 'Two dogs and 3 cats are on site.', 'ungrounded_clause'],
     ['empty', '   ', 'empty'],
   ])('rejects %s', (_label, text, reason) => {
     expect(jobCard.validateParagraph(text, grounding, codes)).toBe(reason);
@@ -91,9 +107,9 @@ describe('writeParagraph', () => {
   const template = 'Pets: dog. First visit on record.';
 
   test('model text that passes validation is returned as source=model', async () => {
-    const callModel = jest.fn(async () => ({ ok: true, text: 'A dog lives here and this is the first visit on record.' }));
+    const callModel = jest.fn(async () => ({ ok: true, text: 'A dog is here and this is the first visit on record.' }));
     const out = await jobCard.writeParagraph(template, [], { callModel });
-    expect(out).toEqual({ text: 'A dog lives here and this is the first visit on record.', source: 'model' });
+    expect(out).toEqual({ text: 'A dog is here and this is the first visit on record.', source: 'model' });
     // The grounding sent to the model is the template — never a code.
     expect(callModel.mock.calls[0][0].text).toContain(template);
   });
@@ -288,7 +304,7 @@ describe('buildMixAmount', () => {
 
   test.each([
     ['missing rate', { ratePer1000: null, carrierGalPer1000: 2, gallons: 110 }, 'No verified rate on file'],
-    ['expired/missing calibration', { ratePer1000: 1.5, carrierGalPer1000: null, gallons: 110 }, 'Rig not calibrated'],
+    ['missing calibration', { ratePer1000: 1.5, carrierGalPer1000: null, gallons: 110 }, 'Rig not calibrated'],
     ['odd volume', { ratePer1000: 1.5, carrierGalPer1000: 2, gallons: 5 }, 'Pick 110 or 1 gallons'],
   ])('%s → null amount with reason', (_l, input, reason) => {
     expect(jobCard.buildMixAmount(input)).toMatchObject({ amount: null, reason });
@@ -307,18 +323,14 @@ describe('property coordinates', () => {
 });
 
 describe('tankFromCalibrations', () => {
-  const now = new Date('2026-09-04T12:00:00Z');
-  test('expired calibration is not calibrated', () => {
-    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }], now))
-      .toMatchObject({ calibrated: false, reason: 'Rig calibration expired', carrierGalPer1000: 2 });
+  test('an expired or unverified calibration still mixes — expiry / field-verification blocks were retired (#3935)', () => {
+    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }]))
+      .toMatchObject({ calibrated: true, reason: null, carrierGalPer1000: 2 });
   });
+  const now = new Date('2026-09-04T12:00:00Z');
   test('live calibration', () => {
     expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }], now))
       .toMatchObject({ calibrated: true, reason: null, tankCapacityGal: 110 });
-  });
-  test('unexpired but not field verified → not calibrated (Codex r3 P1, plan-engine block reused)', () => {
-    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }], now))
-      .toMatchObject({ calibrated: false, reason: 'Rig calibration not field verified', carrierGalPer1000: 2 });
   });
   test('two active rigs and no assignment → ambiguous, no mix (Codex r4 P1)', () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' };
@@ -338,6 +350,15 @@ describe('safety-critical facts survive the rewrite (PR r1 P1)', () => {
     const grounding = 'Chemical sensitivity: asthma, no pyrethroids, pets: dog crated in garage. Open: URGENT wasps at the front door.';
     expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
     expect(jobCard.validateParagraph('Customer has a chemical sensitivity; dog crated in garage.', grounding, [], critical)).toBe('critical_fact_dropped');
+    // A critical fact restated under a negation is reversed, not kept (hook P1).
+    expect(jobCard.validateParagraph('No chemical sensitivity. First visit on record.', 'Chemical sensitivity. First visit on record.', [], ['sensitiv'])).toBe('polarity_flip');
+    expect(jobCard.validateParagraph('The dog isn\'t crated in garage today.', 'Pets: dog (crated in garage).', [], ['crated in garage'])).toBe('polarity_flip');
+    // Polarity holds for EVERY clause, not only critical facts (Codex r12 P1).
+    expect(jobCard.validateParagraph('No side gate. First visit on record.', 'Side gate. First visit on record.', [])).toBe('polarity_flip');
+    expect(jobCard.validateParagraph('Irrigation on file. First visit on record.', 'No irrigation on file — ask the customer. First visit on record.', [])).toBe('polarity_flip');
+    expect(jobCard.validateParagraph('No irrigation on file, ask the customer. First visit on record.', 'No irrigation on file — ask the customer. First visit on record.', [])).toBeNull();
+    // The fact's own "no" (asthma, no pyrethroids) is not a negation of the fact.
+    expect(jobCard.validateParagraph('Customer has asthma, no pyrethroids; dog crated in garage. Urgent: wasps at the front door.', grounding, [], critical)).toBeNull();
     expect(jobCard._test.criticalFacts({ chemicalSensitivity: 'yes', issues: [] })).toEqual(['sensitiv']);
   });
 });
@@ -366,6 +387,27 @@ describe('lineMeta hints keep the secondary line\'s role (pre-push P1)', () => {
       expect.objectContaining({ product: catalog[0], role: 'conditional', selected: false }),
     ]);
   });
+
+  test('a line naming two products resolves both ("Distance or Talus", "Iron Plus + Mn Combo") (Codex r14 P1)', () => {
+    const catalog = [{ id: 'd', name: 'Distance IGR', cost_per_unit: 1 }, { id: 't', name: 'Talus 70 DF IGR', cost_per_unit: 1 }, { id: 'fe', name: 'Chelated Iron Plus', cost_per_unit: 1 }, { id: 'mn', name: 'High Mn Combo', cost_per_unit: 1 }];
+    const lines = jobCard._test.linesFromProtocolText({ primary: 'Distance IGR or Talus 70 DF IGR for crawlers\nIron Plus + Mn Combo foliar', secondary: '' }, catalog);
+    const byLine = (raw) => lines.filter((l) => l.raw === raw).map((l) => l.product.id).sort();
+    expect(byLine('Distance IGR or Talus 70 DF IGR for crawlers')).toEqual(['d', 't']);
+    expect(byLine('Iron Plus + Mn Combo foliar')).toEqual(['fe', 'mn']);
+    expect(lines).toHaveLength(4);
+    // A single-product line is unchanged.
+    expect(jobCard._test.linesFromProtocolText({ primary: 'Conserve SC 0.1-0.2 fl oz/gal for caterpillars', secondary: '' }, [{ id: 'c', name: 'Conserve SC', cost_per_unit: 1 }]).map((l) => l.product.id)).toEqual(['c']);
+  });
+
+  test('a product on two treatment lines keeps both lines (Codex r10 P2)', () => {
+    const catalog = [{ id: 'al', name: 'Alpine WSG', cost_per_unit: 1 }];
+    const visit = {
+      primary: 'Perimeter band with Alpine WSG\nInterior cracks and crevices',
+      secondary: '',
+      lineMeta: { 'Perimeter band with Alpine WSG': { catalogProductHints: ['Alpine WSG'] }, 'Interior cracks and crevices': { catalogProductHints: ['Alpine WSG'] } },
+    };
+    expect(jobCard._test.linesFromLineMeta(visit, catalog).map((l) => l.raw)).toEqual(['Perimeter band with Alpine WSG', 'Interior cracks and crevices']);
+  });
 });
 
 describe('serviceDayInstant (PR r3 P2)', () => {
@@ -376,6 +418,14 @@ describe('serviceDayInstant (PR r3 P2)', () => {
     expect(jobCard._test.serviceDayInstant('2026-09-04', now)).toBe(now);
     expect(jobCard._test.serviceDayInstant('2026-09-04', new Date('2026-09-04T12:00:00Z')).toISOString()).toBe('2026-09-04T16:00:00.000Z');
     expect(jobCard._test.serviceDayInstant('2026-08-01', now)).toBe(now);
+  });
+  test('a booked window judges the rig at the appointment start, not noon (Codex r10 P1)', () => {
+    const now = new Date('2026-09-04T12:00:00Z');
+    expect(jobCard._test.serviceDayInstant('2026-09-10', now, '15:00:00').toISOString()).toBe('2026-09-10T19:00:00.000Z');
+    expect(jobCard._test.serviceDayInstant('2026-09-10', now, '08:30').toISOString()).toBe('2026-09-10T12:30:00.000Z');
+    // Already past the start → now; garbage window → noon.
+    expect(jobCard._test.serviceDayInstant('2026-09-04', new Date('2026-09-04T20:00:00Z'), '15:00:00').toISOString()).toBe('2026-09-04T20:00:00.000Z');
+    expect(jobCard._test.serviceDayInstant('2026-09-10', now, 'later').toISOString()).toBe('2026-09-10T16:00:00.000Z');
   });
 });
 
@@ -442,6 +492,11 @@ describe('access codes never enter the model-safe facts', () => {
     expect(jobCard._test.petLine({ pet_details: 'Dog; gate code 4545#' })).not.toContain('4545');
     // And the validator refuses model text that prints a known code.
     expect(jobCard.validateParagraph('Gate code 4545# on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
+    // The bare form of a stored code is the code too (Codex r11 P1): the
+    // scrub and the leak check both catch "4545" for "4545#", as a whole token.
+    expect(jobCard._test.scrubKnownCodes({ notes: 'Try 4545 first, then 4545#' }, [{ code: '4545#' }])).toEqual({ notes: 'Try [code] first, then [code]' });
+    expect(jobCard._test.scrubKnownCodes('Visit 2026-09-04 at 14545 Main', [{ code: '4545#' }])).toBe('Visit 2026-09-04 at 14545 Main');
+    expect(jobCard.validateParagraph('Gate code 4545 on file.', 'gate code on file', [{ label: 'Property gate', code: '4545#' }])).toBe('code_leak');
   });
   test('a known code value pasted bare into any fact string is scrubbed before grounding (Codex r6 P1)', () => {
     const facts = { entry: '4545#', issues: [{ text: 'Use 4545# at the side gate' }], lastVisit: { summary: 'Fine' }, rain7d: 0.5 };
@@ -457,6 +512,15 @@ describe('access codes never enter the model-safe facts', () => {
     expect(jobCard.validateParagraph('Say blue at the gate.', 'say blue at the gate', [{ code: 'BLUE' }])).toBe('code_leak');
     // Nothing known → the object is untouched.
     expect(jobCard._test.scrubKnownCodes(facts, [])).toBe(facts);
+  });
+});
+
+describe('a lawn visit at a non-primary address never gets the primary home\'s plan (Codex r12 P1)', () => {
+  test('card path: alternate_address block, no lines, plan never built', async () => {
+    const buildPlan = jest.fn();
+    const out = await jobCard.resolveVisitProducts({ facts: { serviceId: 'svc1', isLawn: true, facts: { alternateAddress: true } }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan } });
+    expect(out).toEqual({ visit: null, lines: [], blocks: [{ code: 'alternate_address', message: expect.stringContaining('non-primary address') }] });
+    expect(buildPlan).not.toHaveBeenCalled();
   });
 });
 
@@ -512,7 +576,7 @@ describe('isTankMixable', () => {
 describe('mixForProduct', () => {
   // Generic knex-chain stub: every builder method returns the chain, the
   // terminal (.first / await) resolves the table's fixture.
-  const makeDb = (fixtures) => (table) => {
+  const makeDb = (fixtures) => Object.assign((table) => {
     const rows = fixtures[String(table).split(" as ")[0]] ?? [];
     const chain = {};
     for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
@@ -520,8 +584,7 @@ describe('mixForProduct', () => {
     chain.catch = (fn) => Promise.resolve(rows).catch(fn);
     chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
     return chain;
-  };
-  makeDb.withRaw = (fixtures) => Object.assign(makeDb(fixtures), { raw: (sql) => sql });
+  }, { raw: (sql) => sql });
   const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
 
   const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', assigned_equipment_system_id: null, assigned_calibration_id: null };
@@ -532,7 +595,7 @@ describe('mixForProduct', () => {
   const approve = () => jest.fn().mockResolvedValue({ blocks: [], warnings: [] });
 
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
-    const dbh = makeDb.withRaw({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] } });
     const evaluateApprovals = approve();
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
@@ -541,11 +604,37 @@ describe('mixForProduct', () => {
     buildPlan.mockRejectedValue(new Error('boom'));
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).planBlocks[0].code).toBe('plan_unavailable');
     // A pest visit never builds the plan nor runs approvals.
-    const pest = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] });
+    const pest = makeDb({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] });
     buildPlan.mockClear(); evaluateApprovals.mockClear();
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: pest, deps: { buildPlan, evaluateApprovals }, ...at })).amount).toBe(6.215);
     expect(buildPlan).not.toHaveBeenCalled();
     expect(evaluateApprovals).not.toHaveBeenCalled();
+  });
+
+
+  test('a lawn visit at a non-primary address gets no plan and no searched dose (Codex r12 P1)', async () => {
+    const dbh = makeDb({ scheduled_services: [{ ...lawnVisit, address_diverges: true }], products_catalog: [product], equipment_calibrations: [live] });
+    const buildPlan = jest.fn();
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
+    expect(out).toMatchObject({ amount: null, planBlocks: [{ code: 'alternate_address' }] });
+    expect(buildPlan).not.toHaveBeenCalled();
+  });
+
+  test('a base line the resolver left unselected is withheld by the search, not dosed at the catalog rate (Codex r9 P1)', async () => {
+    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const loser = { raw: 'Fertilizer branch B', role: 'base', selected: false, selectionReason: 'mutually_exclusive_branch_not_selected', product: { id: 'p1' } };
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [loser], conditional: [] }, mixCalculator: { items: [], conditionalOptions: [] } });
+    const evaluateApprovals = approve();
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
+    expect(out).toMatchObject({ amount: null, reason: 'Not the fertilizer branch this property\'s plan selected — amount withheld', planBlocks: [{ code: 'base_not_selected' }] });
+    // PREMIUM_ONLY on an ineligible plan names its own reason; an unknown reason still withholds.
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [{ ...loser, selectionReason: 'premium_or_drought_prep_not_selected' }] }, mixCalculator: { items: [], conditionalOptions: [] } });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).reason).toBe('Premium-only line, not on this plan — amount withheld');
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [{ ...loser, selectionReason: 'other' }] }, mixCalculator: { items: [], conditionalOptions: [] } });
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).amount).toBeNull();
+    // The same product on a selected line (a winning branch) doses at the plan's rate.
+    buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [loser, { ...loser, selected: true }] }, mixCalculator: { items: [{ product: { id: 'p1' }, selected: true, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).toMatchObject({ amount: 11, rateSource: 'plan', planBlocks: [] });
   });
 
   test('an off-plan searched product still faces the plan\'s guards (Codex r13 + r14 P1)', async () => {
@@ -553,7 +642,7 @@ describe('mixForProduct', () => {
     const windows = [{ jurisdictionName: 'Manatee County', restrictedNitrogen: true, restrictedPhosphorus: false }];
     const cleanPlan = { propertyGate: { blocks: [], activeOrdinanceWindows: windows }, mixCalculator: { items: [], conditionalOptions: [] } };
     const buildPlan = jest.fn().mockResolvedValue(cleanPlan);
-    const dbh = (rows) => makeDb.withRaw({ scheduled_services: [lawnVisit], products_catalog: rows, equipment_calibrations: [live] });
+    const dbh = (rows) => makeDb({ scheduled_services: [lawnVisit], products_catalog: rows, equipment_calibrations: [live] });
     // Ordinance blackout on an off-plan nitrogen product.
     const n = await jobCard.mixForProduct('n1', 110, { serviceId: 'svc1', dbh: dbh([urea]), deps: { buildPlan, evaluateApprovals: approve() }, ...at });
     expect(n).toMatchObject({ amount: null, reason: expect.stringContaining('Nitrogen blackout'), planBlocks: [{ code: 'nitrogen_blackout' }] });
@@ -569,14 +658,14 @@ describe('mixForProduct', () => {
 
   test('a per-gallon pest product dilutes straight into the tank, range and all (PR r1 P2)', async () => {
     const demand = { id: 'd', name: 'Demand CS', category: 'insecticide', default_rate_per_1000: null, rate_unit: null, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
-    const dbh = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [demand], equipment_calibrations: [] });
+    const dbh = makeDb({ scheduled_services: [visit], products_catalog: [demand], equipment_calibrations: [] });
     const out = await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh, ...at });
     expect(out).toMatchObject({ amount: 22, amountMax: 88, unit: 'fl_oz', gallons: 110, basis: 'per_gallon', reason: null, ratePerGallon: { lo: 0.2, hi: 0.8, unit: 'fl_oz' }, rateVerified: true });
     expect((await jobCard.mixForProduct('d', 1, { serviceId: 'svc1', dbh, ...at })).amount).toBe(0.2);
   });
 
   test('a product the lawn plan resolved is dosed at the plan\'s rate, not the catalog default (Codex r12 P1)', async () => {
-    const dbh = makeDb.withRaw({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
+    const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     // Saved substitution override: 0.2 oz/1,000 instead of the catalog's 0.113.
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [{ product: { id: 'p1' }, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
@@ -587,7 +676,7 @@ describe('mixForProduct', () => {
   });
 
   test('no visit row → null, never a dose from an unassigned rig (Codex r9 P1)', async () => {
-    const dbh = makeDb.withRaw({
+    const dbh = makeDb({
       products_catalog: [product],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
@@ -595,18 +684,9 @@ describe('mixForProduct', () => {
     expect(await jobCard.mixForProduct('p1', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') })).toBeNull();
   });
 
-  test('expired calibration → amount withheld with the tank reason', async () => {
-    const dbh = makeDb.withRaw({
-      scheduled_services: [visit],
-      products_catalog: [product],
-      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
-    });
-    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, now: new Date('2026-09-04T12:00:00Z') });
-    expect(out).toMatchObject({ amount: null, reason: 'Rig not calibrated', tank: { calibrated: false, reason: 'Rig calibration expired' } });
-  });
 
   test('granular product → no tank amount even on a live rig (Codex r1 P1)', async () => {
-    const dbh = makeDb.withRaw({
+    const dbh = makeDb({
       scheduled_services: [visit],
       products_catalog: [{ id: 'hg', name: 'Headway G', default_rate_per_1000: 3, rate_unit: 'lb', label_verified_at: null }],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
@@ -616,14 +696,14 @@ describe('mixForProduct', () => {
   });
 
   test('an unverified label rate gets no dose on either basis (PR r2 P1)', async () => {
-    const dbh = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [{ ...product, label_verified_at: null }], equipment_calibrations: [live] });
+    const dbh = makeDb({ scheduled_services: [visit], products_catalog: [{ ...product, label_verified_at: null }], equipment_calibrations: [live] });
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, ...at })).toMatchObject({ amount: null, reason: 'Label rate not yet verified', rateVerified: false });
-    const gal = makeDb.withRaw({ scheduled_services: [visit], products_catalog: [{ id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: null }], equipment_calibrations: [] });
+    const gal = makeDb({ scheduled_services: [visit], products_catalog: [{ id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: null }], equipment_calibrations: [] });
     expect((await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh: gal, ...at })).amount).toBeNull();
   });
 
   test('live calibration → amount for 110 gal', async () => {
-    const dbh = makeDb.withRaw({
+    const dbh = makeDb({
       scheduled_services: [visit],
       products_catalog: [product],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
@@ -654,17 +734,16 @@ describe('PR review r4', () => {
     const visit = { id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care', assigned_equipment_system_id: null, assigned_calibration_id: null };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-08-01' };
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
-    const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], distributor_product_map: [] };
-    const dbh = (t) => {
-      const table = String(t).split(' as ')[0];
+    const fixtures = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live], distributor_product_map: [] };
+    const dbh = Object.assign((table) => {
+      const rows = fixtures[String(table).split(' as ')[0]] || [];
       const chain = {};
       for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'orderBy', 'select', 'modify', 'andWhere', 'join', 'leftJoin', 'limit']) chain[m] = () => chain;
-      chain.first = () => Promise.resolve((rows[table] || [])[0] || null);
-      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
-      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.first = () => Promise.resolve(rows[0] || null);
+      chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      chain.catch = (fn) => Promise.resolve(rows).catch(fn);
       return chain;
-    };
-    dbh.raw = (sql) => sql;
+    }, { raw: (sql) => sql });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [] } });
     const evaluateApprovals = jest.fn().mockRejectedValue(new Error('rotation read failed'));
     const out = await mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, now: new Date('2026-09-04T12:00:00Z') });
@@ -697,6 +776,9 @@ describe('PR review r4', () => {
       { call_summary: 'Old call', direction: 'inbound', created_at: new Date('2026-08-01T15:00:00Z') },
     ]);
     const calls = await jobCard._test.loadCallsSince('c1', new Date('2026-08-12T14:30:00Z'), { getRecentCalls });
+    // A historical card caps at its own start: later calls are not its pre-visit context (Codex r12 P2).
+    const later = [{ created_at: new Date('2026-09-20T10:00:00Z'), call_summary: 'after the visit', direction: 'inbound' }, { created_at: new Date('2026-09-01T10:00:00Z'), call_summary: 'before the visit', direction: 'inbound' }];
+    expect((await jobCard._test.loadCallsSince('c1', new Date('2026-08-12T14:30:00Z'), { getRecentCalls: async () => later }, new Date('2026-09-04T16:00:00Z'))).map((c) => c.summary)).toEqual(['before the visit']);
     expect(getRecentCalls).toHaveBeenCalledWith('c1', { sentinelOnError: true });
     expect(calls).toEqual([{ summary: 'Asked about ants', direction: 'inbound', date: '2026-08-20' }]);
     expect(await jobCard._test.loadCallsSince('c1', null, { getRecentCalls: async () => null })).toBeNull();
@@ -740,6 +822,11 @@ describe('PR review r4', () => {
   test('precautions include the product-specific pet / child guidance (P2)', () => {
     const text = jobCard._test.precautionText({ customer_safety_summary: 'Keep off until dry.', pet_kid_guidance_text: 'Do not disturb bait stations.', reentry_text: 'Re-entry 2 h.' });
     expect(text).toBe('Keep off until dry. Do not disturb bait stations. Re-entry 2 h.');
+  });
+
+  test('PPE comes from the label-derived ppe_text, with the legacy ppe_required list only as the fallback (hook P1)', () => {
+    expect(jobCard._test.precautionText({ ppe_text: 'Long sleeves, chemical-resistant gloves, protective eyewear', ppe_required: '["gloves"]' })).toBe('PPE: Long sleeves, chemical-resistant gloves, protective eyewear');
+    expect(jobCard._test.precautionText({ ppe_text: null, ppe_required: '["gloves","eye protection"]' })).toBe('PPE: gloves, eye protection');
   });
 
   test('the cached best price is owner-only: absent unless the viewer may see pricing (P1)', () => {
@@ -794,6 +881,16 @@ describe('PR review r5', () => {
     expect(note).toBe('MOA 3A last used 2026-06-10 (Bifen IT)');
     expect(seen).toContain('service_products as sp');
   });
+
+  test('a failed history read is said on the card, never "no history" (Codex r10 P2)', async () => {
+    const dbh = () => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'modify', 'orderBy', 'select', 'limit']) chain[m] = () => chain;
+      chain.catch = async (fn) => fn(new Error('db down'));
+      return chain;
+    };
+    await expect(jobCard._test.rotationNote(dbh, { customerId: 'c1', scheduledDate: '2026-09-04' }, { name: 'Talstar P', moa_group: '3A' })).resolves.toBe('MOA 3A rotation check unavailable — verify before applying');
+  });
 });
 
 describe('PR review r6', () => {
@@ -806,18 +903,14 @@ describe('PR review r6', () => {
     expect(card.order.quantity).toBeCloseTo(11.4, 2);
   });
 
-  test('a rig that lapsed after noon withholds the card amounts with the tank reason (hook P1)', async () => {
+  test('no usable rig withholds the card amounts with the tank reason (hook P1; expiry retired by #3935)', async () => {
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
-    const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'Rig calibration expired' });
+    const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'No rig calibration on file' });
     expect(card.planned).toBeNull();
-    expect(card.amountNote).toBe('Rig calibration expired — amount withheld');
+    expect(card.amountNote).toBe('No rig calibration on file — amount withheld');
     const [ok] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: null });
     expect(ok.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
-    // The boundary: a calibration valid at noon but expired by the time the card opens.
-    const cal = { carrier_gal_per_1000: 2, expires_at: '2026-09-04T18:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
-    expect(jobCard.tankFromCalibrations([cal], new Date('2026-09-04T16:00:00Z')).calibrated).toBe(true);
-    expect(jobCard.tankFromCalibrations([cal], new Date('2026-09-04T20:00:00Z')).calibrated).toBe(false);
   });
 
   test('the lawn plan is built strict so a catalog outage is a plan block, not an empty card (P2)', async () => {
@@ -869,21 +962,56 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     dbh.raw = (sql) => sql;
     return dbh;
   };
-  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', watering_days: '["Mon"]' };
+  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', away_mode_until: '2099-01-01', watering_days: '["Mon"]' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
     const deps = { getRecentCalls: async () => [] };
     const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
     expect(away.access.codes).toEqual([]);
-    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: 'dog' });
-    expect(jobCard.buildTemplateParagraph(away.facts)).toContain('visit at a non-primary address');
+    // Pets and the securing plan are the primary home's as well (Codex r9 P1).
+    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '', instructions: '', awayUntil: null });
+    const awayText = jobCard.buildTemplateParagraph(away.facts);
+    expect(awayText).toMatch(/visit at a non-primary address — the home's pets and access details are not shown/i);
+    expect(awayText).not.toMatch(/dog|crated|north side|away/);
     // The primary home's code is still scrubbed from notes and still a leak check for the rewrite (hook P1).
     expect(away.facts.visitNotes).toBe('Try [code] first');
     expect(away.knownCodes).toEqual([{ label: 'Property gate', code: '4545#' }]);
     const home = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs }), deps);
     expect(home.access.codes).toEqual([{ label: 'Property gate', code: '4545#' }]);
-    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false });
+    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage', instructions: 'Enter from the north side', awayUntil: '2099-01-01' });
+  });
+
+  test('special instructions and the visit note reach the card verbatim, outside the paragraph budget (hook P1)', async () => {
+    const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
+    const instructions = 'Enter through the side gate, knock first, keep the pool cage door closed, spray the lanai screens only from outside, and do not treat the vegetable garden by the shed — gate 4545#';
+    const sensitivity = 'Asthma — no pyrethroids anywhere on the property, no fogging, and please text before arriving so the windows can be closed; the daughter reacts to strong fragrances too';
+    const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: { ...prefs, special_instructions: instructions, chemical_sensitivities: true, chemical_sensitivity_details: sensitivity } });
+    // The paragraph cache write is the one mutation on this path.
+    const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps, now: new Date('2026-09-04T12:00:00Z') });
+    // Complete (the grounding copy is bounded to 120 chars) and code-scrubbed.
+    expect(instructions.length).toBeGreaterThan(120);
+    expect(card.notes.visitNotes).toBe('Try [code] first');
+    expect(card.notes.instructions).toMatch(/^Enter through the side gate/);
+    expect(card.notes.instructions).not.toContain('4545');
+    // Chemical sensitivity and the pet plan get the same complete copies (hook P1).
+    expect(sensitivity.length).toBeGreaterThan(80);
+    expect(card.notes.chemicalSensitivity).toBe(sensitivity);
+    expect(card.notes.petsSecured).toBe('crated in garage');
+    expect(card.notes.instructions).toContain('do not treat the vegetable garden');
+  });
+
+  test('the rain window ends on the viewed visit date, today at the latest (Codex r14 P2)', async () => {
+    const getAreaRainfall = jest.fn(async () => 0.4);
+    const today = new Date();
+    const past = await jobCard._test.loadRain7d(null, { lawn_water_area_id: 'a1' }, '2026-06-20', { getAreaRainfall });
+    expect(past).toBe(0.4);
+    expect(getAreaRainfall).toHaveBeenLastCalledWith('a1', '2026-06-14', '2026-06-20', null);
+    // A future-dated visit is bounded at today.
+    await jobCard._test.loadRain7d(null, { lawn_water_area_id: 'a1' }, '2099-01-01', { getAreaRainfall });
+    expect(getAreaRainfall.mock.calls[1][2] <= today.toISOString().slice(0, 10)).toBe(true);
+    expect(await jobCard._test.loadRain7d(null, {}, '2026-06-20', { getAreaRainfall })).toBeNull();
   });
 
   test('pet presence is a critical fact even without a securing plan (P1)', () => {
@@ -1174,7 +1302,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
   test('the tank search runs the spray check at the property: a Hold withholds the dose', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12', max_wind_mph: 10 };
-    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', latitude: 27.4, longitude: -82.5 };
+    // Judged from the appointment start (10:00 ET = 14:00Z), as on the card.
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', window_start: '10:00', latitude: 27.4, longitude: -82.5 };
     const dbh = (table) => {
       const rows = { scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [live] }[String(table).split(' as ')[0]] ?? [];
       const chain = {};

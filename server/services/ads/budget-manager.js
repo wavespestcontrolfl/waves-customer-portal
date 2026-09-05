@@ -3,6 +3,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
+const { applyAssignable } = require('../technician-eligibility');
 
 // Lazy so requiring budget-manager (e.g. from the scheduler at boot) doesn't
 // load the google-ads-api client until a push is actually attempted.
@@ -298,12 +299,14 @@ class BudgetManager {
   }
 
   async getTechCountForArea(_area, _dateStr) {
-    // Capacity is driven by the real active-technician count. There is no
-    // per-area tech roster in the data (one field crew covers the whole service
-    // area), so every area uses the same live count — the old hardcoded
-    // {area: [names]} map invented 2–3 phantom techs per zone and overstated
-    // capacity, holding budgets at full base while the real schedule was full.
-    const techs = await db('technicians').where({ active: true });
+    // Capacity is driven by the real assignable-technician count (active AND
+    // field-dispatchable — a prospective placeholder or an office-only account
+    // can take no slot, so it adds no capacity). There is no per-area tech
+    // roster in the data (one field crew covers the whole service area), so
+    // every area uses the same live count — the old hardcoded {area: [names]}
+    // map invented 2–3 phantom techs per zone and overstated capacity, holding
+    // budgets at full base while the real schedule was full.
+    const techs = await applyAssignable(db('technicians'));
     return techs.length;
   }
 
@@ -372,9 +375,7 @@ class BudgetManager {
         heatmap[area].weeklySlots += cap.slots;
       }
 
-      heatmap[area].techs = area === 'all'
-        ? (await db('technicians').where({ active: true })).length
-        : await this.getTechCountForArea(area);
+      heatmap[area].techs = await this.getTechCountForArea(area);
 
       heatmap[area].weeklyUtilization = heatmap[area].weeklySlots > 0
         ? Math.round((heatmap[area].weeklyBooked / heatmap[area].weeklySlots) * 100)

@@ -42,12 +42,12 @@ describe('customer login recovery', () => {
     render(<MemoryRouter><LoginPage /></MemoryRouter>);
 
     fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '9415550123' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Send Code' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
 
     await waitFor(() => expect(screen.getByLabelText('Verification code')).toBeInTheDocument());
     expect(screen.getByRole('alert')).toHaveTextContent('That verification code is not valid.');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Use Different Number' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use a different number' }));
 
     expect(authMocks.clearError).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText('Phone number')).toBeInTheDocument();

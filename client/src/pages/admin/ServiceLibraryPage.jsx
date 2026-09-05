@@ -1495,7 +1495,7 @@ export default function ServiceLibraryPage() {
   const [services, setServices] = useState([]);
   const [selectedView, setSelectedView] = useState("all");
   const [selectedId, setSelectedId] = useState(null);
-  // Sub-tabs + actions registered by the embedded Protocol & Readiness page
+  // Sub-tabs + actions registered by the embedded Treatment Plans page
   // (null on the other tabs). Declared before the mobile early return below
   // so the hook order is stable.
   const [secondary, setSecondary] = useState(null);
@@ -1684,7 +1684,7 @@ export default function ServiceLibraryPage() {
 
   const tabs = [
     { key: "catalog", label: "Service Catalog", Icon: Library },
-    { key: "protocols", label: "Protocol & readiness", Icon: Sprout },
+    { key: "protocols", label: "Treatment Plans", Icon: Sprout },
     { key: "discounts", label: "Discounts", Icon: Percent },
   ];
 

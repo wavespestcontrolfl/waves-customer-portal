@@ -98,7 +98,7 @@ describe('pay page — other ways to pay (Zelle)', () => {
   it('renders nothing when the server sends no manualPayOptions', async () => {
     stubFetch(payload());
     renderPage();
-    await screen.findByText('Secure'); // payment-panel marker (the 'Pay securely' header was removed 2026-08-31)
+    await screen.findByText('Review and pay'); // payment-panel marker (the 'Pay securely' header was removed 2026-08-31)
     expect(screen.queryByRole('button', { name: /Other ways to pay/ })).not.toBeInTheDocument();
   });
 
@@ -318,7 +318,7 @@ describe('pay page — other ways to pay (Zelle)', () => {
   it('withholds the block while account credit is pending and Stripe setup has not answered (codex r3 P1)', async () => {
     stubFetch(payload({ manualPayOptions: zellePhone({ creditPending: true }) }));
     renderPage();
-    await screen.findByText('Secure'); // payment-panel marker (the 'Pay securely' header was removed 2026-08-31)
+    await screen.findByText('Review and pay'); // payment-panel marker (the 'Pay securely' header was removed 2026-08-31)
     expect(screen.queryByRole('button', { name: /Other ways to pay/ })).not.toBeInTheDocument();
   });
 });

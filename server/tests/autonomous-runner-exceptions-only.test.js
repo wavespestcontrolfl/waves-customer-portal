@@ -83,6 +83,25 @@ afterEach(() => {
   delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
 });
 
+describe('pre-brief routed disposition', () => {
+  test.each([
+    ['refresh_existing_page', 'new_supporting_blog', 'skip'],
+    ['new_supporting_blog', 'refresh_existing_page', 'pendingReview'],
+  ])('%s routed to %s uses %s on a protected-page lookup failure', async (provisional, effective, disposition) => {
+    const queue = makeQueue({ id: 'opp_routed', action_type: provisional, effective_action_type: effective, claimed_at: claimedAt });
+    const briefBuilder = { compose: jest.fn() };
+    const { runner } = loadRunner({ queue, briefBuilder });
+    runner._checkProtectedPage = jest.fn().mockResolvedValue({ protected: true, is_error: true, reason: 'lookup_unavailable' });
+
+    const result = await runner.runNext();
+
+    expect(result.action_type).toBe(effective);
+    expect(queue[disposition]).toHaveBeenCalledWith('opp_routed', 'protected_page:lookup_unavailable', { claimToken: claimedAt });
+    expect(queue[disposition === 'skip' ? 'pendingReview' : 'skip']).not.toHaveBeenCalled();
+    expect(briefBuilder.compose).not.toHaveBeenCalled();
+  });
+});
+
 describe('publish-cap pre-check (step 1a.3)', () => {
   test('a full weekly cap defers AFTER brief composition (final action type) but BEFORE drafting — no writer spend, no review item', async () => {
     process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
@@ -189,7 +208,7 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     const result = await runner.runNext();
 
     expect(result.outcome).toBe('deferred_gate_retry');
-    expect(result.skip_reason).toBe('gate_fail');
+    expect(result.skip_reason).toBe('auto_publish_gate_fail');
     expect(queue.defer).toHaveBeenCalledWith('opp_agg', expect.any(Date), { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');

@@ -14,10 +14,16 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 // fn.ownedRow (a row = the tech owns the visit; null = not theirs).
 jest.mock('../models/db', () => {
   const chain = {};
-  for (const m of ['where', 'whereNotIn', 'select']) chain[m] = () => chain;
+  for (const m of ['where', 'whereNotIn', 'whereILike', 'orWhereILike', 'orWhereNull', 'orderBy', 'limit']) chain[m] = () => chain;
+  chain.select = (...cols) => { fn.selected = cols; return chain; };
+  chain.modify = (fn2) => { fn2(chain); return chain; };
   chain.first = async () => fn.ownedRow;
+  // Awaiting the chain (the product search) resolves fn.products.
+  chain.then = (res, rej) => Promise.resolve(fn.products).then(res, rej);
   function fn() { return chain; }
   fn.ownedRow = null;
+  fn.products = [];
+  fn.selected = null;
   fn.raw = () => ({});
   fn.schema = { hasTable: async () => true };
   return fn;
@@ -55,6 +61,17 @@ describe('job-card routes', () => {
     delete process.env.GATE_JOB_CARD;
     jobCard.buildJobCard.mockReset();
     jobCard.mixForProduct.mockReset();
+  });
+
+  test('the Tank search route: gate-off answers enabled:false; a 2+ char term returns id/name/category only (Codex r13 P1)', async () => {
+    expect((await run('/job-card/products', { q: 'cel', __tech: true })).body).toEqual({ enabled: false, products: [] });
+    process.env.GATE_JOB_CARD = 'true';
+    expect((await run('/job-card/products', { q: 'c', __tech: true })).body).toEqual({ enabled: true, products: [] });
+    db.products = [{ id: 'p1', name: 'Celsius WG', category: 'herbicide' }];
+    const res = await run('/job-card/products', { q: 'cel', __tech: true });
+    expect(res.body).toEqual({ enabled: true, products: db.products });
+    // No rate or pricing columns leave this route.
+    expect(db.selected).toEqual(['id', 'name', 'category']);
   });
 
   test('tech-accessible: neither route carries requireAdmin', () => {

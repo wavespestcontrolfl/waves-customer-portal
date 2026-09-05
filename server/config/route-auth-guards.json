@@ -71,6 +71,8 @@
       "what": "404 while GATE mcpPublic is off (unobservable-when-dark) ahead of parse/limits" },
     { "name": "publicA2aGate", "module": "server/routes/public-a2a.js", "local": true,
       "what": "404 while GATE a2aPublic is off (unobservable-when-dark) ahead of parse/limits" },
+    { "name": "commitmentsGate", "module": "server/routes/integrations-commitments-worker.js", "local": true,
+      "what": "404 while GATE_HERMES_COMMITMENTS is off ahead of auth, limiter, and reads" },
     { "name": "watchdogGate", "module": "server/routes/integrations-watchdog-worker.js", "local": true,
       "what": "404 while GATE_HERMES_WATCHDOG is off (unobservable-when-dark) ahead of linkWorkerAuth — no audit row while dark" },
     { "name": "staffMaintenance", "module": "server/middleware/staff-maintenance.js",

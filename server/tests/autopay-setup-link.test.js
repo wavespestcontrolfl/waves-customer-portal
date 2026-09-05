@@ -3,7 +3,8 @@
 // checks (gate → customer → payer → already-on-Auto-Pay → saved-method
 // auto-secure → dedup/expiry → mint), the two deliveries (inline hands the
 // link back and sends nothing; sms rides the card_request purpose,
-// operator-initiated), the page state machine, and the completion tail.
+// operator-initiated; email renders payment.autopay_setup_link through the
+// template library), the page state machine, and the completion tail.
 
 let mockTableHandlers = {};
 let mockDbTouches = [];
@@ -78,6 +79,8 @@ const mockNotifyAdmin = jest.fn(async () => {});
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
+const mockSendTemplate = jest.fn(async () => ({ sent: true }));
+jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockSendTemplate(...a) }));
 const mockRenderTemplate = jest.fn(async () => 'Hi Pat! Set up Auto Pay: https://x/secure/tok');
 jest.mock('../services/appointment-card-request', () => ({ renderTemplate: (...a) => mockRenderTemplate(...a) }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
@@ -91,7 +94,7 @@ const {
   _test,
 } = require('../services/autopay-setup-link');
 
-const CUSTOMER = { id: 'cust-1', first_name: 'Pat', phone: '+19415551234', ach_status: null, autopay_enabled: false };
+const CUSTOMER = { id: 'cust-1', first_name: 'Pat', phone: '+19415551234', email: 'pat@example.com', ach_status: null, autopay_enabled: false };
 const FUTURE = new Date(Date.now() + 10 * 24 * 3600 * 1000);
 const PAST = new Date(Date.now() - 3600 * 1000);
 const PENDING = { id: 'req-1', kind: 'customer', customer_id: 'cust-1', status: 'pending', token: 'tok1', expires_at: FUTURE, stripe_setup_intent_id: null };
@@ -117,6 +120,7 @@ beforeEach(() => {
   mockFindConsentedChargeableCard.mockResolvedValue(null);
   mockEnrollConsentedMethod.mockResolvedValue({ enrolled: true });
   mockSendCustomerMessage.mockResolvedValue({ sent: true });
+  mockSendTemplate.mockResolvedValue({ sent: true });
   mockRenderTemplate.mockResolvedValue('Hi Pat! Set up Auto Pay: https://x/secure/tok');
   mockSavePaymentMethod.mockResolvedValue({ id: 'pm-row-1', method_type: 'card' });
   mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_new', type: 'card' });
@@ -372,6 +376,93 @@ describe('requestAutopaySetupLink — link minting and delivery', () => {
     expect(r.reason).toBe('opted_out');
     const calls = touches('appointment_card_requests').flatMap((c) => c.calls);
     expect(calls.some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
+  });
+
+  it('email: sends payment.autopay_setup_link to the account holder through the template library and stamps sent_at', async () => {
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email', trigger: 'admin' });
+    expect(r).toEqual(expect.objectContaining({ action: 'sent', channel: 'email', secureUrl: expect.stringMatching(/\/secure\//) }));
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.autopay_setup_link',
+      to: 'pat@example.com',
+      payload: expect.objectContaining({ first_name: 'Pat', secure_link: r.secureUrl, expires_on: expect.any(String) }),
+      recipientType: 'customer',
+      recipientId: 'cust-1',
+      suppressProviderErrorLog: true,
+    }));
+    // Stream + suppression group belong to the template row (service_operational).
+    expect(mockSendTemplate.mock.calls[0][0].suppressionGroupKey).toBeUndefined();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const stamp = touches('appointment_card_requests').find((c) => c.calls.some((x) => x[0] === 'update' && x[1].sent_at));
+    expect(stamp.calls.find((x) => x[0] === 'update')[1]).toEqual({ sent_at: expect.any(Date) });
+    expect(stamp.calls.find((x) => x[0] === 'where')[1]).toEqual(expect.objectContaining({ status: 'pending' }));
+  });
+
+  it('email: every office click is a fresh send (UUID idempotency key per click, never per row or clock tick)', async () => {
+    await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING }) };
+    await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    const keys = mockSendTemplate.mock.calls.map((c) => c[0].idempotencyKey);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+    for (const k of keys) expect(k).toMatch(/^autopay_setup_link_email:req-[^:]+:[0-9a-f-]{36}$/);
+  });
+
+  it('email: no email on file skips the send but still returns the link for copy/paste', async () => {
+    mockTableHandlers.customers = { first: () => ({ ...CUSTOMER, email: '  ' }) };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    expect(r.reason).toBe('no_customer_email');
+    expect(r.secureUrl).toMatch(/\/secure\//);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('email: an unreadable email preference fails CLOSED — retryable skip, nothing sent', async () => {
+    mockTableHandlers.notification_prefs = { first: () => { throw new Error('db blip'); } };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    expect(r.reason).toBe('email_prefs_check_uncertain');
+    expect(r.secureUrl).toMatch(/\/secure\//);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('email: a customer with email notifications turned off is never emailed (link still returned)', async () => {
+    mockTableHandlers.notification_prefs = { first: () => ({ customer_id: 'cust-1', email_enabled: false }) };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    expect(r.reason).toBe('email_opted_out');
+    expect(r.secureUrl).toMatch(/\/secure\//);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('email: an inactive or missing template is a dark lever — the link exists but nothing sends', async () => {
+    const disabled = new Error('email template payment.autopay_setup_link is inactive');
+    disabled.code = 'EMAIL_TEMPLATE_DISABLED';
+    mockSendTemplate.mockRejectedValueOnce(disabled);
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' })).reason).toBe('email_template_inactive');
+    mockSendTemplate.mockRejectedValueOnce(new Error('template not found'));
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    expect(r.reason).toBe('email_template_inactive');
+    expect(r.secureUrl).toMatch(/\/secure\//);
+    expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
+  });
+
+  it('email: a provider failure is an uncertain outcome (no stamp); a blocked send reports the library reason', async () => {
+    mockSendTemplate.mockRejectedValueOnce(Object.assign(new Error('sendgrid 500 to pat@example.com'), { code: 'PROVIDER_ERROR' }));
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' })).reason).toBe('send_outcome_uncertain');
+    mockSendTemplate.mockResolvedValueOnce({ sent: false, blocked: true, reason: 'suppressed' });
+    expect((await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' })).reason).toBe('suppressed');
+    expect(touches('appointment_card_requests').flatMap((c) => c.calls).some((c) => c[0] === 'update' && c[1].sent_at)).toBe(false);
+  });
+
+  it('email: a mid-completion row is never emailed or stamped', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...PENDING, status: 'completing', updated_at: new Date() }) };
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'email' });
+    expect(r.reason).toBe('completion_in_progress');
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('an unknown delivery collapses to inline (no comm)', async () => {
+    const r = await requestAutopaySetupLink({ customerId: 'cust-1', delivery: 'carrier_pigeon' });
+    expect(r.action).toBe('link_created');
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
   it('never throws — an unexpected failure is a skip', async () => {

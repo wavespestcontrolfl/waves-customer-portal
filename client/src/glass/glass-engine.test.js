@@ -27,12 +27,12 @@ afterEach(() => {
 });
 
 describe('applyGlassScene', () => {
-  it('full variant mounts attribute, orbs, and grain; cleanup restores everything', () => {
+  it('the scene mounts attribute, orbs, and grain; cleanup restores everything', () => {
     document.documentElement.style.background = 'rgb(1, 2, 3)';
     document.body.style.background = 'rgb(4, 5, 6)';
 
-    const { orbs, cleanup } = applyGlassScene('full');
-    expect(document.documentElement.getAttribute('data-glass-theme')).toBe('full');
+    const { orbs, cleanup } = applyGlassScene();
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
     expect(orbs).toBe(document.querySelector('.glass-scene-orbs'));
     expect(orbs.querySelectorAll('.glass-orb')).toHaveLength(5);
     expect(document.querySelector('.glass-scene-grain')).not.toBeNull();
@@ -46,27 +46,12 @@ describe('applyGlassScene', () => {
     expect(document.body.style.background).toBe('rgb(4, 5, 6)');
   });
 
-  it('pro variant mounts no orbs and no grain', () => {
-    const { orbs, cleanup } = applyGlassScene('pro');
-    expect(document.documentElement.getAttribute('data-glass-theme')).toBe('pro');
-    expect(orbs).toBeNull();
-    expect(document.querySelector('.glass-scene-orbs')).toBeNull();
-    expect(document.querySelector('.glass-scene-grain')).toBeNull();
-    cleanup();
-    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
-  });
 });
 
 describe('attachGlassPointerFx', () => {
-  it('is a no-op without orbs (pro variant)', () => {
-    const add = vi.spyOn(document, 'addEventListener');
-    const detach = attachGlassPointerFx(document.documentElement, null, false);
-    expect(add).not.toHaveBeenCalledWith('pointermove', expect.any(Function), expect.anything());
-    expect(() => detach()).not.toThrow();
-  });
 
   it('detach removes listeners and the specular vars', () => {
-    const { orbs, cleanup } = applyGlassScene('full');
+    const { orbs, cleanup } = applyGlassScene();
     const add = vi.spyOn(document, 'addEventListener');
     const remove = vi.spyOn(document, 'removeEventListener');
     const detach = attachGlassPointerFx(document.documentElement, orbs, false);
@@ -90,7 +75,7 @@ describe('fireGlassConfetti', () => {
   });
 
   it('no-ops when Element.animate is unavailable (jsdom)', () => {
-    document.documentElement.setAttribute('data-glass-theme', 'full');
+    document.documentElement.setAttribute('data-glass-theme', '');
     const before = document.body.childElementCount;
     fireGlassConfetti(10, 10);
     expect(document.body.childElementCount).toBe(before);
@@ -99,8 +84,8 @@ describe('fireGlassConfetti', () => {
 
 describe('useGlassSurface', () => {
   it('mounts the scene while active and tears it down on unmount', () => {
-    const { unmount } = renderHook(() => useGlassSurface(true, 'full'));
-    expect(document.documentElement.getAttribute('data-glass-theme')).toBe('full');
+    const { unmount } = renderHook(() => useGlassSurface(true));
+    expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(true);
     expect(document.querySelector('.glass-scene-orbs')).not.toBeNull();
     unmount();
     expect(document.documentElement.hasAttribute('data-glass-theme')).toBe(false);
@@ -113,10 +98,4 @@ describe('useGlassSurface', () => {
     unmount();
   });
 
-  it('pro variant mounts the quiet scene', () => {
-    const { unmount } = renderHook(() => useGlassSurface(true, 'pro'));
-    expect(document.documentElement.getAttribute('data-glass-theme')).toBe('pro');
-    expect(document.querySelector('.glass-scene-orbs')).toBeNull();
-    unmount();
-  });
 });
