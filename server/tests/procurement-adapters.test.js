@@ -224,7 +224,7 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       evaluate: async (fn) => fn({ tagName: (spec.tag || 'input').toUpperCase(), id: spec.id || '', name: spec.name || '', value: spec.value ?? '' }),
       getAttribute: async (n) => (spec.attrs ? spec.attrs[n] ?? null : null),
       first() { return this; },
-      elementHandle() { return Promise.resolve(spec.detached ? { textContent: async () => spec.text ?? null, isVisible: async () => false, $$: async () => [] } : this); },
+      elementHandle() { return Promise.resolve(spec.detached ? { textContent: async () => spec.text ?? null, isVisible: async () => false, $$: async () => [], click: async () => { throw new Error('Element is not attached to the DOM'); } } : this); },
       // ElementHandle.$$: the handle's OWN children — a row detached since (detachedWhen) has none (r11 P1)
       $$: async (sub) => { if (spec.detachedWhen && spec.detachedWhen()) return []; const l = spec.sub ? spec.sub(sub) : el(); const n = await l.count(); return Array.from({ length: n }, (_, i) => l.nth(i)); },
       nth: (i) => spec.nth ? spec.nth(i) : el(spec),
@@ -356,13 +356,16 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.placeOrder) st.atClick = true; // the Place Order stage has begun (the at-click re-checks run after this)
       // placeOrderDisabled: the visible Place Order button is not enabled (actionability fails, nothing dispatched)
       // placeOrderDisabledAfterTrial: a rerender disables Place Order between the trial click and the dispatch (r8 P1)
-      const placeBtn = () => el({ count: 1, visible: true, get disabled() { return !!st.placeOrderDisabled || (!!st.placeOrderDisabledAfterTrial && !!st.trialDone); }, onTrial: () => { st.trialDone = true; }, onClick: (o) => { st.placeClicked += 1; st.placeClickOpts = o; } });
+      // placeOrderReplacedAtClick: the button element the trial validated is removed and replaced once the confirmation baseline has been sampled —
+      // the handle taken at the trial reads detached (not visible); a locator would re-resolve to the replacement (hook P1)
+      const placeBtn = () => el({ count: 1, get visible() { return !(st.placeOrderReplacedAtClick && st.baselineSampled); }, get disabled() { return !!st.placeOrderDisabled || (!!st.placeOrderDisabledAfterTrial && !!st.trialDone); }, onTrial: () => { st.trialDone = true; }, onClick: (o) => { st.placeClicked += 1; st.placeClickOpts = o; } });
       if (sel === S.placeOrder && st.placeOrderHiddenOnly) return el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } });
       if (sel === S.placeOrder) return st.placeOrderHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenPlaceClicked = (st.hiddenPlaceClicked || 0) + 1; } }) : placeBtn()) }) : placeBtn();
       // orderNumberHiddenFirst: a hidden stale confirmation node precedes the visible current one
       // Before the click there is no confirmation node — unless orderNumberBeforeClick models a pre-existing reference element
       // orderNumberDuringLoop: a reference node appears only once the Place Order stage's re-checks are under way (after the loop's first total read) (r6 P2)
       // orderNumberBaselineUnreadable: the pre-click node's visibility read throws; orderNumbersBeforeClick: N shown reference nodes before the click (r7 P2)
+      if (sel === S.orderNumber && !st.placeClicked && st.atClick) st.baselineSampled = true;
       if (sel === S.orderNumber && !st.placeClicked && st.orderNumberBaselineUnreadable) return el({ count: 1, isVisibleThrows: true });
       if (sel === S.orderNumber && !st.placeClicked && st.orderNumbersBeforeClick) return el({ count: st.orderNumbersBeforeClick.length, nth: (i) => el({ count: 1, visible: true, text: st.orderNumbersBeforeClick[i] }) });
       if (sel === S.orderNumber && !st.placeClicked) return st.orderNumberBeforeClick ? el({ count: 1, visible: true, text: st.orderNumberBeforeClick }) : st.orderNumberDuringLoop && (st.totalReads || 0) > 1 ? el({ count: 1, visible: true, text: st.orderNumberDuringLoop }) : el();
@@ -960,6 +963,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ checkoutLineAppearsAtClick: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
     expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('the dispatch goes to the ELEMENT the trial validated: a Place Order button replaced after the final checks refuses place_order_replaced — no click, cart emptied (hook P1)', async () => {
+    const { st, deps } = fakeSiteOne({ placeOrderReplacedAtClick: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'place_order_replaced' });
+    expect(st.trialDone).toBe(true);
+    expect(st.placeClicked || 0).toBe(0);
+    expect(st.cart).toEqual([]);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {

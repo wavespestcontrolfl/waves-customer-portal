@@ -832,6 +832,13 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // confirmation node can appear or change — a baseline taken before those
   // awaits would let that node pass as post-click evidence (Codex #3876 r6 P2).
   let baseline = null;
+  // The ELEMENT the click goes to: an ElementHandle taken at the trial
+  // click, so the dispatch is bound to the control the checks validated. A
+  // locator (even forced) re-resolves and retries a detached target for up
+  // to its timeout, and would click a REPLACEMENT button after a rerender
+  // that changed the page (pre-push hook P1 on a0ffa12fd). A replaced
+  // control is refused before the submitted guard flips.
+  let placeHandle = null;
   // The total the click submits is the one shown NOW: an async tax /
   // shipping recalculation after the earlier read (which also spans the
   // screenshot upload and the cap reservation) would otherwise bypass the
@@ -867,7 +874,9 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
       await gate(cents, 'total at the click');
       continue;
     }
-    try { await placeOrder.click({ trial: true, timeout: 5000 }); }
+    placeHandle = await placeOrder.elementHandle({ timeout: 1500 }).catch(() => null);
+    if (!placeHandle) await refuse('place_order_unactionable', 'the Place Order control could not be resolved — nothing submitted');
+    try { await placeHandle.click({ trial: true, timeout: 5000 }); }
     catch (e) { await refuse('place_order_unactionable', `the Place Order control cannot be clicked (${String(e.message).slice(0, 80)}) — nothing submitted`); }
     await recheckTenderAtClick(page, radio, { evidence, upload });
     await identity();
@@ -877,6 +886,9 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     if (shownCents === cents) break;
     if (i >= 3) throw unstable(shownCents);
   }
+  // Still the validated element, still shown: a detached handle is a
+  // replaced control — refused, nothing submitted (hook P1).
+  if (!(await placeHandle.isVisible().catch(() => false))) await refuse('place_order_replaced', 'the Place Order control was replaced after the final checks — nothing submitted');
   markSubmitted();
   let number = null;
   try {
@@ -888,7 +900,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // click proved actionable a few reads ago; a control the browser will
     // not act on submits nothing and falls to the ambiguous path (Codex
     // #3876 r8 P1).
-    await placeOrder.click({ force: true, timeout: 5000 });
+    await placeHandle.click({ force: true, timeout: 5000 });
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
     // The confirmation must be read ON SiteOne: SITEONE_BOT_ALLOWED_HOSTS can
     // admit an asset host, and a numeric error id on a page there is not an
