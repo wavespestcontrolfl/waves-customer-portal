@@ -15,7 +15,8 @@ const START = db.raw("date_trunc('milliseconds', COALESCE(processing_started_at,
 const ID = 'id';
 const COLUMNS = [
   'id', 'direction', 'status', 'duration_seconds', 'processing_status', 'transcription_status', 'v2_extraction_status',
-  'enrichment_status', 'classification', 'disposition', 'call_outcome', 'processing_started_at', 'processing_heartbeat_at',
+  'classification', 'disposition', 'call_outcome', 'processing_started_at', 'processing_heartbeat_at',
+  db.raw('(ai_extraction_enriched IS NOT NULL) AS enriched'),
   'extraction_attempts', 'ai_extraction_model', 'ai_extraction_prompt_version', 'created_at', 'updated_at', 'caller_city',
 ];
 
@@ -38,7 +39,14 @@ const STATUS_MAP = Object.freeze({
 // processor's vocabulary).
 const UNKNOWN_STATUS = Object.freeze({ lifecycle: 'terminal', result: null });
 
-const DONE = new Set(['completed', 'complete']);
+// The processor's own stage vocabularies (call-recording-processor.js,
+// drift-tested): transcription_status 'completed' | 'summary_only' carry a
+// usable transcript; v2_extraction_status 'valid' is the ONE extraction
+// success (parse_failed / schema_failed / normalization_failed /
+// api_unavailable are its failures); enrichment has no status column of
+// its own — ai_extraction_enriched is the enriched payload.
+const TRANSCRIBED = new Set(['completed', 'summary_only']);
+const V2_VALID = 'valid';
 
 function stepStatus(done, running) {
   return done ? 'done' : running ? 'running' : 'skipped';
@@ -55,8 +63,9 @@ function fromRow(c) {
   const status = c.processing_status || 'pending';
   const map = STATUS_MAP[status] || UNKNOWN_STATUS;
   const live = map.lifecycle === 'running';
-  const extracted = status === 'processed' || c.v2_extraction_status === 'completed';
-  const transcribed = extracted || DONE.has(c.transcription_status);
+  const extracted = status === 'processed' || c.v2_extraction_status === V2_VALID;
+  const extractFailed = map.result === 'errored' || /_failed$|^api_unavailable$/.test(c.v2_extraction_status || '');
+  const transcribed = extracted || TRANSCRIBED.has(c.transcription_status);
   const beat = c.processing_heartbeat_at || c.processing_started_at;
   return canonicalRun({
     source: SOURCE,
@@ -74,8 +83,8 @@ function fromRow(c) {
     attempts: Math.max(1, Number(c.extraction_attempts || 0)),
     steps: [
       { key: 'transcribe', label: 'Transcribe', status: stepStatus(transcribed, live), detail: null, ms: null, toolName: null },
-      { key: 'extract', label: 'Extract', status: map.result === 'errored' ? 'failed' : stepStatus(extracted, live && transcribed), detail: modelLabel(c, 'ai_extraction_model', 'ai_extraction_prompt_version'), ms: null, toolName: null },
-      { key: 'enrich', label: 'Enrich', status: stepStatus(DONE.has(c.enrichment_status), live && extracted), detail: null, ms: null, toolName: null },
+      { key: 'extract', label: 'Extract', status: extractFailed ? 'failed' : stepStatus(extracted, live && transcribed), detail: extractFailed && c.v2_extraction_status ? c.v2_extraction_status : modelLabel(c, 'ai_extraction_model', 'ai_extraction_prompt_version'), ms: null, toolName: null },
+      { key: 'enrich', label: 'Enrich', status: stepStatus(!!c.enriched, live && extracted), detail: null, ms: null, toolName: null },
     ],
     link: `/admin/communications?tab=calls&call=${c.id}`,
     entity: { type: 'call_log', id: c.id },
@@ -109,4 +118,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, LANE, STATUS_MAP, list, get, fromRow };
+module.exports = { SOURCE, LANE, STATUS_MAP, TRANSCRIBED, V2_VALID, list, get, fromRow };

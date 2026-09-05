@@ -145,6 +145,20 @@ describe('adapters project onto the canonical shape', () => {
     const live = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed' });
     expect(live).toMatchObject({ lifecycle: 'running', lastHeartbeatAt: ago(10e3).toISOString(), attempts: 2, laneId: 'call_extraction', title: 'inbound · 2 min' });
     expect(live.steps.map((s) => s.status)).toEqual(['done', 'running', 'skipped']);
+    // the processor's stage vocabulary: 'valid' is the one extraction success; its *_failed values fail the step; enrichment = the enriched payload
+    // every server-side writer of the call_log stage columns
+    const fs = require('fs');
+    const path = require('path');
+    const root = path.join(__dirname, '..');
+    const src = ['services', 'routes'].flatMap((d) => fs.readdirSync(path.join(root, d)).filter((f) => f.endsWith('.js')).map((f) => fs.readFileSync(path.join(root, d, f), 'utf8'))).join('\n');
+    // extractCallDataV2 returns { status: 'valid' } on success; the stored column takes that value
+    expect(src).toMatch(/v2_extraction_status = 'valid'/);
+    expect(callLog.V2_VALID).toBe('valid');
+    for (const t of callLog.TRANSCRIBED) expect(src).toMatch(new RegExp(`transcription_status: '${t}'`));
+    const done = callLog.fromRow({ ...base, processing_status: 'processed', v2_extraction_status: 'valid', transcription_status: 'summary_only', enriched: true });
+    expect(done.steps.map((s) => s.status)).toEqual(['done', 'done', 'done']);
+    const parseFailed = callLog.fromRow({ ...base, processing_status: 'processing', transcription_status: 'completed', v2_extraction_status: 'schema_failed' });
+    expect(parseFailed.steps[1]).toMatchObject({ status: 'failed', detail: 'schema_failed' });
     expect(callLog.fromRow({ ...base, processing_status: 'extraction_failed' })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'incomplete' });
     expect(callLog.fromRow({ ...base, processing_status: 'voicemail' })).toMatchObject({ result: 'succeeded', disposition: 'no_action' });
     expect(callLog.fromRow({ ...base, processing_status: 'pending' }).lifecycle).toBe('queued');
