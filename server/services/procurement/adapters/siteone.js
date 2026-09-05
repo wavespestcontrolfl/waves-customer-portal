@@ -563,7 +563,11 @@ async function associatedRadio(page, option) {
 // terms box or verification step (Codex #3853 r14 P1).
 async function scanCheckoutBlockers(page, refuse) {
   if (await blockerShown(page, SELECTORS.mfaField, 'mfa', refuse)) await refuse('mfa_required', 'SiteOne checkout asks for a verification code — bot never supplies it');
-  const terms = await matches(page, SELECTORS.termsCheckbox);
+  // Strict: a terms box whose visibility cannot be read is refused, never
+  // dropped from the scan as "hidden" (Codex #3876 r4 P1).
+  let terms;
+  try { terms = await matches(page, SELECTORS.termsCheckbox, { strict: true }); }
+  catch (e) { await refuse('terms_unreadable', `SiteOne checkout shows a terms checkbox whose visibility could not be read (${String(e.message).slice(0, 80)}) — owner action`); }
   for (const box of terms.shown.length ? terms.shown : terms.all) {
     let accepted = null;
     try { accepted = await box.isChecked(); } catch { await refuse('terms_unreadable', 'SiteOne checkout shows a terms checkbox whose state could not be read — owner action'); }
@@ -616,6 +620,9 @@ async function recheckTenderAtClick(page, radio, { evidence, upload }) {
   let checked = null;
   try { checked = await radio.isChecked(); } catch { checked = null; }
   if (checked !== true) await refuse('bill_to_account_unverified', 'bill-to-account is no longer selected at the moment of submission — the bot never submits on another tender');
+  // Visible too (Codex #3876 r4 P1): a rerender that hides the checked
+  // account radio behind a saved-card tender must not submit on the card.
+  if (!(await radio.isVisible().catch(() => false))) await refuse('bill_to_account_hidden', 'the selected bill-to-account radio is no longer visible at the moment of submission — not the tender the checkout shows');
   const checkedCount = await page.locator(SELECTORS.billToAccountSelected).count().catch(() => null);
   if (checkedCount !== 1) await refuse('bill_to_account_ambiguous', `${checkedCount ?? 'an unreadable number of'} account tenders read as selected at the moment of submission`);
 }
@@ -694,17 +701,28 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // and then READ AGAIN — the cap reservation is itself an awaited DB write
   // during which the page may recalculate once more; the click happens only
   // when the figure on screen is the one the cap approved (pre-push P0).
+  // Order at the boundary (Codex #3876 r4 P1): total read → (changed: gate,
+  // start over) → tender + blockers re-checked → total read AGAIN — the
+  // very last await before the click is that pure read, and it must equal
+  // the figure the cap approved.
   let cents = finalCents;
+  const unstable = (shownCents) => new RefusedError('checkout_total_unstable', `SiteOne checkout total kept changing before the click (${cents} → ${shownCents}) — not submitted`, evidence, shownCents);
   for (let i = 0; ; i += 1) {
-    const shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
+    let shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
+    if (shownCents !== cents) {
+      if (i >= 3) throw unstable(shownCents);
+      evidence.totalChangedBeforeClick = { from: cents, to: shownCents };
+      cents = shownCents;
+      await gate(cents, 'total at the click');
+      continue;
+    }
+    await recheckTenderAtClick(page, radio, { evidence, upload });
+    shownCents = await readCheckoutTotal(page, { evidence, upload, screenshot: false });
     if (shownCents === cents) break;
-    if (i >= 3) throw new RefusedError('checkout_total_unstable', `SiteOne checkout total kept changing before the click (${cents} → ${shownCents}) — not submitted`, evidence, shownCents);
-    evidence.totalChangedBeforeClick = { from: cents, to: shownCents };
-    cents = shownCents;
-    await gate(cents, 'total at the click');
+    if (i >= 3) throw unstable(shownCents);
   }
-  await recheckTenderAtClick(page, radio, { evidence, upload });
   markSubmitted();
+  let number = null;
   try {
     await placeOrder.click();
     await page.waitForLoadState('domcontentloaded', { timeout: NAV_TIMEOUT }).catch(() => {});
@@ -712,7 +730,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // (bounded) for a SHOWN confirmation-number node rather than sampling
     // once after a fixed delay (Codex #3876 r2 P2). A timeout falls through
     // to the ambiguous path below.
-    await waitForNewOrderText(page, beforeText, CONFIRMATION_TIMEOUT);
+    number = await waitForNewOrderNumber(page, beforeText, CONFIRMATION_TIMEOUT);
   } catch (e) {
     const err = new Error(`siteone submit outcome unknown: ${String(e.message).slice(0, 120)}`);
     err.ambiguous = true; err.evidence = evidence; err.cents = cents;
@@ -721,8 +739,6 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   await shot(page, 'confirmation', evidence, upload);
   // The ONE visible confirmation-number node — a hidden or stale responsive
   // copy must not record the wrong number or force the ambiguous path (r15 P2).
-  const numText = await shownOrderText(page);
-  const number = numText != null && numText !== beforeText ? orderNumberIn(numText) : null; // pre-click text = no confirmation
   if (!number) {
     const err = new Error('siteone: order submitted but no confirmation number was found');
     err.ambiguous = true; err.evidence = evidence; err.cents = cents;
@@ -734,12 +750,16 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
 // Wait (bounded) for a shown confirmation-number node whose text differs
 // from what was shown BEFORE the click; a timeout leaves the ambiguous path
 // to decide.
-async function waitForNewOrderText(page, beforeText, timeout) {
+// Returns the confirmation number, or null at the timeout. The node's first
+// render ("Processing order…", an empty element) is not the outcome: polling
+// continues until the changed text yields a number (Codex #3876 r4 P2).
+async function waitForNewOrderNumber(page, beforeText, timeout) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const text = await shownOrderText(page);
-    if (text != null && text !== beforeText) return;
-    if (Date.now() >= deadline) return;
+    const number = text != null && text !== beforeText ? orderNumberIn(text) : null;
+    if (number) return number;
+    if (Date.now() >= deadline) return null;
     await page.waitForTimeout(500);
   }
 }
@@ -752,11 +772,16 @@ function orderNumberIn(text) {
   // An identifier carries a digit and is never date-shaped: digits joined
   // only by separators (2026-09-05, 09-05-2026, 05/09/26) are not ids —
   // an unlabeled all-digit run (12345678) still is (Codex #3876 r3 P2).
-  const isId = (t) => !!t && /\d/.test(t) && !/^\d+([-/.]\d+)+$/.test(t);
+  const MON = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*';
+  const dateShaped = (t) => /^\d+([-/.]\d+)+$/.test(t) // 2026-09-05, 09-05-2026, 05/09/26
+    || /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/.test(t) // 20260905 (compact)
+    || new RegExp(`^${MON}[-/.]?\\d{1,2}[-/.]\\d{2,4}$`, 'i').test(t) // Sep-05-2026
+    || new RegExp(`^\\d{1,2}[-/.]?${MON}[-/.]?\\d{2,4}$`, 'i').test(t); // 05-Sep-2026
+  const isId = (t) => !!t && /\d/.test(t) && !dateShaped(t);
   // EVERY labeled match is tried before any fallback: "Order date 2026-09-05
   // … Order # SO-778899" must yield the number, not the date (Codex #3876
   // r2 P2).
-  for (const m of String(text).matchAll(/order\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/gi)) if (isId(m[1])) return m[1];
+  for (const m of String(text).matchAll(/order(?!\s*date)\s*(?:#|number|no\.?)?\s*:?\s*([A-Z0-9-]{5,})/gi)) if (isId(m[1])) return m[1];
   return (String(text).match(/[A-Z0-9/.-]{5,}/gi) || []).find(isId) || null;
 }
 
