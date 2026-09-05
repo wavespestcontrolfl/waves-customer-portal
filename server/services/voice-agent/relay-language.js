@@ -65,6 +65,10 @@ const COPY = {
     es: 'Disculpe, se cortó por un segundo. ¿En qué estábamos?',
   },
 
+  writePending: {
+    en: "Your request is still processing, so I can't confirm the result yet. Please don't repeat the request while it is pending. Is there anything else I can help with?",
+    es: 'Su solicitud sigue en proceso, así que todavía no puedo confirmar el resultado. Por favor, no repita la solicitud mientras esté pendiente. ¿Hay algo más en lo que pueda ayudarle?',
+  },
   troubleNoCallback: {
     en: "I'm having trouble pulling that up right now, and I couldn't save a callback either. Please call us back when you get a chance — thanks for calling.",
     es: 'Estoy teniendo problemas para acceder a eso y tampoco pude guardar una devolución de llamada. Por favor, llámenos de nuevo cuando pueda. Gracias por llamar.',

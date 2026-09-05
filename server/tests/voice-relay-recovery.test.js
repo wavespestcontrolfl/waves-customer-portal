@@ -655,7 +655,7 @@ describe('the conversation side', () => {
     try {
       const pending = convo._maybeHandoffForFailure(null);
       await jest.advanceTimersByTimeAsync(10010);
-      expect(await pending).toBe(false);
+      expect(await pending).toBe(true);
       expect(convo._handoffForFailure).toBe(false);
       convo._inFlightWrites.clear();
       convo._fileFailureCallback = jest.fn(async () => false);
@@ -1099,6 +1099,38 @@ describe('the conversation side', () => {
       expect(results.content.map((c) => c.tool_use_id)).toEqual(['t1', 't2', 't3']);
       expect(results.content[2].content).toMatch(/Not run/);
       expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'transfer' }));
+    });
+
+    test('a failed write round answers with an unknown outcome when pending writes defer handoff', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'tool_use', content: [
+        { type: 'text', text: 'Your appointment is booked.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ] }) }));
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pending-write-loop', from: '+19415551234', send, endSession });
+      convo._toolFailures = 1;
+      convo._executeToolBounded = jest.fn(async (name, input, ctx) => {
+        ctx.toolFailed = true;
+        convo._inFlightWrites.set(name, new Promise(() => {}));
+        return 'Request still processing.';
+      });
+      convo._fileFailureCallback = jest.fn();
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+      try {
+        const pending = convo._runLoop('book me');
+        await jest.advanceTimersByTimeAsync(10010);
+        await pending;
+        const spoken = send.mock.calls.map(([text]) => String(text)).join(' | ');
+        expect(spoken).toMatch(/still processing/);
+        expect(spoken).not.toMatch(/appointment is booked|call you back/);
+        expect(convo._fileFailureCallback).not.toHaveBeenCalled();
+        expect(endSession).not.toHaveBeenCalled();
+        expect(convo._handoffForFailure).toBe(false);
+      } finally { jest.useRealTimers(); }
     });
 
     test('…office closed ⇒ the callback close: capture floor + a clean end (reason provider_failure); once per call', async () => {

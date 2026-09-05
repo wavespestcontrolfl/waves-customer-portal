@@ -1589,7 +1589,10 @@ class RelayConversation {
     if (this._handoffForFailure || this.ended || this._ending) return false;
     if (providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) !== 'handoff') return false;
     await withTimeout(Promise.allSettled([...this._inFlightWrites.values()]), WRITE_DRAIN_TIMEOUT_MS);
-    if (this._inFlightWrites.size) return false;
+    if (this._inFlightWrites.size) {
+      if (!await this._sessionSuperseded()) this.say(require('./relay-language').copy('writePending', this.language));
+      return true; // the turn is answered; retry handoff on a later caller turn
+    }
     this._handoffForFailure = true;
     let superseded = await this._sessionSuperseded();
     const { copy } = require('./relay-language');
