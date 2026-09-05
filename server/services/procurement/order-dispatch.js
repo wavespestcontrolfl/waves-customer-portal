@@ -486,49 +486,46 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
     logger.warn(`[order-dispatch] bell for ledger ${ledgerId} was not persisted (re-rung next run)`);
     return false;
   }
-  // Every OTHER version of this row's bell (an earlier park's copy, the
-  // unversioned key) is retired BEFORE this delivery is stamped: a retire
-  // that fails leaves bellAt null, so the next run re-rings this version (a
-  // dedupe refresh, never a double) and retries the retire — an obsolete
-  // reconcile / dry-run instruction is never left unread beside its
-  // replacement (Codex r31 P1).
+  // Retire-and-stamp is ONE transaction under the ledger row lock, and the
+  // delivered version is verified against the row FIRST (hook r31 P1): a
+  // delayed delivery of an earlier version resuming after its replacement
+  // was delivered and stamped must retire only ITSELF, never the current
+  // bell — a current bell already stamped would otherwise never re-ring.
+  //   current  → every OTHER version of this row's bell (an earlier park's
+  //              copy, the unversioned key) is retired, then bellAt lands:
+  //              an obsolete reconcile / dry-run instruction is never left
+  //              unread beside its replacement (Codex r31 P1);
+  //   replaced → the notification just inserted (the stale copy) is
+  //              retired; the replacement stays pending for the re-ring
+  //              (Codex r23 P1, hook P1).
+  // A failed transaction leaves bellAt null: the next run re-rings this
+  // version (a dedupe refresh, never a double) and retries the retire.
+  const key = (ver) => (ver ? `auto-order:${ledgerId}:${ver}` : `auto-order:${ledgerId}`);
+  let outcome;
   try {
-    await conn('notifications')
-      .whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [`auto-order:${ledgerId}`, `auto-order:${ledgerId}:%`])
-      .whereRaw("metadata->>'dedupeKey' <> ?", [v ? `auto-order:${ledgerId}:${v}` : `auto-order:${ledgerId}`])
-      .whereNull('read_at')
-      .update({ read_at: new Date() });
+    outcome = await conn.transaction(async (trx) => {
+      const row = await trx('vendor_orders').where({ id: ledgerId }).forUpdate().first('id', 'evidence');
+      const current = meta(row?.evidence).bell?.v || null;
+      if (!row || current !== (v || null)) {
+        await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key(v)]).whereNull('read_at').update({ read_at: new Date() });
+        return 'superseded';
+      }
+      await trx('notifications')
+        .whereRaw("(metadata->>'dedupeKey' = ? OR metadata->>'dedupeKey' LIKE ?)", [key(null), `${key(null)}:%`])
+        .whereRaw("metadata->>'dedupeKey' <> ?", [key(v)])
+        .whereNull('read_at')
+        .update({ read_at: new Date() });
+      await trx('vendor_orders').where({ id: ledgerId }).update({
+        evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
+        updated_at: new Date(),
+      });
+      return 'stamped';
+    });
   } catch (err) {
-    logger.warn(`[order-dispatch] earlier bell versions for ledger ${ledgerId} could not be retired (this bell re-rung next run): ${err.message}`);
+    logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} landed but could not be stamped (re-rung next run): ${err.message}`);
     return false;
   }
-  let superseded = false;
-  try {
-    // Stamp ONLY the bell version that was delivered: if the row's bell was
-    // replaced meanwhile, the replacement stays pending for the re-ring.
-    const stamp = conn('vendor_orders').where({ id: ledgerId });
-    if (v) stamp.whereRaw("evidence->'bell'->>'v' = ?", [v]);
-    const n = await stamp.update({
-      evidence: conn.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ bellAt: new Date().toISOString() })]),
-      updated_at: new Date(),
-    });
-    // Zero rows = the row's bell was replaced after this one was delivered:
-    // the REPLACEMENT is still pending, so this is not a delivery (hook P1).
-    superseded = n !== 1;
-  } catch (err) {
-    // The bell landed; the dedupeKey makes the re-ring a refresh, not a double.
-    logger.warn(`[order-dispatch] bell stamp failed for ledger ${ledgerId}: ${err.message}`);
-  }
-  if (!superseded) return true;
-  // The notification just inserted carries the superseded version's
-  // instructions (a stale reconcile / dry-run text beside the replacement):
-  // retire it now rather than leave it unread (Codex r23 P1). Best effort
-  // here — the replacement's own delivery retires it durably (above).
-  try {
-    await conn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`auto-order:${ledgerId}:${v}`]).whereNull('read_at').update({ read_at: new Date() });
-  } catch (err) {
-    logger.warn(`[order-dispatch] superseded bell v${v} for ledger ${ledgerId} could not be retired: ${err.message}`);
-  }
+  if (outcome === 'stamped') return true;
   logger.warn(`[order-dispatch] bell v${v || '?'} for ledger ${ledgerId} was superseded before its stamp — retired; replacement re-rung next run`);
   return false;
 }

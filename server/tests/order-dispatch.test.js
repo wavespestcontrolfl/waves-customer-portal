@@ -43,9 +43,13 @@ jest.mock('../models/db', () => {
     const q = {};
     for (const m of ['join', 'leftJoin', 'where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'forUpdate', 'modify']) q[m] = () => q;
     q.whereIn = (col) => { if (col === 'vo.status') q._pendingBells = true; return q; };
+    q.where = (w) => { q._where = w; return q; };
+    q.whereRaw = (sql, bindings) => { (q._raws = q._raws || []).push([sql, bindings]); return q; };
     q.first = async (...cols) => {
       if (cols[0] === 'vo.status') return mockState.liveAutoOrderAfterBell && mockState.bellRung ? mockState.liveAutoOrderAfterBell : mockState.liveAutoOrder; // findLiveAutoOrder's aliased join (a claim landing after the hand-off bell: liveAutoOrderAfterBell)
       if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'status') return { id: 'ledger-1', status: mockState.ledgerSettled ? 'needs_review' : 'placing' }; // recordPlaced's locked ledger read
+      // deliverBell's locked version read: the row's CURRENT bell is the one being delivered (the park's / the pending row's), unless a test replaced it (bellStampMiss).
+      if (table === 'vendor_orders' && cols[0] === 'id' && cols[1] === 'evidence') { const pending = mockState.pendingBells.find((r) => r.id === q._where?.id); return { id: q._where?.id, evidence: { bell: { v: mockState.bellStampMiss ? 'replaced' : (pending?.evidence?.bell?.v ?? mockState.currentBellV ?? null) } } }; }
       if (table === 'vendor_orders' && cols.length === 1 && cols[0] === 'id') return mockState.requestLedger || null; // settleRequestLedgerBells' row (null = the request has no ledger row); the lock-only reads ignore the value
       if (cols[0] === 'vo.id') return mockState.priorUnreconciled; // the claim's prior-order belt
       if (cols[0] === 'request_payload') return mockState.dispatchedLedger; // orderedQuantityFor
@@ -64,7 +68,7 @@ jest.mock('../models/db', () => {
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
-    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); mockState.updates.push({ table, row }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
+    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && typeof row.evidence === 'string') { try { const v = JSON.parse(row.evidence).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } } mockState.updates.push({ table, row, ...(q._raws ? { raws: q._raws } : {}) }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -78,7 +82,7 @@ jest.mock('../models/db', () => {
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
-  dbFn.raw = jest.fn(async (sql) => sql);
+  dbFn.raw = jest.fn(async (sql, bindings) => { try { const v = JSON.parse(bindings?.[0]).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } return sql; }); // the late-placement attach writes its bell through raw
   dbFn.transaction = async (fn) => fn(dbFn);
   return dbFn;
 });
@@ -98,7 +102,7 @@ function mockAdapter(overrides = {}) {
 
 let notify;
 beforeEach(() => {
-  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null });
+  Object.assign(mockState, { request: baseRequest(), vendor: stickerMule, product: sticker, pricing: { vendor_sku: '4242', price: '314.00', quantity: '500' }, ledgerRows: [], freshRequestStatus: 'open', monthly: 0, claimConflict: false, updates: [], deletes: [], sibling: null, stale: [], pendingBells: [], ledgerSettled: false, liveAutoOrder: null, priorUnreconciled: null, dispatchedLedger: null, currentBellV: null });
   for (const k of Object.keys(ENV)) process.env[k] = ENV[k];
   notify = jest.fn(async () => ({ id: 'n1' }));
   auditVendorOrder.mockClear();
@@ -887,8 +891,11 @@ test('a delivered bell whose version stamp hits zero rows (the bell was replaced
   mockState.request = { ...baseRequest(), status: 'ordered' };
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
   mockState.bellStampMiss = false;
-  // The row's earlier versions are retired before the stamp (Codex r31 P1), then the just-inserted v1 itself — staff never read v1's instructions beside v2 (Codex r23 P1).
-  expect(mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at)).toHaveLength(2);
+  // ONLY the just-inserted v1 notification is retired — staff never read v1's instructions beside v2 (Codex r23 P1) — and v2's own notification is untouched: a delayed
+  // v1 delivery must never retire the current bell, whose row is already stamped and would never re-ring (hook r31 P1).
+  const retired = mockState.updates.filter((u) => u.table === 'notifications' && u.row.read_at);
+  expect(retired).toHaveLength(1);
+  expect(retired[0].raws).toEqual([[expect.stringContaining("dedupeKey' = ?"), ['auto-order:ledger-9:v1']]]);
 });
 
 test('a bell delivery retires the row\'s earlier bell versions BEFORE its stamp; a retire that fails leaves the bell pending — re-rung, and the retire retried, next run (Codex r31 P1)', async () => {
@@ -899,7 +906,9 @@ test('a bell delivery retires the row\'s earlier bell versions BEFORE its stamp;
   expect(r.bells).toEqual({ rung: ['ledger-7'], pending: [] });
   const order = mockState.updates.map((u) => u.table);
   expect(order.indexOf('notifications')).toBeGreaterThanOrEqual(0);
-  expect(order.indexOf('notifications')).toBeLessThan(order.indexOf('vendor_orders')); // retire, then the bellAt stamp
+  expect(order.indexOf('notifications')).toBeLessThan(order.indexOf('vendor_orders')); // retire, then the bellAt stamp — one transaction under the row lock (hook r31 P1)
+  const retire = mockState.updates.find((u) => u.table === 'notifications');
+  expect(retire.raws.map((r) => r[1])).toEqual([['auto-order:ledger-7', 'auto-order:ledger-7:%'], ['auto-order:ledger-7:v2']]); // every other version of THIS row's bell, never v2 itself
   mockState.updates = [];
   mockState.bellRetireThrows = true;
   try {
