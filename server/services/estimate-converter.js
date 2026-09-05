@@ -2619,6 +2619,11 @@ function reservedAcceptPerVisitSplit({
       }
     }
     if (byKey.has('termite_station_rental')) return null;
+    // Reconcile the amounts that will be STORED (codex #3938 r4 P2): round
+    // each row first, so a sub-cent drift between the raw rows and the
+    // reserved price declines rather than stamping figures that no longer
+    // add up to it.
+    for (const [key, amount] of byKey) byKey.set(key, roundMoney(amount));
     routeRowsUsed = new Set();
     routeRowCount = byKey.size;
     lineAmount = (svc) => {

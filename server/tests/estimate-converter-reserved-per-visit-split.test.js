@@ -191,13 +191,18 @@ describe('reservedAcceptPerVisitSplit — codex #3938 r2', () => {
     expect(reservedAcceptPerVisitSplit({
       reservedPrice: 91.8, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly', rowAmounts: missingLawn,
     })).toBeNull();
-    // Unrounded route figures reconcile the way the route rounds them: at the total.
+    // Sub-cent route figures reconcile as the STORED (rounded) amounts — a
+    // drift the rounding cannot reproduce declines rather than stamping
+    // prices that no longer add up to the reserved figure.
     const cents = [
       { service: 'pest_control', name: 'Pest Control', amount: 91.804 },
       { service: 'lawn_care', name: 'Every 6 Weeks Lawn Care Service', amount: 60.004 },
     ];
     expect(reservedAcceptPerVisitSplit({
       reservedPrice: 151.81, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly', rowAmounts: cents,
+    })).toBeNull();
+    expect(reservedAcceptPerVisitSplit({
+      reservedPrice: 151.8, reservedService: pestLine, promotedServices: [lawnLine], acceptedPlanFrequency: 'quarterly', rowAmounts: cents,
     })).toEqual({ reserved: 91.8, promoted: [60] });
   });
 });

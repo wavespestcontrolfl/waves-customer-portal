@@ -360,7 +360,11 @@ describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)
 
   test('slices the first visit exactly: 5% of $90 + 5% of $56.40 = $7.32', () => {
     const slice = planCreditFirstVisitSlice(acceptedFrequency());
-    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
+    expect(slice).toMatchObject({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
+    // Per-row slices ride along, aligned to the row amounts, and add up to
+    // the first-visit slice (codex #3938 r4: the converter nets forwarded
+    // rows with the same allocation).
+    expect(slice.rowSlices.reduce((sum, v) => Math.round((sum + v) * 100) / 100, 0)).toBe(7.32);
   });
 
   test('gate-independent: billing honors the credit under either presentation (codex #3185 r6)', () => {
@@ -372,7 +376,7 @@ describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)
     try {
       delete process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES;
       expect(planCreditFirstVisitSlice(acceptedFrequency()))
-        .toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
+        .toMatchObject({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
     } finally {
       process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES = prior;
     }
@@ -419,7 +423,7 @@ describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)
       ],
     });
     expect(planCreditFirstVisitSlice(comboFrequency()))
-      .toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+      .toMatchObject({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
     // A floor-capped combo credit differs by real dollars — refused exactly,
     // no tolerance to hide inside (r7 P0).
     expect(planCreditFirstVisitSlice(comboFrequency({ amount: 47.5, recurringAmount: 47.5, capped: true, capReason: 'lawn_program_minimum' })))
@@ -448,7 +452,7 @@ describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)
     frequency.manualDiscount.amount = 25.38;
     frequency.manualDiscount.recurringAmount = 25.38;
     const slice = planCreditFirstVisitSlice(frequency);
-    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 2.82 });
+    expect(slice).toMatchObject({ label: 'Custom Percentage Discount', firstVisitSlice: 2.82 });
   });
 });
 
@@ -477,7 +481,7 @@ describe('codex #3185 P1 regressions — preference bases and flat-monthly membe
     const slice = planCreditFirstVisitSlice(gateOnFrequency(), {
       preferences: { interior_spray: false },
     });
-    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
+    expect(slice).toMatchObject({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
   });
 
   test('a flat-monthly member row bails BOTH surfaces: no accept slice…', () => {
@@ -553,7 +557,7 @@ describe('codex #3185 r2 regressions — combo+preference reconciliation and ove
     const slice = planCreditFirstVisitSlice(combo, {
       preferences: { interior_spray: false },
     });
-    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+    expect(slice).toMatchObject({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
   });
 
   test('a slice that fully comps the first visit is refused (zero net cannot thread the fallbacks)', () => {
@@ -664,7 +668,7 @@ describe('codex #3185 r8 — combo credit state fully replaces the base row stat
       manualDiscountSuppressed: combo.manualDiscountSuppressed === true,
     };
     expect(planCreditFirstVisitSlice(overlaid))
-      .toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+      .toMatchObject({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
     // And the inverse: a combo's own suppression blocks even with a live
     // base credit inherited nowhere.
     const suppressedOverlay = { ...overlaid, manualDiscountSuppressed: true };
