@@ -716,7 +716,7 @@ const PRODUCT_COLUMNS = [
   'mixing_order_category', 'mixing_instructions', 'rainfast_minutes', 'rei_hours',
   'labeled_turf_species', 'excluded_turf_species', 'requires_surfactant', 'allows_surfactant',
   'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
-  'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_required', 'reentry_text',
+  'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_text', 'ppe_required', 'reentry_text',
   'customer_safety_summary', 'pet_kid_guidance_text', 'service_report_summary',
   'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
   'best_price_amount_cached', 'best_price_updated_at', 'label_verified_at',
@@ -839,8 +839,10 @@ function precautionText(product) {
   // The product-specific pet / child guidance carries the actionable detail
   // (bait stations, keep pets off treated turf) the generic summary omits.
   const parts = [clean(product.customer_safety_summary, 160), clean(product.pet_kid_guidance_text, 160), clean(product.reentry_text, 100)].filter(Boolean);
+  // Label-derived PPE (ppe_text, the tech-tools reader's source) first; the
+  // legacy ppe_required list only when no verified text exists.
   const ppe = parseJson(product.ppe_required);
-  const ppeText = Array.isArray(ppe) ? ppe.map((p) => clean(p, 30)).filter(Boolean).join(', ') : clean(ppe, 80);
+  const ppeText = clean(product.ppe_text, 120) || (Array.isArray(ppe) ? ppe.map((p) => clean(p, 30)).filter(Boolean).join(', ') : clean(ppe, 80));
   if (ppeText) parts.push(`PPE: ${ppeText}`);
   return parts.join(' ') || null;
 }

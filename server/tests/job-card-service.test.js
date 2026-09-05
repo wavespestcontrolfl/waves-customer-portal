@@ -756,6 +756,11 @@ describe('PR review r4', () => {
     expect(text).toBe('Keep off until dry. Do not disturb bait stations. Re-entry 2 h.');
   });
 
+  test('PPE comes from the label-derived ppe_text, with the legacy ppe_required list only as the fallback (hook P1)', () => {
+    expect(jobCard._test.precautionText({ ppe_text: 'Long sleeves, chemical-resistant gloves, protective eyewear', ppe_required: '["gloves"]' })).toBe('PPE: Long sleeves, chemical-resistant gloves, protective eyewear');
+    expect(jobCard._test.precautionText({ ppe_text: null, ppe_required: '["gloves","eye protection"]' })).toBe('PPE: gloves, eye protection');
+  });
+
   test('the cached best price is owner-only: absent unless the viewer may see pricing (P1)', () => {
     const product = { inventory_unit: 'gal', best_price_amount_cached: '129.5' };
     expect(jobCard._test.orderFor(product, null, null)).not.toHaveProperty('lastPrice');
