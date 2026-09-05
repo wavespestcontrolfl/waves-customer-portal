@@ -1,3 +1,4 @@
+import lawnScores from '../../../../shared/lawn-scores.cjs';
 // client/src/pages/admin/SchedulePage.jsx
 //
 // Shared-utility module for the V2 dispatch surface. The V1 page
@@ -7684,7 +7685,11 @@ function LawnPreviousVisitCard({ service }) {
       .catch(() => { if (live) setState({ loading: false, row: null, error: true }); });
     return () => { live = false; };
   }, [customerId, day, service.id]);
-  const row = state.row;
+  const row = state.row && {
+    ...state.row,
+    overall_score: lawnScores.calculateLawnOverallScore(state.row),
+    stress_damage: lawnScores.resolveStressDamage(state.row),
+  };
   const display = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : `${Math.round(Number(value))}/100`;
   return (
     <section aria-label="Previous lawn visit" style={{ margin: "16px 0", padding: 14, background: D.white, border: `1px solid ${D.border}`, borderRadius: 12, color: D.heading }}>
