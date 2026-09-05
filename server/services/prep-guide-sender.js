@@ -44,7 +44,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { currentRestrictionPolicy, resolveRestrictionCounty } = require('../config/irrigation-restrictions');
-const { countyConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
+const { countyConfirmedAfterMove, parseConfirmedFields } = require('./irrigation-schedule-confirmation');
 const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -179,8 +179,15 @@ async function buildWateringBlock(customer) {
   try {
     const prefs = await db('property_preferences').where({ customer_id: customer.id }).first();
     const turf = await db('customer_turf_profiles').where({ customer_id: customer.id }).first();
+    // After a move the saved minutes describe the FORMER home's system
+    // until the customer re-enters them (the same per-field ledger the
+    // weekly plan sizes from — irrigation_confirmed_fields); an unconfirmed
+    // figure is left out rather than sent as this home's instruction
+    // (pre-push Codex P1 on d82831055).
+    const minutesCurrent = !prefs?.irrigation_home_changed_at
+      || parseConfirmedFields(prefs.irrigation_confirmed_fields).includes('irrigation_run_minutes');
     const runMinutes = Number(prefs?.irrigation_run_minutes);
-    if (Number.isFinite(runMinutes) && runMinutes > 0) minutes = Math.round(runMinutes);
+    if (minutesCurrent && Number.isFinite(runMinutes) && runMinutes > 0) minutes = Math.round(runMinutes);
     const county = resolveRestrictionCounty({
       county: turf?.county || null,
       profileCity: turf?.city || null,

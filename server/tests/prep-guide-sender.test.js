@@ -997,6 +997,19 @@ describe('sprinkler timer guide', () => {
     expect(block).not.toMatch(/watering day a week/);
   });
 
+  test('watering block: minutes saved before a move are the former home\'s — left out until re-confirmed (pre-push Codex P1 on d82831055)', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    mockRestrictionPolicy = ORDER;
+    prefsRow = { irrigation_run_minutes: 35, irrigation_home_changed_at: '2026-08-20T12:00:00Z', irrigation_confirmed_fields: JSON.stringify(['watering_days']) };
+    let block = await buildWateringBlock(customerRow);
+    expect(block).not.toMatch(/about 35 minutes/);
+    expect(block).toMatch(/Monday's email tells you how many minutes/);
+    // Re-entered after the move → current again.
+    prefsRow = { ...prefsRow, irrigation_confirmed_fields: JSON.stringify(['watering_days', 'irrigation_run_minutes']) };
+    block = await buildWateringBlock(customerRow);
+    expect(block).toMatch(/about 35 minutes/);
+  });
+
   test('watering block survives a preferences read failure (fails closed)', async () => {
     const { buildWateringBlock } = require('../services/prep-guide-sender');
     mockRestrictionPolicy = ORDER;
