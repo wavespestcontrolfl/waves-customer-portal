@@ -841,6 +841,13 @@ describe('builtinTranscriptMayReplace (pure) and POST /transcription', () => {
     expect(builtinTranscriptMayReplace({ transcription: 'x', transcription_provider: null })).toBe(true);
     expect(builtinTranscriptMayReplace({ transcription: 'x', transcription_provider: 'openai' })).toBe(false);
     expect(builtinTranscriptMayReplace({ transcription: 'x', transcription_provider: 'gemini' })).toBe(false);
+    // Sandy PR 2A: the relay's own transcript yields to the recording's text ONLY on a transferred row whose AI segment is stashed.
+    const stashed = { relay_transcript: { text: 'Agent: hi' }, relay_handoff: {} };
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: stashed })).toBe(true);
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: JSON.stringify(stashed) })).toBe(true);
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_handoff: {} } })).toBe(false); // not stashed
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_transcript: { text: 'Agent: hi' } } })).toBe(false); // not a transfer
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay' })).toBe(false);
   });
 
   test('a late built-in transcription does not overwrite the diarized provider transcript the extraction ran on', async () => {

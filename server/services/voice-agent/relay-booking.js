@@ -43,6 +43,7 @@
  */
 
 const logger = require('../logger');
+const { assertAssignableTechnician } = require('../technician-eligibility');
 
 const EARLIEST_START_MINUTES = 8 * 60; // house rule: no client appointments before 8am ET
 
@@ -385,6 +386,7 @@ async function commitVoiceBooking({
       // pending office-review booking (voice_agent source_action), which
       // maybeGroupRow refuses; its grouping moment is office confirm via
       // the transitionJobStatus pending→confirmed seam (job-status.js).
+      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only

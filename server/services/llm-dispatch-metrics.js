@@ -33,8 +33,12 @@
  * The same table is also the CALL LEDGER (agent-control S2a): behind the
  * separate GATE_LLM_CALL_LEDGER, every provider call through the llm adapters
  * writes one row_kind='call' row (tokens, latency, served model, error
- * class) and every Managed Agents session one row_kind='session' row, each
- * stamped with the ambient agent-control lane / chain / run / step ids. Chain
+ * class) and every Managed Agents session one row_kind='session' row (the
+ * cumulative session) plus one row_kind='session_turn' row per recorded
+ * turn carrying that turn's DELTA of the counters — what a windowed read
+ * sums, so a session live across a window edge never drags its earlier
+ * turns along. Each is stamped with the ambient agent-control lane / chain
+ * / run / step ids. Chain
  * rows and heartbeats keep their row_kind so the digest above reads exactly
  * what it always did. Redacted bodies (GATE_LLM_CALL_TRACES + a lane policy
  * that opts in) live in llm_call_traces, keyed to the call row and pruned
@@ -43,6 +47,7 @@
  */
 
 const logger = require('./logger');
+const { v5: uuidv5 } = require('uuid');
 
 const { classifyFailure } = require('./agent-control/taxonomy');
 const { policyFor } = require('./agent-control/lane-policies');
@@ -481,30 +486,88 @@ function messageText(value) {
 // code / class stays), so a delayed pre-termination snapshot can never
 // resurrect a terminated session. A runner's finally re-bills safely; a sum
 // over session rows never counts a session twice.
-async function upsertSessionRow(row) {
-  try {
-    const db = require('../models/db');
-    const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
-    const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
-    return await writtenId(db('llm_dispatch_log')
-      .insert(row)
-      .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
-      .merge({
-        ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
-        error_code: first('error_code'),
-        error_class: first('error_class'),
-        latency_ms: greatest('latency_ms'),
-        served_model: first('served_model'),
-        input_tokens: greatest('input_tokens'),
-        cached_input_tokens: greatest('cached_input_tokens'),
-        cache_write_tokens: greatest('cache_write_tokens'),
-        output_tokens: greatest('output_tokens'),
-        reasoning_tokens: greatest('reasoning_tokens'),
-      }));
-  } catch (err) {
-    logger.debug(`[llm-dispatch-metrics] session upsert failed: ${err.message}`);
-    return null;
+//
+// Beside it, ONE row_kind='session_turn' row per turn carries that turn's
+// share: the counters minus the session row's previous snapshot, this
+// turn's latency and outcome. Windowed reads (agent-control hub) sum turn
+// rows, so a session live across a window edge contributes only what it
+// did inside the window (GH codex #3869 r2). The read-then-write runs in
+// one short transaction under a per-session advisory lock (no network I/O
+// inside it), so two overlapping records of one session cannot both
+// subtract the same snapshot: the deltas always sum to the cumulative row.
+//
+// Attribution WITHIN a session is exact when its turns are sequential —
+// every runner but the customer assistant is one turn per session, and
+// the assistant's turns are one per inbound customer message. If two
+// turns of one session DO overlap, or a turn's failed usage GET is only
+// recovered after a later turn landed, the later record carries the
+// earlier turn's tokens (the total stays exact); the provider exposes no
+// per-turn usage to do better with. The hub states this as
+// basis.sessions = 'per_turn' with its caveat.
+//
+// A turn is identified by step_id = uuid v5 of (session id, turn id) —
+// the caller's `turnId` when it passes one (the assistant mints one per
+// turn; a start time alone could collide inside one millisecond), else
+// the turn start — unique per turn row (migration 000030). Every re-record of the
+// same turn — a runner's finally re-billing, a retried terminal write, a
+// recovered usage GET — lands on the SAME row through the same monotone
+// merge the session row uses (pre-push audits on #3869): counters and
+// latency only grow, ok only goes false, the first error stays. A record
+// with unknown usage (the GET failed) still writes its turn row with null
+// counters; the recovered snapshot fills it in place.
+const SESSION_COUNTERS = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens'];
+const SESSION_TURN_NS = '60c2b5a4-2f0e-4f3b-9a4e-3f7e6d2c1b0a';
+function sessionTurnKey(sessionId, startedAt, turnId) {
+  const turn = turnId || (startedAt ? Number(startedAt) : null);
+  return turn ? uuidv5(`${sessionId}:${turn}`, SESSION_TURN_NS) : null;
+}
+function sessionTurnRow(row, prev, turnKey) {
+  const turn = { ...row, row_kind: 'session_turn', step_id: turnKey };
+  for (const col of SESSION_COUNTERS) {
+    // null = this turn's usage GET failed; no number is better than a false zero
+    turn[col] = row[col] == null ? null : Math.max(row[col] - Number(prev?.[col] || 0), 0);
   }
+  return turn;
+}
+// Every merged column is MONOTONE — no ordering between writers is assumed.
+// The session row's counters are cumulative snapshots → GREATEST. A turn
+// row's counters are DELTAS since the session row's previous snapshot, so a
+// re-record of the same turn carries only what arrived since its last
+// record (0 for an identical snapshot, everything for one recovered from a
+// failed GET, the increment for a snapshot that grew) → they ADD; null
+// only while every record of the turn has had unknown usage.
+function monotoneMerge(db, { counters = 'greatest' } = {}) {
+  const greatest = (col) => db.raw(`GREATEST(EXCLUDED.${col}, llm_dispatch_log.${col})`);
+  const first = (col) => db.raw(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
+  const add = (col) => db.raw(`CASE WHEN llm_dispatch_log.${col} IS NULL AND EXCLUDED.${col} IS NULL THEN NULL ELSE COALESCE(llm_dispatch_log.${col}, 0) + COALESCE(EXCLUDED.${col}, 0) END`);
+  return {
+    ok: db.raw('(llm_dispatch_log.ok AND EXCLUDED.ok)'),
+    error_code: first('error_code'),
+    error_class: first('error_class'),
+    latency_ms: greatest('latency_ms'),
+    // the session's start is its EARLIEST recorded turn start; a turn's
+    // re-record carries the same start (LEAST skips a null side)
+    started_at: db.raw('LEAST(llm_dispatch_log.started_at, EXCLUDED.started_at)'),
+    served_model: first('served_model'),
+    ...Object.fromEntries(SESSION_COUNTERS.map((col) => [col, counters === 'add' ? add(col) : greatest(col)])),
+  };
+}
+// Inside recordSessionUsage's locked transaction (`trx`); the caller's catch
+// turns any failure into a null id.
+async function upsertSessionRow(trx, row, turnKey) {
+  const db = require('../models/db');
+  const prev = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session' }).first(SESSION_COUNTERS);
+  const id = await writtenId(trx('llm_dispatch_log')
+    .insert(row)
+    .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
+    .merge(monotoneMerge(db)));
+  if (turnKey) {
+    await trx('llm_dispatch_log')
+      .insert(sessionTurnRow(row, prev || null, turnKey))
+      .onConflict(db.raw("(step_id) WHERE row_kind = 'session_turn'"))
+      .merge(monotoneMerge(db, { counters: 'add' }));
+  }
+  return id;
 }
 
 /**
@@ -531,10 +594,14 @@ async function upsertSessionRow(row) {
  * `agentId` is accepted for the runners' convenience but has no column yet —
  * the session id (provider_ref) resolves it in the Console.
  */
-async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, failure = null } = {}) {
+async function recordSessionUsage({ laneId, sessionId, agentId = null, model = null, startedAt = null, turnId = null, failure = null } = {}) {
   try {
     if (!ledgerEnabled() || !sessionId) return null;
     const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
+    const ctx = agentContext.current();
+    const lane = laneId || ctx.laneId || null;
+    // The usage GET runs OUTSIDE the transaction below: a pooled connection
+    // is never held across network I/O (pre-push audit on #3869).
     // Empty when the GET misses: the row still lands, without counts.
     let session = {};
     try {
@@ -548,23 +615,32 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
     // anthropic_429 — the codes the taxonomy classifies); a terminated
     // session only names the failure when the runner had none (Codex r10).
     const errorCode = failureCode(failure) || (session.status === 'terminated' ? 'session_terminated' : null);
-    const ctx = agentContext.current();
-    const lane = laneId || ctx.laneId || null;
     logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
-    return await upsertSessionRow(ledgerRow({
-      ctx,
-      rowKind: 'session',
-      laneId: lane,
-      policyLabel: lane || `anthropic/${model || 'session'}`,
-      provider: 'anthropic',
-      requestedModel: model,
-      servedModel: session.model,
-      ok: !errorCode,
-      errorCode,
-      tokens,
-      latencyMs,
-      providerRef: sessionId,
-    }));
+    const db = require('../models/db');
+    return await db.transaction(async (trx) => {
+      // Short: lock, read the previous snapshot, write both rows.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [sessionId]);
+      return await upsertSessionRow(trx, {
+        ...ledgerRow({
+          ctx,
+          rowKind: 'session',
+          laneId: lane,
+          policyLabel: lane || `anthropic/${model || 'session'}`,
+          provider: 'anthropic',
+          requestedModel: model,
+          servedModel: session.model,
+          ok: !errorCode,
+          errorCode,
+          tokens,
+          latencyMs,
+          providerRef: sessionId,
+        }),
+        // the start the runner captured, persisted: created_at is the
+        // recording time, AFTER the usage GET, so a start derived from it
+        // drifts by the whole fetch (Codex r12 on #3891)
+        started_at: startedAt ? new Date(Number(startedAt)) : null,
+      }, sessionTurnKey(sessionId, startedAt, turnId));
+    });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
     return null;
@@ -1008,6 +1084,7 @@ async function runLlmDispatchDigest() {
 }
 
 module.exports = {
+  RETENTION_DAYS,
   recordDispatch,
   recordHeartbeat,
   recordCall,

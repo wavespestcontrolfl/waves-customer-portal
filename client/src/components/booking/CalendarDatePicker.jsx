@@ -91,7 +91,7 @@ export default function CalendarDatePicker({
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4, marginBottom: 4 }}>
         {WEEKDAY_LABELS.map((w) => (
-          <div key={w} style={{ textAlign: 'center', fontSize: 12, fontWeight: 600, color: t.muted, padding: '4px 0' }}>{w}</div>
+          <div key={w} style={{ textAlign: 'center', fontSize: 14, fontWeight: 600, color: t.muted, padding: '4px 0' }}>{w}</div>
         ))}
       </div>
 

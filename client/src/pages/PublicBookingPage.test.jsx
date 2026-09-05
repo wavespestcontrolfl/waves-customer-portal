@@ -15,7 +15,7 @@ vi.mock('../components/AddressAutocomplete', () => ({
 vi.mock('../components/brand', () => ({ WavesShell: ({ children }) => <div>{children}</div> }));
 vi.mock('../components/BrandFooter', () => ({ default: () => null }));
 vi.mock('../components/booking/WavesAIScheduleSearch', () => ({ default: () => null }));
-vi.mock('../glass/glass-engine', () => ({ fireGlassConfetti: vi.fn() }));
+vi.mock('../glass/glass-engine', () => ({ fireGlassConfetti: vi.fn(), useGlassSurface: () => {} }));
 vi.mock('../lib/analytics/events', () => ({
   track: vi.fn(),
   FUNNEL_EVENTS: new Proxy({}, { get: (_target, key) => String(key) }),
@@ -57,7 +57,7 @@ const availabilityPayload = () => ({
   slots: [{ start_time: '09:00' }],
 });
 
-function stubFetch({ config, confirmMode } = {}) {
+function stubFetch({ config, confirmMode, browseDay } = {}) {
   const fetchMock = vi.fn(async (url) => {
     const parsed = new URL(String(url), 'https://portal.test');
     if (parsed.pathname.endsWith('/booking/config')) {
@@ -69,7 +69,10 @@ function stubFetch({ config, confirmMode } = {}) {
       if (confirmMode === 'non-json') return { ok: true, status: 200, json: async () => { throw new Error('unparseable'); } };
       return jsonResponse({ confirmationCode: 'WPC-1234' });
     }
-    if (parsed.searchParams.has('date_from')) return jsonResponse({ error: 'unavailable' }, 503);
+    if (parsed.searchParams.has('date_from')) {
+      if (browseDay) return jsonResponse({ capture_token: 'capture-2', days: [browseDay], slots: [] });
+      return jsonResponse({ error: 'unavailable' }, 503);
+    }
     return jsonResponse(availabilityPayload());
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -89,6 +92,36 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('PublicBookingPage custom-date browse', () => {
+  it('feeds the browsed day through the one picker — that day selected, its times listed, and a reset back to the window', async () => {
+    const browsed = futureDay(40);
+    stubFetch({ browseDay: { date: browsed, fullDate: 'Saturday, September 5', nearby: false, slots: [{ start_time: '13:00', start_label: '1:00 PM' }] } });
+
+    render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
+    fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+    fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+    await screen.findByRole('button', { name: /^Choose 9:00 AM/ });
+
+    fireEvent.change(await screen.findByLabelText(/Need a date further out/), { target: { value: browsed } });
+    // A slot tapped in the still-visible window while the browse loads must
+    // not survive the swap.
+    fireEvent.click(screen.getByRole('button', { name: /^Choose 9:00 AM/ }));
+
+    // One picker: the browsed day is the selected day and the only times shown.
+    const chosen = await screen.findByRole('button', { name: /^Choose 1:00 PM on Saturday, September 5/ });
+    expect(screen.queryByRole('button', { name: /^Choose 9:00 AM/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Continue/ })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /^Choose 9:00 AM/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('option', { selected: true }).map((o) => o.getAttribute('aria-label'))).toEqual([expect.stringMatching(/^Saturday, September 5/)]);
+    fireEvent.click(chosen);
+    expect(chosen).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all open times' }));
+    expect(await screen.findByRole('button', { name: /^Choose 9:00 AM/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Choose 1:00 PM/ })).not.toBeInTheDocument();
+  });
 });
 
 describe('PublicBookingPage custom-date failures', () => {
@@ -192,8 +225,8 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
 
     // Contact step is EMPTY — the ambient customer was not prefilled in.
@@ -231,8 +264,8 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
 
     const firstName = await screen.findByLabelText('First name');
@@ -257,8 +290,8 @@ describe('PublicBookingPage customers-only gate (GATE_BOOKING_CUSTOMERS_ONLY)', 
 
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
 
     const firstName = await screen.findByLabelText('First name');
@@ -279,8 +312,8 @@ describe('PublicBookingPage contact phone normalization', () => {
     render(<MemoryRouter initialEntries={['/book']}><PublicBookingPage /></MemoryRouter>);
     fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
     fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /Thursday, July 30.*opening/ }));
-    fireEvent.click(await screen.findByRole('button', { name: /9:00 AM/ }));
+    fireEvent.click(await screen.findByRole('option', { name: /Thursday, July 30.*opening/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 9:00 AM/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Continue →' }));
     fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Pat' } });
     fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Lee' } });

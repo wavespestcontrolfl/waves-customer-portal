@@ -76,7 +76,7 @@ describe('weather-forecast (NWS)', () => {
         json: async () => ({
           properties: {
             periods: [
-              { startTime: '2026-06-11T13:00:00-04:00', probabilityOfPrecipitation: { value: 72 }, shortForecast: 'Thunderstorms' },
+              { startTime: '2026-06-11T13:00:00-04:00', probabilityOfPrecipitation: { value: 72 }, shortForecast: 'Thunderstorms', temperatureF: undefined, temperature: 88, windSpeed: '5 to 10 mph' },
               { startTime: '2026-06-11T14:00:00-04:00', probabilityOfPrecipitation: { value: null }, shortForecast: 'Showers' },
             ],
           },
@@ -85,8 +85,11 @@ describe('weather-forecast (NWS)', () => {
 
     const hours = await getHourlyRainOutlook(27.1, -82.45);
     expect(hours).toHaveLength(2);
-    expect(hours[0]).toEqual({ startTime: '2026-06-11T13:00:00-04:00', rainChance: 72, shortForecast: 'Thunderstorms' });
+    // temperatureF / windMph ride along for the job-card spray check; the
+    // wind upper bound is the conservative number for a max-wind label limit.
+    expect(hours[0]).toEqual({ startTime: '2026-06-11T13:00:00-04:00', rainChance: 72, shortForecast: 'Thunderstorms', temperatureF: 88, windMph: 10 });
     expect(hours[1].rainChance).toBeNull();
+    expect(hours[1]).toMatchObject({ temperatureF: null, windMph: null });
 
     // Cached on the second call; null coords rejected without fetching.
     await getHourlyRainOutlook(27.1, -82.45);

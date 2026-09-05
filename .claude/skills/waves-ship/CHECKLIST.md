@@ -7,7 +7,9 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Staged explicit paths only (no `git add -A`)
 - [ ] Diff touches `client/` → `npm run check:portal-brand` passes
 - [ ] Diff touches blog schema → `npm run verify:blog-schema` passes
-- [ ] New raw SQL / migration → waves-db skill verification done (read-only prod check; BEGIN…ROLLBACK dry-run on dev/preview)
+- [ ] New raw SQL / migration → waves-db verification completed against
+  verified dev/preview PostgreSQL; deployment-specific claims have the
+  separately required production evidence
 - [ ] Money-touching diff → waves-billing invariants reviewed
 
 ## Post-push
@@ -38,4 +40,6 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Railway deploy green (portal) / Pages builds green (astro)
 - [ ] Stacked children retargeted to main (should have happened BEFORE merge)
 - [ ] Gate/kill-switch documented; prod behavior spot-checked if a gate was flipped
-- [ ] Worktree removed if the lane is closed
+- [ ] If the lane is closed, task-created worktree removed only after the
+  ownership/state/dependency checks in waves-ship §5; otherwise retained
+  with the reason recorded. Reused worktrees require explicit removal authorization.

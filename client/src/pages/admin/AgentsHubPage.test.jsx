@@ -23,6 +23,9 @@ vi.mock("./AgentShadowDraftsPage", () => ({
 vi.mock("./DataHygienePage", () => ({
   default: () => <div>Hygiene workspace</div>,
 }));
+vi.mock("./agents/AgentControlCenterTab", () => ({
+  default: () => <div>Control center workspace</div>,
+}));
 vi.mock("./AgentModelsTab", () => ({
   default: () => <div>Models workspace</div>,
 }));
@@ -80,6 +83,20 @@ describe("AgentsHubPage area strip", () => {
     renderHub("/admin/agents?tab=overview");
     expect(await screen.findByRole("button", { name: "Runs" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "SMS & messaging" })).toBeNull();
+    expect(screen.getByText("Overview workspace")).toBeInTheDocument();
+    expect(screen.queryByText("Control center workspace")).toBeNull();
+  });
+
+  it("renders the Control center as Overview, with the area strip, only when the probe reports the ledger phase", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/control/hub") return { ...HUB, features: { queue: false, ledger: true } };
+      throw new Error(`unexpected fetch ${path}`);
+    });
+    renderHub("/admin/agents?tab=overview");
+    expect(await screen.findByText("Control center workspace")).toBeInTheDocument();
+    expect(screen.queryByText("Overview workspace")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Calls" }));
+    expect(screen.getByTestId("search")).toHaveTextContent("?tab=overview&area=calls");
   });
 });
 

@@ -150,15 +150,12 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
 const CUSTOM_SMS_MAX_SEGMENTS = 2;
 
 // Send-layer blockers the note guards can't see because they live in the
-// TEMPLATE's static text (an admin-saved emoji, a broken-render marker
-// like '1970'): discovering them AFTER the move strands a moved visit with
+// TEMPLATE's static text (a broken-render marker like '1970'): discovering them AFTER the move strands a moved visit with
 // no SMS, so commit() runs the send layer's own checks on the assembled
 // body pre-move (codex r9 P2).
 function customBodySendBlocked(body) {
   const { validateOutbound } = require('./sms-guard');
-  if (!validateOutbound(body).ok) return true;
-  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
-  return findEmoji(body).found;
+  return !validateOutbound(body).ok;
 }
 
 /**
@@ -313,12 +310,6 @@ function sanitizeCustomerNote(raw) {
     || containsBareHost(gsm) || containsBareHost(canonical)) {
     return { error: 'note_link_blocked' };
   }
-  // Same emoji rule sendCustomerMessage enforces (validators/voice.js) —
-  // checked HERE so an emoji note rejects BEFORE the move commits, instead
-  // of committing the reschedule and then silently blocking the SMS with
-  // EMOJI_FOR_CUSTOMER (codex PR P2).
-  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
-  if (findEmoji(gsm).found) return { error: 'note_emoji_blocked' };
   // The outbound sms-guard rejects bodies containing unsubstituted {vars},
   // "undefined"/"null"/"1970" etc. AFTER assembly — a note like "Gate code
   // 1970 still works" would commit the move and then lose the SMS (codex
@@ -1822,6 +1813,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         try {
           const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
             allowLive: true,
+            ...(actorUserId ? { actorId: actorUserId } : {}),
             overlapAdvisory: true,
             sourceSurface: 'quick_move',
             // The intent is recorded WITH the operation (durable): the live
@@ -1871,6 +1863,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         // caught below as a per-member failure the tech re-runs.
         const moveResult = await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
           allowLive: true,
+          // The acting staff row (Quick Move's actorUserId): a tech moving
+          // their own visit must not be told about it.
+          ...(actorUserId ? { actorId: actorUserId } : {}),
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_

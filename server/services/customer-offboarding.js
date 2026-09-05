@@ -299,6 +299,10 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
       // fire-and-forget hook claim could land after a compensating revert
       // (codex r3).
       notifyCustomer: 'caller_suppress',
+      // The tech notice waits for the live-state check below: a cancel the
+      // tech raced by going en route is reverted, and must never have told
+      // them their visit was cancelled.
+      suppressTechNotice: true,
     });
   });
   // The flip's atomic guard covers only `status` — a tech can tap En route
@@ -325,6 +329,14 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
     });
     throw new Error(`visit went ${wentLive} mid-cancel — reverted, left for dispatch`);
   }
+  // The cancel stands — now the assigned tech hears it (post-commit,
+  // best-effort, gate-dark; recipient read from the row; silent for the
+  // actor's own cancel). A row that was ALREADY cancelled when re-read
+  // (another cancellation won after the preview) is a same-status repair:
+  // its tech heard from that cancel, so no second card.
+  if (String(fresh.status) !== 'cancelled') {
+    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null, previousStatus: fresh.status });
+  }
   // No per-visit customer notice — the flow sends ONE combined
   // cancellation + refund email (owner ruling 2026-07-15); this also keeps
   // refund-skipped runs silent toward the customer. handleCancellation
@@ -342,7 +354,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   }
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
-    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id });
+    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });
   } catch (e) {
     logger.error(`[customer-offboarding] call follow-up cascade failed for ${visit.id}: ${e.message}`);
   }

@@ -1,10 +1,16 @@
 ---
-description: Record a correction as a permanent rule so the same mistake never happens again
+description: Diagnose a correction and strengthen the existing rule, skill, test, or environment fix; return proposed edits for read-only or proposal-only tasks
 argument-hint: what went wrong, and (optionally) what the rule should be
 ---
 
-A mistake was just caught. Turn it into a permanent rule so no future session
-— Claude or Codex — repeats it.
+A mistake was caught. Identify its first concrete cause and check whether
+an existing rule, skill, test, or environment fix already covers it.
+Strengthen that mechanism when needed; do not add a permanent rule for
+temporary task state, unavailable tools, or an already-clear rule.
+
+In proposal-only or read-only work, return the proposed correction without
+editing or committing. Otherwise, apply the correction only within the
+authorized scope, following the placement rules below.
 
 What happened: $ARGUMENTS
 
@@ -56,6 +62,8 @@ conversation: what was done wrong, what the correction was.)
 
 ## Ship it with the fix
 
-Commit the rule on the SAME branch/PR as the fix for the mistake, so the
+When committing is authorized, commit the rule on the SAME branch/PR as the fix for the mistake, so the
 correction and the lesson land together. If there is no associated fix,
-commit it on its own with a message explaining what incident it encodes.
+include it in the authorized instruction-change commit with a message
+explaining what incident it encodes. Local-only work ends with the local
+correction; proposal-only work ends with the proposed edit.
