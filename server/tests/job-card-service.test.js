@@ -968,11 +968,17 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
 
   test('special instructions and the visit note reach the card verbatim, outside the paragraph budget (hook P1)', async () => {
     const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
-    const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: { ...prefs, special_instructions: 'Do not treat the vegetable garden' } });
+    const instructions = 'Enter through the side gate, knock first, keep the pool cage door closed, spray the lanai screens only from outside, and do not treat the vegetable garden by the shed — gate 4545#';
+    const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: { ...prefs, special_instructions: instructions } });
     // The paragraph cache write is the one mutation on this path.
     const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
     const card = await jobCard.buildJobCard('svc1', { dbh, deps, now: new Date('2026-09-04T12:00:00Z') });
-    expect(card.notes).toEqual({ instructions: 'Do not treat the vegetable garden', visitNotes: 'Try [code] first' });
+    // Complete (the grounding copy is bounded to 120 chars) and code-scrubbed.
+    expect(instructions.length).toBeGreaterThan(120);
+    expect(card.notes.visitNotes).toBe('Try [code] first');
+    expect(card.notes.instructions).toMatch(/^Enter through the side gate/);
+    expect(card.notes.instructions).not.toContain('4545');
+    expect(card.notes.instructions).toContain('do not treat the vegetable garden');
   });
 
   test('pet presence is a critical fact even without a securing plan (P1)', () => {

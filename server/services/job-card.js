@@ -345,6 +345,13 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     rig: rigAssignment(svc),
     windowStart: svc.window_start || null,
     access: { codes },
+    // Display copies of the notes, complete and code-scrubbed: the facts
+    // below are bounded for the model grounding and may lose a restriction
+    // stated later in the text.
+    notes: scrubKnownCodes({
+      instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
+      visitNotes: clean(svc.notes, 2000) || null,
+    }, knownCodes),
     knownCodes,
     // No pin (none stored, or the stamped address diverges from the primary
     // one) → no forecast at all: an office forecast would judge a property
@@ -1166,9 +1173,10 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     serviceLine: facts.serviceLine,
     strip: { ...facts.strip, access: facts.access },
     paragraph,
-    // Shown verbatim under the paragraph: the 60-word budget may trim them
-    // out of the template and the rewrite need not keep them.
-    notes: { instructions: facts.facts.instructions || null, visitNotes: facts.facts.visitNotes || null },
+    // Shown complete under the paragraph: the 60-word budget may trim them
+    // out of the template, the rewrite need not keep them, and the grounding
+    // copies are bounded.
+    notes: facts.notes,
     sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source, window: isToday ? 'today' : 'not_today' },
     tank,
     products: cards,
