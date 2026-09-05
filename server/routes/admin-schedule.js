@@ -10293,6 +10293,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     });
 
+    // Tech-facing notice for a same-tech date/time move (a tech change in the
+    // same edit already told both techs through assignScheduleJobs). Queued
+    // FIRST after commit, before the awaited seam repair / reminder /
+    // broadcast / prepay steps below: the per-visit notice queue preserves
+    // call order, so a later move that commits during those waits must not
+    // enqueue ahead of this one and leave the tech holding stale details.
+    if (techMoveForNotice && techMoveForNotice.technicianId && !assignmentNeedsChange) {
+      void require('../services/tech-visit-notifications').notifyVisitRescheduled({
+        visitId: req.params.id,
+        technicianId: techMoveForNotice.technicianId,
+        actorId: req.technicianId || null,
+        previous: techMoveForNotice.previous,
+        snapshot: techMoveForNotice.snapshot,
+      });
+    }
+
     // Visit-group seam (visit-group-scope.md §2; codex #3590 r4/r8): a
     // direct Edit-Appointment change must repair grouped membership like
     // every other writer — for the edited anchor AND every recurring
@@ -10482,17 +10498,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // (Codex #3361 r2 P0). At-most-once via the helper's guarded stamp
     // (the notice sender's own belt call no-ops after this one); no-op for
     // every other row.
-    // Tech-facing notice for a same-tech date/time move (a tech change in the
-    // same edit already told both techs through assignScheduleJobs).
-    if (techMoveForNotice && techMoveForNotice.technicianId && !assignmentNeedsChange) {
-      void require('../services/tech-visit-notifications').notifyVisitRescheduled({
-        visitId: req.params.id,
-        technicianId: techMoveForNotice.technicianId,
-        actorId: req.technicianId || null,
-        previous: techMoveForNotice.previous,
-        snapshot: techMoveForNotice.snapshot,
-      });
-    }
     if (scheduleMoveForNotice) {
       const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
       await activateLegacyOutboundReviewRowIfNeeded(db, req.params.id, 'schedule-update-details');

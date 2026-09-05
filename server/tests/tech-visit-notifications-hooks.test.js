@@ -214,3 +214,21 @@ describe('transitionJobStatus → cancelled tech notice', () => {
     expect(mockNotifyVisitCancelled).not.toHaveBeenCalled();
   });
 });
+
+describe('admin-schedule update-details (source order)', () => {
+  test('the same-tech move notice is queued right after commit, before the awaited seam / reminder / broadcast / prepay steps', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const notice = src.indexOf("if (techMoveForNotice && techMoveForNotice.technicianId && !assignmentNeedsChange) {");
+    expect(notice).toBeGreaterThan(-1);
+    // The transaction that wrote the edit closes just above the notice…
+    const trxClose = src.lastIndexOf('    });\n', notice);
+    expect(src.slice(trxClose, notice)).not.toMatch(/await /);
+    // …and every awaited post-commit step comes after it.
+    for (const step of ['handleChildStopChanged(', 'registerSpawnedVisitReminder(', 'refreshAnnualPrepayTermsForCustomer(']) {
+      const idx = src.indexOf(step, trxClose);
+      expect(idx).toBeGreaterThan(notice);
+    }
+  });
+});
