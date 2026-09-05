@@ -130,7 +130,7 @@ async function reconcileOwnerPlacement(trx, { prospectId, status, attemptId = nu
   if (notSubmitted) {
     const attempt = held[0];
     await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'slot_released', idempotency_key: null, detail: { ...attempt.detail, owner_verdict: 'not_submitted', owner_confirmed_at: now.toISOString() }, updated_at: now });
-    await trx('seo_link_prospects').where({ id: prospectId }).update({ attempts: 0,
+    await trx('seo_link_prospects').where({ id: prospectId }).update({
       ...(prospect.automation_policy === 'skip' && ['submit_rejected', 'submit_blocked'].includes(attempt.detail?.error_code)
         ? { automation_policy: null, last_classified_at: null } : {}), updated_at: now });
     await require('../audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: 'backlink.submission.not_submitted', resource_type: 'seo_link_prospect', resource_id: prospectId, metadata: { attempt_id: attempt.id }, critical: true, trx });

@@ -146,7 +146,9 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     const [heldNow] = await trx('seo_link_attempts').insert({ prospect_id: p.id, path_id: pathId, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', detail: { authority_id: authority.id, error_code: 'submit_rejected' } }).returning('*');
     const negative = body => new Promise((resolve, reject) => edit({ params: { id: p.id }, body }, { code: 200, status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code, body }); } }, reject));
     const verdict = { submission_verdict: 'not_submitted', submission_attempt_id: heldNow.id };
+    await trx('seo_link_prospects').where({ id: p.id }).update({ attempts: 3 });
     assert.equal((await negative(verdict)).code, 200);
+    assert.equal((await trx('seo_link_prospects').where({ id: p.id }).first()).attempts, 3);
     assert.equal((await trx('seo_link_prospects').where({ id: p.id }).first()).automation_policy, null);
     assert.equal((await negative(verdict)).code, 409);
     assert.equal((await trx('seo_link_attempts').where({ id: heldNow.id }).first()).outcome, 'slot_released');

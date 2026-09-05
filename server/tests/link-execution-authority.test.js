@@ -148,12 +148,14 @@ test.each(['submit_rejected', 'submit_blocked'])('negative owner verdict release
   const attempt = s.db._tables.seo_link_attempts[0];
   Object.assign(attempt, { outcome: 'submit_ambiguous', evidence_url: 'synthetic/evidence.png', detail: { ...attempt.detail, error_code: errorCode } });
   s.db._tables.seo_link_prospects[0].automation_policy = 'skip';
+  s.db._tables.seo_link_prospects[0].attempts = 3;
   const args = { prospectId: s.placement.id, attemptId: attempt.id, notSubmitted: true };
   expect(await E.reconcileOwnerPlacement(s.db, { ...args, attemptId: uid() })).toMatchObject({ ok: false });
   expect(await E.reconcileOwnerPlacement(s.db, args)).toEqual({ ok: true });
   expect(attempt).toMatchObject({ outcome: 'slot_released', evidence_url: 'synthetic/evidence.png', idempotency_key: null });
   expect(s.db._tables.seo_link_placement_authorities[0].satisfied_at).toBeUndefined();
   expect(s.db._tables.seo_link_prospects[0].automation_policy).toBeNull();
+  expect(s.db._tables.seo_link_prospects[0].attempts).toBe(3);
   const retry = await E.reserveSlot(s.db, s.placement, s.path, auth, s.token, new Date());
   expect(retry.id).not.toBe(attempt.id);
   expect(await E.reconcileOwnerPlacement(s.db, args)).toMatchObject({ ok: false });
