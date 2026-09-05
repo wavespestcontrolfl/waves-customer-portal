@@ -408,7 +408,9 @@ function productLimits(product) {
   return {
     maxTempF: num(product.max_temp_f),
     maxWindMph: num(product.max_wind_mph),
-    rainFreeHours: num(product.rain_free_hours),
+    // rainfast_minutes is the canonical label interval (rain_free_hours is
+    // the legacy column some rows still carry alone).
+    rainFreeHours: num(product.rainfast_minutes) > 0 ? num(product.rainfast_minutes) / 60 : num(product.rain_free_hours),
   };
 }
 
