@@ -289,18 +289,21 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
   // geo); `eligible()` builds a row the orchestrator's gate accepts.
   const FAR = (() => { const d = new Date(); d.setUTCDate(d.getUTCDate() + 40); return d.toISOString().slice(0, 10); })();
   const eligible = (over = {}) => ({ id: 's2', service_type: 'Lawn Fertilization', is_recurring: true, recurring_parent_id: 'p2', status: 'confirmed', scheduled_date: FAR, auto_dispatch_locked: false, auto_dispatch_excluded: false, customer_active: true, customer_latitude: 27.5, customer_longitude: -82.4, ...over });
-  const fakeTrx = ({ siblings = [], caps = [], seriesClash = null, planAlert = null } = {}) => {
+  // `capsByTech` answers the capability read per technician_id (the fence's
+  // where clause); plain `caps` answers regardless of tech.
+  const fakeTrx = ({ siblings = [], caps = [], capsByTech = null, seriesClash = null, planAlert = null } = {}) => {
     const calls = [];
     let ssCalls = 0;
     const trx = jest.fn((table) => {
       calls.push(String(table).split(' ')[0]);
       const isSS = String(table).startsWith('scheduled_services');
       const probe = isSS && ssCalls++ > 0;
+      let techFilter = null;
       const api = {
-        where: (w) => { if (typeof w === 'function') w.call(api); return api; },
+        where: (w) => { if (typeof w === 'function') w.call(api); else if (w && w.technician_id) techFilter = w.technician_id; return api; },
         orWhere: () => api, whereIn: () => api, whereNotIn: () => api, whereNull: () => api, leftJoin: () => api,
         forShare: () => api,
-        select: async () => (isSS ? siblings : caps),
+        select: async () => (isSS ? siblings : (capsByTech ? (capsByTech[techFilter] || []) : caps)),
         first: async () => (table === 'recurring_plan_alerts' ? planAlert : (probe ? seriesClash : null)),
       };
       return api;
@@ -336,9 +339,15 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard({ trx, technicianId: 't1' })).resolves.toBeUndefined();
     trx = fakeTrx({ caps: [] });
     await expect(guard({ trx, technicianId: 't1' })).resolves.toBeUndefined();
-    // The rebooker passes the kept/receiving tech; it wins over the placement's.
-    trx = fakeTrx({ caps: [{ service_category: lawn, active: false }] });
-    await expect(guard({ trx, technicianId: 't9' })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    // The DESTINATION (placement) tech is what gets checked, not the tech the
+    // rebooker says the row is kept on: the unit mover strips technicianId
+    // from member moves, so that "kept" tech is the old one. Old tech Off for
+    // lawn + destination active → passes; destination Off → refuses.
+    const toT2 = makeMoveGuard({ service: lawnRow, best: { ...BEST, technician_id: 't2' } });
+    trx = fakeTrx({ capsByTech: { t1: [{ service_category: lawn, active: false }], t2: [{ service_category: lawn, active: true }] } });
+    await expect(toT2({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+    trx = fakeTrx({ capsByTech: { t1: [{ service_category: lawn, active: true }], t2: [{ service_category: lawn, active: false }] } });
+    await expect(toT2({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
     // No receiving tech at all → nothing to check, no read.
     const unassigned = makeMoveGuard({ service: { ...lawnRow, technician_id: null }, best: { ...BEST, technician_id: null } });
     trx = fakeTrx();

@@ -155,11 +155,15 @@ async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
   if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
 }
 
-// Per-row fence the rebooker runs on the transaction that commits each move:
-// the tapped row, and — because the unit mover forwards it — every grouped
-// sibling's own move too (the member guard ran under the planning lock; this
-// is the commit-time recheck). The rebooker hands over the row it is moving
-// and the tech it lands on; the closure's values are the fallback.
+// Per-row fence run on the transaction that commits each row's placement:
+// the rebooker calls it for the row it moves (standalone, or each grouped
+// member — the unit mover forwards it), and the unit mover calls it again in
+// the transaction that assigns each member to the destination technician (the
+// member guard ran under the planning lock, released by then). The row checked
+// is the one the caller hands over; the tech checked is the DESTINATION — the
+// placement's technician (the unit mover strips technicianId from member
+// moves, so the rebooker's "kept" tech is the OLD one there and would both
+// block a valid move away from an Off category and miss the destination).
 function makeMoveGuard({ service, best }) {
   const refuse = (rowId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
@@ -167,7 +171,7 @@ function makeMoveGuard({ service, best }) {
   );
   return async ({ trx, technicianId, service: movingRow }) => {
     const row = movingRow || service;
-    const receiving = technicianId || best.technician_id || row.technician_id || null;
+    const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
   };
 }
