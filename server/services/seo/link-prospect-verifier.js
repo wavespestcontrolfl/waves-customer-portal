@@ -27,6 +27,7 @@ const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
+const { canonicalProspectDomain, TARGET_DOMAIN_CANONICAL_SQL } = require('./prospect-domain-lock');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
 const OUR_HOMEPAGE = `https://${OUR_DOMAIN}`;
@@ -230,7 +231,7 @@ async function reconcileByDomain(prospect) {
 
 // A publisher can post a link without a worker report. Match one placement, never all locations on a host.
 function outreachTargetMatches(link, placement) {
-  if (comparableDomain(link.source_domain) !== comparableDomain(placement.target_domain)) return false;
+  if (canonicalProspectDomain(link.source_domain) !== canonicalProspectDomain(placement.target_domain)) return false;
   try {
     const expected = new URL(expectedTargetUrl(placement), OUR_HOMEPAGE);
     const actual = new URL(link.target_url);
@@ -241,7 +242,7 @@ function outreachTargetMatches(link, placement) {
 function outreachMatch(link, placements) {
   let source;
   try { source = new URL(link.source_url); } catch { return { placement: null, ambiguous: [] }; }
-  if (!['http:', 'https:'].includes(source.protocol) || source.username || source.password || comparableDomain(source.hostname) !== comparableDomain(link.source_domain)) return { placement: null, ambiguous: [] };
+  if (!['http:', 'https:'].includes(source.protocol) || source.username || source.password || canonicalProspectDomain(source.hostname) !== canonicalProspectDomain(link.source_domain)) return { placement: null, ambiguous: [] };
   const matches = placements.filter((p) => outreachTargetMatches(link, p));
   const exact = matches.filter((p) => canonicalLinkUrl(p.live_url || p.target_url) === canonicalLinkUrl(link.source_url));
   if (exact.length === 1) {
@@ -264,7 +265,7 @@ const outreachAwaitingPlacement = (p) => p.outreach_status === 'sent' && p.outre
 
 async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
   if (!isEnabled('linkAuthority') && !ownerMatch) return { matched: 0, ambiguous: 0 };
-  const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-domain-lock');
+  const { lockProspectDomain } = require('./prospect-domain-lock');
   let pendingQuery = db('seo_link_prospects').where((q) => q.where((b) => b.where({ outreach_status: 'sent' })
     .whereIn('status', ['contacted', 'negotiating', 'awaiting_owner'])).orWhereRaw("quality_signals->>'outreach_match_ambiguous' IS NOT NULL")).whereNotNull('domain_id');
   if (ownerMatch) pendingQuery = pendingQuery.where({ id: ownerMatch.prospectId });
@@ -275,11 +276,13 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
     const result = await db.transaction(async (trx) => {
       await lockProspectDomain(trx, domain);
       const rows = await trx('seo_link_prospects')
-        .whereRaw(`${require('./prospect-domain-lock').TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain])
+        .whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain])
         .forUpdate();
       const placements = rows.filter((p) => !['rejected', 'lost'].includes(p.status));
-      const links = await trx('seo_backlinks').where({ status: 'active' }).where(scanTrackedOnly)
-        .whereRaw("lower(regexp_replace(source_domain, '^www\\.', '')) = ?", [domain]).orderBy('id');
+      const links = (await trx('seo_backlinks').where({ status: 'active' }).where(scanTrackedOnly)
+        .whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL.replaceAll('target_domain', 'source_domain')} = ?`, [domain]).orderBy('id'))
+        .map((link) => ({ link, exact: placements.some((p) => outreachTargetMatches(link, p) && canonicalLinkUrl(p.live_url || p.target_url) === canonicalLinkUrl(link.source_url)) }))
+        .sort((a, b) => Number(b.exact) - Number(a.exact)).map(({ link }) => link);
       // A queued choice is valid only while the same active evidence still has ambiguous identity.
       for (const p of rows) {
         const quality = parseQuality(p.quality_signals);
@@ -299,7 +302,8 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
         const match = outreachMatch(link, placements);
         if (ownerMatch) {
           const chosen = placements.find((p) => p.id === ownerMatch.prospectId && outreachTargetMatches(link, p));
-          if (!chosen || !outreachAwaitingPlacement(chosen) || parseQuality(chosen.quality_signals).outreach_match_ambiguous !== link.id || !match.ambiguous.some((p) => p.id === chosen.id)) continue;
+          if (!chosen || !outreachAwaitingPlacement(chosen)) continue;
+          if (match.placement?.id !== chosen.id && !(parseQuality(chosen.quality_signals).outreach_match_ambiguous === link.id && match.ambiguous.some((p) => p.id === chosen.id))) continue;
           match.placement = chosen; match.ambiguous = [];
         }
         if (placements.some((p) => p.backlink_id === link.id && p.id !== match.placement?.id)) continue;

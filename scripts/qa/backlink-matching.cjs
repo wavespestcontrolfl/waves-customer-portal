@@ -78,5 +78,25 @@ stub('models/db', proxy);
     assert.equal(restored.follow_up_status, 'skipped');
     assert.equal(restored.indexing_status, 'not_checked');
     console.log('PASS recovered historical and moved backlinks settle only their own placement and retire follow-ups');
+    // A previously ambiguous owner choice is still valid after its competing sibling is rejected.
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', live_url: null, backlink_id: null, quality_signals: { outreach_match_ambiguous: replacement }, follow_up_status: 'drafted' });
+    assert.deepEqual(await V.reconcileOutreach({ ownerMatch: { prospectId: second, backlinkId: replacement } }), { matched: 1, ambiguous: 0 });
+    assert.equal((await trx('audit_log').where({ resource_id: second, action: 'backlink.placement.match' })).length, 2);
+    console.log('PASS owner assignment completes when its choice became unique');
+
+    // Canonical mail/apex spellings use the same publisher identity in SQL and matching.
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', live_url: null, backlink_id: null, quality_signals: {} });
+    await trx('seo_backlinks').where({ id: replacement }).update({ source_domain: `mail.${publisher}`, source_url: `https://mail.${publisher}/new-resources` });
+    assert.deepEqual(await V.reconcileOutreach(), { matched: 1, ambiguous: 0 });
+    console.log('PASS mail publisher canonicalization in the database query and matcher');
+
+    // A generic URL sorts before the known page by UUID; exact identity must still win.
+    const generic = '00000000-0000-4000-8000-000000000001';
+    await trx('seo_backlinks').insert({ id: generic, source_domain: publisher, source_url: `https://${publisher}/generic`, target_url: target, status: 'active', discovery_source: 'dataforseo', first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date()) });
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', live_url: null, backlink_id: null, target_url: `https://mail.${publisher}/new-resources`, quality_signals: {} });
+    assert.deepEqual(await V.reconcileOutreach(), { matched: 1, ambiguous: 0 });
+    assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).backlink_id, replacement);
+    console.log('PASS exact publisher page wins before a lower-UUID generic backlink');
+
   } finally { await trx.rollback(); }
 })().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(() => db.destroy());
