@@ -923,6 +923,18 @@ describe('PR review r8', () => {
 });
 
 describe('follow-up PR: add-on lines + tank-search spray check', () => {
+  test('a spray-check Hold withholds the card amount like the tank search (hook P1)', async () => {
+    const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', inventory_on_hand: 1, inventory_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
+    const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
+    const [held] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [{ productId: 'p', verdict: 'hold', reason: 'wind over 10 mph' }], packSizes: {} });
+    expect(held.planned).toBeNull();
+    expect(held.amountNote).toBe('Spray check: wind over 10 mph — amount withheld');
+    // Demand (shortage, order quantity) is unaffected by the hold.
+    expect(held.short).toBe(true);
+    const [ok] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [{ productId: 'p', verdict: 'ok', reason: null }], packSizes: {} });
+    expect(ok.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
+  });
+
   const program = { visits: [{ visit: 9, month: 'Sep', primary: 'Speedzone Southern 1 fl oz' }] };
   const catalog = [{ id: 'c', name: 'Celsius WG', rate_unit: 'oz' }, { id: 's', name: 'Speedzone Southern', rate_unit: 'fl oz' }];
 

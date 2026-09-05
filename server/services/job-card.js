@@ -1059,7 +1059,10 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // lapsed since noon withholds every planned amount here too, with the
     // Tank section's own reason.
     const demandMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
-    const plannedMix = !blocked && !tankReason && !unverified ? demandMix : null;
+    // A spray-check Hold withholds the amount on the card exactly as it does
+    // in the tank search — a held product is not dosed anywhere.
+    const held = verdict.verdict === 'hold';
+    const plannedMix = !blocked && !tankReason && !unverified && !held ? demandMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
     const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
@@ -1082,7 +1085,9 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
-      amountNote: unverified ? 'Label rate not yet verified — amount withheld' : (tankReason && demandMix ? `${tankReason} — amount withheld` : null),
+      amountNote: unverified
+        ? 'Label rate not yet verified — amount withheld'
+        : (tankReason && demandMix ? `${tankReason} — amount withheld` : (held && demandMix ? `Spray check: ${verdict.reason} — amount withheld` : null)),
       short,
       stockNote,
       onHand,
