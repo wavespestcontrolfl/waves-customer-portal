@@ -1463,6 +1463,11 @@ class RelayConversation {
         const { writeHandoffPacket } = require('./relay-transfer');
         return writeHandoffPacket(db, { callSid: this.callSid, packet, fence: (q) => this._fenceOwner(q), terminal: RELAY_TERMINAL_OUTCOMES });
       },
+      // The undo for a timed-out write that landed after the tool aborted.
+      revertHandoff: (attempt) => {
+        const { revertHandoffPacket } = require('./relay-transfer');
+        return revertHandoffPacket(db, { callSid: this.callSid, attempt, fence: (q) => this._fenceOwner(q) });
+      },
     };
   }
 
@@ -1940,6 +1945,20 @@ class RelayConversation {
               updated_at: new Date(),
             });
           if (salvaged) logger.info(`[voice-relay] transcript kept on a relay_failed row callSid=${maskSid(this.callSid)} turns=${this._transcript.length}`);
+        }
+        // Voicemail WON the close race (no staff numbers / an unconfirmed
+        // ring stamped it before this close): the recording's transcript
+        // owns the columns, but the AI segment still rides
+        // metadata.relay_transcript on the transfer-marked row (hook P1).
+        if (transcriptUpdate && !updated && !salvaged && this._transferRequested === true) {
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).where('call_outcome', 'voicemail').whereRaw("(metadata->'relay_handoff') IS NOT NULL"))
+            .update({
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                relay_transcript: { text: transcriptUpdate.transcription, metadata: JSON.parse(transcriptUpdate.transcription_metadata) },
+              })]),
+              updated_at: new Date(),
+            });
+          if (salvaged) logger.info(`[voice-relay] AI segment stashed on a voicemail-after-transfer row callSid=${maskSid(this.callSid)}`);
         }
         if (transcriptUpdate && !updated && !salvaged) {
           logger.error(

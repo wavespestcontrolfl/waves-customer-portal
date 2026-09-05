@@ -336,6 +336,79 @@ describe('codex r2 follow-ups', () => {
   });
 });
 
+describe('pre-push hook round 9', () => {
+  test('a card number in the model\'s summary never reaches the packet or the whisper (P0)', () => {
+    const packet = transfer.buildHandoffPacket({ intent: 'pay by card 4111 1111 1111 1111 please', summary: 'card 4242424242424242 exp 12/28', unresolved_question: 'charge 5555 5555 5555 4444 now' }, { verificationTier: 'full' });
+    const PAN = /\d(?:[ -]?\d){11,}/; // the scrubber keeps "card ending 4242" — only the full number must be gone
+    for (const field of ['intent', 'summary', 'unresolved_question']) {
+      expect(packet[field]).not.toMatch(PAN);
+      expect(packet[field]).toMatch(/card ending/);
+    }
+    expect(transfer.transferWhisper({ ...packet, context_available: true })).not.toMatch(PAN);
+    expect(transfer.transferWhisper({ ...packet, context_available: true })).toMatch(/Sandy transfer/);
+  });
+
+  test('both writes time out ⇒ abort; a timed-out UPDATE that lands LATER is reverted (P1)', async () => {
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    jest.useFakeTimers();
+    let settleFull;
+    const full = new Promise((r) => { settleFull = r; });
+    const writeHandoff = jest.fn().mockReturnValueOnce(full).mockReturnValueOnce(new Promise(() => {}));
+    const revertHandoff = jest.fn(async () => 1);
+    const { ctx } = ctxFor({ writeHandoff, revertHandoff });
+    const p = executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx);
+    await jest.advanceTimersByTimeAsync(4000 + 1500 + 10);
+    expect(await p).toMatch(/could not be started/);
+    expect(ctx.endForTransfer).not.toHaveBeenCalled();
+    expect(revertHandoff).not.toHaveBeenCalled();
+    settleFull({ rows: 1, contextAvailable: true }); // the pool recovered — the stamp landed after the abort
+    await jest.advanceTimersByTimeAsync(0);
+    jest.useRealTimers();
+    await new Promise((r) => setImmediate(r));
+    expect(revertHandoff).toHaveBeenCalledWith(writeHandoff.mock.calls[0][0].attempt);
+  });
+
+  test('revertHandoffPacket undoes only THIS attempt on an un-rung ai_transferred row; the tool ctx wires it', async () => {
+    const db = require('../models/db');
+    const update = jest.fn(async () => 1);
+    const builder = { update, where: jest.fn(() => builder), whereRaw: jest.fn(() => builder) };
+    db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const convo = new RelayConversation({ callSid: 'CA-rv', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    expect(await convo._buildToolCtx().revertHandoff('att-9')).toBe(1);
+    expect(builder.where).toHaveBeenCalledWith('call_outcome', 'ai_transferred');
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff'->>'attempt'"), ['att-9']);
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_transfer_ring_at'));
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining('relay_session_claim_owner'), ['nonce-1']);
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ call_outcome: null, metadata: expect.objectContaining({ sql: "metadata - 'relay_handoff'" }) }));
+  });
+
+  test('voicemail won the close race: the AI segment is stashed metadata-only on the transfer-marked voicemail row (P1)', async () => {
+    const db = require('../models/db');
+    const updates = [];
+    const builder = {
+      where: jest.fn(() => builder), whereIn: jest.fn(() => builder), whereNull: jest.fn(() => builder), orWhereNotIn: jest.fn(() => builder),
+      whereRaw: jest.fn(() => builder), whereNotIn: jest.fn(() => builder), first: jest.fn(async () => null), select: jest.fn(() => builder),
+      update: jest.fn(async (patch) => { updates.push(patch); return updates.length === 3 ? 1 : 0; }), // reconcile 0, terminal salvage 0, voicemail stash 1
+    };
+    db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const convo = new RelayConversation({ callSid: 'CA-vm', sessionKey: 'nonce-v', from: '+19415551234', send: jest.fn() });
+    convo._transferRequested = true;
+    convo.leadCaptured = true;
+    convo._recordTurn('user', 'transfer me');
+    convo._recordTurn('agent', 'Transferring you now.');
+    await convo.end('transfer');
+    expect(updates).toHaveLength(3);
+    expect(builder.where).toHaveBeenCalledWith('call_outcome', 'voicemail');
+    expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff') IS NOT NULL"));
+    expect(updates[2]).not.toHaveProperty('transcription'); // the recording owns the columns
+    expect(updates[2].metadata.bindings[0]).toContain('"relay_transcript"');
+    const logger = require('../services/logger');
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('transcript NOT persisted'));
+  });
+});
+
 describe('whisper + AI segment', () => {
   test('≤20 words, sanitized, from the packet only', () => {
     const w = transfer.transferWhisper({ context_available: true, caller_name: 'Pat "Doe" <b>', intent: 'cancel service', unresolved_question: 'refund for June and the extra visit last week please' });
