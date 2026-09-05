@@ -447,9 +447,16 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     return transition('waiting', { lifecycle, last_progress_at: new Date() }, { extendLease: false, message: clip(reason, 2000), metadata: { kind } });
   }
 
+  // A resume opens a fresh ACTIVE span: started_at is the run's current
+  // active span (the attempt row keeps the attempt's own start), so a run
+  // that waited on a human longer than the lane's hard timeout is judged
+  // from when it resumed, not labelled stalled the moment it moves again
+  // (pre-push audit; the same rule the legacy adapters apply to an
+  // executing approval).
   async function resume(reason = null) {
     if (spent()) return null;
-    return transition('resumed', { lifecycle: 'running', last_progress_at: new Date() }, { message: clip(reason, 2000) });
+    const now = new Date();
+    return transition('resumed', { lifecycle: 'running', started_at: now, last_progress_at: now }, { message: clip(reason, 2000) });
   }
 
   async function checkpoint(data = {}) {

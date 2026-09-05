@@ -226,6 +226,17 @@ describe('start / step / finish', () => {
     expect(mockToolEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'agent_run', toolName: 'web_search', success: false, metadata: { run_id: h.id, step_id: store.agent_run_steps[1].id } }));
   });
 
+  test('a resume after a human wait opens a fresh active span: started_at moves to the resume, the attempt keeps its own start', async () => {
+    const h = await runs.startRun(base);
+    const attemptStart = store.agent_attempts[0].started_at;
+    runRow().started_at = new Date(Date.now() - 3 * 864e5); // a 3-day owner wait is not an instant hard timeout
+    await h.wait('human', 'owner review');
+    await h.resume('approved');
+    expect(runRow().started_at.getTime()).toBeGreaterThan(Date.now() - 5000);
+    expect(store.agent_attempts[0].started_at).toBe(attemptStart);
+    expect(events(h.id)).toEqual(['started', 'waiting', 'resumed']);
+  });
+
   test('wait / resume / checkpoint move the lifecycle and merge the summary; an unserialisable checkpoint never throws', async () => {
     const h = await runs.startRun(base);
     const bad = await runs.startRun({ ...base, sourceRunId: 'bad', idempotencyKey: 'kbad' });
