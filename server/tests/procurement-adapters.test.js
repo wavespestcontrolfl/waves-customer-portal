@@ -225,23 +225,35 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       isChecked: async () => { if (spec.checked == null) throw new Error('n/a'); return spec.checked; },
       click: async () => { if (spec.onClick) await spec.onClick(); },
       fill: async (v) => { if (spec.onFill) spec.onFill(v); },
-      press: async () => {},
+      press: async (key) => { if (spec.onPress) await spec.onPress(key); },
       waitFor: async () => {},
       locator: (sub) => (spec.sub ? spec.sub(sub) : el()),
     });
-    const line = (l) => el({ count: 1, sub: (sub) => sub === S.cartLineSku ? el({ count: 1, text: l.sku }) : sub === S.cartLineQty ? el({ count: 1, value: l.qty }) : el() });
+    const line = (l) => el({ count: 1, visible: true, sub: (sub) => sub === S.cartLineSku ? el({ count: 1, text: l.sku }) : sub === S.cartLineQty ? el({ count: 1, value: l.qty }) : el() });
     const resolve = (sel) => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
-      if (sel === S.loginPass) return st.loggedIn ? (st.loginPassHiddenAfterLogin ? el({ count: 1, visible: false }) : el()) : el({ count: 1, visible: true });
-      if (sel === S.loginSubmit) return el({ count: 1, onClick: () => { if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
+      // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
+      // a document-wide loginSubmit read is what a hidden responsive login form ahead of the visible one would poison.
+      const submit = el({ count: 1, visible: true, onClick: () => { if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
+      const loginForm = el({ count: 1, sub: (sub) => (sub === S.loginSubmit ? (st.formSubmitCount === 0 ? el() : submit) : el()) });
+      const passField = el({ count: 1, visible: true, sub: (sub) => (sub === 'xpath=ancestor::form[1]' ? loginForm : el()), onPress: async (key) => { st.pressed = [...(st.pressed || []), key]; if (key === 'Enter') await submit.click(); } });
+      if (sel === S.loginPass) return st.loggedIn ? (st.loginPassHiddenAfterLogin ? el({ count: 1, visible: false }) : el()) : passField;
+      if (sel === S.loginSubmit) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenSubmitClicked = (st.hiddenSubmitClicked || 0) + 1; } }) : submit) });
       if (sel === S.loginError) return el();
-      if (sel === S.searchInput) return el({ count: 1 });
+      if (sel === S.searchInput) return el({ count: 1, visible: true });
       if (sel === S.productLink) return el({ count: 1 });
       if (sel === S.productSku) return el({ count: 1, text: 'SKU: S1-77' });
       if (sel === S.unavailable) return el();
-      if (sel === S.qtyInput) return el({ count: 1, onFill: (v) => { st.qty = Number(v); } });
-      if (sel === S.addToCart) return el({ count: 1, onClick: () => { st.addClicked += 1; st.cart.push({ sku: 'S1-77', qty: st.qty }); if (st.addExtra) st.cart.push(st.addExtra); } });
-      if (sel === S.cartLine) return el({ count: st.cart.length, nth: (i) => line(st.cart[i]) });
+      // productControlsHiddenFirst: hidden desktop/mobile copies of the quantity + Add to Cart controls precede the visible ones
+      const qtyInput = el({ count: 1, visible: true, onFill: (v) => { st.qty = Number(v); } });
+      const addToCart = el({ count: 1, visible: true, onClick: () => { st.addClicked += 1; st.cart.push({ sku: 'S1-77', qty: st.qty }); if (st.addExtra) st.cart.push(st.addExtra); } });
+      const hiddenCopy = (target) => el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenControlClicked = (st.hiddenControlClicked || 0) + 1; }, onFill: () => { st.hiddenControlClicked = (st.hiddenControlClicked || 0) + 1; } }) : target) });
+      if (sel === S.qtyInput) return st.productControlsHiddenFirst ? hiddenCopy(qtyInput) : qtyInput;
+      if (sel === S.addToCart) return st.productControlsHiddenFirst ? hiddenCopy(addToCart) : addToCart;
+      // cartLinesResponsive: every cart line is rendered twice — a hidden mobile copy after the visible row
+      if (sel === S.cartLine) return st.cartLinesResponsive
+        ? el({ count: st.cart.length * 2, nth: (i) => (i % 2 ? el({ count: 1, visible: false }) : line(st.cart[i / 2])) })
+        : el({ count: st.cart.length, nth: (i) => line(st.cart[i]) });
       if (sel === S.cartRemove) return el({ count: st.cart.length && st.removable ? 1 : 0, onClick: () => { st.cart.shift(); } });
       // cartTotalHiddenFirst: a hidden responsive copy carrying a stale figure precedes the visible total
       if (sel === S.cartTotal) return st.cartTotalHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: '$999.00' }) : el({ count: 1, visible: true, text: '$99.00' })) }) : el({ count: 1, visible: true, text: '$99.00' });
@@ -535,6 +547,33 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ loginPassHiddenAfterLogin: true });
     expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
     expect(st.loggedIn).toBe(true);
+  });
+
+  test('the login submit is the visible password form\'s own control — a hidden responsive login form ahead of it is never clicked (r16 P1)', async () => {
+    const { st, deps } = fakeSiteOne();
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.loggedIn).toBe(true);
+    expect(st.hiddenSubmitClicked || 0).toBe(0); // the document-wide first submit (hidden) was never used
+  });
+
+  test('a visible login form without its own submit control is submitted with Enter on the password field (r16 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ formSubmitCount: 0 });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.pressed).toEqual(['Enter']);
+    expect(st.loggedIn).toBe(true);
+  });
+
+  test('hidden responsive copies of the quantity + Add to Cart controls are never acted on — the visible ones are (r16 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ productControlsHiddenFirst: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.hiddenControlClicked || 0).toBe(0);
+    expect(st.addClicked).toBe(1); // the visible Add to Cart, once (the dry run then empties the cart)
+  });
+
+  test('a cart item rendered again in a hidden responsive container is ONE line — the exact-cart proof passes (r16 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ cartLinesResponsive: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 }); // the total was read = the one-line proof passed
+    expect(st.addClicked).toBe(1);
   });
 
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {

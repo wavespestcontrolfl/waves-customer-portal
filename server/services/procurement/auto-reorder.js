@@ -220,6 +220,12 @@ async function handleLiveRequest(ctx, p, existing) {
   // the same transaction that creates the claim (Codex r19 P1 / r20 P1) —
   // the sweep only stands down here.
   if (vendorId && await dispatcherOrders(ctx.conn, vendorId)) return;
+  // An automatic order already out for this product (an ambiguous submit or
+  // stale recovery leaves the request OPEN with the ledger dispatched):
+  // the ledger's own bell says do-not-reorder; a gate closed or a vendor
+  // retired since must not ring "order manually" on top of it (hook r27
+  // P0). Reconciliation — receive or revoke — is what reopens the lane.
+  if (await require('./order-dispatch').findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
   await bellOrWarn(ctx, p, request, 'renotified');
 }
 

@@ -23,7 +23,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
-function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false }) {
+function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false, openLookupBell = false }) {
   const updates = [];
   const inserts = [];
   const trx = (table) => {
@@ -56,10 +56,14 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   trx.raw = (s) => s;
   const db = (table) => {
     const q = {};
-    for (const m of ['whereNotNull', 'where', 'whereRaw', 'whereNull']) q[m] = () => q;
+    for (const m of ['whereNotNull', 'where', 'whereNull']) q[m] = () => q;
+    q.whereRaw = (sql, bindings) => { if (table === 'notifications' && bindings) q._key = bindings[0]; return q; };
     q.select = async () => products;
-    q.update = async (row) => { updates.push({ table, row }); return 1; };
-    q.first = async () => (table === 'product_inventory_movements' && settledAfterBell ? { id: 'mv-race' } : null); // the post-bell settled re-check
+    q.update = async (row) => { updates.push({ table, row, ...(q._key ? { key: q._key } : {}) }); return 1; };
+    q.first = async () => {
+      if (table === 'notifications') return openLookupBell && q._key === 'supplies-consumption-failed:lookup:svc-1' ? { id: 'bell-lookup' } : null; // retireLookupBellIfSettled's open-bell probe
+      return table === 'product_inventory_movements' && (settledAfterBell || openLookupBell) ? { id: 'mv-race' } : null; // the post-bell settled re-check / lookupSettled
+    };
     return q;
   };
   db.transaction = async (fn) => fn(trx);
@@ -294,31 +298,73 @@ test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14
   expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:lookup:svc-1');
 });
 
-test('a lookup bell rung after a concurrent retry already deducted the visit\'s kit is retired at once (Codex r24 P1)', async () => {
-  notifyAdmin.mockClear();
+// The lookup-failure bell's post-bell re-check re-runs the lookup: the bell is
+// retired only when EVERY kit product that applies to the line has a usage
+// movement; a lookup that fails again, or one product still owed, keeps the
+// bell and the owed marker (Codex r24 P1 → r27 P1).
+function lookupBellDb({ retryProducts, movements }) {
   const updates = [];
+  let lookups = 0;
   const db = (table) => {
-    if (table === 'products_catalog') throw new Error('relation lost');
-    const q = {};
-    for (const m of ['where', 'whereRaw', 'whereNull']) q[m] = () => q;
-    q.first = async () => ({ id: 'mv-race' }); // the visit-wide settled re-check finds the retry's movement
+    if (table === 'products_catalog') {
+      lookups += 1;
+      if (lookups === 1 || retryProducts === null) throw new Error('relation lost');
+      const q = {}; for (const m of ['where', 'whereNotNull']) q[m] = () => q; q.select = async () => retryProducts; return q;
+    }
+    const q = {}; let productId = null;
+    q.where = (w) => { if (w && w.product_id) productId = w.product_id; return q; };
+    for (const m of ['whereRaw', 'whereNull']) q[m] = () => q;
+    q.first = async () => (table === 'product_inventory_movements' && movements.includes(productId) ? { id: `mv-${productId}` } : null);
     q.update = async (row) => { updates.push({ table, row }); return 1; };
     return q;
   };
   db.raw = (sql) => sql;
-  const res = await consumeCompletionSupplies(db, args);
+  return { db, updates };
+}
+const card = { id: 'prod-card', name: 'Door card', per_completion_usage: '1', per_completion_service_lines: null };
+const lawnOnly = { id: 'prod-lawn', name: 'Lawn flag', per_completion_usage: '1', per_completion_service_lines: '["lawn"]' };
+
+test('a lookup bell is retired when the re-run lookup shows EVERY applicable kit product already deducted by the concurrent retry (Codex r24 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: [sign, card, lawnOnly], movements: ['prod-sign', 'prod-card'] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' }); // lawnOnly does not apply to a pest visit
   expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
   expect(updates).toEqual([{ table: 'notifications', row: expect.objectContaining({ read_at: expect.any(Date) }) }]);
 });
 
-test('a successful deduction retires the failure bells an earlier attempt rang for this product + visit (Codex r15 P2)', async () => {
+test('a lookup bell STAYS when one applicable kit product has no movement yet — one movement is not visit-wide settlement (Codex r27 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: [sign, card], movements: ['prod-sign'] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(updates).toEqual([]);
+});
+
+test('a lookup bell STAYS when the re-run lookup fails again, whatever movements exist (Codex r27 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: null, movements: ['prod-sign'] });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(updates).toEqual([]);
+});
+
+test('a successful deduction retires the failure bell an earlier attempt rang for this product + visit — and ONLY that one: the visit-wide lookup bell stays until every kit product is proven settled (Codex r15 P2, hook r27 P1)', async () => {
   const { db, updates } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, args);
   const retired = updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(1);
+  expect(retired[0].key).toBe('supplies-consumption-failed:prod-sign:svc-1'); // never the lookup key from a product clear
   expect(retired[0].row.read_at).toBeInstanceOf(Date);
   expect(String(retired[0].row.metadata)).toContain('autoRetired'); // stamped so it never reads as a staff hand-off (Codex r26 P1)
+});
+
+test('an open lookup bell is retired at the end of a run only when every applicable kit product has a movement (hook r27 P1)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], openLookupBell: true });
+  await consumeCompletionSupplies(db, args); // sign is deducted in this run → the one applicable product is settled
+  const keys = updates.filter((u) => u.table === 'notifications').map((u) => u.key);
+  expect(keys).toEqual(['supplies-consumption-failed:prod-sign:svc-1', 'supplies-consumption-failed:lookup:svc-1']);
 });
 
 test('a lookup bell this module auto-retired (a concurrent retry deducted the kit) does NOT hand off the next kit product — it is deducted (Codex r26 P1)', async () => {
@@ -422,6 +468,9 @@ describe('recap consumption hook — retry window (source contract)', () => {
     expect(hook).toMatch(/if \(result\.priorCompleted !== true\) return true;/);
     expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
     expect(hook).toMatch(/return flags\.completion_supplies_owed === true;/);
+    // A failed marker read is NOT owed (hook r27 P1): a historical completion edited today has no movement for the index to stop; the marker stays for the next recap.
+    expect(hook).toMatch(/settlement deferred, marker kept/);
+    expect(hook).not.toMatch(/consuming anyway:/); // the old warn-and-return-true branch
     // Cleared unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must not deduct again.
     expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent'\);/);
     expect(hook).toMatch(/if \(result\.recordId && !handoffLost\) await db\('service_records'\)/);

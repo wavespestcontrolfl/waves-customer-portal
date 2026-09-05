@@ -14091,13 +14091,14 @@ async function recapSuppliesOwed(result) {
     const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
     return flags.completion_supplies_owed === true;
   } catch (err) {
-    // This is the marker's only production reader and the client gets a 200
-    // either way, so "not owed" on a failed read would strand the kit for
-    // good. Fail TOWARD consuming: the at-most-once movement index makes a
-    // double deduction impossible and a handed-off product is skipped by
-    // settlement (Codex r20 P2).
-    logger.warn(`[dispatch] recap supplies-owed read failed — consuming anyway: ${err.message}`);
-    return true;
+    // A failed read establishes nothing: consuming anyway would deduct
+    // today's kit for a HISTORICAL completion edited now — one completed
+    // before consumption existed has no movement, so the at-most-once index
+    // cannot stop it (hook r27 P1). Fail CLOSED: the durable marker (if
+    // set) stays for the next recap of this record; the miss is error-level
+    // so it is never silent.
+    logger.error(`[dispatch] recap supplies-owed read failed for record ${result.recordId} — settlement deferred, marker kept: ${err.message}`);
+    return false;
   }
 }
 
