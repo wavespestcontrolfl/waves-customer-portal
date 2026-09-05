@@ -6,11 +6,13 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { readContext, childEnvironment, identity } = require('./context');
 const { doctor } = require('./doctor');
+const { checkRuntime } = require('./runtime');
 
 async function main() {
   const context = readContext();
   const mode = process.argv[2] || 'app';
   if (!['app', 'client', 'debug', 'migrate'].includes(mode)) throw new Error('Expected app, client, debug, or migrate.');
+  checkRuntime(context.root);
   const env = childEnvironment(context, { database: mode !== 'client' });
   if (mode === 'migrate') {
     const child = spawn(process.execPath, ['node_modules/knex/bin/cli.js', 'migrate:latest', '--knexfile', 'server/knexfile.js'],

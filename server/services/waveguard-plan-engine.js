@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const protocols = require('../config/protocols.json');
+const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
@@ -971,10 +972,13 @@ function findNutrientProductsMissingConversions(items) {
   });
 }
 
-function selectProtocolVisit(profile, serviceDate) {
-  const trackKey = profile?.track_key && protocols.lawn?.[profile.track_key]
-    ? profile.track_key
-    : TRACK_BY_GRASS[profile?.grass_type] || null;
+function selectProtocolVisit(profile, serviceDate, legacyGrass = null) {
+  const profileRecorded = [profile?.track_key, profile?.grass_type]
+    .some((value) => String(value || '').trim());
+  const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
+    || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
+    || (recorded ? null : 'st_augustine');
   const track = trackKey ? protocols.lawn?.[trackKey] : null;
   const month = MONTH_ABBR[etParts(serviceDate).month - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
@@ -1298,7 +1302,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .select(
       'ss.*',
       'c.first_name', 'c.last_name', 'c.address_line1', 'c.city', 'c.state', 'c.zip',
-      'c.waveguard_tier',
+      'c.waveguard_tier', 'c.lawn_type',
       't.name as technician_name',
     )
     .first();
@@ -1318,8 +1322,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const strict = options.strict === true;
   const profile = await knex('customer_turf_profiles')
     .where({ customer_id: service.customer_id, active: true })
-    .first()
-    .catch((err) => { if (strict) throw err; return null; });
+    .first();
   const profileCompleteness = summarizeTurfProfileCompleteness(profile);
   const products = await getProducts(knex, { strict });
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products, { strict });
@@ -1341,7 +1344,7 @@ async function buildPlanForService(serviceId, options = {}) {
   });
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
-  const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate);
+  const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate, service.lawn_type);
   const structuredProtocolContext = await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
@@ -1664,6 +1667,7 @@ async function buildPlanForService(serviceId, options = {}) {
 module.exports = {
   buildProductInventorySnapshot,
   buildPlanForService,
+  selectProtocolVisit,
   calculateProductAmount,
   parseVisitNutrientTargets,
   summarizeMaterialCost,

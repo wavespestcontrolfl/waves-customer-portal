@@ -4,10 +4,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { readContext, availablePort, childEnvironment, identity } = require('./context');
+const { checkRuntime } = require('./runtime');
 
 async function doctor(context, { frontend = false, ports = true } = {}) {
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  if (major < 20 || (major === 20 && minor < 9)) throw new Error('Node 20.9 or newer is required.');
+  const nodeVersion = checkRuntime(context.root);
   for (const dependency of ['vite', 'playwright', 'knex', '@waves/report-redaction']) {
     require.resolve(dependency, { paths: [context.root] });
   }
@@ -33,7 +33,7 @@ async function doctor(context, { frontend = false, ports = true } = {}) {
       throw new Error('Dev database readiness failed. Check connectivity and run dev:migrate on the dedicated dev database.');
     } finally { await db.destroy(); }
   }
-  return { ...identity(context), migrations, integrationCredentials: 'excluded', backgroundJobs: 'disabled' };
+  return { ...identity(context), nodeVersion, migrations, integrationCredentials: 'excluded', backgroundJobs: 'disabled' };
 }
 
 if (require.main === module) {

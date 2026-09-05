@@ -1011,3 +1011,22 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     localStorage.removeItem('waves_admin_token');
   });
 });
+
+
+describe('Consolidated lawn report', () => {
+  it('keeps the lawn summary once and omits the separate inspection card', async () => {
+    const payload = structuredClone(lawnReportV2);
+    payload.reportV2.photoSummary = 'Lawn health is up 2 points since your first assessment.';
+    payload.protocol = { structuredObservations: ['Leaf spotting consistent with gray leaf spot was observed. Location: Back yard.', 'Unreviewed raw technician note'], actions: ['Tested irrigation coverage'] };
+    renderReport(payload);
+    await waitFor(() => expect(document.getElementById('visit-summary')?.textContent).toContain(payload.reportV2.photoSummary));
+    const text = document.body.textContent;
+    expect(text.split(payload.reportV2.photoSummary)).toHaveLength(2);
+    expect(document.getElementById('lawn-field-findings')).toBeNull();
+    expect(screen.getAllByText(payload.protocol.structuredObservations[0])).toHaveLength(1);
+    expect(document.getElementById('visit-summary')).toContainElement(screen.getByText(payload.protocol.structuredObservations[0]));
+    expect(text).not.toContain('Unreviewed raw technician note');
+    expect(text).not.toContain('Lawn Health Documentation');
+    expect(text).not.toContain("Why these products were selected for today's service.");
+  });
+});
