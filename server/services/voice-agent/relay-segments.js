@@ -7,8 +7,10 @@ const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
 const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0 }) {
   return {
+    model_failures: Number(modelFailures) || 0,
+    tool_failures: Number(toolFailures) || 0,
     slot_refs: slotRefs,
     lookup_refs: lookupRefs,
     lookup_results: lookupResults,

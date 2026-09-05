@@ -249,6 +249,31 @@ describe('triggerNotification bell outcome', () => {
     expect(result.bellWritten).toBe(false);
   });
 
+  test('relay callback ownership is checked by the bell transaction and a refused bell never pushes', async () => {
+    const relayFailureCall = { callSid: 'CA-fixture', owner: 'owner-fixture' };
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });
+    const result = await triggerNotification('customer_voicemail_callback', { callLogId: 'call-fixture', phone: '+19415551234' }, { relayFailureCall });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('voicemail_callback', expect.any(String), expect.any(String), expect.objectContaining({ relayFailureCall, dedupeKey: 'relay-failure:CA-fixture' }));
+    expect(result.bellWritten).toBe(false);
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('reports the committed bell before slow push delivery completes', async () => {
+    let completePush;
+    const push = new Promise((resolve) => { completePush = resolve; });
+    require('../services/push-notifications').sendToAdminUsers.mockReturnValueOnce(push);
+    let committed;
+    const bell = new Promise((resolve) => { committed = resolve; });
+    let finished = false;
+    const delivery = triggerNotification('customer_voicemail_callback', { callLogId: 'call-fixture' }, {
+      relayFailureCall: { callSid: 'CA-fixture', owner: 'owner-fixture' }, onBell: committed,
+    }).then((result) => { finished = true; return result; });
+    expect(await bell).toBe(true);
+    expect(finished).toBe(false);
+    completePush({ sent: 1 });
+    expect((await delivery).bellWritten).toBe(true);
+  });
+
   test('reports bellWritten true when the insert succeeds', async () => {
     const result = await triggerNotification('twilio_failure', { channel: 'sms' });
 

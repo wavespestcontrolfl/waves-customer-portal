@@ -15,6 +15,7 @@ const { segmentsText, callerTurnsFromText, nonEmptyFields, latestPromises } = re
 
 const RECONNECT_LIMIT = 1;
 const RESUME_STATE_TIMEOUT_MS = 2000;
+const PROVIDER_FAILURE_LIMIT = 2;
 const RESUME_SEED_MAX_CHARS = 20000;
 
 function isRecoveryGateOn() {
@@ -131,6 +132,8 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
       return {
         reconnects,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
+        modelFailures: latest ? Number(latest.model_failures) || 0 : 0,
+        toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
         reserviceFiled: meta.relay_reservice_filed === true || legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
         // A lead captured on an earlier leg even when its relay_lead_id
@@ -205,9 +208,15 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
   try { return await Promise.race([read, timeout]); } catch { return null; } finally { clearTimeout(timer); }
 }
 
+/** 'handoff' once either counter reaches the limit; null otherwise. */
+function providerFailurePolicy({ modelFailures = 0, toolFailures = 0 } = {}) {
+  if (!isRecoveryGateOn()) return null;
+  return (modelFailures >= PROVIDER_FAILURE_LIMIT || toolFailures >= PROVIDER_FAILURE_LIMIT) ? 'handoff' : null;
+}
 
 module.exports = {
   RECONNECT_LIMIT,
+  PROVIDER_FAILURE_LIMIT,
   isRecoveryGateOn,
   claimReconnect,
   undoLateReconnect,
@@ -216,5 +225,6 @@ module.exports = {
   fallbackFence,
   loadResumeState,
   readReconnectState,
+  providerFailurePolicy,
   RESUME_SEED_MAX_CHARS,
 };

@@ -5,7 +5,7 @@ const segmentStore = require('../services/voice-agent/relay-segments');
  * twilio-voice-relay-recovery.test.js.
  *
  * Gate off ⇒ nothing here runs: no segment append, no generation fence, no
- * resume seed — the close-time statements are
+ * resume seed, no provider-failure handoff — the close-time statements are
  * byte-identical to today (pinned by the existing conversation/transcript
  * suites, which run with the gate unset).
  */
@@ -165,7 +165,7 @@ describe('relay-recovery module', () => {
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'other-nonce' })).toBeNull(); // not this socket's claim ⇒ nothing (hook P0)
     expect(await recovery.loadResumeState(db, 'CA-1')).toBeNull(); // no key ⇒ nothing
-    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, promises: [], callerTurns: ['ants'] });
+    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
     primeDb({ firstRow: { metadata: JSON.stringify({ ...OWNED, relay_segments: [{ generation: 1, text: 'x' }] }) } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toBeNull(); // no reconnect stamp ⇒ a forged <Parameter resumed> proves nothing
     primeDb({ firstRow: null });
@@ -223,6 +223,14 @@ describe('relay-recovery module', () => {
     expect(await recovery.readReconnectState(db, 'CA-1')).toEqual({ reconnects: 1, reconnectMs: 777, claimGen: 500, profile: null });
   });
 
+  test('providerFailurePolicy hands off at the limit on either counter', () => {
+    expect(recovery.providerFailurePolicy({ modelFailures: 2 })).toBeNull();
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    expect(recovery.providerFailurePolicy({ modelFailures: 1, toolFailures: 1 })).toBeNull();
+    expect(recovery.providerFailurePolicy({ modelFailures: 2 })).toBe('handoff');
+    expect(recovery.providerFailurePolicy({ toolFailures: 2 })).toBe('handoff');
+    expect(recovery.providerFailurePolicy()).toBeNull();
+  });
 });
 
 describe('the conversation side', () => {
@@ -481,6 +489,15 @@ describe('the conversation side', () => {
     expect(convo._resume.segmentsText).toBe('');
   });
 
+  test('the provider-failure streak continues across the reconnect (codex r1 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x', modelFailures: 1, toolFailures: 0 })).toEqual(expect.objectContaining({ model_failures: 1, tool_failures: 0 }));
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', model_failures: 1, tool_failures: 1 }] } } });
+    const convo = resumedConvo({ callSid: 'CA-streak' });
+    await convo._resumeReady;
+    expect(convo._modelFailures).toBe(1);
+    expect(convo._toolFailures).toBe(1);
+  });
 
   test('a proven prior lead restores the capture state (lead_captured true; the session may end when the caller is done) (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
@@ -550,6 +567,45 @@ describe('the conversation side', () => {
     expect(seg.started_at).toBe(new Date(t0).toISOString()); // this leg's segment carries the CALL's start forward
   });
 
+  test('callback delivery carries the verified owner to the atomic notification boundary', async () => {
+    primeDb({ firstRow: { id: 'cl-1', from_phone: '+19415551234' } });
+    const convo = new RelayConversation({ callSid: 'CA-old', sessionKey: 'old', from: '+19415551234', send: jest.fn() });
+    convo._callerVerified = true;
+    expect(await convo._fileFailureCallback()).toBe(true);
+    expect(require('../services/notification-triggers').triggerNotification).toHaveBeenCalledWith(
+      'customer_voicemail_callback', expect.any(Object),
+      expect.objectContaining({ relayFailureCall: { callSid: 'CA-old', owner: 'old' }, beforePush: expect.any(Function) }),
+    );
+  });
+
+  test.each([true, false])('supersession before or during handoff stops speech and callback instructions (before=%s)', async (before) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const endSession = jest.fn();
+    const convo = new RelayConversation({ callSid: 'CA-old', from: '+19415551234', send: jest.fn(), endSession });
+    convo._modelFailures = 2;
+    convo._sessionSuperseded = jest.fn().mockResolvedValue(true);
+    if (!before) convo._sessionSuperseded.mockResolvedValueOnce(false);
+    convo._fileFailureCallback = jest.fn().mockResolvedValue(false);
+    convo.say = jest.fn();
+    expect(await convo._maybeHandoffForFailure(null)).toBe(true);
+    expect(convo._fileFailureCallback).toHaveBeenCalledTimes(before ? 0 : 1);
+    expect(convo.say).not.toHaveBeenCalled();
+    expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'superseded' }));
+  });
+
+  test('the provider-failure callback links the customer and rings the row\'s number only for a VERIFIED session; an unverified one files unlinked to the number it declared (hook r26 P1)', async () => {
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    primeDb({ firstRow: { id: 'cl-9', customer_id: 'C1', from_phone: '+19415550000' } });
+    const unverified = new RelayConversation({ callSid: 'CA-cb-unv', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    expect(await unverified._fileFailureCallback()).toBe(true);
+    expect(trig).toHaveBeenLastCalledWith('customer_voicemail_callback', expect.objectContaining({ phone: '+19415551234', customerId: null, callLogId: 'cl-9' }), expect.objectContaining({ relayFailureCall: expect.any(Object) }));
+    const verified = new RelayConversation({ callSid: 'CA-cb-ver', sessionKey: 'nonce-1', from: '+19415550000', send: jest.fn() });
+    verified._callerVerified = true;
+    expect(await verified._fileFailureCallback()).toBe(true);
+    expect(trig).toHaveBeenLastCalledWith('customer_voicemail_callback', expect.objectContaining({ phone: '+19415550000', customerId: 'C1', callLogId: 'cl-9' }), expect.objectContaining({ relayFailureCall: expect.any(Object) }));
+  });
+
   test('customer-book lookups already spent ride the segment and the resumed leg continues the per-call budget (codex r4 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     expect(segmentStore.buildSegment({ generation: 1, text: 'x', lookupsUsed: 2 }).lookups_used).toBe(2);
@@ -569,6 +625,58 @@ describe('the conversation side', () => {
     expect(resumedSessionBudgetMs({ created_at: new Date(now - 10 * 60 * 1000), metadata: JSON.stringify({ relay_reconnects: 1 }) }, { now })).toBe(5 * 60 * 1000);
     expect(resumedSessionBudgetMs({ created_at: new Date(now - 20 * 60 * 1000), metadata: { relay_reconnects: 1 } }, { now })).toBe(WS_RESUMED_MIN_SESSION_MS);
     expect(resumedSessionBudgetMs({ created_at: null, metadata: { relay_reconnects: 1 } }, { now })).toBe(WS_MAX_SESSION_MS);
+  });
+
+  test('only committed callback evidence permits repeating the promise without another delivery', async () => {
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    primeDb({ firstRow: { id: 'cl-9', metadata: { relay_failure_callback_filed_at: new Date().toISOString() } } });
+    const convo = new RelayConversation({ callSid: 'CA-cb-dup', from: '+19415551234', send: jest.fn() });
+    expect(await convo._fileFailureCallback()).toBe(true);
+    expect(trig).not.toHaveBeenCalled();
+  });
+
+  test('a committed callback is promised even while push delivery remains pending', async () => {
+    primeDb({ firstRow: { id: 'cl-9', metadata: {} } });
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    trig.mockImplementationOnce((_key, _payload, options) => {
+      options.onBell(true);
+      return new Promise(() => {});
+    });
+    const convo = new RelayConversation({ callSid: 'CA-cb-push', from: '+19415551234', send: jest.fn() });
+    expect(await convo._fileFailureCallback()).toBe(true);
+  });
+
+  test('an unresolved callback makes no promise and leaves no separately persisted claim', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const { updates } = primeDb({ firstRow: { id: 'cl-9', metadata: {} } });
+      const { triggerNotification: trig } = require('../services/notification-triggers');
+      trig.mockImplementationOnce(() => new Promise(() => {}));
+      const convo = new RelayConversation({ callSid: 'CA-cb-pending', from: '+19415551234', send: jest.fn() });
+      const pending = convo._fileFailureCallback();
+      await jest.advanceTimersByTimeAsync(3100);
+      expect(await pending).toBe(false);
+      expect(updates).toEqual([]);
+    } finally { jest.useRealTimers(); }
+  });
+
+  test('unsettled writes defer handoff; a settled outcome is present before transfer', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const convo = new RelayConversation({ callSid: 'CA-write', from: '+19415551234', send: jest.fn() });
+    convo._modelFailures = 2;
+    convo._inFlightWrites.set('request_booking', new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const pending = convo._maybeHandoffForFailure(null);
+      await jest.advanceTimersByTimeAsync(10010);
+      expect(await pending).toBe(true);
+      expect(convo._handoffForFailure).toBe(false);
+      convo._inFlightWrites.clear();
+      convo._fileFailureCallback = jest.fn(async () => false);
+      expect(await convo._maybeHandoffForFailure(null)).toBe(true);
+      expect(convo._fileFailureCallback).toHaveBeenCalled();
+    } finally { jest.useRealTimers(); }
   });
 
   test('the turn cap is re-judged after resume hydration: a slow resume read that restores 40 earlier turns ends the call before any model round (codex r5 P2)', async () => {
@@ -747,14 +855,19 @@ describe('the conversation side', () => {
     expect(convo.leadCaptured).toBe(true);
   });
 
-  test('the earlier legs\' caller turns count toward the call turn cap', async () => {
+  test('a late reload never resurrects a failure streak this leg already cleared; the earlier legs\' caller turns count toward the call turn cap (codex r3 P2 ×2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
     const convo = resumedConvo({ callSid: 'CA-streak' });
     await convo._resumeReady;
-    const late = { ...convo._resume, callerTurns: Array.from({ length: 39 }, (_, i) => `turn ${i}`) };
+    const late = { ...convo._resume, modelFailures: 1, toolFailures: 1, callerTurns: Array.from({ length: 39 }, (_, i) => `turn ${i}`) };
     convo._applyResumeState(late); // before any round on this leg ⇒ the streak carries over
+    expect(convo._modelFailures).toBe(1);
+    convo._providerRoundSeen = true; // a round ran here and cleared it
+    convo._modelFailures = 0; convo._toolFailures = 0;
     convo._applyResumeState(late);
+    expect(convo._modelFailures).toBe(0);
+    expect(convo._toolFailures).toBe(0);
     // 39 earlier caller turns + this one ⇒ the cap (40) ends the call
     expect(convo._priorCallerTurns).toBe(39);
     const endSession = jest.fn();
@@ -842,7 +955,7 @@ describe('the conversation side', () => {
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
     const convo = resumedConvo({ callSid: 'CA-res', sessionGeneration: 2 });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, promises: [], callerTurns: ['my ants are back'] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
     await convo._runLoop('where were we').catch(() => {}); // no Anthropic client in tests: the seeding half runs
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call, before the line dropped'));
     expect(seeded).toHaveLength(1);
@@ -938,7 +1051,7 @@ describe('the conversation side', () => {
     const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } }); // proven, but no segment yet
     const convo = resumedConvo({ callSid: 'CA-race' });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, promises: [], callerTurns: [] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
     builder.first = jest.fn(async () => ({ metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L9', relay_segments: [{ generation: 1, text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } })); // the old socket's append landed
@@ -1005,4 +1118,232 @@ describe('the conversation side', () => {
     expect(off._resumeReady).toBeNull();
   });
 
+  describe('provider-failure handoff', () => {
+    function isolated({ streamImpl, executeToolImpl }) {
+      let Convo;
+      let leadWriter;
+      let dbIso;
+      jest.resetModules(); // relay-conversation requires relay-tools lazily — a cached instance from an earlier case must not win
+      jest.isolateModules(() => {
+        jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream: streamImpl } }; });
+        jest.doMock('../services/voice-agent/relay-tools', () => ({ TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: executeToolImpl }));
+        Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
+        leadWriter = require('../services/lead-from-extraction').createLeadFromExtraction; // the isolated registry's mocks
+        dbIso = require('../models/db');
+      });
+      return { Convo, leadWriter, dbIso };
+    }
+
+    test('transfer snapshots the outcome after a pending capture settles', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+      let convo;
+      const executeTool = jest.fn(async () => {
+        expect(convo._inFlightWrites.size).toBe(0);
+        expect(convo.leadCaptured).toBe(true);
+        return 'Transferring the caller to the office now.';
+      });
+      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      convo = new Convo({ callSid: 'CA-late-write', from: '+19415551234', send: jest.fn() });
+      convo._modelFailures = 2;
+      let settle;
+      const write = new Promise((resolve) => { settle = resolve; }).then(() => { convo.leadCaptured = true; convo._inFlightWrites.delete('capture_lead'); });
+      convo._inFlightWrites.set('capture_lead', write);
+      const pending = convo._maybeHandoffForFailure({ officeOpenNow: () => true });
+      await Promise.resolve();
+      expect(executeTool).not.toHaveBeenCalled();
+      settle();
+      expect(await pending).toBe(true);
+      expect(executeTool).toHaveBeenCalledTimes(1);
+    });
+
+    test('the second consecutive model failure hands off: office open ⇒ transfer_to_office runs (2A ends the leg); no re-prompt copy', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => { throw new Error('upstream 500'); } }));
+      const executeTool = jest.fn(async (name, input, ctx) => { ctx.endForTransfer(); return 'Transferring the caller to the office now.'; });
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf', from: '+19415551234', send, endSession });
+      convo._officeHours = { open: true };
+      convo._buildToolCtx = ((orig) => function () { const c = orig.call(this); c.officeOpenNow = () => true; return c; })(convo._buildToolCtx);
+      await convo._runLoop('first').catch(() => {});
+      expect(convo._modelFailures).toBe(1);
+      expect(executeTool).not.toHaveBeenCalled();
+      await convo._runLoop('second').catch(() => {});
+      expect(executeTool).toHaveBeenCalledWith('transfer_to_office', expect.objectContaining({ intent: 'system trouble' }), expect.anything());
+      const spoken = send.mock.calls.map(([t]) => String(t)).join(' | ');
+      expect(spoken).not.toMatch(/connect you with the office/); // the real transfer tool owns its success announcement
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'transfer' }));
+      expect(convo._handoffForFailure).toBe(true);
+    });
+
+    test('the threshold is judged after EACH failed tool: two failed blocks in one response hand off before a third runs; the skipped block still gets a tool_result (codex r3 P2)', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+      const blocks = [{ type: 'tool_use', id: 't1', name: 'a', input: {} }, { type: 'tool_use', id: 't2', name: 'b', input: {} }, { type: 'tool_use', id: 't3', name: 'c', input: {} }];
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'tool_use', content: blocks }) }));
+      const executeTool = jest.fn(async (name, input, ctx) => {
+        if (name === 'transfer_to_office') { ctx.endForTransfer(); return 'Transferring.'; }
+        if (name === 'c') return 'ok';
+        ctx.toolFailed = true; return 'Sorry, that failed.';
+      });
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf-tools', from: '+19415551234', send, endSession });
+      convo._officeHours = { open: true };
+      convo._buildToolCtx = ((orig) => function () { const c = orig.call(this); c.officeOpenNow = () => true; return c; })(convo._buildToolCtx);
+      await convo._runLoop('first').catch(() => {});
+      const names = executeTool.mock.calls.map(([n]) => n);
+      expect(names).toEqual(['a', 'b', 'transfer_to_office']); // 'c' never ran
+      expect(convo._toolFailures).toBe(2);
+      const results = convo.messages.find((m) => Array.isArray(m.content) && m.content.some((c) => c.type === 'tool_result'));
+      expect(results.content.map((c) => c.tool_use_id)).toEqual(['t1', 't2', 't3']);
+      expect(results.content[2].content).toMatch(/Not run/);
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'transfer' }));
+    });
+
+    test('a failed write round answers with an unknown outcome when pending writes defer handoff', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'tool_use', content: [
+        { type: 'text', text: 'Your appointment is booked.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ] }) }));
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pending-write-loop', from: '+19415551234', send, endSession });
+      convo._toolFailures = 1;
+      convo._executeToolBounded = jest.fn(async (name, input, ctx) => {
+        ctx.toolFailed = true;
+        convo._inFlightWrites.set(name, new Promise(() => {}));
+        return 'Request still processing.';
+      });
+      convo._fileFailureCallback = jest.fn();
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+      try {
+        const pending = convo._runLoop('book me');
+        await jest.advanceTimersByTimeAsync(10010);
+        await pending;
+        const spoken = send.mock.calls.map(([text]) => String(text)).join(' | ');
+        expect(spoken).toMatch(/still processing/);
+        expect(spoken).not.toMatch(/appointment is booked|call you back/);
+        expect(convo._fileFailureCallback).not.toHaveBeenCalled();
+        expect(endSession).not.toHaveBeenCalled();
+        expect(convo._handoffForFailure).toBe(false);
+      } finally { jest.useRealTimers(); }
+    });
+
+    test.each(['_modelFailures', '_toolFailures'])('next caller turn retries a deferred %s handoff before another model round', async (counter) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'How can I help?' }] }) }));
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-deferred-next-turn', from: '+19415551234', send: jest.fn(), endSession });
+      convo[counter] = 2;
+      convo._fileFailureCallback = jest.fn(async () => true);
+      let settle;
+      const write = new Promise((resolve) => { settle = resolve; }).then(() => { convo._inFlightWrites.delete('request_booking'); });
+      convo._inFlightWrites.set('request_booking', write);
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+      try {
+        const deferred = convo._maybeHandoffForFailure(null);
+        await jest.advanceTimersByTimeAsync(10010);
+        expect(await deferred).toBe(true);
+        expect(convo._handoffForFailure).toBe(false);
+        // A caller turn while the write is still pending must not resume the model.
+        const waitingTurn = convo._runLoop('is it done yet');
+        await jest.advanceTimersByTimeAsync(10010);
+        await waitingTurn;
+        expect(stream).not.toHaveBeenCalled();
+        expect(convo._fileFailureCallback).not.toHaveBeenCalled();
+        settle();
+        await write;
+        await convo._runLoop('please continue');
+        expect(stream).not.toHaveBeenCalled();
+        expect(convo[counter]).toBe(2);
+        expect(convo._fileFailureCallback).toHaveBeenCalledTimes(1);
+        expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
+      } finally { jest.useRealTimers(); }
+    });
+
+    test('…office closed ⇒ the callback close: capture floor + a clean end (reason provider_failure); once per call', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      primeDb();
+      const stream = jest.fn(() => ({ finalMessage: async () => { throw new Error('upstream 500'); } }));
+      const executeTool = jest.fn();
+      const { Convo, leadWriter, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ firstRow: { id: 'cl-1', customer_id: null }, db: dbIso });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf2', from: '+19415551234', send, endSession });
+      await convo._runLoop('first').catch(() => {});
+      await convo._runLoop('second').catch(() => {});
+      expect(executeTool).not.toHaveBeenCalled();
+      const spoken = send.mock.calls.map(([t]) => String(t)).join(' | ');
+      expect(spoken).toMatch(/call you back as soon as possible/);
+      // …promised only because the office's callback bell was WRITTEN first (hook P1)
+      // notification-triggers is required LAZILY at call time ⇒ the main registry's post-reset instance, not the isolated one
+      const { triggerNotification: trig } = require('../services/notification-triggers');
+      expect(trig).toHaveBeenCalledWith('customer_voicemail_callback', expect.objectContaining({ phone: '+19415551234', callLogId: 'cl-1', reason: 'sandy_provider_failure' }), expect.objectContaining({ relayFailureCall: expect.any(Object) }));
+      expect(spoken).not.toMatch(/connect you with the office/); // the transfer line is said only when a transfer is attempted (codex r1 P2)
+      expect(leadWriter).not.toHaveBeenCalled(); // the floor runs ONCE, in end() on the close that follows the end frame (codex r1 P2)
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
+      expect(convo._ending).toBe(true);
+    });
+
+    test('…and when the callback bell cannot be written, Sandy makes NO promise (the no-callback close) (hook P1)', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => { throw new Error('upstream 500'); } }));
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+      primeDb({ firstRow: { id: 'cl-2', customer_id: null }, db: dbIso });
+      const { triggerNotification: trig } = require('../services/notification-triggers'); // the lazily-required (main registry) instance
+      trig.mockResolvedValueOnce({ bellWritten: false, push: null, suppressed: true });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf5', from: '+19415551234', send, endSession });
+      await convo._runLoop('first').catch(() => {});
+      await convo._runLoop('second').catch(() => {});
+      const spoken = send.mock.calls.map(([t]) => String(t)).join(' | ');
+      expect(spoken).toMatch(/couldn't save a callback/);
+      expect(spoken).not.toMatch(/call you back as soon as possible/);
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
+    });
+
+    test('a successful round resets the model streak; gate off ⇒ the streak counts but nothing hands off', async () => {
+      let n = 0;
+      const stream = jest.fn(() => ({ finalMessage: async () => { n += 1; if (n === 2) return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }; throw new Error('boom'); } }));
+      const { Convo } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf3', from: '+19415551234', send: jest.fn(), endSession });
+      await convo._runLoop('a').catch(() => {});
+      expect(convo._modelFailures).toBe(1);
+      await convo._runLoop('b').catch(() => {});
+      expect(convo._modelFailures).toBe(0);
+      await convo._runLoop('c').catch(() => {});
+      await convo._runLoop('d').catch(() => {});
+      expect(convo._modelFailures).toBe(2);
+      expect(endSession).not.toHaveBeenCalled(); // gate off: today's re-prompt loop
+    });
+
+    test('a second failed TOOL in one call hands off too', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ content: [{ type: 'tool_use', id: 't1', name: 'find_slots', input: {} }], stop_reason: 'tool_use' }) }));
+      const executeTool = jest.fn(async (name, input, ctx) => { ctx.toolFailed = true; return 'Could not look that up.'; });
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf4', from: '+19415551234', send: jest.fn(), endSession });
+      await convo._runLoop('book me').catch(() => {});
+      expect(convo._toolFailures).toBeGreaterThanOrEqual(2);
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
+    });
+  });
 });
