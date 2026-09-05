@@ -3631,83 +3631,117 @@ router.put('/:serviceId/status', async (req, res, next) => {
       const { transitionJobStatus } = require('../services/job-status');
       let targets = [];
       let ongoingStopped = 0;
+      // Set INSIDE the transaction when a target is already paid for; the
+      // trx is rolled back by the throw and the 409 is answered after it.
+      let billingCovered = null;
       // Shared claim token for every target's trx claim — declared out
       // here because the post-commit series handler needs it too.
       const seriesClaimToken = require('../services/job-status').nextClaimTs();
-      await db.transaction(async (trx) => {
-        // Serialize with the per-parent series-maintenance advisory lock
-        // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting
-        // the cancel set (codex P0: completion hook recreated cancelled
-        // future visits). A concurrent completion's auto-extend either
-        // commits before the select below — so its fresh row lands in the
-        // cancel set — or blocks on this lock until our commit and then
-        // sees recurring_ongoing=false in its in-lock re-checks and no-ops.
-        // Without the lock, maintenance could interleave between the row
-        // cancels and the flag clear and re-extend (re-bill) the cadence
-        // the customer just cancelled.
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['recurring-series-maintenance', String(parentId)],
-        );
+      try {
+        await db.transaction(async (trx) => {
+          // Serialize with the per-parent series-maintenance advisory lock
+          // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting
+          // the cancel set (codex P0: completion hook recreated cancelled
+          // future visits). A concurrent completion's auto-extend either
+          // commits before the select below — so its fresh row lands in the
+          // cancel set — or blocks on this lock until our commit and then
+          // sees recurring_ongoing=false in its in-lock re-checks and no-ops.
+          // Without the lock, maintenance could interleave between the row
+          // cancels and the flag clear and re-extend (re-bill) the cadence
+          // the customer just cancelled.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['recurring-series-maintenance', String(parentId)],
+          );
 
-        const targetQuery = trx('scheduled_services')
-          .where(function () {
-            this.where('id', parentId).orWhere('recurring_parent_id', parentId);
-          })
-          .where(function () {
-            this.whereIn('status', cancellableStatuses)
-              .orWhere(function () {
-                this.where('id', svc.id).whereNotIn('status', terminalStatuses);
-              });
-          });
-        if (scope === 'following') {
-          targetQuery.where('scheduled_date', '>=', svc.scheduled_date);
-        }
-        targets = await targetQuery
-          .orderBy('scheduled_date', 'asc')
-          .select('id', 'status', 'customer_id', 'service_type');
-        if (!targets.length) return; // nothing written — 409 after commit
-
-        for (const target of targets) {
-          await transitionJobStatus({
-            jobId: target.id,
-            fromStatus: target.status,
-            toStatus,
-            transitionedBy: req.technicianId,
-            lat,
-            lng,
-            notes,
-            trx,
-            // Caller-owned: the series branch below runs its own awaited
-            // per-visit handleCancellation (notify-or-suppress per the
-            // request flag) plus one combined notice — the hook must stand
-            // down entirely, not race those claims.
-            notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
-            cancelNoticeToken: seriesClaimToken,
-          });
-        }
-
-        // Stop the plan ATOMICALLY with the row cancels: both 'following'
-        // and 'series' cancel the remainder of the series, so a parent left
-        // flagged recurring_ongoing would let a later completion of an
-        // earlier retained visit re-extend — and re-bill — the cancelled
-        // cadence. Cleared series-wide (parent + children carry the flag)
-        // in the SAME transaction, under the maintenance lock above.
-        // Single-occurrence cancels (scope 'this_only') never enter this
-        // branch and leave the flag intact. The per-row cancellation reason
-        // is already stamped by transitionJobStatus (notes →
-        // job_status_history); the activity_log line below records the
-        // plan stop.
-        const cols = await trx('scheduled_services').columnInfo().catch(() => ({}));
-        if (cols.recurring_ongoing) {
-          ongoingStopped = await trx('scheduled_services')
+          const targetQuery = trx('scheduled_services')
             .where(function () {
               this.where('id', parentId).orWhere('recurring_parent_id', parentId);
             })
-            .where('recurring_ongoing', true)
-            .update({ recurring_ongoing: false, updated_at: new Date() });
-        }
-      });
+            .where(function () {
+              this.whereIn('status', cancellableStatuses)
+                .orWhere(function () {
+                  this.where('id', svc.id).whereNotIn('status', terminalStatuses);
+                });
+            });
+          if (scope === 'following') {
+            targetQuery.where('scheduled_date', '>=', svc.scheduled_date);
+          }
+          targets = await targetQuery
+            .orderBy('scheduled_date', 'asc')
+            .select('id', 'status', 'customer_id', 'service_type', 'scheduled_date', 'annual_prepay_term_id', 'prepaid_amount');
+          if (!targets.length) return; // nothing written — 409 after commit
+
+          // Money already taken for a target (annual prepay term, hand-
+          // collected prepayment) refuses the WHOLE cancel — the same contract
+          // as the plan-length trim (findBillingCoveredVisits, admin-schedule):
+          // a series cancel that silently dropped paid visits would leave
+          // money taken for visits that never happen, with no refund or
+          // coverage decision recorded. The Cancel plan flow on the customer
+          // profile owns that decision (end at term / refund). Read in-lock,
+          // before any row is written; fee holds are NOT a refusal reason here
+          // because this route runs the fee rails with a waiver control.
+          {
+            const { findBillingCoveredVisits } = require('./admin-schedule');
+            const covered = await findBillingCoveredVisits(trx, targets, { feeRails: false });
+            if (covered.size > 0) {
+              const [firstId, reason] = [...covered.entries()][0];
+              const first = targets.find((t) => t.id === firstId);
+              billingCovered = { count: covered.size, reason, firstDate: serviceDateOnly(first?.scheduled_date) };
+              throw new Error('BILLING_COVERED_VISIT');
+            }
+          }
+
+          for (const target of targets) {
+            await transitionJobStatus({
+              jobId: target.id,
+              fromStatus: target.status,
+              toStatus,
+              transitionedBy: req.technicianId,
+              lat,
+              lng,
+              notes,
+              trx,
+              // Caller-owned: the series branch below runs its own awaited
+              // per-visit handleCancellation (notify-or-suppress per the
+              // request flag) plus one combined notice — the hook must stand
+              // down entirely, not race those claims.
+              notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
+              cancelNoticeToken: seriesClaimToken,
+            });
+          }
+
+          // Stop the plan ATOMICALLY with the row cancels: both 'following'
+          // and 'series' cancel the remainder of the series, so a parent left
+          // flagged recurring_ongoing would let a later completion of an
+          // earlier retained visit re-extend — and re-bill — the cancelled
+          // cadence. Cleared series-wide (parent + children carry the flag)
+          // in the SAME transaction, under the maintenance lock above.
+          // Single-occurrence cancels (scope 'this_only') never enter this
+          // branch and leave the flag intact. The per-row cancellation reason
+          // is already stamped by transitionJobStatus (notes →
+          // job_status_history); the activity_log line below records the
+          // plan stop.
+          const cols = await trx('scheduled_services').columnInfo().catch(() => ({}));
+          if (cols.recurring_ongoing) {
+            ongoingStopped = await trx('scheduled_services')
+              .where(function () {
+                this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+              })
+              .where('recurring_ongoing', true)
+              .update({ recurring_ongoing: false, updated_at: new Date() });
+          }
+        });
+      } catch (err) {
+        if (!billingCovered) throw err;
+        return res.status(409).json({
+          error: `Can't cancel ${scope === 'series' ? 'this plan' : 'the rest of this plan'}: the ${billingCovered.firstDate || 'later'} visit is ${billingCovered.reason}`
+            + (billingCovered.count > 1 ? ` (${billingCovered.count} visits are)` : '')
+            + '. Use Cancel plan on the customer profile (it settles the prepaid term), or handle the billing first.',
+          code: 'BILLING_COVERED_VISIT',
+          coveredCount: billingCovered.count,
+        });
+      }
 
       if (!targets.length) return res.status(409).json({ error: 'No cancellable appointments found in this series' });
 

@@ -11513,7 +11513,12 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // in this file): this query gates a destructive action, so an unreadable
 // table must block the trim rather than wave it through. A pre-migration env
 // without the table is the one tolerated case — hasTable is checked first.
-async function findBillingCoveredVisits(conn, visits) {
+//
+// `feeRails: false` limits the check to money already TAKEN (annual prepay
+// term, hand-collected prepayment) for callers that run the card-fee rails
+// themselves with a fee preview and waiver control — the dispatch series
+// cancel — where a live hold is handled, not a reason to refuse.
+async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   for (const v of visits) {
@@ -11525,6 +11530,7 @@ async function findBillingCoveredVisits(conn, visits) {
       mark(v.id, 'already prepaid');
     }
   }
+  if (!feeRails) return covered;
   const ids = visits.map((v) => v.id);
   if (ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
     const holds = await conn('estimate_card_holds')
@@ -17412,6 +17418,11 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
+// Shared "is money already taken for this visit" guard — the plan-length
+// trim's refusal contract, consumed lazily by the admin-dispatch series
+// cancel so a 'following' / 'series' cancel refuses prepaid visits the same
+// way the trim does instead of silently dropping paid visits off the books.
+module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
