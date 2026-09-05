@@ -573,6 +573,9 @@ function EnRouteCard({ data }) {
   return (
     <>
       <Card accent={status.color}>
+        {/* Distance-derived progress as plain text (no chip) — the only
+            textual signal when the ETA provider returns nothing. */}
+        <div style={{ fontSize: 14, fontWeight: 600, color: status.color }}>{status.label}</div>
         <EtaHero minutes={v?.etaMinutes} techFirst={techFirst} source={v?.etaSource} />
 
         {techCoords && property ? (

@@ -2669,7 +2669,10 @@ export default function PayPageV2() {
               <div style={{ fontSize: FS.body, color: isOverdue ? DOC.danger : DOC.muted, fontWeight: isOverdue ? FW.bold : FW.regular }}>
                 {isOverdue ? 'Was due ' : 'Due '}{formatInvoiceDate(invoice.dueDate)}
               </div>
-            ) : null}
+            ) : (
+              /* No due date = payable now (the retired chip's fallback). */
+              <div style={{ fontSize: FS.body, color: DOC.muted }}>Due now</div>
+            )}
           </div>
 
           {/* Amount-due hero removed (owner 2026-08-31: the figure already

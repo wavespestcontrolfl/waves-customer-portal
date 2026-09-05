@@ -152,6 +152,9 @@ describe('AppointmentPage upcoming visit', () => {
     // The POST carries the slot on screen so the server can refuse to
     // confirm a visit an office bulk reschedule moved underneath it.
     expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00', membershipKey: null });
+    // The tap has visible feedback — plain text, no chip (codex P1).
+    expect(await screen.findByRole('status')).toHaveTextContent("Confirmed. We'll see you then.");
+    expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
   });
 
   it('a grouped visit (no reschedule token) lists its services and offers the call/text path instead of a slot picker', async () => {

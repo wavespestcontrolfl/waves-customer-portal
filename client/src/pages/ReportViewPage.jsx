@@ -2911,7 +2911,7 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
     <section data-glass="card" className="waves-ask-card" aria-label="Waves AI — ask about this report">
       <div data-gt="eyebrow" className="section-eyebrow waves-ask-eyebrow">Ask Waves</div>
       <h2 className="waves-ask-title">Questions about today&apos;s service? Ask anything</h2>
-      <p className="waves-ask-intro">What was applied, when it is safe to re-enter, what to watch for, or your next visit — straight answers in seconds.</p>
+      <p className="waves-ask-intro">What was applied, when you can go back in, what to watch for, or your next visit — straight answers in seconds.</p>
       <div className="waves-ask-form">
         <input
           id="floating-report-question"

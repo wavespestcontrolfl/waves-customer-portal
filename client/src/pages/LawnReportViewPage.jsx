@@ -248,6 +248,10 @@ export default function LawnReportViewPage() {
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
           Here&apos;s what we saw at {placeLabel}
         </h1>
+        {/* The server's overall assessment stays, as text (no chip). */}
+        <p style={{ margin: '0 0 8px', color: TEXT, fontSize: 15, fontWeight: 600, lineHeight: 1.5 }}>
+          Overall: {report.overall_status || 'Reviewed'}
+        </p>
         {report.summary ? (
           <p style={{ margin: 0, color: BODY, fontSize: 15, lineHeight: 1.6 }}>{report.summary}</p>
         ) : null}

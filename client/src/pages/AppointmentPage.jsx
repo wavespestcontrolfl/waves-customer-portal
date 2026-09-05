@@ -417,6 +417,14 @@ export default function AppointmentPage() {
               The text carrying the link already greets the right person. */}
           Your {serviceLabel} is {isTomorrow ? 'tomorrow' : 'booked'}.
         </div>
+        {/* Plain-text confirmation (no chip, owner 2026-09-04): mounts when
+            the Confirm POST flips `confirmed`, so the tap has visible and
+            announced feedback instead of a button that just disappears. */}
+        {data.confirmed ? (
+          <div role="status" data-testid="appointment-confirmed" style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5, color: S.muted }}>
+            Confirmed. We&apos;ll see you then.
+          </div>
+        ) : null}
         {Array.isArray(data.service?.visit?.services) && data.service.visit.services.length > 1 && (
           /* Visit group: one link covers every service at this stop. */
           <div data-testid="visit-services" style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5 }}>
