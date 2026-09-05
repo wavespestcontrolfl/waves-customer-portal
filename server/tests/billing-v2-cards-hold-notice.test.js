@@ -18,7 +18,6 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({}));
 jest.mock('../services/stripe', () => ({}));
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../services/payment-lifecycle-email', () => ({}));
 const mockLiveHolds = jest.fn();

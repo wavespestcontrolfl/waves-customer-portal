@@ -23,7 +23,6 @@
 //                                               event dispatch)
 //   server/services/billing-cron.js            (monthly billing,
 //                                               retry ladder Day 1/3/5)
-//   server/services/payment-router.js          (processor abstraction)
 //
 // Customer-facing styling (CLAUDE.md): warm tone, Luckiest Guy /
 // Baloo 2, gold pill, mascot. Do NOT apply admin monochrome rules.

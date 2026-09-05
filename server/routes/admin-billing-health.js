@@ -3,7 +3,6 @@ const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const PaymentRouter = require('../services/payment-router');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { logAutopay } = require('../services/autopay-log');
@@ -119,7 +118,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       return res.status(400).json({ error: 'No amount to charge (monthly_rate is 0 or unset)' });
     }
 
-    const service = await PaymentRouter.getServiceForCustomer(customerId);
+    const service = await require('../services/stripe');
     const desc = description || `Manual charge — WaveGuard ${customer.waveguard_tier || ''}`.trim();
 
     // No explicit amount = "collect this month's monthly rate now" (the

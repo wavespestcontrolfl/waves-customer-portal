@@ -18,7 +18,6 @@ const mockRequest = jest.fn();
 jest.mock('../services/autopay-setup-link', () => ({
   requestAutopaySetupLink: (...args) => mockRequest(...args),
 }));
-jest.mock('../services/payment-router', () => ({}));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
