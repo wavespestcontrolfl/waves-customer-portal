@@ -75,8 +75,12 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, promises = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, promises = [] }) {
   return {
+    // This leg's capture state: a filed re-service deliberately creates NO
+    // lead, and the resumed leg must not route it through lead capture again.
+    reservice_filed: reserviceFiled === true,
+    no_lead_created: noLeadCreated === true,
     // Sandy's promises on this leg (kind, verdict, spoken expectation, when
     // spoken) — restored on the resumed leg so the commitments pass keeps
     // the original deadline instead of deriving a bare promise (hook P1).
@@ -210,9 +214,12 @@ async function loadResumeState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_M
       const promises = latestPromises(meta.relay_segments);
       const callerLabel = `${require('./relay-transcript').CALLER_LABEL}: `;
       const callerTurns = full.split('\n').filter((line) => line.startsWith(callerLabel)).map((line) => line.slice(callerLabel.length).trim()).filter(Boolean);
+      const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments.filter((seg) => seg && typeof seg === 'object') : [];
       return {
         reconnects,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
+        reserviceFiled: legs.some((seg) => seg.reservice_filed === true),
+        noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
         // The seed keeps the TAIL (the most recent turns matter most).
         segmentsText: full.length > RESUME_SEED_MAX_CHARS ? `[…]${full.slice(-RESUME_SEED_MAX_CHARS)}` : full,
         relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : null,

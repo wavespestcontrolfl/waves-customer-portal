@@ -1627,6 +1627,10 @@ class RelayConversation {
     this._resume = state || null;
     if (!state) return;
     if (state.relayLeadId) this.leadCaptured = true;
+    // A re-service already FILED on an earlier leg is this call's artifact:
+    // no lead is owed (the floor stays down) and the close reports it filed.
+    if (state.reserviceFiled) { this._reserviceFiled = true; this._noLeadCreated = true; this.leadCaptured = true; }
+    else if (state.noLeadCreated) this._noLeadCreated = true;
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
@@ -1984,6 +1988,13 @@ class RelayConversation {
     // promptly.
     try { await this._chain; } catch { /* per-turn loop errors are already logged */ }
 
+    // PR 2B: a resumed leg the caller hung up on before speaking may close
+    // before its (bounded) resume read settled — the capture floor and the
+    // composition below read that state, so it settles first (hook P1).
+    if (this._resumeReady) {
+      try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
+    }
+
     // …and then drain the writes the chain does NOT cover. A tool that blew its
     // WRITE timeout was detached from the turn loop deliberately (the caller
     // hears a sentence instead of silence), so the chain can settle while a
@@ -2032,6 +2043,8 @@ class RelayConversation {
           latency: summarizeTurnStats(this._turnStats),
           versions: this._versionStamps(),
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
+          reserviceFiled: this._reserviceFiled === true,
+          noLeadCreated: this._noLeadCreated === true,
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
         });
         const appended = await withTimeout(
