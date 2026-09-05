@@ -24,15 +24,22 @@ function resolveSeriesParentId(service) {
 
 // Fetch every row in the recurring family (parent + children) ordered by
 // scheduled_date so the UI can show "visit 2 of 4" deterministically.
-// `lock: true` (inside a transaction) takes FOR UPDATE on the family so the
-// eligibility read and the stamps see one row state — see stampSeriesPrepaid.
+// `lock: true` (inside a transaction) takes FOR UPDATE on the rows the stamp
+// will UPDATE — the non-terminal family only, filtered in SQL — so the
+// eligibility read and the stamps see one row state (stampSeriesPrepaid).
+// Terminal rows are deliberately NOT locked: the series cancel locks its
+// cancellable children first and touches the (possibly completed) parent
+// last for the recurring_ongoing clear; locking the whole family here in
+// date order would take that parent first and deadlock against it
+// (Codex #3878 r3 P2). Both paths now lock live rows in scheduled_date
+// order and nothing else.
 async function fetchSeriesRows(db, parentId, { lock = false } = {}) {
   const q = db('scheduled_services')
     .where(function () {
       this.where('recurring_parent_id', parentId).orWhere('id', parentId);
     })
     .orderBy(['scheduled_date', 'window_start', 'id']);
-  return lock ? q.forUpdate() : q;
+  return lock ? q.whereNotIn('status', [...TERMINAL_STATUSES]).forUpdate() : q;
 }
 
 // Round to cents so per-visit stamps reconcile to the series total without

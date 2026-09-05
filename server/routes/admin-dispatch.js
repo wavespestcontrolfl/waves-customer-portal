@@ -3629,6 +3629,29 @@ router.put('/:serviceId/status', async (req, res, next) => {
       const cancellableStatuses = ['pending', 'confirmed', 'rescheduled'];
       const terminalStatuses = ['completed', 'skipped', 'cancelled'];
       const { transitionJobStatus } = require('../services/job-status');
+      // An UNPAID payment_pending annual term is invisible to the in-trx
+      // coverage guard (coveredTermsAsOf excludes it and its standalone
+      // prepay invoice carries no scheduled_service_id), yet its public
+      // invoice stays payable — a payment landing AFTER this cancel runs
+      // syncTermForInvoicePayment and re-seeds coverage for the visits just
+      // cancelled. Same refusal the Cancel plan engine applies before its
+      // wind-down (admin-cancellation.js), scoped to this visit's service
+      // family; an unreadable family means whole-account (fail closed).
+      // (Codex #3878 r3 P1.)
+      {
+        const { findPendingPrepayInvoice } = require('../services/admin-cancellation');
+        const { familyOfServiceRow } = require('../services/cancellation-processor');
+        const family = familyOfServiceRow({ service_type: svc.service_type });
+        const pending = await findPendingPrepayInvoice(svc.customer_id, family ? [family] : null);
+        if (pending) {
+          const { term, invoice } = pending;
+          return res.status(409).json({
+            error: `Can't cancel ${scope === 'series' ? 'this plan' : 'the rest of this plan'}: an unpaid annual-prepay invoice (${invoice.invoice_number || invoice.id}${term.plan_label ? `, ${term.plan_label}` : ''}) is still payable and would re-activate coverage if paid after this cancellation. Void it from the invoice tools first.`,
+            code: 'pending_prepay_invoice',
+          });
+        }
+      }
+
       let targets = [];
       let ongoingStopped = 0;
       // Set INSIDE the transaction when a target is already paid for; the

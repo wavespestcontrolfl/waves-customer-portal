@@ -73,6 +73,7 @@ describe('prepaid-series helpers', () => {
             return this;
           },
           orWhere() { return this; },
+          whereNotIn() { return this; },
           orderBy() { return this; },
           forUpdate() { this.locked = true; return this; },
           first: jest.fn(async () => rows[0]),
@@ -126,13 +127,14 @@ describe('prepaid-series helpers', () => {
         const builder = {
           where(arg) { if (typeof arg === 'function') arg.call(builder); this.whereArg = arg; return this; },
           orWhere() { return this; },
+          whereNotIn(col, vals) { this.notIn = [col, vals]; return this; },
           orderBy() { return this; },
           forUpdate() { this.locked = true; return this; },
           first: jest.fn(async () => anchor),
           update: jest.fn((patch) => { updates.push({ id: builder.whereArg?.id, patch }); return builder; }),
           returning: jest.fn(async () => [{ id: builder.whereArg?.id }]),
           then(resolve, reject) {
-            familyReads.push({ locked: builder.locked === true });
+            familyReads.push({ locked: builder.locked === true, terminalExcluded: builder.notIn?.[0] === 'status' && builder.notIn[1].includes('cancelled') });
             return Promise.resolve(lockedFamily).then(resolve, reject);
           },
         };
@@ -146,7 +148,9 @@ describe('prepaid-series helpers', () => {
 
       expect(db.transaction).toHaveBeenCalledTimes(1);
       // The ONLY family read happens inside the transaction, under FOR UPDATE.
-      expect(familyReads).toEqual([{ locked: true }]);
+      // ...and locks only the rows it will update — terminal rows are
+      // excluded in SQL so the cancel's completed parent is never taken.
+      expect(familyReads).toEqual([{ locked: true, terminalExcluded: true }]);
       expect(updates.map((u) => u.id)).toEqual(['svc-1']);
       expect(result.visitsCovered).toBe(1);
       expect(result.perVisitAmount).toBe(200);

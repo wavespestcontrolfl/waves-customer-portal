@@ -37,7 +37,7 @@ jest.mock('../services/visit-cancellation-followthrough', () => ({
 }));
 
 jest.mock('../models/db', () => {
-  const state = { rows: [], invoices: [], terms: [], writes: [], hasTableCalls: [], reads: [] };
+  const state = { rows: [], invoices: [], terms: [], pendingTerms: [], writes: [], hasTableCalls: [], reads: [] };
   const makeBuilder = (table) => {
     const b = {
       _where: {},
@@ -62,7 +62,7 @@ jest.mock('../models/db', () => {
       modify(cb) { cb(b); return b; },
       select() { b._selectCalled = true; return b; },
       async first() {
-        const rows = table === 'scheduled_services' ? state.rows : [];
+        const rows = table === 'scheduled_services' ? state.rows : table === 'invoices' ? state.invoices : [];
         const found = rows.find((r) => Object.entries(b._where).every(([k, v]) => r[k] === v));
         return found ? { ...found } : undefined;
       },
@@ -89,7 +89,9 @@ jest.mock('../models/db', () => {
           : table === 'invoices' ? state.invoices.map((r) => ({ ...r }))
           // coveredTermsAsOf reads 'annual_prepay_terms as t' — the harness
           // seeds what its paid-coverage predicate would return (`covered`).
-          : String(table).startsWith('annual_prepay_terms') ? state.terms.filter((t) => t.covered).map((t) => ({ id: t.id })) : [];
+          : table === 'annual_prepay_terms as t' ? state.terms.filter((t) => t.covered).map((t) => ({ id: t.id }))
+          // The bare table is the pending-prepay-invoice pre-check (payment_pending terms).
+          : table === 'annual_prepay_terms' ? state.pendingTerms.map((t) => ({ ...t })) : [];
         return Promise.resolve(rows).then(resolve, reject);
       },
     };
@@ -137,8 +139,9 @@ const future = (days) => {
   const d = new Date(); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10);
 };
 
-function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', covered: true }] } = {}) {
+function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', covered: true }], pendingTerms = [] } = {}) {
   db.__state.invoices = invoices;
+  db.__state.pendingTerms = pendingTerms;
   db.__state.terms = terms;
   db.__state.rows = [
     { id: 'parent', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
@@ -241,7 +244,6 @@ describe('term coverage is decided by the canonical reader, not a status list (p
     seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null } });
     await cancel('series');
     expect(db.__state.reads).toContain('annual_prepay_terms as t');
-    expect(db.__state.reads).not.toContain('annual_prepay_terms');
   });
 
   test('coveredTermsAsOf keeps a cancelled term with renewal_decision=cancel (paid non-renewal) covered and drops refunded money', () => {
@@ -252,5 +254,33 @@ describe('term coverage is decided by the canonical reader, not a status list (p
     expect(sql).toMatch(/"t"\."status" = 'cancelled' and "t"\."renewal_decision" = 'cancel'/);
     expect(sql).toMatch(/not exists \(\s*select 1 from payments p/);
     expect(sql).toMatch(/"t"\."id" in \('term-1'\)/);
+  });
+});
+
+describe('unpaid payment_pending annual term (Codex #3878 r3 P1)', () => {
+  const pendingTerm = { id: 'term-p', prepay_invoice_id: 'inv-p', plan_label: 'Annual Pest', coverage_service_type: 'Pest Control' };
+  const payable = { id: 'inv-p', status: 'sent', invoice_number: 'INV-9001' };
+
+  test.each(['following', 'series'])('scope %s → 409 pending_prepay_invoice before any transaction (its invoice would re-activate coverage if paid later)', async (scope) => {
+    seed({ pendingTerms: [pendingTerm], invoices: [payable] });
+    const { status, body } = await cancel(scope);
+    expect(status).toBe(409);
+    expect(body.code).toBe('pending_prepay_invoice');
+    expect(body.error).toContain('INV-9001');
+    expect(body.error).toMatch(/Void it from the invoice tools first/);
+    expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+    expect(db.__state.writes).toEqual([]);
+  });
+
+  test('a VOIDED pending-prepay invoice no longer blocks', async () => {
+    seed({ pendingTerms: [pendingTerm], invoices: [{ ...payable, status: 'void' }] });
+    const { status } = await cancel('series');
+    expect(status).toBe(200);
+  });
+
+  test("a pending term for ANOTHER service family does not block this family's series", async () => {
+    seed({ pendingTerms: [{ ...pendingTerm, coverage_service_type: 'Lawn Care' }], invoices: [payable] });
+    const { status } = await cancel('series');
+    expect(status).toBe(200);
   });
 });
