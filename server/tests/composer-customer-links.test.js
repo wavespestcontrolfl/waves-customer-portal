@@ -1980,6 +1980,11 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
       expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
       expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c1' });
+      // An upper-cased token is the same working page (the public route
+      // lowercases before its lookup) — looked up lower-cased, not refused.
+      wireNotice();
+      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN.toUpperCase()}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
     });
 
     test('an in-flight (draft / sending) notice, a past change, a vanished token, or another customer\'s notice refuses', async () => {

@@ -1103,7 +1103,10 @@ async function checkPriceChangeLinks(ctx) {
   for (const run of linkRuns(ctx.runs, /\/price-change\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, PRICE_CHANGE_TOKEN_RE);
     if (!token) return refuseSend('A price change notice link in this message is not on the Waves portal — remove it before sending.');
-    const notice = await db('price_change_notices').where({ notice_token: token }).first('id', 'customer_id', 'status', 'effective_date');
+    // Stored lowercase; the public route lowercases before its lookup, so a
+    // pasted upper-cased token is the same working page and is judged the
+    // same (pre-push Codex P1).
+    const notice = await db('price_change_notices').where({ notice_token: token.toLowerCase() }).first('id', 'customer_id', 'status', 'effective_date');
     if (!notice || !PRICE_CHANGE_LINKABLE_STATUSES.includes(notice.status) || dateOnly(notice.effective_date) < etDateString()) {
       return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
     }
