@@ -6738,12 +6738,25 @@ const CallRecordingProcessor = {
       const recorded = recordedPartOfComposite(row.transcription);
       return isUsableFallback(recorded) ? recorded : null;
     };
-    const composeRelay = (text, provenance) => {
-      const relaySegment = composeRelaySegment(call);
+    const composeRelay = async (text, provenance) => {
+      // Composed from the row's CURRENT state, not the claim-time snapshot
+      // (hook P1): end()'s relay_transcript stash can land during the
+      // minutes-long transcription — the stash side prepends the AI segment
+      // only onto a recorded-only column that already exists, so this side
+      // must see a stash that landed before its write. Read failure ⇒ the
+      // snapshot (today's behaviour).
+      let row = call;
+      try {
+        const fresh = await db('call_log').where({ id: call.id }).first('metadata', 'call_outcome', 'transcription', 'transcription_provider', 'transcription_metadata');
+        if (fresh) row = { ...call, ...fresh };
+      } catch (err) {
+        logger.warn(`[call-proc] relay-segment re-read failed for ${maskSid(callSid)}: ${err.message} — composing from the snapshot`);
+      }
+      const relaySegment = composeRelaySegment(row);
       if (!relaySegment) return text;
       recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
       provenance.metadata.relay = relaySegment.metadata;
-      return `${relaySegment.text}\n\n[${call.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${text}`;
+      return `${relaySegment.text}\n\n[${row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${text}`;
     };
     // Twilio CDN hasn't finished propagating the MP3 (404 or truncated
     // buffer for the known duration) — release the claim untouched instead
@@ -6815,7 +6828,7 @@ const CallRecordingProcessor = {
         // keep it ahead of the recorded segment and its provenance under
         // transcription_metadata.relay, instead of letting the recording's
         // transcript replace it. Qualified on the persisted handoff packet.
-        transcription = composeRelay(transcription, transcriptionProvenance);
+        transcription = await composeRelay(transcription, transcriptionProvenance);
         const relaySegment = Boolean(recordedSegmentText);
         const transcriptUpdate = {
           transcription,
@@ -6926,7 +6939,7 @@ const CallRecordingProcessor = {
             source: 'fresh_call_log',
           },
         };
-        transcription = composeRelay(transcription, transcriptionProvenance);
+        transcription = await composeRelay(transcription, transcriptionProvenance);
         // Token-fenced (post-transcription awaits): the pass that now owns
         // the call scrubs, stamps and quarantines for itself.
         const fallbackStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
@@ -6969,7 +6982,7 @@ const CallRecordingProcessor = {
             source: 'cached_call_log',
           },
         };
-        transcription = composeRelay(transcription, transcriptionProvenance);
+        transcription = await composeRelay(transcription, transcriptionProvenance);
         const cachedStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
           transcription, // scrubbed — see the fresh-row twin above
           ...(recordedSegmentText ? { transcript_structured: null } : (cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {})),

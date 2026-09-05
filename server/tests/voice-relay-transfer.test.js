@@ -403,7 +403,8 @@ describe('pre-push hook round 9', () => {
     expect(src).toContain('const gateText = recordedSegmentText || transcription;');
     expect(src).toContain('let fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);');
     // Every fallback path composes through the same closure and reads only the recorded part (hook round 11 P1).
-    expect(src.match(/transcription = composeRelay\(transcription, transcriptionProvenance\);/g)).toHaveLength(3);
+    expect(src.match(/transcription = await composeRelay\(transcription, transcriptionProvenance\);/g)).toHaveLength(3);
+    expect(src).toContain("const fresh = await db('call_log').where({ id: call.id }).first('metadata', 'call_outcome', 'transcription', 'transcription_provider', 'transcription_metadata');"); // composed from the CURRENT row, not the claim snapshot
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
     expect(src).toContain("} else if (recordedFallbackOf(call)) {");
     expect(src).toContain("if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;");
