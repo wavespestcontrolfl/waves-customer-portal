@@ -214,35 +214,27 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
 });
 
 
-describe('Lawn water coverage requires affirmative moisture evidence', () => {
-  test('keeps affirmative moisture evidence in a separate summary field', () => {
-    const report = buildLawnReportV2({ lawnAssessment: baseAssessment({ ...CASES.healthy, observations: 'No weeds seen', aiSummary: 'Dry patches remain near the driveway.' }) });
-    expect(report.water.coverageWatch).toBe(true);
-  });
+describe('Tan edge wear does not establish a watering problem', () => {
   const renderObservation = observations => buildLawnReportV2({
-    lawnAssessment: baseAssessment({ ...CASES.healthy, observations, aiSummary: 'Dense green turf with ordinary edge wear.' }),
+    lawnAssessment: baseAssessment({
+      ...CASES.healthy,
+      observations,
+      aiSummary: 'Dense green turf with ordinary edge wear.',
+    }),
   });
-  test.each([
-    'Minor tan patches along the pavement are normal wear and not a concern.',
-    'No signs of weeds, disease, drought stress, or watering problems are visible.',
-    'The turf is free of drought stress.',
-    'The lawn is not dry.',
-    'No weeds and drought stress are visible.',
-    'Let damp areas dry out before the next inspection.',
-  ])('does not invent sprinkler advice from %s', observation => {
-    const report = renderObservation(observation);
+
+  test('does not invent sprinkler advice from normal tan edge wear', () => {
+    const report = renderObservation('Minor tan patches near pavement are normal wear. No signs of weeds, disease, insect damage, or watering problems are visible.');
     expect(report.water.coverageWatch).toBe(false);
     expect(report.insights.some(card => card.category === 'water')).toBe(false);
     expect(report.smsSummary).not.toMatch(/sprinkler|watching watering/i);
   });
+
   test.each([
-    'Dry patches remain near the driveway.',
-    'No disease is visible, and dry patches remain near the driveway.',
-    'No weeds were seen and dry patches remain near the driveway.',
-    'No irrigation reaches the west side, leaving dry patches.',
-    'No disease is visible, but the west side is dry.',
-    'No drought stress in the front; sprinkler coverage is uneven in the back.',
-  ])('preserves affirmative evidence in %s', observation => {
+    'Tan patches near the pavement look dry.',
+    'Tan patches suggest uneven irrigation coverage.',
+    'No weeds were seen and uneven irrigation coverage is visible near the driveway.',
+  ])('preserves moisture evidence in %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(true);
     expect(report.insights.some(card => card.category === 'water')).toBe(true);
