@@ -7000,7 +7000,30 @@ const CallRecordingProcessor = {
     // (hook P1 — a long Sandy conversation before a short voicemail is not
     // a hallucination).
     const gateText = recordedSegmentText || transcription;
-    const fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);
+    let fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);
+    // A TRANSFERRED call (hook P1): the recorded leg may be a hallucination,
+    // Sandy's leg is not — its lead (capture_lead / the capture floor) and
+    // its transcript are real. Reject the RECORDED SEGMENT ONLY: the AI
+    // segment stays as the transcript with the rejection noted in its place,
+    // and the whole-call rejection below (voicemail sentinel, triage
+    // dismissal, lead retirement keyed by CallSid) never runs.
+    const recordedRejected = fallbackImplausible || (!transcription && primaryTranscriptRejected);
+    const relayOnly = recordedRejected ? composeRelaySegment(call) : null;
+    if (relayOnly) {
+      const rejectedChars = fallbackImplausible ? spokenCharCount(gateText) : rejectedPrimaryChars;
+      logger.warn(`[call-proc] Rejecting the RECORDED segment of transferred call ${maskSid(callSid)} (${rejectedChars} chars / ${recordingSeconds}s) — keeping the AI segment`);
+      transcription = `${relayOnly.text}\n\n[${call.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff'} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}`;
+      transcriptionProvenance = transcriptionProvenance || { provider: null, model: null, metadata: {} };
+      transcriptionProvenance.metadata = { ...(transcriptionProvenance.metadata || {}), relay: relayOnly.metadata, recorded_segment_rejected: { reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rejectedChars, recording_seconds: recordingSeconds } };
+      const wroteRelayOnly = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({ transcription, transcription_status: 'completed', transcription_provider: transcriptionProvenance.provider, transcription_model: transcriptionProvenance.model, transcript_structured: null, transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date() });
+      if (!wroteRelayOnly) return abandonToPeer('the relay-only transcript write');
+      recordedSegmentText = null;
+      fallbackImplausible = false;
+      primaryTranscriptRejected = false;
+    }
     // Two terminal-rejection cases: (a) the Twilio fallback ALSO produced an
     // implausible transcript; (b) the primary was implausible and no usable
     // fallback exists. Both finalize as an empty voicemail — NOT no_transcription

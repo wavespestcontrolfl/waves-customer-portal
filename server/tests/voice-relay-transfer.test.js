@@ -391,12 +391,23 @@ describe('pre-push hook round 9', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite');
     expect(src).toContain('const gateText = recordedSegmentText || transcription;');
-    expect(src).toContain('const fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);');
+    expect(src).toContain('let fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);');
     // Every fallback path composes through the same closure and reads only the recorded part (hook round 11 P1).
     expect(src.match(/transcription = composeRelay\(transcription, transcriptionProvenance\);/g)).toHaveLength(3);
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
     expect(src).toContain("} else if (recordedFallbackOf(call)) {");
     expect(src).toContain("if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;");
+    // A hallucinated RECORDED leg on a transferred call rejects that segment only: the AI segment stays, and the
+    // whole-call rejection (voicemail sentinel, triage dismissal, CallSid-keyed lead retirement) never runs (hook P1).
+    const relayOnlyAt = src.indexOf('const relayOnly = recordedRejected ? composeRelaySegment(call) : null;');
+    const wholeCallAt = src.indexOf('if (fallbackImplausible || (!transcription && primaryTranscriptRejected)) {');
+    expect(relayOnlyAt).toBeGreaterThan(0);
+    expect(relayOnlyAt).toBeLessThan(wholeCallAt);
+    const site = src.slice(relayOnlyAt, wholeCallAt);
+    expect(site).toContain("if (!wroteRelayOnly) return abandonToPeer('the relay-only transcript write');");
+    expect(site).toContain('fallbackImplausible = false;');
+    expect(site).toContain('primaryTranscriptRejected = false;');
+    expect(site).toContain('recorded_segment_rejected');
   });
 
   test('recordedPartOfComposite: the relay\'s own transcript and a bare AI segment are not recording transcripts; a stored composite yields its recorded part', () => {
