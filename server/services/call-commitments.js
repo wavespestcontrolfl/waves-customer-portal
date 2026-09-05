@@ -1080,19 +1080,26 @@ async function resolveFulfillment(conn, commitment, call) {
         // precise FK / lead-id mirror, never contact matching. This remains
         // an association; conflicting or unknown live-lead ownership blocks
         // the unowned-estimate fallback in either linkage direction.
+        // Uncorrelated membership sets avoid rescanning leads per estimate.
+        // Exclude NULL FK values so NOT IN does not reject unrelated rows.
         estQ.whereRaw(`(estimates.customer_id = ? OR (
           estimates.customer_id IS NULL
-          AND EXISTS (
-            SELECT 1 FROM leads l
+          AND (estimates.id IN (
+            SELECT l.estimate_id FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id = ? AND l.estimate_id IS NOT NULL
+          ) OR estimates.estimate_data ->> 'lead_id' IN (
+            SELECT l.id::text FROM leads l
             WHERE l.deleted_at IS NULL AND l.customer_id = ?
-              AND (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data ->> 'lead_id')
+          ))
+          AND estimates.id NOT IN (
+            SELECT l.estimate_id FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ? AND l.estimate_id IS NOT NULL
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM leads l
+          AND COALESCE(estimates.estimate_data ->> 'lead_id', '') NOT IN (
+            SELECT l.id::text FROM leads l
             WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ?
-              AND (l.estimate_id = estimates.id OR l.id::text = estimates.estimate_data ->> 'lead_id')
           )
-        ))`, [customerId, customerId, customerId]);
+        ))`, [customerId, customerId, customerId, customerId, customerId]);
       } else if (phone) {
         estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
       } else {
