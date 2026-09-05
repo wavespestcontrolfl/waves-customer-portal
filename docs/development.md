@@ -95,3 +95,47 @@ and its zip path. CI retains evidence for seven days, including failed runs.
 
 Browser previews are fixture-based UI evidence. They do not exercise the backend,
 provider APIs or database and must not be described as full end-to-end QA.
+
+## Application QA with a real database
+
+After verifying and selecting a Railway dev/preview cluster as above:
+
+```sh
+npm run qa:database
+npm run dev:migrate
+npm run dev:doctor
+npm run build
+npm run qa:e2e
+npm run qa:cleanup
+```
+
+`qa:database` explicitly creates an empty database named for the worktree UUID
+within the selected cluster, backs up the selection to `.tmp/dev/cluster.env`,
+and selects the private database. It requires database-creation privileges.
+It copies no application records. Keep the preview deployment on its original
+database so its background jobs cannot process QA accounts. If doctor reports
+a pending legacy placeholder after the first migration batch, run `dev:migrate`
+again. Never use production credentials with these commands.
+
+`qa:e2e` creates fictional admin, technician and customer accounts with random
+credentials and future appointments. It starts its own loopback API serving the
+production frontend build. Browser logins exercise password auth and captured
+OTP verification; API journeys check estimate acceptance retries, rescheduling
+with an unassigned overlap and 90-minute duration, signed webhook settlement
+and replay, completion, and report redaction. The browser renders the customer
+portal, paid receipt and completed report against that database.
+
+This is application integration coverage with browser journeys. Twilio OTP and
+message delivery and Stripe charge lookup are simulated only in the QA process;
+actual auth, signature verification, settlement and database code execute.
+Provider credentials are excluded and unexpected HTTP/fetch calls are blocked.
+This does not verify real provider delivery, checkout or device hardware.
+
+Screenshots, trace, server log and a commit/step report live in `.tmp/qa/e2e`.
+Credentials and captured OTPs are private files there; never commit or attach
+them. Traces can contain short-lived synthetic session tokens. CI retains only
+the report, screenshots and trace for seven days, then discards them.
+`qa:seed` leaves a synthetic fixture for local inspection; `qa:cleanup` removes
+only the recorded run's owned records and refuses a changed database selection.
+The next E2E run also cleans its previous fixture before creating a new one.
+Cleanup retains the private database/schema for future runs.
