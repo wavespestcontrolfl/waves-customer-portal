@@ -45,6 +45,7 @@ jest.mock('../models/db', () => {
       },
       whereNull(col) { st.nulls.push(col); return chain; },
       first() { st.first = true; return chain; },
+      forUpdate() { return chain; },
       update(patch) { st.op = 'update'; st.payload = patch; return chain; },
       whereNot(col, val) { st.whereNot = [...(st.whereNot || []), [col, val]]; return chain; },
       max(expr) { st.max = expr; st.first = true; return chain; },

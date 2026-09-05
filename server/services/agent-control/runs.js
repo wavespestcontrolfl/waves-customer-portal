@@ -211,7 +211,11 @@ async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
     })
     .onConflict(['source_system', 'source_run_id'])
     .ignore();
-  return conn('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).first();
+  // LOCKED for the rest of the start transaction: two concurrent starts on
+  // one key serialize here, and the second re-reads the row the first
+  // committed (a fresh lease, attempts + 1) — so exactly one of them opens
+  // an attempt and the other is held (pre-push audit on Codex r15).
+  return conn('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).forUpdate().first();
 }
 
 // The attempt number is allocated by an atomic UPDATE … attempts + 1
