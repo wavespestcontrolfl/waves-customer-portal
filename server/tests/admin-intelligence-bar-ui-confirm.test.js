@@ -283,6 +283,21 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(offPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
   });
 
+  test('current ET date refreshes after midnight without reloading the route', async () => {
+    jest.useFakeTimers({ doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'performance'] });
+    try {
+      scriptModelTurns([[{ type: 'text', text: 'Ready.' }], [{ type: 'text', text: 'Ready.' }]]);
+      await withServer(async baseUrl => {
+        jest.setSystemTime(new Date('2099-01-01T23:59:00-05:00'));
+        await postQuery(baseUrl, { prompt: 'today', context: 'customers' });
+        jest.setSystemTime(new Date('2099-01-02T00:01:00-05:00'));
+        await postQuery(baseUrl, { prompt: 'today', context: 'customers' });
+      });
+      expect(JSON.stringify(mockMessagesCreate.mock.calls[0][0].messages)).toContain('CURRENT EASTERN DATE: 2099-01-01');
+      expect(JSON.stringify(mockMessagesCreate.mock.calls[1][0].messages)).toContain('CURRENT EASTERN DATE: 2099-01-02');
+    } finally { jest.useRealTimers(); }
+  });
+
   test('prompt caching: system block breakpoint, one message breakpoint per round (no accumulation), pageData on the user turn not the system prompt', async () => {
     mockExecuteTool.mockResolvedValue({ preview: true });
     scriptModelTurns([
@@ -405,6 +420,7 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
       const firstCallMessages = mockMessagesCreate.mock.calls[0][0].messages;
       const userTurn = firstCallMessages[firstCallMessages.length - 1];
       expect(userTurn.content).toEqual([
+        { type: 'text', text: expect.stringContaining('CURRENT EASTERN DATE:') },
         {
           type: 'image',
           source: { type: 'base64', media_type: 'image/png', data: validImageData },

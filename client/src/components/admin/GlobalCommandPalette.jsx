@@ -1,3 +1,4 @@
+import { useIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 /**
  * Global Command Palette (⌘K / mobile bottom sheet)
  * client/src/components/admin/GlobalCommandPalette.jsx
@@ -349,6 +350,12 @@ function GlobalCommandPalette(_props, ref) {
   // key handlers, so no onEscape is passed here.
   const paletteRef = useModalFocus(open);
 
+  const onActionResolved = useCallback((action, decision, body) => {
+    if (body.success === false) return;
+    setPendingActions(previous => previous.map(item => item.id === action.id
+      ? { ...item, resolvedStatus: decision === 'confirm' ? 'confirmed' : 'cancelled', resolvedWarning: body.result?.warning || null } : item));
+  }, []);
+  const ibPageData = useIntelligenceBarPageData();
   const context = detectContext(location.pathname, location.search);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
@@ -526,7 +533,6 @@ function GlobalCommandPalette(_props, ref) {
       setShowThreads(false); // a query from the History view shows its answer
       setLoading(true);
       setResponse(null);
-      setPendingActions([]);
       setToolActivity([]);
       saveRecent(q);
       setRecents(loadRecents());
@@ -544,7 +550,7 @@ function GlobalCommandPalette(_props, ref) {
                   ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
                 }
               : {}),
-            pageData: { route: location.pathname },
+            pageData: { route: location.pathname, ...ibPageData?.current },
             ...(attachments.length
               ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
               : {}),
@@ -554,7 +560,7 @@ function GlobalCommandPalette(_props, ref) {
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
           setResponse(data.response);
-          setPendingActions(data.pendingActions || []);
+          setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, receivedAt: Date.now() }))]);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
           setConversationHistory(data.conversationHistory || []);
           if (data.threadId) {
@@ -588,7 +594,7 @@ function GlobalCommandPalette(_props, ref) {
       setPrompt("");
       resetAttachments();
     },
-    [prompt, loading, conversationHistory, context, threadId, location.pathname, attachments, resetAttachments],
+    [prompt, loading, conversationHistory, context, threadId, location.pathname, attachments, resetAttachments, ibPageData],
   );
 
   const addAttachments = useCallback(
@@ -690,6 +696,7 @@ function GlobalCommandPalette(_props, ref) {
         loading={loading}
         response={response}
         pendingActions={pendingActions}
+        onActionResolved={onActionResolved}
         toolActivity={toolActivity}
         recents={recents}
         quickActions={quickActions}
@@ -989,7 +996,7 @@ function GlobalCommandPalette(_props, ref) {
             >
               {renderMarkdown(response)}
             </div>{" "}
-            <PendingActionsCard actions={pendingActions} variant="dark" />
+            <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />
           </div>
         )}
         {response && !loading && !showThreads && (
@@ -1122,6 +1129,7 @@ function MobileSheet({
   loading,
   response,
   pendingActions,
+  onActionResolved,
   toolActivity,
   recents,
   quickActions,
@@ -1426,7 +1434,7 @@ function MobileSheet({
             </div>
           )}
           {response && !loading && !showThreads && (
-            <PendingActionsCard actions={pendingActions} variant="light" />
+            <PendingActionsCard actions={pendingActions} variant="light" onResolved={onActionResolved} />
           )}
 
           {showThreads && !loading && (

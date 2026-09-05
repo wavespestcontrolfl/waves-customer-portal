@@ -1,0 +1,73 @@
+jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn() }));
+jest.mock('../models/db', () => {
+  const db = jest.fn();
+  db.transaction = jest.fn(async cb => cb(db));
+  return db;
+});
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/appointment-address', () => ({ planAppointmentAddress: jest.fn(), lockAppointmentAddress: jest.fn(), applyAppointmentAddress: jest.fn(async () => ['stop']) }));
+jest.mock('../services/scheduling/occupancy', () => ({ acquireOccupancyLocks: jest.fn() }));
+jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn() }));
+const db = require('../models/db');
+const address = require('../services/appointment-address');
+const gates = require('../config/feature-gates');
+const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
+const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+const input = { appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002' };
+let plan;
+let property;
+beforeEach(() => {
+  jest.clearAllMocks();
+  gates.isEnabled.mockReturnValue(true);
+  property = { id: input.property_id, address_line1: '200 Test Street', customer_id: 'customer' };
+  plan = { anchor: { id: input.appointment_id, customer_id: 'customer' }, propertyId: input.property_id, scope: 'visit', rows: [
+    { id: input.appointment_id, customer_id: 'customer', scheduled_date: '2099-01-02', status: 'en_route', recurring_parent_id: 'template' },
+  ] };
+  address.planAppointmentAddress.mockImplementation(async () => structuredClone(plan));
+  db.mockImplementation(table => {
+    const row = table === 'customers' ? { id: 'customer', address_line1: '100 Test Street' } : property;
+    const chain = {};
+    for (const name of ['where', 'whereNull', 'whereIn', 'orderBy', 'forUpdate', 'forShare']) chain[name] = () => chain;
+    chain.first = async () => row;
+    chain.then = resolve => Promise.resolve([]).then(resolve);
+    return chain;
+  });
+});
+const call = (params = input, context = {}) => executeScheduleTool('switch_appointment_property', params, context);
+
+test('en-route preview is mutation-free and scoped to this visit', async () => {
+  const preview = await call();
+  expect(preview.destination).toBe('200 Test Street');
+  expect(preview.stops[0].status).toBe('en_route');
+  expect(address.planAppointmentAddress).toHaveBeenCalledWith(db, input.appointment_id, input.property_id, 'visit');
+  expect(address.applyAppointmentAddress).not.toHaveBeenCalled();
+  expect(db.transaction).not.toHaveBeenCalled();
+});
+
+test('confirmed execution holds locks and applies only the pinned preview', async () => {
+  const preview = await call();
+  const result = await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true, technicianId: 'actor' });
+  expect(result).toMatchObject({ success: true, messages_sent: false });
+  expect(address.lockAppointmentAddress).toHaveBeenCalled();
+  expect(address.applyAppointmentAddress).toHaveBeenCalledWith(db, expect.objectContaining({ scope: 'visit' }), 'actor');
+});
+
+test('destination changes between approval and commit refuse without writes', async () => {
+  const preview = await call();
+  property.address_line1 = '300 Test Street';
+  const result = await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true });
+  expect(result.preview_changed).toBe(true);
+  expect(address.applyAppointmentAddress).not.toHaveBeenCalled();
+});
+
+test('missing server confirmation, dark gate, terminal visits, and recurring templates fail closed', async () => {
+  expect((await call({ ...input, confirmed: true })).error).toMatch(/confirmation card/);
+  gates.isEnabled.mockReturnValue(false);
+  expect((await call()).error).toMatch(/not enabled/);
+  gates.isEnabled.mockReturnValue(true);
+  plan.rows[0].status = 'completed';
+  expect((await call()).error).toMatch(/completed/);
+  plan.rows[0] = { ...plan.rows[0], status: 'pending', is_recurring: true, recurring_parent_id: null };
+  expect((await call()).error).toMatch(/template/);
+  expect(address.applyAppointmentAddress).not.toHaveBeenCalled();
+});

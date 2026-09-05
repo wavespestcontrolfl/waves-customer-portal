@@ -1,0 +1,72 @@
+# Intelligence Bar operational fixes
+
+Implemented locally on `fix/ib-operational-gaps`, based on `a2bb0bc49`.
+The shared address-edit prerequisite is commit `2c3086803` from
+`codex/appointment-address`, incorporated without modifying that worktree.
+This branch extends that service with an explicit visit scope; its existing
+Dispatch caller retains its series scope.
+
+## Audit coverage
+
+1. Customer detail includes saved properties, linked profiles, apartment units,
+   and explicit unavailable-versus-empty coverage.
+2. Admin schedule and tech route/detail tools use effective appointment addresses,
+   with the same divergent-stamp unit rule used by the existing SQL readers.
+3. `switch_appointment_property` prepares an actor-bound confirmation card for
+   a saved property on the same customer. Commit reacquires scheduling, stop,
+   customer-comms, and row locks; verifies the approved destination and stop set;
+   then uses the shared address writer. Grouped service lines move together.
+   Primary customer address, future visits, lifecycle, and billing are preserved;
+   no messages are sent. Terminal visits and recurrence-template rows must use
+   Dispatch review. The latter cannot honestly promise a visit-only effect.
+4. The current ET date is supplied per request instead of frozen at process load.
+5. Customers and Dispatch publish selected IDs and the viewed date to the global
+   bar through one page-context provider; the prompt requires authoritative reads.
+6. Customer, SMS, and call searches support a full first-and-last name.
+7. Customer counts reflect all filtered matches; customer/schedule/message/call
+   reads have continuation and coverage. Schedule defaults to today ET.
+8. Advertised presence filters work; unsupported filter keys are rejected;
+   health filters use the latest score and numeric zero bounds are retained.
+9. SMS history supports older pages. Call IDs can retrieve full transcripts in
+   bounded pages. Instructions distinguish excerpts and unavailable sources from
+   complete evidence.
+10. Tech next-stop and remaining counts exclude terminal appointments.
+11. Clarification preserves pending cards, original expiry, and resolved status.
+12. Explicit change requests authorize preparing the preview immediately;
+    execution approval remains the existing confirmation card. Cancellation's
+    tool description states the intentional Dispatch restriction.
+
+## Verification
+
+- 142 server tests passed across eight relevant suites, including new real-Knex
+  SQL compilation tests with an in-memory transport (no database socket).
+- 18 client tests passed across the admin shell, customer page, Dispatch
+  completion predicate, and pending-card regression suites.
+- Client production build passed.
+- `check:portal-brand` and `check:domain-rules` passed.
+- ESLint found no errors. The rewritten customer query and new functions are
+  below the structural warning threshold; existing large component/route warnings
+  remain outside this change's refactoring scope.
+- Playwright with installed Chrome exercised the real global bar at 1440 and 390
+  pixels against synthetic API fixtures: selected context arrived, a clarification
+  retained the pending card, Confirm worked, and Done survived another question.
+  Both screenshots were inspected in-session:
+  `/tmp/ib-operational-qa/clarification-1440.png` and
+  `/tmp/ib-operational-qa/clarification-390.png`.
+  This was an isolated bar fixture, not live customer data or a full backend run.
+  The temporary client fixture was removed.
+
+## Release and verification limits
+
+No deployment, production writes, customer messages, or gate flips were performed.
+The address action uses the prerequisite's default-off `GATE_EDIT_APPT_ADDRESS`;
+activation remains an owner release decision. No migration was added or run.
+A dev/preview database is still required for end-to-end schema and concurrent
+transaction verification; mocked transaction tests do not establish that evidence.
+No live model call was used to claim a measured change in conversational behavior.
+
+Before release, reconcile this branch with the final reviewed version of the
+address-edit prerequisite. Do not ship an older copy over later changes on that
+branch. This local branch includes the prerequisite's Dispatch UI/API changes,
+which were not independently browser-exercised here; their shared writer tests
+and this branch's production build passed.

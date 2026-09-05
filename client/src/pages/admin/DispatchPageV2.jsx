@@ -1,3 +1,4 @@
+import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 // client/src/pages/admin/DispatchPageV2.jsx
 //
 // Mobile-first orchestrator for /admin/dispatch under the dispatch-v2
@@ -591,6 +592,12 @@ export default function DispatchPageV2({
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
+  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || continueProjectService;
+  usePublishIntelligenceBarPageData({
+    viewed_date: date,
+    appointment_id: ibSelectedService?.id,
+    customer_id: ibSelectedService?.customer_id,
+  });
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
