@@ -4,7 +4,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
+const { pagedAtColumn, canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 const decisions = require('./agent-decisions');
 
 const SOURCE = 'message_drafts';
@@ -27,9 +27,10 @@ const PROJECTED_LIVE = decisions.LIVE_STATUSES.filter((s) => s !== 'pending_revi
 // span while it is projected, else the draft's creation. The page key is
 // the creation alone (immutable — the span moves when the owner schedules
 // the send and back when it lands; Codex r14).
-const PAGED = () => db.raw("date_trunc('milliseconds', d.created_at)");
+const PAGED = 'd.created_at';
 const START = () => db.raw(`date_trunc('milliseconds', COALESCE(CASE WHEN d.status = 'suggested' AND ${DECISION_STATUS} IN (${PROJECTED_LIVE.map(() => '?').join(', ')}) THEN ${DECISION_ACTIVE} END, d.created_at))`, PROJECTED_LIVE);
 const COLUMNS = () => [
+  pagedAtColumn(db, 'd.created_at'), // the page stamp (see PAGED)
   'd.id', 'd.intent', 'd.drafter', 'd.draft_ms', 'd.created_at', 'd.approved_at', 'd.sent_at', 'd.status',
   'd.campaign_type', 'd.purpose', 'd.customer_id', 'd.sms_log_id', 'd.model', 'd.prompt_version',
   db.raw("NULLIF(TRIM(CONCAT_WS(' ', c.first_name, c.last_name)), '') AS customer_name"),
@@ -129,6 +130,7 @@ function fromRow(d) {
     subtitle: [lane, d.drafter ? `drafter ${d.drafter}` : null].filter(Boolean).join(' · ') || null,
     ...map,
     createdAt: d.created_at,
+    pagedAt: d.paged_at,
     startedAt: decided ? decided.startedAt : d.created_at,
     finishedAt: outcome.finishedAt,
     lastProgressAt: outcome.lastProgressAt,
@@ -156,7 +158,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
         q.where('d.status', 'pending');
         q.orWhere((s) => s.where('d.status', 'suggested').whereIn(db.raw(`COALESCE(${DECISION_STATUS}, 'pending_review')`), decisions.LIVE_STATUSES));
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'd.id' }), { start: PAGED(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'd.id' }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

@@ -6,7 +6,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
+const { pagedAtColumn, canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'agent_decisions';
 // A scheduled send (admin-communications queues an sms_log row with
@@ -29,11 +29,13 @@ function activeFrom(t) {
 }
 const ACTIVE_FROM = activeFrom('agent_decisions');
 const START = () => db.raw(`date_trunc('milliseconds', ${ACTIVE_FROM})`);
-// the page key: the row's creation, immutable (ACTIVE_FROM moves when the
-// decision is scheduled and back when it resolves; Codex r14)
-const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
+// the page key: the row's raw creation, immutable (ACTIVE_FROM moves when
+// the decision is scheduled and back when it resolves; Codex r14); the
+// stamp beside it (pagedAtColumn) keeps the compare on the indexed column
+const PAGED = 'created_at';
 const ID = 'id';
 const COLUMNS = () => [
+  pagedAtColumn(db, 'created_at'), // the page stamp (see PAGED)
   'id', 'workflow', 'agent_name', 'mode', 'status', 'entity_type', 'entity_id', 'customer_id', 'lead_id',
   'detected_intent', 'confidence', 'confidence_label', 'safety_flags', 'model', 'prompt_version',
   'human_verdict', 'reviewed_at', 'created_at', 'updated_at',
@@ -154,6 +156,7 @@ function fromRow(d) {
     verification: verdict.verification,
     disposition: verdict.disposition ?? map.disposition ?? null,
     createdAt: d.created_at,
+    pagedAt: d.paged_at,
     startedAt: d.active_from || d.created_at,
     finishedAt: map.lifecycle === 'terminal' ? decidedAt : null,
     lastProgressAt: decidedAt,
@@ -174,7 +177,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .where((q) => {
         q.whereIn('status', LIVE_STATUSES);
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: PAGED(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

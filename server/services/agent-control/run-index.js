@@ -112,10 +112,12 @@ function validate({ preset, status, area, lane, limit, now }) {
 const LIST_DEFAULTS = Object.freeze({ lane: null, area: null, status: 'all', window: '7d', cursor: null, limit: DEFAULT_LIMIT, now: null });
 
 // Cursor = every source's keyset position { at, id } after the last row
-// that source contributed (or was read past) — base64url JSON.
+// that source contributed (or was read past) — base64url JSON. `at` is the
+// row's pagedAt stamp as TEXT (microsecond precision), bound as-is to the
+// adapter's raw column compare.
 function encodeCursor(positions) {
   const p = {};
-  for (const [source, pos] of positions) if (pos) p[source] = [pos.at.toISOString(), pos.id];
+  for (const [source, pos] of positions) if (pos) p[source] = [pos.at, pos.id];
   return Buffer.from(JSON.stringify({ p }), 'utf8').toString('base64url');
 }
 
@@ -127,8 +129,8 @@ function decodeCursor(cursor) {
     const positions = new Map();
     for (const [source, pair] of Object.entries(parsed.p)) {
       if (!SOURCES.has(source) || !Array.isArray(pair) || typeof pair[1] !== 'string' || !keyed(source, pair[1])) throw new Error('shape');
-      const at = new Date(pair[0]);
-      if (Number.isNaN(at.getTime())) throw new Error('shape');
+      const at = typeof pair[0] === 'string' ? pair[0] : null;
+      if (!at || Number.isNaN(new Date(at).getTime())) throw new Error('shape');
       positions.set(source, { at, id: pair[1] });
     }
     return positions;
@@ -138,7 +140,7 @@ function decodeCursor(cursor) {
 }
 
 function positionOf(run) {
-  return { at: new Date(run.pagedAt || run.createdAt), id: run.id };
+  return { at: run.pagedAt, id: run.id };
 }
 
 function countBuckets(scoped) {

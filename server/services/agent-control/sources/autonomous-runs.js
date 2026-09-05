@@ -6,7 +6,7 @@
 
 const db = require('../../../models/db');
 const { RUN_STAGES, runStatus, TERMINAL_APPROVAL } = require('../../agent-activity');
-const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
+const { pagedAtColumn, canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'autonomous_runs';
 const LANE = 'blog_draft';
@@ -34,11 +34,13 @@ const PUBLISHING = "outcome LIKE 'publishing%'";
 const PUBLISHING_RE = /^publishing/;
 // Sort / page key = the run's startedAt in fromRow (spanFor), at ms precision.
 const START = () => db.raw(`date_trunc('milliseconds', COALESCE(${EXECUTION_STARTED_AT}, CASE WHEN ${PUBLISHING} THEN updated_at END, claimed_at, created_at))`);
-// the page key: the row's creation, immutable (START moves with the span — an
-// approval, a publishing claim; Codex r14); ms-truncated to compare with a JS cursor
-const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
+// the page key: the row's raw creation, immutable (START moves with the
+// span — an approval, a publishing claim; Codex r14); the stamp is selected
+// beside it (pagedAtColumn) so the cursor compares against the indexed column
+const PAGED = 'created_at';
 const ID = 'id';
 const COLUMNS = () => [
+  pagedAtColumn(db, 'created_at'), // the page stamp (see PAGED)
   'id', 'action_type', 'page_type', 'shadow_mode', 'outcome', 'skip_reason', 'failure_message',
   db.raw("draft_payload->>'title' AS draft_title"),
   db.raw("draft_payload->'frontmatter'->>'title' AS draft_frontmatter_title"),
@@ -183,6 +185,7 @@ function fromRow(run) {
     errorCode: errored ? failure.code : null,
     errorMessage: failure.message,
     createdAt: run.created_at,
+    pagedAt: run.paged_at,
     ...spanFor(run, decided, decidedAt),
     lastProgressAt: decidedAt || run.updated_at || run.claimed_at,
     steps,
@@ -202,7 +205,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
         q.orWhereRaw(REVIEW_PARKED_GATE);
         q.orWhereRaw(PUBLISHING);
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: PAGED(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

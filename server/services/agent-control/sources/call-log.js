@@ -6,7 +6,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
+const { pagedAtColumn, canonicalRun, humanize, modelLabel, keyset, notMirrored, isMissingSchema } = require('./shape');
 const { whereNotSandboxCall } = require('../../voice-agent/relay-protocol');
 // the processor's retry limits (one config): an extraction_failed call still
 // inside them is queued work its sweep will claim again, not a failure (Codex r9)
@@ -16,11 +16,14 @@ const SOURCE = 'call_log';
 const LANE = 'call_extraction';
 // Sort / page key = the run's startedAt in fromRow, at ms precision.
 const START = () => db.raw("date_trunc('milliseconds', COALESCE(processing_started_at, created_at))");
-// the page key: the call's creation, immutable (processing_started_at moves on every retry; Codex r14)
-const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
+// the page key: the call's raw creation, immutable (processing_started_at
+// moves on every retry; Codex r14) — call_log_created_at_index serves the
+// scan; the stamp beside it (pagedAtColumn) is what the cursor carries
+const PAGED = 'created_at';
 const ID = 'id';
 const PAN_DETECTED = "(transcription_metadata::jsonb ->> 'pan_detected') = 'true'";
 const COLUMNS = () => [
+  pagedAtColumn(db, 'created_at'), // the page stamp (see PAGED)
   'id', 'direction', 'status', 'duration_seconds', 'processing_status', 'transcription_status', 'v2_extraction_status',
   'classification', 'disposition', 'call_outcome', 'processing_started_at', 'processing_heartbeat_at',
   db.raw('(ai_extraction_enriched IS NOT NULL) AS enriched'),
@@ -177,6 +180,7 @@ function fromRow(c) {
     failureClass: failureClassFor(c, status, map),
     errorCode: map.result === 'errored' || retry ? status : null,
     createdAt: c.created_at,
+    pagedAt: c.paged_at,
     startedAt: c.processing_started_at || c.created_at,
     finishedAt: map.lifecycle === 'terminal' ? c.updated_at : null,
     lastHeartbeatAt: beat,
@@ -214,7 +218,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
           .where('created_at', '>', db.raw(`NOW() - INTERVAL '${Number(EXTRACTION_RETRY_WINDOW_DAYS)} days'`))
           .whereRaw(SWEEP_CLAIMABLE));
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'call_log.id' }), { start: PAGED(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'call_log.id' }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

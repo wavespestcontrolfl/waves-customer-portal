@@ -6,7 +6,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
+const { pagedAtColumn, canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
@@ -35,7 +35,7 @@ const SESSION_START = `COALESCE(started_at, ${FIRST_TURN_START}, created_at - ma
 // the page key: the session row's recording time, immutable (SESSION_START
 // can move earlier when a re-record recovers a first turn; Codex r14); the
 // window is judged on LAST_TURN
-const PAGED = () => db.raw("date_trunc('milliseconds', created_at)");
+const PAGED = 'created_at';
 const TURN_END = 'COALESCE(t.started_at + make_interval(secs => COALESCE(t.latency_ms, 0) / 1000.0), t.created_at)';
 const LAST_TURN = `COALESCE((SELECT max(${TURN_END}) ${TURNS}), started_at + make_interval(secs => COALESCE(latency_ms, 0) / 1000.0), created_at)`;
 const ID = 'provider_ref';
@@ -47,6 +47,7 @@ const COLUMNS = () => [
   // shadows the raw column: the resolved start, whichever record carried it
   db.raw(`${SESSION_START} AS started_at`),
   db.raw(`${LAST_TURN} AS last_turn_at`),
+  pagedAtColumn(db, 'created_at'),
 ];
 
 function fromRow(s) {
@@ -71,7 +72,7 @@ function fromRow(s) {
     createdAt: startedAt,
     startedAt,
     finishedAt,
-    pagedAt: s.created_at,
+    pagedAt: s.paged_at,
     // the latency for one turn; the wall span for a session that kept turning
     durationMs: s.latency_ms == null ? null : finishedAt.getTime() - startedAt.getTime(),
     // a failed turn (ok = false) is not done — the detail timeline labels it failed
@@ -94,7 +95,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(baseQuery()
       // windowed on the latest turn, paged on the start (see LAST_TURN)
-      .whereRaw(`${LAST_TURN} >= ?`, [from]), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: PAGED(), id: ID, cursor, limit });
+      .whereRaw(`${LAST_TURN} >= ?`, [from]), { source: SOURCE, idColumn: 'llm_dispatch_log.provider_ref' }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };

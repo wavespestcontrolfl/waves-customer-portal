@@ -266,12 +266,35 @@ async function openAttempt(conn, run, policy, now) {
   return { attemptId: attempt ? attempt.id || attempt : null, attemptNo };
 }
 
+// A run whose current attempt is LIVE: opened, neither terminal nor queued
+// for a retry, and its lease unexpired — a worker is still heartbeating it
+// (a crashed worker's lease lapses after the policy's stall_after_ms).
+function isHeld(run, now) {
+  return Number(run.attempts || 0) > 0 && !['terminal', 'queued'].includes(run.lifecycle)
+    && !!run.lease_expires_at && new Date(run.lease_expires_at).getTime() > now.getTime();
+}
+
+// The handle a refused start gets: inert (writes nothing) and `held` names
+// the live attempt, so runManaged can refuse the body.
+function heldHandle(args, run) {
+  return Object.freeze({
+    ...inertHandle(args),
+    held: { runId: run.id, attemptNo: Number(run.attempts), workerId: run.worker_id || null, leaseExpiresAt: new Date(run.lease_expires_at) },
+  });
+}
+
 /**
  * startRun({ laneId, workflowId, sourceSystem, sourceRunId, workItem?,
  *            traceId?, idempotencyKey?, maxAttempts?, agentVersionId?,
- *            summary?, link? })
+ *            summary?, link?, supersede? })
  * Requires laneId or workflowId (CHECK constraint) and sourceSystem +
- * sourceRunId (UNIQUE key). Returns a handle; never throws.
+ * sourceRunId (UNIQUE key). Returns a handle; never throws. A second start
+ * on a source key whose attempt is still LIVE (lease unexpired) is refused:
+ * the returned handle is inert with `held` set — superseding it would
+ * only rewrite the ledger while the first worker's body keeps running, so
+ * the business operation could run twice (Codex r15). `supersede: true`
+ * is the explicit override for a manual replay. A queued retry, a terminal
+ * run and an expired lease (crashed worker) reopen as a new attempt.
  */
 async function startRun(args = {}) {
   if (!runGateOn()) return inertHandle(args);
@@ -299,6 +322,12 @@ async function startRun(args = {}) {
     const workItemId = await upsertWorkItem(trx, args, laneId, policy);
     const run = await insertRun(trx, args, laneId, policy, workItemId, traceId, now);
     if (!run) throw new Error('run row missing after insert');
+    // refused before the row is touched: the live attempt keeps its lease,
+    // its work item link and its outcome-to-be
+    if (isHeld(run, now) && !args.supersede) {
+      logger.warn(`[agent-runs] startRun held: ${run.source_system}/${run.source_run_id} attempt ${run.attempts} is live on ${run.worker_id || 'unknown worker'} until ${new Date(run.lease_expires_at).toISOString()}`);
+      return { held: run };
+    }
     // a run first started without a work item binds one supplied by a later
     // start ON THE ROW — the ledger's readers (not just this handle) must
     // see the link finish() will mark done (Codex r2)
@@ -326,6 +355,7 @@ async function startRun(args = {}) {
     return { run, attemptId, attemptNo, workItemId: run.work_item_id, laneId: persistedLane, policy: runPolicy };
   }));
   if (!opened) return inertHandle(args);
+  if (opened.held) return heldHandle(args, opened.held);
   // a reopened run keeps the trace its ledger rows already carry
   return liveHandle({ ...opened, traceId: opened.run.trace_id || traceId, workflowId: opened.run.workflow_id || args.workflowId || null, agentVersionId: opened.run.agent_version_id || null });
 }
@@ -666,6 +696,14 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
  */
 async function runManaged(startArgs, fn) {
   const handle = await startRun(startArgs);
+  // a held start never runs the body: the operation is already in flight
+  // on another worker (code `run_in_progress`; `supersede: true` overrides)
+  if (handle.held) {
+    const err = new Error(`run in progress: ${clip(startArgs.sourceSystem, 60)}/${clip(startArgs.sourceRunId, 180)} attempt ${handle.held.attemptNo} is live until ${handle.held.leaseExpiresAt.toISOString()}`);
+    err.code = 'run_in_progress';
+    err.held = handle.held;
+    throw err;
+  }
   // the handle's own scope: its RESOLVED identity (a reopen keeps the
   // persisted lane / workflow, which may differ from what was asked); an
   // inert handle has none, so its body runs in the ambient scope

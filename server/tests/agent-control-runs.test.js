@@ -122,6 +122,8 @@ const SRC = 'test_src';
 const base = { laneId: 'blog_draft', sourceSystem: SRC, sourceRunId: 'r1', idempotencyKey: 'k1' };
 const events = (runId) => store.run_events.filter((e) => e.run_id === runId).map((e) => e.event_type);
 const runRow = () => store.agent_runs[0];
+// the worker holding this run crashed: its lease lapsed (a live attempt refuses a second start — Codex r15)
+const crash = (row = runRow()) => { row.lease_expires_at = new Date(Date.now() - 1); };
 
 beforeEach(() => {
   for (const k of Object.keys(store)) delete store[k];
@@ -335,8 +337,40 @@ describe('start / step / finish', () => {
 });
 
 describe('concurrent starts', () => {
-  test('two starts on one source key get distinct attempts, and the older handle no longer writes the run', async () => {
+  test('a second start on a LIVE attempt is refused: a held inert handle, nothing written; runManaged refuses the body; supersede: true overrides (Codex r15)', async () => {
     const a = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    const ops = state.ops.length;
+    const b = await runs.startRun(base);
+    expect(b.inert).toBe(true);
+    expect(b.held).toMatchObject({ runId: a.id, attemptNo: 1, workerId: runs.WORKER_ID });
+    expect(b.held.leaseExpiresAt).toBeInstanceOf(Date);
+    // nothing updated (the insert is the ON CONFLICT DO NOTHING probe), no attempt row, no event
+    expect(state.ops.slice(ops).filter((o) => /:update$/.test(o))).toEqual([]);
+    expect(store.agent_attempts).toHaveLength(1);
+    expect(events(a.id)).toEqual(['started']);
+    expect(mockWarn.mock.calls.some((c) => /startRun held/.test(c[0]))).toBe(true);
+    // the held handle writes nothing, and its step still runs the wrapped work
+    expect(await b.finish({ result: 'succeeded' })).toBeNull();
+    expect(runRow()).toMatchObject({ lifecycle: 'running', attempts: 1 });
+    // runManaged: the body never runs, the caller gets the code
+    const body = jest.fn(async () => 'ran');
+    await expect(runs.runManaged(base, body)).rejects.toMatchObject({ code: 'run_in_progress', held: { runId: a.id } });
+    expect(body).not.toHaveBeenCalled();
+    // a waiting run still holds its lease → still refused; a queued retry and a lapsed lease reopen
+    await a.wait('external', 'x');
+    expect((await runs.startRun(base)).held).toBeDefined();
+    // explicit manual replay supersedes
+    const c = await runs.startRun({ ...base, supersede: true });
+    expect(c.attemptNo).toBe(2);
+    expect(store.agent_attempts[0]).toMatchObject({ error_code: 'superseded' });
+    await c.fail({ error: new Error('x'), errorCode: 'openai_500', retryable: true });
+    expect(runRow().lifecycle).toBe('queued');
+    expect((await runs.startRun({ ...base, maxAttempts: 3 })).attemptNo).toBe(3);
+  });
+
+  test('a start on a crashed attempt (lease lapsed) supersedes it as attempt 2, and the older handle no longer writes the run', async () => {
+    const a = await runs.startRun({ ...base, workItem: { sourceRef: 'w' } });
+    crash();
     const b = await runs.startRun(base);
     expect(a.id).toBe(b.id);
     expect([a.attemptNo, b.attemptNo]).toEqual([1, 2]);
@@ -440,6 +474,7 @@ describe('a spent handle', () => {
 
   test('a reopen supersedes a crashed attempt (one open attempt at most); the old handle may still replace the placeholder, but a recorded outcome is never rewritten', async () => {
     const a = await runs.startRun(base);
+    crash();
     const b = await runs.startRun(base); // a never finished: its worker crashed
     expect(store.agent_attempts[0]).toMatchObject({ result: 'canceled', error_code: 'superseded' });
     expect(store.agent_attempts[0].finished_at).toBeInstanceOf(Date);
@@ -490,6 +525,7 @@ describe('a spent handle', () => {
 
   test('a stale handle stepping past the budget stamps nothing and writes no budget event on the newer attempt', async () => {
     const a = await runs.startRun(base);
+    crash();
     const b = await runs.startRun(base); // attempt 2: a is stale
     const max = policyFor('blog_draft').budget.max_steps;
     for (let i = 0; i <= max; i += 1) await a.step({ key: `a${i}` }, async () => i);

@@ -13,7 +13,10 @@
  *     createdAt, startedAt, finishedAt, lastHeartbeatAt, lastProgressAt,
  *     pagedAt (the IMMUTABLE stamp run-index orders and pages on — a
  *       source's creation / recording time, never its active span, which
- *       moves when a run resumes or a decision is scheduled; default createdAt),
+ *       moves when a run resumes or a decision is scheduled; default
+ *       createdAt. A TEXT stamp at microsecond precision, YYYY-MM-DDTHH:MM:SS.ffffffZ,
+ *       so the cursor compares against the raw column and its index —
+ *       see pagedAtColumn),
  *     progressSequence, durationMs, attempts, maxAttempts,
  *     stepsDone, stepsTotal, toolCalls, steps: [{ key, label, status, detail, ms, toolName }],
  *     sideEffectClass, riskTier, link, detail, entity: { type, id } | null,
@@ -84,6 +87,25 @@ function defined(fields) {
 const optionalNumber = (v) => (v == null ? null : Number(v));
 const orElse = (v, fallback) => (v == null ? fallback : v);
 
+// The page stamp an adapter selects beside its paging column: that column
+// at MICROsecond precision as text (UTC). The cursor carries it back as
+// text and the adapter compares the RAW column against it, so the plain
+// created_at index serves the keyset scan. A JS Date truncates to ms, and
+// the date_trunc'd column that once matched it could not use an index
+// (date_trunc on timestamptz is not IMMUTABLE) (Codex r15).
+const PAGE_STAMP = 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"';
+const PAGE_STAMP_RE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/;
+function pagedAtColumn(db, column) {
+  return db.raw(`to_char(?? AT TIME ZONE 'UTC', '${PAGE_STAMP}') AS paged_at`, [column]);
+}
+// Normalizes a Date / ISO string to the same six-digit form, so stamps from
+// every source (and the JS-stamped agent_runs rows) order as one key.
+function pageStamp(value) {
+  if (typeof value === 'string' && PAGE_STAMP_RE.test(value)) return value;
+  const s = iso(value);
+  return s && s.replace('Z', '000Z');
+}
+
 function canonicalRun(fields) {
   const f = { ...FIELD_DEFAULTS, ...defined(fields) };
   const source = String(f.source);
@@ -116,7 +138,7 @@ function canonicalRun(fields) {
     finishedAt: iso(f.finishedAt),
     lastHeartbeatAt: iso(f.lastHeartbeatAt),
     lastProgressAt: iso(f.lastProgressAt),
-    pagedAt: iso(orElse(f.pagedAt, f.createdAt)),
+    pagedAt: pageStamp(orElse(f.pagedAt, f.createdAt)),
     progressSequence: Number(f.progressSequence),
     durationMs: f.durationMs == null ? durationBetween(startedAt, f.finishedAt) : Number(f.durationMs),
     attempts: Number(f.attempts ?? (lifecycle === 'queued' ? 0 : 1)),
@@ -137,12 +159,13 @@ function canonicalRun(fields) {
 }
 
 // Keyset paging every adapter applies the same way: rows order by (`start`
-// DESC, id DESC) — `start` is the source's IMMUTABLE paging expression
-// (the row's pagedAt: its creation / recording stamp), never the active
-// span the row displays as startedAt: a span moves (a resume, a scheduled
-// send, a publishing claim), and a row that moved across the cursor would
-// repeat on the next page or vanish from it (Codex r14). A `cursor` =
-// { at, id } (the last row a previous page
+// DESC, id DESC) — `start` is the source's IMMUTABLE paging COLUMN, raw
+// (the row's pagedAt: its creation / recording stamp, selected beside it
+// by pagedAtColumn), never the active span the row displays as startedAt:
+// a span moves (a resume, a scheduled send, a publishing claim), and a
+// row that moved across the cursor would repeat on the next page or
+// vanish from it (Codex r14). A `cursor` = { at, id } (the last row a
+// previous page
 // consumed) selects only rows strictly after it in that order. `start` is
 // the adapter's start expression truncated to milliseconds so the JS Date
 // the cursor carries compares exactly (timestamptz keeps microseconds).
@@ -177,4 +200,4 @@ function isMissingSchema(err) {
   return !!err && (err.code === MISSING_TABLE_SQLSTATE || err.code === UNDEFINED_COLUMN_SQLSTATE);
 }
 
-module.exports = { canonicalRun, defined, keyset, notMirrored, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };
+module.exports = { canonicalRun, defined, keyset, notMirrored, pagedAtColumn, pageStamp, iso, humanize, modelLabel, areaFor, isMissingSchema, MISSING_TABLE_SQLSTATE };

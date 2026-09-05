@@ -7,15 +7,16 @@
 
 const db = require('../../../models/db');
 const { LANE_RUNTIME } = require('../lane-policies');
-const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
+const { pagedAtColumn, canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require('./shape');
 
 const SOURCE = 'job_health';
 // One row per job, and its tick start is its only stamp: a job that ticks
 // between two pages is a NEW run under the same key, so it may appear
 // again — the one source with no immutable page key (Codex r14).
 const START = () => db.raw("date_trunc('milliseconds', last_started_at)");
+const PAGED = 'last_started_at';
 const ID = 'job_name';
-const COLUMNS = ['job_name', 'last_started_at', 'last_finished_at', 'last_success_at', 'last_status', 'last_error', 'last_duration_ms', 'consecutive_failures', 'updated_at'];
+const COLUMNS = () => ['job_name', 'last_started_at', 'last_finished_at', 'last_success_at', 'last_status', 'last_error', 'last_duration_ms', 'consecutive_failures', 'updated_at', pagedAtColumn(db, 'last_started_at')];
 
 let workflowLane = null;
 function laneForJob(jobName) {
@@ -62,6 +63,7 @@ function fromRow(job) {
     failureClass: state.failureClass,
     errorMessage: error,
     createdAt: job.last_started_at,
+    pagedAt: job.paged_at,
     startedAt: job.last_started_at,
     finishedAt,
     lastHeartbeatAt: finishedAt ?? job.last_started_at,
@@ -81,11 +83,11 @@ function fromRow(job) {
 async function list({ from, cursor = null, limit = 200 } = {}) {
   try {
     const rows = await keyset(notMirrored(db('job_health')
-      .select(COLUMNS)
+      .select(COLUMNS())
       .where((q) => {
         q.where('last_status', 'running').orWhere('last_status', 'failed').orWhere('consecutive_failures', '>', 0);
         q.orWhere(START(), '>=', from);
-      }), { source: SOURCE, idColumn: 'job_health.job_name' }), { start: START(), id: ID, cursor, limit });
+      }), { source: SOURCE, idColumn: 'job_health.job_name' }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };
@@ -95,7 +97,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
 
 async function get(jobName) {
   try {
-    const row = await db('job_health').select(COLUMNS).where({ job_name: jobName }).first();
+    const row = await db('job_health').select(COLUMNS()).where({ job_name: jobName }).first();
     return row ? { run: fromRow(row) } : null;
   } catch (err) {
     if (isMissingSchema(err)) return null;

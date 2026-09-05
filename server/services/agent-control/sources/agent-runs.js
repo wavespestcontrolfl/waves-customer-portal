@@ -5,7 +5,7 @@
  */
 
 const db = require('../../../models/db');
-const { canonicalRun, keyset, isMissingSchema } = require('./shape');
+const { pagedAtColumn, canonicalRun, keyset, isMissingSchema } = require('./shape');
 
 const SOURCE = 'agent_runs';
 
@@ -28,6 +28,7 @@ function fromRow(run, steps = []) {
     errorCode: run.error_code,
     errorMessage: run.error_message,
     createdAt: run.created_at,
+    pagedAt: run.paged_at,
     startedAt: run.started_at,
     finishedAt: run.finished_at,
     lastHeartbeatAt: run.last_heartbeat_at,
@@ -63,12 +64,11 @@ function fromRow(run, steps = []) {
 
 // The window is judged on the active span (started_at moves on a reopen /
 // resume; created_at backs a queued row that never started). The page key
-// is created_at — the run's pagedAt — which the writer stamps ONCE from a
-// JS Date (ms precision, so the cursor compares exactly; no date_trunc,
-// and agent_runs_created_idx indexes the bare column). Paging on the span
-// let a resumed run cross the cursor and repeat or vanish (Codex r14).
+// is the raw created_at — the run's pagedAt — which the writer stamps ONCE
+// (agent_runs_created_idx serves the scan). Paging on the span let a
+// resumed run cross the cursor and repeat or vanish (Codex r14).
 const START = () => db.raw('COALESCE(r.started_at, r.created_at)');
-const PAGED = () => db.raw('r.created_at');
+const PAGED = 'r.created_at';
 const ID = 'r.id';
 // Step / tool-call counts are the CURRENT attempt's (attempt_no = r.attempts):
 // health.js reads them against the per-run budget, and a retry starts
@@ -83,7 +83,7 @@ const STEP_COUNTS = () => [
 function baseQuery() {
   return db('agent_runs as r')
     .leftJoin('work_items as w', 'w.id', 'r.work_item_id')
-    .select('r.*', 'w.title as work_item_title', 'w.entity_type', 'w.entity_id', ...STEP_COUNTS());
+    .select('r.*', 'w.title as work_item_title', 'w.entity_type', 'w.entity_id', pagedAtColumn(db, 'r.created_at'), ...STEP_COUNTS());
 }
 
 async function list({ from, cursor = null, laneId = null, limit = 200 } = {}) {
@@ -94,7 +94,7 @@ async function list({ from, cursor = null, laneId = null, limit = 200 } = {}) {
         q.where('r.lifecycle', '<>', 'terminal');
         q.orWhere(START(), '>=', from);
       })
-      .modify((q) => { if (laneId) q.where('r.lane_id', laneId); }), { start: PAGED(), id: ID, cursor, limit });
+      .modify((q) => { if (laneId) q.where('r.lane_id', laneId); }), { start: PAGED, id: ID, cursor, limit });
     return { runs: rows.map((r) => fromRow(r)), unavailable: false };
   } catch (err) {
     if (isMissingSchema(err)) return { runs: [], unavailable: true };
