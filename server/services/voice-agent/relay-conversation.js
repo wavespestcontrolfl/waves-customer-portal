@@ -1657,6 +1657,9 @@ class RelayConversation {
     this._resume = state || null;
     if (!state) return;
     if (state.relayLeadId || state.leadCaptured) this.leadCaptured = true;
+    // The call started when its FIRST leg did (hook r25 P1): the close-time
+    // duration_seconds covers the whole call, not the resumed leg alone.
+    if (state.startedAtMs && state.startedAtMs < this._startedAt) this._startedAt = state.startedAtMs;
     // The earlier legs' caller turns count toward this CALL's turn cap
     // (codex r3 P2): a reconnect is not a fresh budget.
     this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
@@ -2169,6 +2172,7 @@ class RelayConversation {
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
+          startedAt: this._startedAt,
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)

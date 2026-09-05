@@ -102,8 +102,12 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null }) {
   return {
+    // When this leg's session started (the first leg's is the CALL's start —
+    // restored on the resumed leg so duration_seconds covers the whole call,
+    // hook r25 P1).
+    started_at: Number.isFinite(Number(startedAt)) && Number(startedAt) > 0 ? new Date(Number(startedAt)).toISOString() : null,
     // An INCOMPLETE estimate capture at this leg's close: the call was being
     // held open for the missing fields, and these are the fields already
     // given — both restored on the resumed leg (codex r2 P1).
@@ -282,6 +286,8 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         // A lead captured on an earlier leg even when its relay_lead_id
         // stamp (best-effort) did not land (codex r3 P2).
         leadCaptured: legs.some((seg) => seg.lead_captured === true),
+        // The earliest leg's start = the call's start (null when no leg recorded one).
+        startedAtMs: legs.map((seg) => Date.parse(seg.started_at || '')).filter((ms) => Number.isFinite(ms) && ms > 0).reduce((min, ms) => (min === null || ms < min ? ms : min), null),
         // The LATEST leg's hold (a later complete capture clears it) and the
         // estimate fields accumulated across every leg, later legs winning.
         holdOpen: latest ? latest.hold_open === true : false,
