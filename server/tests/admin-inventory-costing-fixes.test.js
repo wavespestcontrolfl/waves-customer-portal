@@ -176,7 +176,7 @@ describe('POST /restock-requests/:id/action', () => {
       expect(movements).toHaveLength(1);
       expect(movements[0].metadata.secondReceive).toBe(true);
       expect(statusUpdates.some((u) => u.status === 'received')).toBe(true);
-      expect(orderUpdates).toHaveLength(1); // evidence.landedAfterReceive comes off in the same transaction
+      expect(orderUpdates.some((u) => String(u.evidence).includes("- 'landedAfterReceive'"))).toBe(true); // the marker comes off in the same transaction
     });
   });
 

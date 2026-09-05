@@ -320,9 +320,15 @@ async function assertManualActionAllowed(trx, requestId, action) {
 // the delivered, unread bell is retired in the same transaction; another
 // admin must not follow it into a duplicate purchase (Codex r28 P2). The
 // revoke CLI retires the same keys on a revoke.
+// The persisted copy (evidence.bell / bellAt) goes too, as the revoke CLI
+// strips it: a delivery in flight (park / re-ring) that lands afterwards
+// fails deliverBell's version check instead of resurrecting the
+// instruction (hook P1).
 async function settleRequestLedgerBells(trx, requestId) {
   const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id');
-  if (row) await retireLedgerBells(trx, row.id);
+  if (!row) return;
+  await retireLedgerBells(trx, row.id);
+  await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
 }
 
 // Unlocked read for a pre-check (the IB tool's confirmation card); the
