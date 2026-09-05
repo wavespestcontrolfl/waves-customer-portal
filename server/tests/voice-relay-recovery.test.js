@@ -18,6 +18,7 @@ jest.mock('../services/twilio-failure-alerts', () => ({ maskSid: (s) => String(s
 // would race the module cache); the gate answers true so the close-time pass runs in every case.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => undefined) }));
 jest.mock('../services/call-commitments', () => ({ recordRelayCommitments: jest.fn(async () => ({ found: true, written: 1 })) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: null })) }));
 
 const recovery = require('../services/voice-agent/relay-recovery');
 const { RelayConversation } = require('../services/voice-agent/relay-conversation');
@@ -34,8 +35,7 @@ function resumedConvo(over = {}) {
 
 afterEach(() => { delete process.env.GATE_VOICE_RELAY_RECOVERY; delete process.env.GATE_VOICE_RELAY_TRANSFER; jest.clearAllMocks(); });
 
-function primeDb({ firstRow = null, updateImpl } = {}) {
-  const db = require('../models/db');
+function primeDb({ firstRow = null, updateImpl, db = require('../models/db') } = {}) {
   const updates = [];
   const guardQ = { whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
   const builder = {
@@ -525,23 +525,25 @@ describe('the conversation side', () => {
     function isolated({ streamImpl, executeToolImpl }) {
       let Convo;
       let leadWriter;
+      let dbIso;
       jest.resetModules(); // relay-conversation requires relay-tools lazily — a cached instance from an earlier case must not win
       jest.isolateModules(() => {
         jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream: streamImpl } }; });
         jest.doMock('../services/voice-agent/relay-tools', () => ({ TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: executeToolImpl }));
         Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
-        leadWriter = require('../services/lead-from-extraction').createLeadFromExtraction; // the isolated registry's mock
+        leadWriter = require('../services/lead-from-extraction').createLeadFromExtraction; // the isolated registry's mocks
+        dbIso = require('../models/db');
       });
-      return { Convo, leadWriter };
+      return { Convo, leadWriter, dbIso };
     }
 
     test('the second consecutive model failure hands off: office open ⇒ transfer_to_office runs (2A ends the leg); no re-prompt copy', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
       process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
-      primeDb();
       const stream = jest.fn(() => ({ finalMessage: async () => { throw new Error('upstream 500'); } }));
       const executeTool = jest.fn(async (name, input, ctx) => { ctx.endForTransfer(); return 'Transferring the caller to the office now.'; });
-      const { Convo } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
       const send = jest.fn();
       const endSession = jest.fn();
       const convo = new Convo({ callSid: 'CA-pf', from: '+19415551234', send, endSession });
@@ -563,7 +565,8 @@ describe('the conversation side', () => {
       primeDb();
       const stream = jest.fn(() => ({ finalMessage: async () => { throw new Error('upstream 500'); } }));
       const executeTool = jest.fn();
-      const { Convo, leadWriter } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      const { Convo, leadWriter, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ firstRow: { id: 'cl-1', customer_id: null }, db: dbIso });
       const send = jest.fn();
       const endSession = jest.fn();
       const convo = new Convo({ callSid: 'CA-pf2', from: '+19415551234', send, endSession });
@@ -572,10 +575,32 @@ describe('the conversation side', () => {
       expect(executeTool).not.toHaveBeenCalled();
       const spoken = send.mock.calls.map(([t]) => String(t)).join(' | ');
       expect(spoken).toMatch(/call you back as soon as possible/);
+      // …promised only because the office's callback bell was WRITTEN first (hook P1)
+      // notification-triggers is required LAZILY at call time ⇒ the main registry's post-reset instance, not the isolated one
+      const { triggerNotification: trig } = require('../services/notification-triggers');
+      expect(trig).toHaveBeenCalledWith('customer_voicemail_callback', expect.objectContaining({ phone: '+19415551234', callLogId: 'cl-1', reason: 'sandy_provider_failure' }));
       expect(spoken).not.toMatch(/connect you with the office/); // the transfer line is said only when a transfer is attempted (codex r1 P2)
       expect(leadWriter).not.toHaveBeenCalled(); // the floor runs ONCE, in end() on the close that follows the end frame (codex r1 P2)
       expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
       expect(convo._ending).toBe(true);
+    });
+
+    test('…and when the callback bell cannot be written, Sandy makes NO promise (the no-callback close) (hook P1)', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => { throw new Error('upstream 500'); } }));
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+      primeDb({ firstRow: { id: 'cl-2', customer_id: null }, db: dbIso });
+      const { triggerNotification: trig } = require('../services/notification-triggers'); // the lazily-required (main registry) instance
+      trig.mockResolvedValueOnce({ bellWritten: false, push: null, suppressed: true });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-pf5', from: '+19415551234', send, endSession });
+      await convo._runLoop('first').catch(() => {});
+      await convo._runLoop('second').catch(() => {});
+      const spoken = send.mock.calls.map(([t]) => String(t)).join(' | ');
+      expect(spoken).toMatch(/couldn't save a callback/);
+      expect(spoken).not.toMatch(/call you back as soon as possible/);
+      expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
     });
 
     test('a successful round resets the model streak; gate off ⇒ the streak counts but nothing hands off', async () => {
@@ -596,10 +621,10 @@ describe('the conversation side', () => {
 
     test('a second failed TOOL in one call hands off too', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-      primeDb();
       const stream = jest.fn(() => ({ finalMessage: async () => ({ content: [{ type: 'tool_use', id: 't1', name: 'find_slots', input: {} }], stop_reason: 'tool_use' }) }));
       const executeTool = jest.fn(async (name, input, ctx) => { ctx.toolFailed = true; return 'Could not look that up.'; });
-      const { Convo } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
       const endSession = jest.fn();
       const convo = new Convo({ callSid: 'CA-pf4', from: '+19415551234', send: jest.fn(), endSession });
       await convo._runLoop('book me').catch(() => {});

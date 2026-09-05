@@ -1579,10 +1579,13 @@ class RelayConversation {
         logger.warn(`[voice-relay] provider-failure transfer failed callSid=${maskSid(this.callSid)}: ${err.message} — taking the callback instead`);
       }
     }
-    // The callback: say so and end the leg. The capture floor is NOT run
-    // here — end() runs it once on the socket close that follows the end
-    // frame (a second pass here duplicated the lead activity, codex r1 P2).
-    this.say(copy('troubleCallback', this.language));
+    // The callback is PERSISTED before it is promised (hook P1): the office's
+    // callback bell (the voicemail-callback trigger, per-call tag) is the
+    // follow-up record — the capture floor alone files nothing for a known
+    // customer and skips an already-captured call. Not filed ⇒ Sandy does
+    // not promise one. The capture floor itself is left to end() (one pass).
+    const filed = await this._fileFailureCallback();
+    this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
     if (!this._ending) {
       this._ending = true;
       try { if (this._endSession) this._endSession({ reason: 'provider_failure', captured: this.leadCaptured, owner: this.sessionKey || null }); } catch (e) {
@@ -1647,6 +1650,36 @@ class RelayConversation {
     this._toolFailures = Math.max(this._toolFailures, Number(state.toolFailures) || 0);
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
+    }
+  }
+
+  /**
+   * PR 2B — the provider-failure callback record: the office's callback bell
+   * for THIS call (`customer_voicemail_callback`, per-call tag, real number
+   * by owner ruling), bounded and best-effort. Returns true only when the
+   * bell row was written. Never on the sandbox (a dry run files nothing).
+   */
+  async _fileFailureCallback() {
+    if (this.sandbox || !this.callSid) return false;
+    const phone = toE164(this.from || '');
+    if (!isLikelyE164(phone)) return false;
+    try {
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('id', 'customer_id').catch(() => null), 2000, null);
+      const { triggerNotification } = require('../notification-triggers');
+      const res = await withTimeout(triggerNotification('customer_voicemail_callback', {
+        name: (this._estimateFields && this._estimateFields.first_name) || null,
+        phone,
+        service: null,
+        customerId: (row && row.customer_id) || null,
+        callLogId: (row && row.id) || null,
+        reason: 'sandy_provider_failure',
+      }), 3000, null);
+      const filed = Boolean(res && res.bellWritten === true);
+      if (!filed) logger.warn(`[voice-relay] provider-failure callback NOT filed callSid=${maskSid(this.callSid)} — no promise made`);
+      return filed;
+    } catch (err) {
+      logger.warn(`[voice-relay] provider-failure callback failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return false;
     }
   }
 

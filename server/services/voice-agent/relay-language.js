@@ -68,6 +68,10 @@ const COPY = {
     en: "I'm having trouble pulling that up, so I'm going to connect you with the office rather than keep you waiting.",
     es: 'Estoy teniendo problemas para acceder a eso, así que le comunico con la oficina en lugar de hacerle esperar.',
   },
+  troubleNoCallback: {
+    en: "I'm having trouble pulling that up right now, and I couldn't save a callback either. Please call us back when you get a chance — thanks for calling.",
+    es: 'Estoy teniendo problemas para acceder a eso y tampoco pude guardar una devolución de llamada. Por favor, llámenos de nuevo cuando pueda. Gracias por llamar.',
+  },
   troubleCallback: {
     en: "I'm having trouble pulling that up. I've noted your number, and a Waves team member will call you back as soon as possible. Thanks for calling.",
     es: 'Estoy teniendo problemas para acceder a eso. He anotado su número y un miembro del equipo de Waves le devolverá la llamada lo antes posible. Gracias por llamar.',
