@@ -6746,12 +6746,14 @@ const CallRecordingProcessor = {
       }
       let meta = row.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      // PR 2B: a RECONNECTED row (relay_reconnects > 0) carries the same
-      // evidence problem as a transfer — its relay stash may land during
-      // this transcription — so the pending-composition guard engages too.
-      const reconnected = Boolean(meta && typeof meta === 'object' && (Number(meta.relay_reconnects) || 0) > 0);
+      // A reconnect attempt alone may have been compensated without any AI
+      // session. Preserve a pending relay segment only with text or proof
+      // that a resumed socket claimed the call.
+      const segment = composeRelaySegment(row);
+      const resumedClaim = Number(meta?.relay_reconnect_ms) > 0 && Number(meta?.relay_session_claim_gen) >= Number(meta.relay_reconnect_ms);
+      const reconnected = Number(meta?.relay_reconnects) > 0 && Boolean(segment || resumedClaim);
       const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || row.call_outcome === 'ai_transferred';
-      return { row, segment: composeRelaySegment(row), transferred, reconnected, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
+      return { row, segment, transferred, reconnected, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
     };
     // Transfer-marked row whose relay text had NOT landed at compose time:
     // the transcript write below then composes INSIDE the UPDATE from the

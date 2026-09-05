@@ -610,3 +610,25 @@ describe('whisper + AI segment', () => {
     expect(c2.endForTransfer).not.toHaveBeenCalled();
   });
 });
+
+// Exercise the production reader closure without starting the recording
+// pipeline's external transcription/notification work.
+describe('recording rejection needs evidence beyond a reconnect attempt', () => {
+  test.each([
+    [{ relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 500 }, false],
+    [{ relay_reconnects: 1 }, false],
+    [{ relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 900 }, true],
+    [{ relay_reconnects: 1, relay_transcript: { text: 'Caller: Please help with pests.' } }, true],
+    [{ relay_handoff: { intent: 'office' } }, true],
+  ])('metadata %j enables the rejection exception: %s', async (metadata, expected) => {
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const start = source.indexOf('const currentRelayState = async () => {');
+    const end = source.indexOf('\n    };', start) + '\n    };'.length;
+    const call = { id: 'call-evidence', call_outcome: 'voicemail', metadata };
+    const db = () => ({ where: () => ({ first: async () => call }) });
+    const state = await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return currentRelayState(); })()`, {
+      call, db, composeRelaySegment: transfer.composeRelaySegment,
+    });
+    expect(state.transferred).toBe(expected);
+  });
+});

@@ -593,6 +593,7 @@ class RelayConversation {
     // is closed for the rest of the call.
     this._lookupsUsed = 0;
     this._priorLookupsUsed = 0;
+    this._priorCallerTurns = 0;
     // Session-scoped OFFERED-SLOT registry. Same opaque-ref doctrine as the
     // lookup refs: the availability tools speak "Tuesday August 18 at 9 AM"
     // (no ISO date anywhere), so request_booking takes a ref instead of making
@@ -1617,17 +1618,17 @@ class RelayConversation {
   _applyResumeState(state) {
     this._resume = state || null;
     if (!state) return;
-    if (state.relayLeadId || state.leadCaptured) this.leadCaptured = true;
+    this.leadCaptured = [this.leadCaptured, state.relayLeadId, state.leadCaptured, state.reserviceFiled, state.noLeadCreated].some(Boolean);
     // The earlier leg's lead is THIS call's lead for the booking card too
     // (hook r36 P1): request_booking after the reconnect reads ctx.leadId().
     // A lead this leg captured itself is kept.
-    if (state.relayLeadId && !this._leadId) this._leadId = state.relayLeadId;
+    this._leadId ||= state.relayLeadId;
     // The call started when its FIRST leg did (hook r25 P1): the close-time
     // duration_seconds covers the whole call, not the resumed leg alone.
-    if (state.startedAtMs && state.startedAtMs < this._startedAt) this._startedAt = state.startedAtMs;
+    this._startedAt = Math.min(this._startedAt, state.startedAtMs || Infinity);
     // The earlier legs' caller turns count toward this CALL's turn cap
     // (codex r3 P2): a reconnect is not a fresh budget.
-    this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
+    this._priorCallerTurns = Math.max(this._priorCallerTurns, (state.callerTurns || []).length);
     // …and so do the customer-book lookups already spent (codex r4 P2).
     this._priorLookupsUsed = Math.max(this._priorLookupsUsed, Number(state.lookupsUsed) || 0);
     this._lookupResults = [...new Set([...(state.lookupResults || []), ...this._lookupResults])];
@@ -1641,8 +1642,8 @@ class RelayConversation {
     // A capture that deliberately created NO lead (an existing lifecycle
     // customer) is captured all the same (codex r2 P2): the floor stays
     // down and the session may end when the caller is done.
-    if (state.reserviceFiled) { this._reserviceFiled = true; this._noLeadCreated = true; this.leadCaptured = true; }
-    else if (state.noLeadCreated) { this._noLeadCreated = true; this.leadCaptured = true; }
+    this._reserviceFiled ||= state.reserviceFiled === true;
+    this._noLeadCreated = [this._noLeadCreated, state.reserviceFiled, state.noLeadCreated].some(Boolean);
     // An INCOMPLETE estimate capture on the earlier leg (codex r2 P1): the
     // hold that keeps the call open for the missing fields, and the fields
     // already given, carry over — otherwise the resumed leg's first
@@ -1650,11 +1651,22 @@ class RelayConversation {
     // retry would have forgotten the name and address. Only while THIS leg
     // has not captured yet (markCaptured sets the boolean); this leg's own
     // fields win over the earlier ones.
-    if (state.holdOpen && this._holdOpenForRetry == null) this._holdOpenForRetry = true;
-    if (state.estimateFields) this._estimateFields = { ...state.estimateFields, ...(this._estimateFields || {}) };
+    this._holdOpenForRetry ??= state.holdOpen || null;
+    this._estimateFields = { ...state.estimateFields, ...this._estimateFields };
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
+  }
+
+  // Both turn-time hydration and a silent close can race the older socket's
+  // append. They use the same bounded, owner-verified restoration attempt.
+  async _reloadResumeState() {
+    const recovery = require('./relay-recovery');
+    if (this._callerVerified !== true || !recovery.isRecoveryGateOn()) return;
+    try {
+      const fresh = await recovery.loadResumeState(db, this.callSid, { sessionKey: this.sessionKey });
+      if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh);
+    } catch { /* fail-soft: a later turn or close may retry */ }
   }
 
   async _sessionSuperseded() {
@@ -1729,12 +1741,7 @@ class RelayConversation {
       // empty list. Reload (bounded) on each of the first turns until the
       // segment is there — the seed then lands on that turn (hook P1).
       this._resumeReloads = (this._resumeReloads || 0) + 1;
-      try {
-        // Also the retry for an initial load that timed out, or a verification
-        // that settled late — the owner + verification checks stay (hook P1).
-        const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
-        if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh); // the same restoration as the constructor's load (hook P1)
-      } catch { /* fail-soft: the next turn retries */ }
+      await this._reloadResumeState();
     }
     if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
       this._resumeSeeded = true;
@@ -1994,6 +2001,7 @@ class RelayConversation {
    */
   async end(reason) {
     if (this.ended) return;
+    reason ||= null;
     this.ended = true;
     this.interrupt();
     // A barge-in the caller never followed with speech before hanging up is
@@ -2021,17 +2029,8 @@ class RelayConversation {
     // composition below read that state, so it settles first (hook P1).
     if (this._resumeReady) {
       try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
-      // …and a snapshot that read the row before the old socket appended its
-      // segment is refreshed ONCE here (bounded): the floor below must see
-      // the earlier caller turns even when the caller never spoke on this
-      // leg, so the turn-time reload never ran (hook P1).
-      if (this._resumedHint && (!this._resume || !this._resume.segmentsText) && require('./relay-recovery').isRecoveryGateOn()) {
-        try {
-          const fresh = this._callerVerified === true ? await require('./relay-recovery').loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null;
-          if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh);
-        } catch { /* fail-soft */ }
-      }
     }
+    if (this._resumedHint && !this._resume?.segmentsText) await this._reloadResumeState();
 
     // …and then drain the writes the chain does NOT cover. A tool that blew its
     // WRITE timeout was detached from the turn loop deliberately (the caller
@@ -2083,7 +2082,7 @@ class RelayConversation {
         segment = recovery.buildSegment({
           generation: this.sessionGeneration,
           sessionKey: this.sessionKey,
-          reason: reason || null,
+          reason,
           text: buildTranscriptText(this._transcript),
           turns: this._transcript.length,
           latency: summarizeTurnStats(this._turnStats),
@@ -2091,7 +2090,7 @@ class RelayConversation {
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
           noLeadCreated: this._noLeadCreated === true,
-          promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
+          promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, ...v })),
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
           startedAt: this._startedAt,
@@ -2114,9 +2113,7 @@ class RelayConversation {
         logger.warn(`[voice-relay] segment append failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       }
     }
-    const supersededAtClose = this.sessionKey
-      ? await this._sessionSuperseded().catch(() => false)
-      : false;
+    const supersededAtClose = await this._sessionSuperseded().catch(() => false);
     if (supersededAtClose) {
       logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
       // …except that this socket's segment may just have RECOMPOSED a call
@@ -2157,9 +2154,11 @@ class RelayConversation {
           logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
         }
       }
+      return;
     }
 
-    if (!supersededAtClose) await this._runCaptureFloor(reason);
+    await this._runCaptureFloor(reason);
+    if (!this.callSid) return;
 
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
@@ -2169,8 +2168,7 @@ class RelayConversation {
     // calls don't linger as ringing/no-answer/null, then resync the unified
     // message row. Keyed by CallSid — a no-op (0 rows) when no call_log row
     // exists for the session (a call answered outside the signed webhooks).
-    if (this.callSid && !supersededAtClose) {
-      try {
+    try {
         // RACE: end() runs on EVERY WebSocket close, including a relay failure
         // (rejected upgrade / WS error / transient disconnect). On failure Twilio
         // also hits /relay-complete, which stamps call_outcome='voicemail' as the
@@ -2194,11 +2192,12 @@ class RelayConversation {
         // Turns still waiting on a speaker event log now (firstAudio=n/a).
         for (const s of this._turnStats) this._finishTurn(s);
         const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats } = require('./relay-transcript');
+        const capturedLead = this.leadCaptured && !this._noLeadCreated;
         const transcriptUpdate = buildTranscriptUpdate({
           turns: this._transcript,
           modelSummary: this._modelSummary,
-          reason: reason || null,
-          leadCaptured: this.leadCaptured && !this._noLeadCreated,
+          reason,
+          leadCaptured: capturedLead,
           reserviceFiled: this._reserviceFiled,
           callSid: this.callSid,
           model: MODEL,
@@ -2209,9 +2208,11 @@ class RelayConversation {
         // PR 2B (codex r3 P2): on a reconnected call the summary covers the
         // WHOLE call — the earlier legs' caller lines ahead of this leg's —
         // unless the model wrote one (capture_lead's, which already did).
-        const priorCallerTurns = (recoveryOn && this._resume && Array.isArray(this._resume.callerTurns) ? this._resume.callerTurns : []).map((text) => ({ role: 'caller', text }));
+        const resume = this._resume || {};
+        const priorCallerTurns = Array.from(recoveryOn ? (resume.callerTurns || []) : [], (text) => ({ role: 'caller', text }));
+        const hasTranscript = Boolean(transcriptUpdate?.transcription);
         if (transcriptUpdate && priorCallerTurns.length && !this._modelSummary) {
-          transcriptUpdate.call_summary = buildCallSummary({ turns: [...priorCallerTurns, ...this._transcript], reason: reason || null, leadCaptured: this.leadCaptured && !this._noLeadCreated });
+          transcriptUpdate.call_summary = buildCallSummary({ turns: [...priorCallerTurns, ...this._transcript], reason, leadCaptured: capturedLead });
         }
         const reconcileQuery = db('call_log')
           .where('twilio_call_sid', this.callSid)
@@ -2244,14 +2245,14 @@ class RelayConversation {
         // the row's durable earlier segments plus this socket's own record,
         // deduplicated by session key should the append land after all —
         // never this socket's text alone over a reconnected call (hook r27 P1).
-        if (recoveryOn && segment && transcriptUpdate && transcriptUpdate.transcription) {
+        if (recoveryOn && segment && hasTranscript) {
           composedTranscription = db.raw('COALESCE(?, ?)', [recovery.composeSegmentsSql(db, segmentAppended ? null : segment), transcriptUpdate.transcription]);
           try {
             const tm = JSON.parse(transcriptUpdate.transcription_metadata);
             tm.segments = { this_generation: this.sessionGeneration, appended: segmentAppended };
             transcriptUpdate.transcription_metadata = JSON.stringify(tm);
           } catch { /* keep the metadata as built */ }
-        } else if (recoveryOn && this._resume && !(transcriptUpdate && transcriptUpdate.transcription)) {
+        } else if (recoveryOn && this._resume && !hasTranscript) {
           // The caller hung up before speaking on the reconnected leg: the
           // reconnect claim fenced the first socket's reconcile out, so this
           // close is the only one that can put the earlier segment(s) on the
@@ -2259,7 +2260,7 @@ class RelayConversation {
           const { TRANSCRIPTION_PROVIDER: RELAY_PROVIDER } = require('./relay-transcript');
           composedFromRowOnly = {
             // …and its summary (the superseded first socket never wrote one).
-            ...(priorCallerTurns.length ? { call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason: reason || null, leadCaptured: this.leadCaptured && !this._noLeadCreated }) } : {}),
+            ...(priorCallerTurns.length ? { call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason, leadCaptured: capturedLead }) } : {}),
             transcription: db.raw('COALESCE(?, transcription)', [recovery.composeSegmentsSql(db)]),
             transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [recovery.composeSegmentsSql(db), RELAY_PROVIDER]),
             transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [recovery.composeSegmentsSql(db)]),
@@ -2275,9 +2276,9 @@ class RelayConversation {
               ? db.raw('GREATEST(COALESCE(duration_seconds, 0), ?)', [Math.max(0, Math.round((Date.now() - this._startedAt) / 1000))])
               : Math.max(0, Math.round((Date.now() - this._startedAt) / 1000)),
             updated_at: new Date(),
-            ...(transcriptUpdate || {}),
+            ...transcriptUpdate,
             ...(composedTranscription ? { transcription: composedTranscription } : {}),
-            ...(composedFromRowOnly || {}),
+            ...composedFromRowOnly,
           });
         // LOUD on a dropped audit record: 0 rows with a real transcript means
         // either the voicemail guard fired (a genuinely failed relay leg) or
@@ -2382,8 +2383,8 @@ class RelayConversation {
         // too. A never-reconnected, never-transferred salvage (relay_failed)
         // and the sandbox record nothing, as before.
         const transferSalvaged = salvaged > 0 && this.sandbox !== true
-          && (this._transferRequested === true || Boolean(this._resume && this._resume.reconnects > 0));
-        if ((updated || transferSalvaged) && (transcriptUpdate?.transcription || composedFromRowOnly)) {
+          && (this._transferRequested === true || (resume.reconnects > 0));
+        if ((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) {
           // PR 2B: on a reconnected call the persisted transcript is the
           // composed one (all segments); the commitments pass reads THAT
           // under the same owner fence, so segment 1's promises reach Owed
@@ -2395,13 +2396,12 @@ class RelayConversation {
               2000,
               null,
             );
-            if (persisted && typeof persisted.transcription === 'string' && persisted.transcription) commitmentsTranscript = persisted.transcription;
+            commitmentsTranscript = persisted?.transcription || commitmentsTranscript;
           }
           await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });
         }
-      } catch (err) {
-        logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
-      }
+    } catch (err) {
+      logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
     }
 
   }
