@@ -756,8 +756,11 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     // required): sendable from the Owner queue while the cause is transient — and, when it is not (a thread deleted, a
     // match the owner declines), skippable HERE, the one terminal action (`outcome: 'skip'`); "It sent" / "Re-queue"
     // do not apply to it (the endpoint refuses them)
+    // …or ANY drafted follow-up while the authority contract is off (nothing can send it — the skip is the one action)
     const unverifiable = await orderByPriority(
-      db('seo_link_prospects').where({ follow_up_status: 'drafted' }).whereIn('follow_up_skipped_reason', [...M.OWNER_MARKERS])
+      isEnabled('linkAuthority')
+        ? db('seo_link_prospects').where({ follow_up_status: 'drafted' }).whereIn('follow_up_skipped_reason', [...M.OWNER_MARKERS])
+        : db('seo_link_prospects').where({ follow_up_status: 'drafted' })
     );
     for (const p of unverifiable) needsReconcile.push({ ...p, follow_up: true, unverifiable: true, outreach_subject: p.follow_up_subject });
     const sentToday = await Outreach.dailySendCount();

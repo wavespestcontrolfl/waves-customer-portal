@@ -412,7 +412,7 @@ async function closeCustomerRecipientFollowUp(q, prospectId, now = new Date()) {
 // or the domain — it is settled skipped at once instead
 const followUpSchedule = (sentAt) => (isEnabled('linkAuthority')
   ? { follow_up_status: 'none', follow_up_due_at: M.followUpDueAt(sentAt), follow_up_skipped_reason: null }
-  : { follow_up_status: 'skipped', follow_up_due_at: null, follow_up_skipped_reason: 'GATE_LINK_AUTHORITY off — follow-ups send under the authority contract only' });
+  : { follow_up_status: 'skipped', follow_up_due_at: null, follow_up_skipped_reason: M.GATE_OFF_REASON });
 
 // Finalize ONLY our own claim (the send token still matches). The token is private
 // to the send path, so this can't be stranded by an unrelated updated_at write.
@@ -632,6 +632,13 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
 async function settleDraftedFollowUp(trx, { prospectId, current, onPath, mode }) {
   if (mode === 'auto' && M.OWNER_MARKERS.includes(current.follow_up_skipped_reason)) return { ok: false, code: 'not_authorized', error: `an earlier automatic attempt was refused (${current.follow_up_skipped_reason}) — the follow-up is the owner's` };
   const drafted = () => trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id });
+  // the contract OFF after the draft (a redeploy): nothing can ever send it — retired on this attempt, as the lease
+  // retires a due one (followUpRetirement), so the conversation completes and the closure sweep releases the inbox
+  if (!isEnabled('linkAuthority')) {
+    await drafted().update({ follow_up_status: 'skipped', follow_up_skipped_reason: M.GATE_OFF_REASON, updated_at: new Date() });
+    logger.info(`[link-outreach] follow-up for ${prospectId} retired — ${M.GATE_OFF_REASON}`);
+    return { ok: false, code: 'not_authorized', error: `${M.GATE_OFF_REASON}; the follow-up is retired` };
+  }
   if (onPath && onPath.superseded_by) {
     await drafted().update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path superseded before the follow-up', updated_at: new Date() });
     logger.info(`[link-outreach] follow-up for ${prospectId} retired — its acquisition path was superseded after the draft`);
@@ -997,8 +1004,9 @@ async function reconcileFollowUp({ prospect, outcome, approvedBy }) {
   // will not acknowledge) or by the policy (unclean copy, a score outside the automatic threshold: the open follow-up
   // instance decided OWNER_*) — may be skipped outright: the queue never sends it, the Owner queue offers only Send,
   // and the conversation holds its inbox and domain until it is settled. Only an owner-routed drafted follow-up and the
-  // ambiguous send states skip: an AUTO-decided draft is the queue's to send.
-  const ownerRouted = st === 'drafted' && (M.OWNER_MARKERS.includes(prospect.follow_up_skipped_reason)
+  // ambiguous send states skip: an AUTO-decided draft is the queue's to send — unless the contract is OFF (nothing
+  // sends it: the owner's skip is the one action left).
+  const ownerRouted = st === 'drafted' && (!isEnabled('linkAuthority') || M.OWNER_MARKERS.includes(prospect.follow_up_skipped_reason)
     || (await db(AUTH).where({ prospect_id: prospect.id, dimension: 'communication', instance_kind: 'followup' }).whereNull('ended_at').whereNull('satisfied_at').select('level')).some((r) => String(r.level || '').startsWith('OWNER_')));
   if (outcome === 'skip' && !ownerRouted && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable', error: 'only a follow-up that is yours to send (routed to you by the automatic attempt or the policy), or an ambiguous send, can be skipped' };
   if (outcome !== 'skip' && st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };

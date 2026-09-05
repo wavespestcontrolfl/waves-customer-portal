@@ -174,7 +174,12 @@ const FOLLOW_UP_STATUSES_ANY = Object.freeze(['contacted', ...FOLLOW_UP_JUDGE_ST
 // it, domainRefusal refuses the old path), or the placement OUT of the path's follow-up lifecycle (a send-first row the
 // verifier promoted to live). ONE reader for the lease, the drafter's report, the send and the reconcile — the places
 // that retire it (`skipped`, the reason stamped) so the conversation completes and the closure sweep releases the inbox.
+// …and a follow-up exists under the authority contract ONLY (§6.4: its instance, its approval and its reply check are the
+// contract's): with GATE_LINK_AUTHORITY off nothing can ever send it — read at every visit, not only when the pitch
+// schedules it (followUpSchedule), so a follow-up scheduled before the gate was turned off settles the same way
+const GATE_OFF_REASON = 'GATE_LINK_AUTHORITY off — follow-ups send under the authority contract only';
 function followUpRetirement({ row, path, domain = null }) {
+  if (!require('../../config/feature-gates').isEnabled('linkAuthority')) return GATE_OFF_REASON;
   if (!path) return 'acquisition path deleted before the follow-up';
   if (path.superseded_by) return 'acquisition path superseded before the follow-up';
   if (domain && domain.best_path_id && row.path_id && domain.best_path_id !== row.path_id) return 'domain re-ranked to another path before the follow-up';
@@ -278,4 +283,4 @@ async function reviewByEmail(q, emails) {
 // have delivered the pitch, so the inbox stays held and the authority it was claimed under stays pinned until then
 const AMBIGUOUS_SEND_STATUSES = Object.freeze(['sending', 'send_error']);
 
-module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpRetirement, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };
+module.exports = { AMBIGUOUS_SEND_STATUSES, REPLY_CHECK_FAILED, RECIPIENT_REVIEW_REQUIRED, OWNER_MARKERS, FOLLOW_UP_MAX_WORDS, draftReview, followUpReview, reviewDraft, classifyDraft, lintDraft, draftHash, followUpHash, draftOf, followUpDueAt, FOLLOW_UP_DELAY_DAYS, FOLLOW_UP_STATUSES, FOLLOW_UP_STATUSES_ANY, FOLLOW_UP_JUDGE_STATUSES, followUpRetirement, GATE_OFF_REASON, followUpPending, recipientReview, recipientReviews, reviewByEmail, normalizeEmail, STORED_SQL, CLASSIFIER_RULES, CONTACT_SOURCES, SHARED_MAIL_DOMAINS, GOOGLE_HOSTS, LINT_CONTEXT };

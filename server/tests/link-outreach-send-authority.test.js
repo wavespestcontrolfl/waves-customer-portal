@@ -1277,6 +1277,24 @@ describe('Codex r2 on #3854', () => {
     Object.assign(placement(t.db), { follow_up_status: 'sent' });
     expect(await Outreach.reconcileSendError({ prospectId: t.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: false, code: 'not_reconcilable' });
   });
+  test('P2 (Codex r21): the authority gate turned OFF after a follow-up was scheduled (a redeploy): a due one retires at the lease, a drafted one on the owner\'s click or the reconcile\'s skip — never stranded until the gate returns', async () => {
+    const due = await conversation({ decide: false });
+    Object.assign(placement(due.db), { follow_up_status: 'due', follow_up_subject: null, follow_up_body: null, follow_up_due_at: new Date(Date.now() - DAY) });
+    isEnabled.mockImplementation((g) => g !== 'linkAuthority');
+    expect(await worker.claim({ n: 10, type: 'outreach', followUp: true })).toEqual([]);
+    expect(placement(due.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/GATE_LINK_AUTHORITY/) });
+    isEnabled.mockImplementation(() => true);
+    const click = await conversation();
+    isEnabled.mockImplementation((g) => g !== 'linkAuthority');
+    expect(await Outreach.sendOutreach({ prospectId: click.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(click.db)), now: LATER })).toMatchObject({ ok: false, code: 'not_authorized', error: expect.stringMatching(/GATE_LINK_AUTHORITY/) });
+    expect(placement(click.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/GATE_LINK_AUTHORITY/) });
+    isEnabled.mockImplementation(() => true);
+    const skip = await conversation();
+    isEnabled.mockImplementation((g) => g !== 'linkAuthority');
+    expect(await Outreach.reconcileSendError({ prospectId: skip.row.id, outcome: 'skip', approvedBy: 'Adam', followUp: true })).toMatchObject({ ok: true, retired: true });
+    expect(placement(skip.db)).toMatchObject({ follow_up_status: 'skipped', follow_up_skipped_reason: expect.stringMatching(/^skipped by Adam after review/) });
+    isEnabled.mockImplementation(() => true);
+  });
   test('P2 (Codex r19): a SKIP of an ambiguous follow-up keeps the attempt stamp (Gmail may have delivered it — the ET-day cap counts every attempt); only a confirmed-not-sent requeue clears it', async () => {
     const s = await conversation();
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: NOW })).ok).toBe(true);
