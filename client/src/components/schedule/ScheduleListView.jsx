@@ -197,9 +197,13 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
     });
   };
 
+  const allVisibleSelected = sorted.length > 0 && sorted.every(s => selected.has(s.id));
+  const someVisibleSelected = sorted.some(s => selected.has(s.id));
+
   const toggleAll = () => {
-    if (selected.size === sorted.length) setSelected(new Set());
+    if (allVisibleSelected) setSelected(new Set());
     else {
+      selectedMetaRef.current.clear();
       sorted.forEach(rememberSelectedMeta);
       setSelected(new Set(sorted.map(s => s.id)));
     }
@@ -485,7 +489,10 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
           <thead>
             <tr>
               <th className={cn(thClass, 'w-8')}>
-                <input type="checkbox" checked={selected.size > 0 && selected.size === sorted.length}
+                <input type="checkbox" checked={allVisibleSelected}
+                  aria-label="Select all visible appointments"
+                  ref={node => { if (node) node.indeterminate = someVisibleSelected && !allVisibleSelected; }}
+                  disabled={loading || loadError || sorted.length === 0}
                   onChange={toggleAll}
                   className="w-4 h-4" style={{ accentColor: '#18181B' }} />
               </th>
