@@ -1083,8 +1083,8 @@ describe('buildPriceChangeNoticeLink', () => {
 });
 
 describe('buildProjectReportLink', () => {
-  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held' };
-  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null };
+  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z' };
+  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z' };
 
   test('the account\'s newest issued report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
     mockBuilders = {
@@ -1094,6 +1094,9 @@ describe('buildProjectReportLink', () => {
     const r = await buildProjectReportLink(['c1', 'c2']);
     expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
     expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('status', ['sent', 'closed']);
+    // Delivery evidence too: completing a visit closes a project and mints
+    // its token even when the report was never sent (GH Codex #3893 r3 P1).
+    expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('sent_at');
     expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
     expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/project/dana-${'f'.repeat(12)}`);
@@ -1939,7 +1942,7 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
     describe('project report links resolve as the viewer does and bind to the account', () => {
       const FULL = 'f'.repeat(32);
-      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', report_token: FULL, report_hold_status: null, ...over });
+      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', report_token: FULL, report_hold_status: null, ...over });
       function wireProject({ full = project(), byPrefix = [project()], ...account } = {}) {
         wireAccount(account);
         mockBuilders.projects = chainBuilder({ firstRow: full, rows: byPrefix });
@@ -1965,6 +1968,10 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
         // A tokened but unissued (draft) project — a /send that failed after
         // stamping the token — is not a report to text (GH Codex #3893 r1 P1).
         wireProject({ full: project({ status: 'draft' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        // Closed by a visit completion but never sent (report_not_sent) —
+        // the token exists, the report was not issued (GH Codex #3893 r3 P1).
+        wireProject({ full: project({ sent_at: null }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
         wireProject({ full: project({ report_hold_status: 'held' }) });
         expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);

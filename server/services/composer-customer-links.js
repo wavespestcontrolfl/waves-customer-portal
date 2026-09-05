@@ -1085,11 +1085,12 @@ async function checkProjectReportLinks(ctx, onRecipientAccount) {
     const lookup = segment && require('./project-report-links').extractProjectReportTokenLookup(segment);
     if (!lookup) return refuseSend('A project report link in this message is not on the Waves portal — remove it before sending.');
     const project = await linkableProjectReport(lookup);
-    // Issued only (sent / closed — the builder's own set): a /send that
-    // failed after stamping report_token leaves a draft whose URL the admin
-    // project APIs still expose; texting it would bypass the project send
-    // flow's readiness and official-document checks (GH Codex #3893 r1 P1).
-    if (!project || !PROJECT_REPORT_STATUSES.includes(String(project.status || ''))) {
+    // Issued only (the builder's own predicate — status AND sent_at): a
+    // /send that failed after stamping report_token leaves a draft, and a
+    // closed-but-never-sent project keeps a token too; texting either would
+    // bypass the project send flow's readiness and official-document checks
+    // (GH Codex #3893 r1 + r3 P1).
+    if (!issuedProjectReport(project)) {
       return refuseSend('This project report is no longer viewable — remove the link before sending.');
     }
     if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
@@ -1965,14 +1966,21 @@ async function buildPriceChangeNoticeLink(customerId) {
 // report — reports-public heldReportPaymentContext's own set.
 const PROJECT_REPORT_HELD_STATUSES = ['held', 'releasing'];
 // Reports that have been issued: the same status set project-report-links
-// numbers vanity paths over.
+// numbers vanity paths over — AND delivery evidence: completing a project-
+// backed visit mints report_token and closes the project even when the
+// report was never sent (project-completion.js report_not_sent), and the
+// public viewer has no status gate past the token, so a closed row alone is
+// not an issued report; the project send flow stamps sent_at (GH Codex
+// #3893 r3 P1). Both the builder and the send seam require it.
 const PROJECT_REPORT_STATUSES = ['sent', 'closed'];
+const issuedProjectReport = (project) => Boolean(project)
+  && PROJECT_REPORT_STATUSES.includes(String(project.status || '')) && Boolean(project.sent_at);
 
 // The project a public report segment opens, exactly as the viewer resolves
 // it (reports-public loadProjectForReport): a full token matches its row; a
 // vanity prefix must match exactly one.
 async function linkableProjectReport(lookup) {
-  const COLUMNS = ['id', 'customer_id', 'status', 'report_token', 'report_hold_status'];
+  const COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'report_token', 'report_hold_status'];
   if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...COLUMNS);
   const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`).limit(2);
   return rows.length === 1 ? rows[0] : null;
@@ -1992,8 +2000,9 @@ async function buildProjectReportLink(customerIds) {
     const rows = await db('projects')
       .whereIn('customer_id', customerIds)
       .whereIn('status', PROJECT_REPORT_STATUSES)
+      .whereNotNull('sent_at')
       .whereNotNull('report_token')
-      .orderByRaw('COALESCE(sent_at, created_at) DESC, id DESC')
+      .orderByRaw('sent_at DESC, id DESC')
       .offset(offset)
       .limit(PAGE);
     project = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;

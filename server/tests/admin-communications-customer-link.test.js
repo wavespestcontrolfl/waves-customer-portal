@@ -318,7 +318,7 @@ describe('POST /admin/communications/customer-link', () => {
     });
   });
 
-  test('receipt + project_report: dispatch the whole account id set; the project report rides the owner back (an account-scoped bearer); a receipt does not', async () => {
+  test('receipt + project_report: dispatch the whole account id set; both ride the owner back (account-scoped customer bearers — /sms applies the recipient\'s consent policy)', async () => {
     wireDb({ customers: soloCustomer() });
     builders.buildReceiptLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/receipt/abc', line: 'Here is your receipt for invoice INV-1: https://portal.wavespestcontrol.com/receipt/abc\n\n', receipt: { id: 'inv-1', invoiceNumber: 'INV-1', status: 'paid', total: 85, paidAt: '2026-08-30' } });
     builders.buildProjectReportLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff', line: 'Here is your WDO report: https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff\n\n', immediateOnly: true, projectReport: { id: 'p1', title: 'WDO', projectType: 'wdo', projectDate: '2026-08-10' } });
@@ -327,8 +327,7 @@ describe('POST /admin/communications/customer-link', () => {
       expect(receipt.status).toBe(200);
       expect(builders.buildReceiptLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
       const receiptBody = await receipt.json();
-      expect(receiptBody).toMatchObject({ kind: 'receipt', url: 'portal.wavespestcontrol.com/receipt/abc', receipt: { invoiceNumber: 'INV-1' } });
-      expect(receiptBody.customerId).toBeUndefined();
+      expect(receiptBody).toMatchObject({ kind: 'receipt', url: 'portal.wavespestcontrol.com/receipt/abc', receipt: { invoiceNumber: 'INV-1' }, customerId: CUSTOMER_UUID });
       expect(receiptBody.immediateOnly).toBeUndefined();
 
       // The phone-only resolver's selects are queued per request.
