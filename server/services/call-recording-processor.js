@@ -7070,7 +7070,10 @@ const CallRecordingProcessor = {
     if (relayOnly || (relayState && relayState.transferred)) {
       const rejectedChars = fallbackImplausible ? spokenCharCount(gateText) : rejectedPrimaryChars;
       logger.warn(`[call-proc] Rejecting the RECORDED segment of transferred call ${maskSid(callSid)} (${rejectedChars} chars / ${recordingSeconds}s) — keeping the AI segment${relayOnly ? '' : ' (pending)'}`);
-      transcription = `${relayOnly ? `${relayOnly.text}\n\n` : ''}[${relayState.label} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}`;
+      // With the relay text still pending, the BARE sentinel is written:
+      // composition (in the UPDATE now, or the late stash) adds the segment
+      // header exactly once, and a bare sentinel stays a rejected fallback.
+      transcription = relayOnly ? `${relayOnly.text}\n\n[${relayState.label} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}` : TRANSCRIPTION_REJECTED_SENTINEL;
       transcriptionProvenance = transcriptionProvenance || { provider: null, model: null, metadata: {} };
       transcriptionProvenance.metadata = { ...(transcriptionProvenance.metadata || {}), ...(relayOnly ? { relay: relayOnly.metadata } : {}), recorded_segment_rejected: { reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rejectedChars, recording_seconds: recordingSeconds } };
       // Through the same SQL-time composition as every other transcript write
