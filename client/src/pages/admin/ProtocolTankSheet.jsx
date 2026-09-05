@@ -26,6 +26,7 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
           Reference sheet, not a pesticide container label or approval to combine every product.
           Follow each product label for mixing, PPE, application restrictions and re-entry.
         </p>
+        <p className="mt-2">Each product below requires a separate single-product tank. Do not combine the listed products in one tank.</p>
       </div>
       {!tankReady && (
         <p role="alert" className="rounded-md border border-alert-fg/30 bg-alert-bg p-3 text-alert-fg">
@@ -48,18 +49,21 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
         const labelLink = productLabelLink(product);
         const tankProduct = TANK_MIX_CATEGORIES.has(product.mixingOrderCategory);
         const exclusions = product.excludedTurfSpecies || [];
-        const excludesDefaultTurf = exclusions.some((species) => String(species).toLowerCase().replace(/[^a-z]/g, "") === "staugustine");
+        const excludesDefaultTurf = exclusions.some((species) => String(species).toLowerCase().replace(/[^a-z]/g, "").startsWith("staugustine"));
         const quantityChecks = [item.selected, tankReady, tankProduct, product.labelVerifiedAt, !excludesDefaultTurf,
           Number.isFinite(mix?.amount), mix?.amount > 0, mix?.amountUnit];
         const hasAmount = quantityChecks.every(Boolean);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
+          ["Active ingredient", product.activeIngredient],
           ["Application instruction", item.raw],
           ["Application scope", item.scope],
           ["Signal word", product.signalWord],
           ["PPE", ppe || "Not on file — consult the product label"],
           ["Re-entry", product.reentryText || "Consult the product label"],
           ["Compatibility", product.compatibilityNotes],
+          ["Do not tank mix with", (product.doNotTankMixWith || []).join("; ")],
+          ["Rainfast timing", product.rainfastMinutes == null ? null : `${product.rainfastMinutes} minutes`],
           ["Pollinators", product.pollinatorPrecautions],
         ].filter(([, value]) => value);
         return (
@@ -68,13 +72,12 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
               <h3 className="text-16 font-medium">{product.name}</h3>
               <span className="font-mono">{hasAmount ? `${mix.amount} ${mix.amountUnit.replaceAll("_", " ")} / 110 gal` : "Quantity withheld"}</span>
             </div>
+            <p className="mt-2 font-medium">Separate single-product tank</p>
             <p className="mt-2 text-zinc-600">{item.conditional ? "Conditional product — confirm its trigger before use." : "Protocol product"} {item.selected ? "Selected." : "Not selected for this tank."}</p>
             {!tankProduct && <p className="mt-2">Tank mixing is not established for this product. Check its application method and label.</p>}
             {!product.labelVerifiedAt && <p className="mt-2 text-alert-fg">Label verification missing.</p>}
             <p className="mt-2">{product.mixingInstructions || "Mixing directions are not on file. Consult the product label."}</p>
-            <p className="mt-2 text-zinc-600">{product.activeIngredient || "Active ingredient not on file"}</p>
             {exclusions.length > 0 && <p className="mt-2 text-alert-fg">Excluded turf: {exclusions.join(", ")}</p>}
-            {product.reiHours != null && <p className="mt-2">Recorded restricted-entry interval: {product.reiHours} hours. Check label applicability.</p>}
             <dl className="mt-3 grid gap-3 md:grid-cols-2">{safety.map(([label, value]) => <div key={label}><dt className="font-medium">{label}</dt><dd>{String(value)}</dd></div>)}</dl>
             <div className="mt-3 flex flex-wrap gap-4">
               {labelLink ? <a className="underline" href={labelLink.href} target="_blank" rel="noopener noreferrer">Product label</a> : <span>Product label document not on file</span>}

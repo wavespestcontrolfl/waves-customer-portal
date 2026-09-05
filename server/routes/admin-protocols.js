@@ -348,20 +348,17 @@ async function loadWindowSopPayload(knex, protocolId, windowKey) {
   const [products, gates, calibrations] = await Promise.all([
     knex('lawn_protocol_products')
       .where({ lawn_protocol_window_id: window.id })
-      .orderBy('sort_order', 'asc')
-      .catch(() => []),
+      .orderBy('sort_order', 'asc'),
     knex('lawn_protocol_gates')
       .where({ lawn_protocol_id: protocol.id })
-      .orderBy('gate_key', 'asc')
-      .catch(() => []),
+      .orderBy('gate_key', 'asc'),
     knex('equipment_calibrations as ec')
       .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
       .where('ec.active', true)
       .where('es.active', true)
       .whereIn('es.system_type', ['tank', 'backpack'])
       .select('ec.carrier_gal_per_1000', 'ec.calibration_status', 'es.name as system_name')
-      .orderBy('es.name', 'asc')
-      .catch(() => []),
+      .orderBy('es.name', 'asc'),
   ]);
   return { protocol, window, products, gates, calibrations };
 }
@@ -1388,7 +1385,7 @@ async function getProtocolProducts() {
       'requires_surfactant', 'allows_surfactant',
       'label_source_note', 'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
       'ppe_required', 'signal_word', 'compatibility_notes', 'pollinator_precautions',
-      'ppe_text', 'reentry_text',
+      'ppe_text', 'reentry_text', 'do_not_tank_mix_with',
     )
     .catch(() => []);
 
@@ -1675,6 +1672,7 @@ router.get('/lawn-mix', async (req, res, next) => {
           ppeRequired: product.ppe_required || null,
           signalWord: product.signal_word || null,
           compatibilityNotes: product.compatibility_notes || null,
+          doNotTankMixWith: product.do_not_tank_mix_with || [],
           pollinatorPrecautions: product.pollinator_precautions || null,
           ppeText: product.ppe_text || null,
           reentryText: product.reentry_text || null,
@@ -2365,50 +2363,61 @@ router.post('/lawn/windows/:windowKey/wiki-sync', requireAdmin, async (req, res,
     const protocol = await protocolQuery.first();
     if (!protocol) return res.status(404).json({ error: 'Lawn protocol not found' });
 
-    const payload = await loadWindowSopPayload(db, protocol.id, req.params.windowKey);
-    if (!payload) return res.status(404).json({ error: 'Protocol window not found' });
+    const result = await db.transaction(async (trx) => {
+      const locked = await trx('lawn_protocols').where({ id: protocol.id }).forUpdate().first();
+      if (locked?.status !== protocol.status) {
+        const error = new Error('Protocol status changed during SOP synchronization. Reload and retry.');
+        error.statusCode = 409;
+        error.isOperational = true;
+        throw error;
+      }
+      const payload = await loadWindowSopPayload(trx, protocol.id, req.params.windowKey);
+      if (!payload) {
+        const error = new Error('Protocol window not found');
+        error.statusCode = 404;
+        error.isOperational = true;
+        throw error;
+      }
 
-    const slug = protocolSopSlug(payload.protocol, payload.window);
-    const title = `${payload.protocol.name} - ${payload.window.title}`;
-    const content = renderWindowSopMarkdown(payload);
-    const metadata = {
-      source: 'lawn_protocol_command_center',
-      protocolId: payload.protocol.id,
-      protocolKey: payload.protocol.protocol_key,
-      protocolVersion: payload.protocol.version,
-      windowId: payload.window.id,
-      windowKey: payload.window.window_key,
-      generatedAt: new Date().toISOString(),
-    };
-    const existing = await db('knowledge_base').where({ slug }).first();
-    const rowData = {
-      path: `kb/protocols/${slug}.md`,
-      slug,
-      title,
-      content,
-      category: 'protocols',
-      tags: JSON.stringify(['waveguard', 'lawn_protocol', 'st_augustine', payload.window.window_key]),
-      source: 'protocol-sync',
-      confidence: 'high',
-      metadata: JSON.stringify(metadata),
-      status: 'active',
-      last_verified_at: new Date(),
-      verified_by: actorFromRequest(req).name || 'protocol-sync',
-      updated_at: new Date(),
-    };
+      const slug = protocolSopSlug(payload.protocol, payload.window);
+      const title = `${payload.protocol.name} - ${payload.window.title}`;
+      const content = renderWindowSopMarkdown(payload);
+      const metadata = {
+        source: 'lawn_protocol_command_center',
+        protocolId: payload.protocol.id,
+        protocolKey: payload.protocol.protocol_key,
+        protocolVersion: payload.protocol.version,
+        windowId: payload.window.id,
+        windowKey: payload.window.window_key,
+        generatedAt: new Date().toISOString(),
+      };
+      const existing = await trx('knowledge_base').where({ slug }).first();
+      const rowData = {
+        path: `kb/protocols/${slug}.md`,
+        slug,
+        title,
+        content,
+        category: 'protocols',
+        tags: JSON.stringify(['waveguard', 'lawn_protocol', 'st_augustine', payload.window.window_key]),
+        source: 'protocol-sync',
+        confidence: 'high',
+        metadata: JSON.stringify(metadata),
+        status: 'active',
+        last_verified_at: new Date(),
+        verified_by: actorFromRequest(req).name || 'protocol-sync',
+        updated_at: new Date(),
+      };
 
-    const [entry] = existing
-      ? await db('knowledge_base').where({ id: existing.id }).update(rowData).returning('*')
-      : await db('knowledge_base').insert({ ...rowData, created_at: new Date() }).returning('*');
+      const [entry] = existing
+        ? await trx('knowledge_base').where({ id: existing.id }).update(rowData).returning('*')
+        : await trx('knowledge_base').insert({ ...rowData, created_at: new Date() }).returning('*');
 
-    let attached = false;
-    if (payload.protocol.status === 'draft') {
-      const existingRefs = Array.isArray(payload.window.wiki_refs) ? payload.window.wiki_refs : [];
-      const ref = `kb:${slug}`;
-      if (!existingRefs.includes(ref)) {
-        const nextRefs = [...existingRefs, ref];
-        await db.transaction(async (trx) => {
-          await lockDraftProtocol(trx, payload.protocol.id);
+      const attached = payload.protocol.status === 'draft';
+      if (attached) {
+        const existingRefs = Array.isArray(payload.window.wiki_refs) ? payload.window.wiki_refs : [];
+        const ref = `kb:${slug}`;
+        if (!existingRefs.includes(ref)) {
+          const nextRefs = [...existingRefs, ref];
           const [updatedWindow] = await trx('lawn_protocol_windows')
             .where({ id: payload.window.id })
             .update({ wiki_refs: JSON.stringify(nextRefs), updated_at: new Date() })
@@ -2422,28 +2431,26 @@ router.post('/lawn/windows/:windowKey/wiki-sync', requireAdmin, async (req, res,
             after: updatedWindow,
             metadata: { route: 'lawn/windows/:windowKey/wiki-sync', kbEntryId: entry.id, slug },
           });
-        });
-        attached = true;
-      } else {
-        attached = true;
+        }
       }
-    }
 
-    res.json({
-      success: true,
-      attached,
-      attachmentRequiresDraft: payload.protocol.status !== 'draft',
-      ref: `kb:${slug}`,
-      entry: {
-        id: entry.id,
-        slug: entry.slug,
-        title: entry.title,
-        category: entry.category,
-        status: entry.status,
-        confidence: entry.confidence,
-        updatedAt: entry.updated_at,
-      },
+      return {
+        success: true,
+        attached,
+        attachmentRequiresDraft: payload.protocol.status !== 'draft',
+        ref: `kb:${slug}`,
+        entry: {
+          id: entry.id,
+          slug: entry.slug,
+          title: entry.title,
+          category: entry.category,
+          status: entry.status,
+          confidence: entry.confidence,
+          updatedAt: entry.updated_at,
+        },
+      };
     });
+    res.json(result);
   } catch (err) { next(err); }
 });
 

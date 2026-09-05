@@ -61,6 +61,18 @@ postgres('protocol publishing on PostgreSQL', () => {
     await mockPg.schema.createTable('products_catalog', (t) => {
       t.uuid('id').primary(); t.text('name'); t.decimal('inventory_on_hand'); t.text('inventory_unit'); t.decimal('low_stock_threshold');
     });
+    await mockPg.schema.createTable('equipment_systems', (t) => {
+      t.uuid('id').primary(); t.text('name'); t.text('system_type'); t.boolean('active');
+    });
+    await mockPg.schema.createTable('equipment_calibrations', (t) => {
+      t.uuid('id').primary(); t.uuid('equipment_system_id'); t.boolean('active');
+      t.decimal('carrier_gal_per_1000'); t.text('calibration_status');
+    });
+    await mockPg.schema.createTable('knowledge_base', (t) => {
+      t.increments('id');
+      for (const field of ['path', 'slug', 'title', 'content', 'category', 'source', 'confidence', 'status', 'verified_by']) t.text(field);
+      t.jsonb('tags'); t.jsonb('metadata'); t.timestamp('last_verified_at'); t.timestamps(true, true);
+    });
     await mockPg.schema.createTable('lawn_protocol_audit_log', (t) => {
       t.increments('id'); t.uuid('lawn_protocol_id'); t.uuid('actor_technician_id'); t.uuid('entity_id');
       for (const field of ['actor_name', 'actor_email', 'entity_type', 'action']) t.text(field);
@@ -68,7 +80,7 @@ postgres('protocol publishing on PostgreSQL', () => {
     });
   });
   beforeEach(async () => {
-    for (const table of ['lawn_protocol_audit_log', 'lawn_protocol_products', 'lawn_protocol_gates', 'lawn_protocol_windows', 'lawn_protocols', 'products_catalog']) await mockPg(table).delete();
+    for (const table of ['knowledge_base', 'lawn_protocol_audit_log', 'lawn_protocol_products', 'lawn_protocol_gates', 'lawn_protocol_windows', 'lawn_protocols', 'products_catalog']) await mockPg(table).delete();
     ids = Object.fromEntries(['active', 'draft', 'activeWindow', 'draftWindow', 'activeProduct', 'draftProduct', 'activeGate', 'draftGate', 'catalog'].map((key) => [key, randomUUID()]));
     await mockPg('products_catalog').insert({ id: ids.catalog, name: 'Synthetic product', inventory_on_hand: 100, inventory_unit: 'oz', low_stock_threshold: 1 });
     for (const status of ['active', 'draft']) {
@@ -122,10 +134,31 @@ postgres('protocol publishing on PostgreSQL', () => {
     expect(await mockPg('lawn_protocol_audit_log').where({ action: 'publish' })).toHaveLength(1);
   });
 
+  test('SOP synchronization writes its page and attachment together', async () => {
+    const result = await invoke('/lawn/windows/:windowKey/wiki-sync', 'post', { windowKey: 'jan' }, { protocolId: ids.draft });
+    expect(result.statusCode).toBe(200);
+    expect(result.body.attached).toBe(true);
+    expect(await mockPg('knowledge_base')).toHaveLength(1);
+    expect((await mockPg('lawn_protocol_windows').where({ id: ids.draftWindow }).first()).wiki_refs).toContain(result.body.ref);
+  });
+
+  test('failed SOP attachment rolls back the knowledge page too', async () => {
+    await mockPg.schema.renameTable('lawn_protocol_audit_log', 'hidden_audit');
+    try {
+      const result = await invoke('/lawn/windows/:windowKey/wiki-sync', 'post', { windowKey: 'jan' }, { protocolId: ids.draft });
+      expect(result.statusCode).toBe(500);
+      expect(await mockPg('knowledge_base')).toHaveLength(0);
+      expect((await mockPg('lawn_protocol_windows').where({ id: ids.draftWindow }).first()).wiki_refs).toEqual(['kb:fixture']);
+    } finally {
+      await mockPg.schema.renameTable('hidden_audit', 'lawn_protocol_audit_log');
+    }
+  });
+
   test.each([
     ['/lawn/products/:id', 'draftProduct', { ratePer1000: 5 }, 'lawn_protocol_products'],
     ['/lawn/gates/:id', 'draftGate', { ruleText: 'Late edit' }, 'lawn_protocol_gates'],
     ['/lawn/windows/:windowKey', 'draftWindow', { requiredTasks: ['late'] }, 'lawn_protocol_windows'],
+    ['/lawn/windows/:windowKey/wiki-sync', 'draftWindow', {}, 'lawn_protocol_windows'],
   ])('%s waits for publication and refuses a late write', async (path, key, body, table) => {
     const before = await mockPg(table).where({ id: ids[key] }).first();
     const trx = await mockPg.transaction();
@@ -133,7 +166,7 @@ postgres('protocol publishing on PostgreSQL', () => {
     try {
       await trx('lawn_protocols').where({ id: ids.draft }).forUpdate().first();
       const params = path.includes('windowKey') ? { windowKey: 'jan' } : { id: ids[key] };
-      edit = invoke(path, 'put', params, { ...body, protocolId: ids.draft });
+      edit = invoke(path, path.endsWith('wiki-sync') ? 'post' : 'put', params, { ...body, protocolId: ids.draft });
       let blocked = false;
       for (let i = 0; i < 100; i++) {
         const rows = await mockPg.raw('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = ? AND cardinality(pg_blocking_pids(pid)) > 0) AS blocked', [schema]);
@@ -146,6 +179,7 @@ postgres('protocol publishing on PostgreSQL', () => {
       await trx.commit();
       expect((await edit).statusCode).toBe(409);
       expect(await mockPg(table).where({ id: ids[key] }).first()).toEqual(before);
+      expect(await mockPg('knowledge_base')).toHaveLength(0);
     } finally {
       if (!trx.isCompleted()) await trx.rollback();
       if (edit) await edit;
