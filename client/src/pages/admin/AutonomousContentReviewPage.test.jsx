@@ -183,3 +183,45 @@ describe('failed activity queries', () => {
     expect(screen.queryByRole('button', { name: 'Requeue' })).toBeNull();
   });
 });
+
+describe('background refresh boundaries', () => {
+  it('keeps a failed decision visible after successful list polling', async () => {
+    vi.useFakeTimers();
+    const original = fetch.getMockImplementation();
+    fetch.mockImplementation((url, opts) => opts?.method === 'POST'
+      ? Promise.reject(new Error('Decision failed')) : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await act(async () => {});
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Other content' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Requeue' })); });
+    expect(screen.getByText('Decision failed')).toBeTruthy();
+    revision = 2;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(screen.getByText('Full draft revision 2')).toBeTruthy();
+    expect(screen.getByText('Decision failed')).toBeTruthy();
+  });
+
+  it('can filter expired activity', async () => {
+    render(<AutonomousContentReviewPage embedded />);
+    await screen.findByText('1–50 of 51');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Activity status' }), { target: { value: 'expired' } });
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('status=expired&limit=50&offset=0'))).toBe(true));
+  });
+
+  it('closes vanished selection on polling without opening another run', async () => {
+    vi.useFakeTimers();
+    const original = fetch.getMockImplementation();
+    let vanished = false;
+    fetch.mockImplementation((url, opts) => vanished && url.includes('/review?')
+      ? Promise.resolve({ ok: true, json: async () => ({ items: [item('blog-2')], total: 1 }) }) : original(url, opts));
+    render(<AutonomousContentReviewPage embedded />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: /Seasonal ants blog-1 / }));
+    vanished = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(screen.queryByText('Full draft revision 1')).toBeNull();
+    expect(screen.getByText('Select a run to see its status.')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(screen.getByText('Select a run to see its status.')).toBeTruthy();
+  });
+});

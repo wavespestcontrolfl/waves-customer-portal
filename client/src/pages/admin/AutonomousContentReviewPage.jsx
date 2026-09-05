@@ -96,9 +96,10 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [linkDetailLoading, setLinkDetailLoading] = useState(false);
   const [contentError, setContentError] = useState("");
+  const [decisionError, setDecisionError] = useState("");
   const [linkError, setLinkError] = useState("");
   const [impactError, setImpactError] = useState("");
-  const error = { links: linkError, impact: impactError, content: contentError, review: contentError }[view];
+  const error = { links: linkError, impact: impactError, content: contentError, review: decisionError || contentError }[view];
   const [reviewNote, setReviewNote] = useState("");
   const [linkReviewNote, setLinkReviewNote] = useState("");
   const [actionPending, setActionPending] = useState("");
@@ -114,9 +115,11 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [detailVersion, setDetailVersion] = useState(0);
   const listRequest = useRef(0);
   const listInFlight = useRef(null);
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
   const actionType = view === "review" ? "other" : "new_supporting_blog";
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (background = false) => {
     const request = ++listRequest.current;
     listInFlight.current = request;
     setLoading(true);
@@ -126,7 +129,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       if (request !== listRequest.current) return;
       setData(next);
       setDetailVersion((version) => version + 1);
-      setSelectedId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
+      const retained = next.items?.some((item) => item.id === selectedIdRef.current);
+      if (background && !retained) {
+        setSelectedId(null);
+        setDetail(null);
+        setMobileDetailOpen(false);
+      } else {
+        setSelectedId((current) => retained ? current : next.items?.[0]?.id || null);
+      }
     } catch (err) {
       if (request !== listRequest.current) return;
       setContentError(err.message);
@@ -174,7 +184,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   useEffect(() => {
     void load();
     const timer = setInterval(() => {
-      if (listInFlight.current === null) void load();
+      if (listInFlight.current === null) void load(true);
     }, 30000);
     return () => { clearInterval(timer); listRequest.current += 1; };
   }, [load]);
@@ -224,7 +234,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const submitDecision = async (decision) => {
     if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending) return;
     setActionPending(decision);
-    setContentError("");
+    setDecisionError("");
     try {
       const next = await adminFetch(`/admin/content/autonomous/review/${selectedId}/decision`, {
         method: "POST",
@@ -236,7 +246,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       setReviewNote("");
       await load();
     } catch (err) {
-      setContentError(err.message);
+      setDecisionError(err.message);
     } finally {
       setActionPending("");
     }
@@ -358,6 +368,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                   <option value="pending_review">Processing / held</option>
                   <option value="done">Completed</option>
                   <option value="skipped">Skipped</option>
+                  <option value="expired">Expired</option>
                 </select></label>
                 <span className="text-14 text-zinc-500">Updates every 30 seconds</span>
               </div>
