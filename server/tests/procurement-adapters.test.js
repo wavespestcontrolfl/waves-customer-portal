@@ -242,7 +242,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       locator: (sub) => (spec.sub ? spec.sub(sub) : el()),
     });
     // cartRowChildrenHiddenFirst: inside a visible row, a hidden stale SKU / quantity copy precedes the shown one (r20 P2)
-    const child = (spec) => (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
+    // cartRowQtyTwoVisible: two VISIBLE quantity children — the input with the requested figure beside a label with SiteOne's adjustment (r21 P2); cartRowQtyTwoVisibleSame: both read the same
+    const child = (spec) => (spec.value != null && (st.cartRowQtyTwoVisible || st.cartRowQtyTwoVisibleSame)) ? el({ count: 2, nth: (i) => el({ count: 1, visible: true, value: i === 1 && st.cartRowQtyTwoVisible ? spec.value + 1 : spec.value }) }) : (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
     // cartSkuInAttribute: the row's SKU node carries the code in data-product-code and shows unrelated text (r21 P2)
     // checkoutRowSwapAtClick: reading the row's SKU is the moment SiteOne replaces the row with a substitute product (S1-99 × same qty):
     // a re-resolving locator then reads the substitute's quantity beside the old SKU; the old row's handle is detached instead (r11 P1)
@@ -342,6 +343,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       // The group count (name="tender") is what a named radio is judged by; an unnamed radio has no countable group (r18 P1)
       if (sel === 'input[type="radio"][name="tender"]:checked') return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      // appendsMidRead: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — a replacement node is appended while the one reading's text is read, the old not yet removed (r21 P2)
+      if (st.appendsMidRead && sel === S[st.appendsMidRead]) return el({ count: (st.midReadTexts || 0) > 0 ? 2 : 1, visible: true, text: { checkoutAccount: 'Account # 12345', checkoutShipTo: 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', checkoutTotal: 'Order total $99.00' }[st.appendsMidRead], onRead: () => { st.midReadTexts = (st.midReadTexts || 0) + 1; } });
       // unreadableFirst: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — a candidate whose visibility read THROWS (detached mid-enumeration) precedes the one visible reading (r19 P2)
       if (st.unreadableFirst && sel === S[st.unreadableFirst]) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, isVisibleThrows: true, text: 'x' }) : el({ count: 1, visible: true, text: { checkoutAccount: 'Account # 12345', checkoutShipTo: 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', checkoutTotal: 'Order total $99.00' }[st.unreadableFirst] })) });
       // accountAtClick: a delayed rerender swaps the displayed billing account once the Place Order stage has begun (r5 P1)
@@ -428,6 +431,10 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['ship_to_unverified', { shipToText: null }],
     ['account_ambiguous', { accountCount: 2 }],
     ['account_mismatch', { accountText: 'Account # 12345 - 01' }], // spaced separator = subaccount 1234501, never 12345 (r19 P2)
+    ['account_mismatch', { accountText: 'Account # 12345 Branch 01' }], // a short subaccount component is part of the account (r21 P2)
+    ['account_unverified', { appendsMidRead: 'checkoutAccount' }], // a node appended mid-read = the reading changed (r21 P2)
+    ['ship_to_unverified', { appendsMidRead: 'checkoutShipTo' }],
+    ['checkout_total_unreadable', { appendsMidRead: 'checkoutTotal' }],
     ['account_unverified', { unreadableFirst: 'checkoutAccount' }], // an unreadable candidate is unresolved, not hidden (r19 P2)
     ['ship_to_unverified', { unreadableFirst: 'checkoutShipTo' }],
     ['checkout_total_unreadable', { unreadableFirst: 'checkoutTotal' }],
@@ -836,6 +843,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       expect(unnamed.st.trialDone).toBeUndefined();
       expect(unnamed.st.cart).toEqual([]);
     }
+  });
+
+  test('two VISIBLE quantity children that read differently are not a reading — the row proof fails closed; two that read the same pass (r21 P2)', async () => {
+    const bad = fakeSiteOne({ cartRowQtyTwoVisible: true });
+    await expect(s1.place(args(), bad.deps)).rejects.toMatchObject({ refuse: expect.stringMatching(/^(cart_mismatch|checkout_lines_mismatch)$/) });
+    expect(bad.st.trialDone).toBeUndefined();
+    const same = fakeSiteOne({ cartRowQtyTwoVisibleSame: true });
+    await expect(s1.place(args(), same.deps)).rejects.toMatchObject(NOT_SHIPPED);
   });
 
   test('a checkout row replaced AFTER the scan by a different visible row (same count, same visibility mask) is churn — the rows are read again and must match (r20 P2)', async () => {
