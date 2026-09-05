@@ -1,5 +1,5 @@
 /**
- * MUTATES only inside a rolled-back transaction: synthetic backlink acceptance checks.
+ * MUTATES synthetic fixtures only: rollback checks plus a concurrent case cleaned in finally.
  * Requires the backlink schema on a verified dev/preview Postgres database, no external
  * provider keys. Set WAVES_DATABASE_ENVIRONMENT=test and BACKLINK_TEST_DATABASE_URL.
  * Run from the repository root: node scripts/qa/backlink-matching.cjs
@@ -83,4 +83,26 @@ stub('models/db', proxy);
     console.log('PASS exact publisher page wins before a lower-UUID generic backlink');
 
   } finally { await trx.rollback(); }
+  // Real independent transactions exercise publisher-lock serialization and replay.
+  // Only this unique synthetic fixture is committed; its rows are removed below.
+  const domainId = randomUUID(), prospectId = randomUUID(), linkId = randomUUID();
+  const publisher = `concurrent-${domainId}.example`, target = 'https://wavespestcontrol.com/pest-control/';
+  try {
+    await db.transaction(async (seed) => {
+      await seed('seo_link_domains').insert({ id: domainId, domain: publisher, source: 'owner_seed' });
+      await seed('seo_link_prospects').insert({ id: prospectId, domain_id: domainId, target_domain: publisher, target_page: target, location_key: 'sarasota', status: 'contacted', link_type: 'resource', outreach_status: 'sent', outreach_sent_at: new Date(Date.now() - 3 * 86400000), follow_up_status: 'drafted' });
+      await seed('seo_backlinks').insert({ id: linkId, source_domain: publisher, source_url: `https://${publisher}/resources`, target_url: target, status: 'active', discovery_source: 'dataforseo', first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date()) });
+    });
+    active = db;
+    const verifier = require(`${root}/server/services/seo/link-prospect-verifier`);
+    const results = await Promise.all([verifier.reconcileOutreach(), verifier.reconcileOutreach()]);
+    assert.equal(results.reduce((total, result) => total + result.matched, 0), 1);
+    assert.deepEqual((await db('seo_link_placement_backlinks').where({ backlink_id: linkId })).map((row) => row.prospect_id), [prospectId]);
+    assert.equal((await db('seo_link_prospects').where({ id: prospectId }).first()).follow_up_status, 'skipped');
+    console.log('PASS concurrent independent reconcilers settle once with one canonical owner');
+  } finally {
+    await db('seo_link_prospects').where({ id: prospectId }).delete();
+    await db('seo_backlinks').where({ id: linkId }).delete();
+    await db('seo_link_domains').where({ id: domainId }).delete();
+  }
 })().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(() => db.destroy());
