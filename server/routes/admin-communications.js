@@ -1153,12 +1153,14 @@ const PREP_REFUSAL_COPY = {
   // The sprinkler timer guide is a seasonal tip, sent once.
   seasonal_tips_off: () => 'This customer turned off Seasonal Lawn Tips, and the sprinkler timer guide is one — it was not sent.',
   email_opted_out: () => 'This customer turned off email — choose Text to send the sprinkler timer guide link instead.',
+  seasonal_tips_not_opted_in: () => 'A sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in (a text is a marketing message) — this customer has not opted in, so choose Email.',
   guide_already_sent: (r) => `This customer already received the sprinkler timer guide${r.sentAt ? ` on ${new Date(r.sentAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : ''} — it is sent once. The guide link is in the composer's link library if they need it again.`,
   guide_check_failed: () => "Couldn't confirm this customer's preferences or send history — try again.",
 };
 // Both delivered the email but not the text: why the text did not go, by the
 // link's own reason (an unplanned text); anything else = the number.
 const PREP_TEXT_DOWN_COPY = {
+  seasonal_tips_not_opted_in: () => 'The text was not sent — a sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in, and this customer has not opted in.',
   no_upcoming_visit: () => 'The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.',
   prep_page_taken: (r) => `The text was not sent — the customer's next visit already carries the ${r.takenBy || 'other'} prep page.`,
   prep_link_failed: () => 'The text was not sent — the guide page link could not be built; try Text again later.',

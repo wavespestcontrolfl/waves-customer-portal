@@ -182,6 +182,18 @@ async function buildWateringBlock(customer) {
     // home's and must not decide a legal instruction (the weekly sweep joins
     // on tp.active = true; GH Codex #3953 r1 P1).
     const turf = await db('customer_turf_profiles').where({ customer_id: customer.id, active: true }).first();
+    // A consistent snapshot: the address is re-read here (the caller's
+    // customer row may predate a move) and the move stamp is re-read after
+    // the address; a stamp that moved between the two reads means the
+    // inputs straddle a move, and a legal instruction is not built on that
+    // (the weekly sender's own recheck; GH Codex #3953 r2 P1).
+    const fresh = await db('customers').where({ id: customer.id }).first('city', 'zip');
+    const stampAfter = (await db('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
+    const stampMs = (v) => (v ? new Date(v).getTime() : null);
+    if (stampMs(stampAfter) !== stampMs(prefs?.irrigation_home_changed_at || null)) {
+      throw new Error('address changed while the watering block was being built');
+    }
+    const home = fresh || customer;
     // After a move the saved minutes describe the FORMER home's system
     // until the customer re-enters them (the same per-field ledger the
     // weekly plan sizes from — irrigation_confirmed_fields); an unconfirmed
@@ -194,8 +206,8 @@ async function buildWateringBlock(customer) {
     const county = resolveRestrictionCounty({
       county: turf?.county || null,
       profileCity: turf?.city || null,
-      city: customer.city,
-      zip: customer.zip,
+      city: home.city,
+      zip: home.zip,
       homeMoved: !!prefs?.irrigation_home_changed_at,
       movedAt: prefs?.irrigation_home_changed_at || null,
       countyConfirmed: countyConfirmedAfterMove(prefs || {}),
@@ -660,7 +672,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
 // uncertain: providerOutcome.sent === true is a send (the caller stamps the
 // page and writes the tagger-compatible marker exactly as for a returned
 // send), anything else a plain failure (GH Codex #3856 r9 P2).
-async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, purpose = 'appointment', pestType, actorId }) {
+async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, purpose = 'appointment', consentBasis = null, pestType, actorId }) {
   let body;
   try {
     body = await renderSmsTemplate(templateKey, { first_name: firstName, ...vars }, {
@@ -683,6 +695,7 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       channel: 'sms',
       audience: 'customer',
       purpose,
+      ...(consentBasis ? { consentBasis } : {}),
       customerId: customer.id,
       identityTrustLevel: 'phone_matches_customer',
       // Sole caller is the admin send-prep route — an operator-clicked send,
@@ -736,14 +749,19 @@ function resolvePrepContacts(customer, channel) {
 
 // Text body: the guide-page link when the visit's page is ours, else the
 // pest's inline-steps text, else nothing to text.
-function planPrepSms(config, prepUrl) {
+function planPrepSms(config, prepUrl, { consentBasis = null } = {}) {
   if (prepUrl) {
     return { templateKey: SMS_GUIDE_LINK_KEY, vars: { prep_label: config.label, prep_url: prepUrl }, variant: 'guide_link' };
   }
   // A standalone guide is a seasonal tip, not appointment prep: its text
   // runs under the marketing_seasonal policy (owner ruling 08-25 — Seasonal
-  // Tips consent + the seasonal_tips preference; GH Codex #3953 r1 P1).
-  if (config.smsStandaloneKey) return { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone', purpose: config.guide ? 'marketing_seasonal' : 'appointment' };
+  // Tips consent + the seasonal_tips preference; GH Codex #3953 r1 P1) and
+  // carries the verified consent basis the policy requires (r2 P1).
+  if (config.smsStandaloneKey) {
+    return config.guide
+      ? { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone', purpose: 'marketing_seasonal', consentBasis }
+      : { templateKey: config.smsStandaloneKey, vars: {}, variant: 'standalone', purpose: 'appointment' };
+  }
   return null;
 }
 
@@ -808,10 +826,10 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
 // Why a standalone guide is not sent right now, or null. Reads fail closed:
 // an unreadable preference or history is treated as a refusal, never as a
 // send (a guide is a courtesy; a second copy or an unwanted one is not).
-async function guideRefusal(customer, config, pestType, { wantEmail = true } = {}) {
+async function guideGate(customer, config, pestType, { wantEmail = true, wantSms = true } = {}) {
   try {
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-    if (prefs && prefs.seasonal_tips === false) return { reason: 'seasonal_tips_off' };
+    if (prefs && prefs.seasonal_tips === false) return { refusal: { reason: 'seasonal_tips_off' } };
     // History BEFORE the email opt-out: on Both, that opt-out only drops the
     // email leg, so a customer already sent the guide must be caught here
     // or the text goes out twice (pre-push Codex P1 on 71346bab2). Three
@@ -838,14 +856,25 @@ async function guideRefusal(customer, config, pestType, { wantEmail = true } = {
         .first(),
     ]);
     const prior = marker || email || text;
-    if (prior) return { reason: 'guide_already_sent', sentAt: prior.created_at || null };
+    if (prior) return { refusal: { reason: 'guide_already_sent', sentAt: prior.created_at || null } };
+    // The text is a seasonal tip: it needs the EXPLICIT Seasonal Tips opt-in
+    // (seasonal_tips === true; a never-asked NULL is not consent) and the
+    // consent basis the marketing_seasonal policy requires — the same
+    // derivation the customer-guide contract texts use (owner ruling 08-25;
+    // GH Codex #3953 r2 P1). No basis = no text, never a downgraded purpose.
+    let consentBasis = null;
+    if (wantSms) {
+      const { marketingSmsConsentBasisForContract } = require('./document-contract-delivery');
+      consentBasis = await marketingSmsConsentBasisForContract({ customer_id: customer.id });
+    }
     // The customer's email opt-out (the weekly irrigation sweep's own
-    // np.email_enabled fence); a text-only send is unaffected by it.
-    if (wantEmail && prefs && prefs.email_enabled === false) return { reason: 'email_opted_out' };
-    return null;
+    // np.email_enabled fence); a text-only send is unaffected by it, and on
+    // Both the caller keeps the text leg — so the basis rides along.
+    if (wantEmail && prefs && prefs.email_enabled === false) return { refusal: { reason: 'email_opted_out' }, consentBasis };
+    return { refusal: null, consentBasis };
   } catch (err) {
     logger.warn(`[prep-guide-sender] guide preference / history read failed for customer ${customer.id}: ${err.message}`);
-    return { reason: 'guide_check_failed' };
+    return { refusal: { reason: 'guide_check_failed' } };
   }
 }
 
@@ -910,8 +939,10 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     // preference), and a customer who already received it is not sent it
     // again — the interaction row logPrepInteraction writes is the durable
     // proof (GH Codex #3953 r1 P1 + P2).
+    let guideConsentBasis = null;
     if (config.guide) {
-      const refusal = await guideRefusal(customer, config, pestType, { wantEmail: contacts.wantEmail });
+      const gate = await guideGate(customer, config, pestType, { wantEmail: contacts.wantEmail, wantSms: contacts.wantSms });
+      const refusal = gate.refusal;
       // Email opted out on Both: the text still carries the hub link; the
       // email leg is reported as the one that did not go.
       if (refusal?.reason === 'email_opted_out' && contacts.wantSms) {
@@ -919,6 +950,14 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
         result.emailSkipReason = 'email_opted_out';
       } else if (refusal) {
         return { ...result, ...refusal };
+      }
+      guideConsentBasis = gate.consentBasis || null;
+      // No Seasonal Tips opt-in: Text is refused; Both drops the text leg
+      // and names it (the email is not a marketing-consent send).
+      if (contacts.wantSms && !guideConsentBasis) {
+        if (!contacts.wantEmail) return { ...result, reason: 'seasonal_tips_not_opted_in' };
+        contacts.wantSms = false;
+        result.smsLinkReason = 'seasonal_tips_not_opted_in';
       }
     }
     const page = config.guide
@@ -929,7 +968,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     if (page.linkReason === 'prep_send_pending') return { ...result, reason: 'prep_send_pending' };
     // The stamp target: only a visit whose page this guide owns.
     page.stampVisit = page.ownsPage ? page.visit : null;
-    const smsPlan = planPrepSms(config, page.prepUrl);
+    const smsPlan = contacts.wantSms ? planPrepSms(config, page.prepUrl, { consentBasis: guideConsentBasis }) : null;
     // Text-only: refused with the link's own reason (no visit / page taken /
     // link failed), never a blanket "no visit". Both: the email leg is
     // valid, so it goes out and the text is reported as the failed leg
@@ -946,6 +985,26 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
     if (result.ok && result.emailSkipReason) {
       result.reason = 'partial';
       result.failedChannel = 'email';
+    } else if (result.ok && config.guide && result.smsLinkReason === 'seasonal_tips_not_opted_in') {
+      result.reason = 'partial';
+      result.failedChannel = 'sms';
+    }
+    // An uncertain email (SendGrid may have accepted; the ledger row reads
+    // "failed", which the send-once fence must not treat as a clean miss)
+    // leaves a durable marker so a later click is refused rather than
+    // sending a second copy (GH Codex #3953 r2 P2). Fail-soft.
+    if (config.guide && result.emailUncertain && !result.emailSent) {
+      try {
+        await db('customer_interactions').insert({
+          customer_id: customer.id,
+          interaction_type: 'email_outbound',
+          admin_user_id: actorId || null,
+          subject: `${config.label} prep sent (manual)`,
+          body: `Prep email dispatched via Communications — delivery uncertain (provider response lost); not resent.`,
+        });
+      } catch (err) {
+        logger.warn(`[prep-guide-sender] uncertain-delivery marker failed for customer ${customer.id}: ${err.message}`);
+      }
     }
     if (result.ok) {
       await logPrepInteraction({ customer, config, contacts, result, pestType, actorId });

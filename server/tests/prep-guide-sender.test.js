@@ -8,6 +8,14 @@ jest.mock('../services/sms-auto-send', () => ({ isRealProviderSend: jest.require
 // policy; pinned here so the copy assertions do not depend on the calendar
 // (the checked-in default expires 2026-10-01 and then fails closed).
 let mockRestrictionPolicy = null;
+// The seasonal-guide SMS consent basis (document-contract-delivery's own
+// derivation): opted in only when notification_prefs.seasonal_tips === true.
+let mockNotificationPrefsRow = null;
+jest.mock('../services/document-contract-delivery', () => ({
+  marketingSmsConsentBasisForContract: jest.fn(async () => (mockNotificationPrefsRow?.seasonal_tips === true
+    ? { status: 'opted_in', source: 'notification_prefs.seasonal_tips', capturedAt: '2026-08-01T00:00:00Z' }
+    : null)),
+}));
 jest.mock('../config/irrigation-restrictions', () => ({
   currentRestrictionPolicy: jest.fn(() => mockRestrictionPolicy),
   resolveRestrictionCounty: jest.fn(() => 'Manatee'),
@@ -41,7 +49,6 @@ let customerRow;
 let prefsRow = null; // property_preferences (sprinkler timer guide minutes)
 let turfRow = null; // customer_turf_profiles (county)
 let turfQueries = [];
-let notificationPrefsRow = null; // notification_prefs (seasonal_tips)
 
 function customersQuery() {
   const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), first: jest.fn(async () => customerRow) };
@@ -164,13 +171,13 @@ beforeEach(() => {
     if (table === 'prep_guide_views') return traceQuery(viewRow);
     if (table === 'property_preferences') return traceQuery(prefsRow);
     if (table === 'customer_turf_profiles') { const q = traceQuery(turfRow); turfQueries.push(q); return q; }
-    if (table === 'notification_prefs') return traceQuery(notificationPrefsRow);
+    if (table === 'notification_prefs') return traceQuery(mockNotificationPrefsRow);
     return customersQuery();
   });
   prefsRow = null;
   turfRow = null;
   turfQueries = [];
-  notificationPrefsRow = null;
+  mockNotificationPrefsRow = null;
   mockRestrictionPolicy = null;
   db.fn = { now: jest.fn(() => 'NOW()') };
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -950,6 +957,7 @@ describe('sprinkler timer guide', () => {
   test('hangs on no visit: no scheduled_services read, no page claim, no prep_url — even with a lawn visit upcoming', async () => {
     upcomingVisitRow = liveVisit({ service_type: 'Lawn Treatment', prep_template_key: 'prep.lawn' });
     mockRestrictionPolicy = ORDER;
+    mockNotificationPrefsRow = { seasonal_tips: true };
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
     expect(result.ok).toBe(true);
     expect(result.emailSent).toBe(true);
@@ -966,6 +974,22 @@ describe('sprinkler timer guide', () => {
     expect(renderSmsTemplate.mock.calls[0][0]).toBe('auto_sprinkler_timer');
     expect(sendCustomerMessage.mock.calls[0][0].metadata.prep_variant).toBe('standalone');
     expect(sendCustomerMessage.mock.calls[0][0].purpose).toBe('marketing_seasonal');
+    expect(sendCustomerMessage.mock.calls[0][0].consentBasis).toEqual({ status: 'opted_in', source: 'notification_prefs.seasonal_tips', capturedAt: '2026-08-01T00:00:00Z' });
+  });
+
+  test('the text needs the explicit Seasonal Tips opt-in: Text is refused without it, Both drops the text leg and names it', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: null }; // never asked — not consent
+    const sms = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(sms).toMatchObject({ ok: false, reason: 'seasonal_tips_not_opted_in' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const both = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+    expect(both).toMatchObject({ ok: true, emailSent: true, smsSent: false, reason: 'partial', failedChannel: 'sms', smsLinkReason: 'seasonal_tips_not_opted_in' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // Visit-prep texts are appointment messages: no opt-in needed, no basis attached.
+    jest.clearAllMocks();
+    const flea = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'sms' });
+    expect(flea.ok).toBe(true);
+    expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('consentBasis');
   });
 
   test('visit prep texts keep the appointment purpose', async () => {
@@ -974,7 +998,7 @@ describe('sprinkler timer guide', () => {
   });
 
   test('a customer who turned off Seasonal Lawn Tips is refused on every channel (the guide is a seasonal tip)', async () => {
-    notificationPrefsRow = { seasonal_tips: false };
+    mockNotificationPrefsRow = { seasonal_tips: false };
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
     expect(result).toMatchObject({ ok: false, reason: 'seasonal_tips_off' });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
@@ -985,7 +1009,7 @@ describe('sprinkler timer guide', () => {
   });
 
   test('a customer who turned off email: Email is refused, Both texts the hub link and names the email as the leg that did not go, Text is unaffected', async () => {
-    notificationPrefsRow = { seasonal_tips: null, email_enabled: false };
+    mockNotificationPrefsRow = { seasonal_tips: true, email_enabled: false };
     const email = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
     expect(email).toMatchObject({ ok: false, reason: 'email_opted_out' });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
@@ -1014,6 +1038,7 @@ describe('sprinkler timer guide', () => {
   });
 
   test('sent once, durably: the email ledger and the SMS log count as delivery even when the interaction marker was never written', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
     // Delivery, then the marker insert fails (logPrepInteraction is fail-soft).
     interactionsInsert.mockRejectedValueOnce(new Error('marker insert failed'));
     const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
@@ -1036,6 +1061,49 @@ describe('sprinkler timer guide', () => {
     const third = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
     expect(third).toMatchObject({ ok: false, reason: 'guide_already_sent', sentAt: '2026-09-03T10:00:00Z' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an uncertain email (post-dispatch throw) writes a durable marker so the next click is refused, even though the ledger row reads failed', async () => {
+    EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ onQueued }) => { onQueued?.(); throw new Error('response lost'); });
+    const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(first).toMatchObject({ ok: false, emailSent: false, emailUncertain: true });
+    expect(interactionsInsert).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'cust-1', interaction_type: 'email_outbound', subject: 'Sprinkler Timer Guide prep sent (manual)',
+    }));
+    expect(interactionsInsert.mock.calls[0][0].body).toMatch(/delivery uncertain/);
+    // A definite pre-dispatch failure writes no marker (a retry is fine).
+    jest.clearAllMocks();
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('template missing'));
+    const second = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(second).toMatchObject({ ok: false, emailSent: false });
+    expect(interactionsInsert).not.toHaveBeenCalled();
+  });
+
+  test('watering block uses the re-read address and fails closed when the move stamp changes mid-build', async () => {
+    const { buildWateringBlock } = require('../services/prep-guide-sender');
+    mockRestrictionPolicy = ORDER;
+    prefsRow = { irrigation_run_minutes: 35 };
+    const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+    // The caller's row says Bradenton; the fresh read says the customer moved to Venice.
+    db.mockImplementation((table) => {
+      if (table === 'customers') return { where: () => ({ first: async () => ({ city: 'Venice', zip: '34285' }) }) };
+      if (table === 'property_preferences') return traceQuery(prefsRow);
+      if (table === 'customer_turf_profiles') return traceQuery(null);
+      return customersQuery();
+    });
+    await buildWateringBlock(customerRow);
+    expect(resolveRestrictionCounty).toHaveBeenLastCalledWith(expect.objectContaining({ city: 'Venice', zip: '34285' }));
+    // A stamp that differs between the two preference reads = inputs straddle a move → fail closed.
+    let reads = 0;
+    db.mockImplementation((table) => {
+      if (table === 'customers') return { where: () => ({ first: async () => ({ city: 'Venice', zip: '34285' }) }) };
+      if (table === 'property_preferences') return { where: () => ({ first: async () => ({ irrigation_run_minutes: 35, irrigation_home_changed_at: (reads++ === 0) ? null : '2026-09-05T20:00:00Z' }) }) };
+      if (table === 'customer_turf_profiles') return traceQuery(null);
+      return customersQuery();
+    });
+    const block = await buildWateringBlock(customerRow);
+    expect(block).toMatch(/check your county's watering rules/);
+    expect(block).not.toMatch(/watering day a week/);
   });
 
   test('an unreadable preference or history fails closed (no send)', async () => {
@@ -1067,6 +1135,7 @@ describe('sprinkler timer guide', () => {
   });
 
   test('text only needs no visit (unlike the visit-prep guides with no inline text)', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
     expect(result.ok).toBe(true);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
