@@ -1,5 +1,4 @@
-const { stopBaseKey, lockStop } = require('./visit-groups');
-const { lockTechDays } = require('./scheduling/tech-day-lock');
+const { stopBaseKey, lockStop, frozenVisitVerdict } = require('./visit-groups');
 const { recordAuditEvent } = require('./audit-log');
 const { dateOnly } = require('./visit-groups');
 
@@ -21,7 +20,7 @@ async function planAppointmentAddress(conn, serviceId, propertyId) {
     }).orderBy('id');
   const visitIds = [...new Set(rows.map((row) => row.visit_id).filter(Boolean))];
   if (visitIds.length) {
-    const members = await conn('scheduled_services').whereIn('visit_id', visitIds);
+    const members = await conn('scheduled_services').whereIn('visit_id', visitIds).whereNotIn('status', terminal);
     if (members.some((row) => row.customer_id !== anchor.customer_id)) throw retry();
     rows = [...new Map([...rows, ...members].map((row) => [row.id, row])).values()]
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -35,9 +34,6 @@ async function planAppointmentAddress(conn, serviceId, propertyId) {
 
 // Called after the date-wide occupancy locks, before maintenance/comms/rows.
 async function lockAppointmentAddress(trx, plan, updates = {}) {
-  const fences = plan.rows.flatMap((row) => [row.technician_id, updates.technician_id].flatMap((techId) =>
-    [row.scheduled_date, updates.scheduled_date].filter(Boolean).map((date) => ({ techId, date: dateOnly(date) }))));
-  await lockTechDays(trx, fences);
   const keys = new Set(plan.stopKeys);
   if (updates.scheduled_date) {
     for (const row of plan.rows) {
@@ -54,13 +50,26 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   const fingerprint = (p) => JSON.stringify(p.rows.map((row) => [row.id, row.customer_id, row.recurring_parent_id,
     row.property_id, dateOnly(row.scheduled_date), row.technician_id, row.visit_id, row.status]));
   if (fingerprint(fresh) !== fingerprint(plan) || JSON.stringify(fresh.stopKeys) !== JSON.stringify(plan.stopKeys)) throw retry();
-  const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
-  if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
   const property = await trx('customer_properties').where({
     id: plan.propertyId, customer_id: plan.anchor.customer_id, active: true,
   }).forShare().first();
   if (!property || !property.address_line1) {
     throw Object.assign(new Error('Choose an active address belonging to this customer.'), { statusCode: 422, isOperational: true });
+  }
+  const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
+  if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
+  for (const visit of fresh.visits) {
+    const verdict = await frozenVisitVerdict(trx, visit.id);
+    // A retained historical member must never be left at a different property
+    // from its visit parent, even if that visit has no surviving artifact.
+    const omittedMember = await trx('scheduled_services').where({ visit_id: visit.id })
+      .whereNotIn('id', locked.map((row) => row.id)).first('id');
+    if (verdict.frozen || omittedMember) {
+      throw Object.assign(new Error('This plan includes a visit with completed services, issued links or completion work. Its address cannot be moved here.'), {
+        statusCode: 409, isOperational: true, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED',
+        reason: verdict.reason || 'historical_member',
+      });
+    }
   }
   const stamp = {
     property_id: property.id,
@@ -69,6 +78,7 @@ async function applyAppointmentAddress(trx, plan, actorId) {
     service_address_city: property.city || '',
     service_address_state: property.state || '',
     service_address_zip: property.zip || '',
+    zone: null,
     lat: property.latitude ?? null,
     lng: property.longitude ?? null,
     pre_service_brief: null,
