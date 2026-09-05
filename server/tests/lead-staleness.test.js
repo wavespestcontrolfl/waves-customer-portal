@@ -150,9 +150,15 @@ describe('lead staleness sweep', () => {
         + 'where scheduled_services.customer_id = leads.customer_id '
         + 'and "scheduled_services"."status" not in (?, ?, ?, ?) '
         + "and scheduled_services.created_at >= COALESCE(leads.first_contact_at, leads.created_at) - interval '1 day') "
+        // A lead whose own funnel row is booked/completed — a wizard repeat's
+        // win settled onto its still-open root — is pending merge, not
+        // unresponsive; the lost bridge would demote that row (codex #3834 r37 P1).
+        + 'and not exists (select 1 from "ad_service_attribution" '
+        + 'where ad_service_attribution.lead_id = leads.id '
+        + 'and "ad_service_attribution"."funnel_stage" in (?, ?)) '
         + 'returning "id"'
       );
-      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show']);
+      expect(bindings).toEqual(['unresponsive', NOW, 'new', cutoff, NOW, cutoff, cutoff, 'cancelled', 'rescheduled', 'skipped', 'no_show', 'booked', 'completed']);
 
       return knex.destroy();
     });

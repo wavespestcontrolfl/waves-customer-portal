@@ -693,6 +693,12 @@ async function submitRecap({
         ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
+        // The completion TRANSITION owes the yard-sign kit: a durable marker
+        // the route's consumption hook reads and clears, so a retry after a
+        // crash between this commit and the hook still consumes, while a
+        // recap edit of an already-completed visit (no transition) never
+        // does (GH codex r3 P1).
+        ...(recapPriorCompleted ? {} : { field_flags: trx.raw("COALESCE(field_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ completion_supplies_owed: true })]) }),
         updated_at: new Date(),
       });
       // Merge-if-absent requirement freeze — ATOMIC guarded jsonb key
@@ -734,7 +740,9 @@ async function submitRecap({
         service_data: JSON.stringify({ ...frozenTraceIdentity, reportIdentitySnapshot }),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
-        field_flags: JSON.stringify({ recap: true, recap_source: actorType || 'admin' }),
+        // completion_supplies_owed: this recap performs the completion
+        // transition (see the update branch above).
+        field_flags: JSON.stringify({ recap: true, recap_source: actorType || 'admin', ...(recapPriorCompleted ? {} : { completion_supplies_owed: true }) }),
       }).returning('id');
       recordId = inserted[0]?.id || inserted[0];
       createdRecord = true;

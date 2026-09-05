@@ -1,7 +1,7 @@
 import Icon from '../components/Icon';
-import BrandFooter from '../components/BrandFooter';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { FLOW_COLUMN_MAX } from '../theme-doc';
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
@@ -47,8 +47,8 @@ const TRACK_PRIMARY_CTA = {
   border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 8,
   fontFamily: FONTS.ui,
-  fontWeight: 800,
-  fontSize: 15,
+  fontWeight: 700,
+  fontSize: 16,
   letterSpacing: 0,
   textDecoration: 'none',
 };
@@ -164,31 +164,13 @@ function useLastUpdated(iso) {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
-        <BrandFooter />
       </div>
     </WavesShell>
   );
 }
 
-function StatusPill({ label, color }) {
-  return (
-    <div data-glass="chip" data-glass-pill="" style={{
-      display: 'inline-block',
-      fontSize: 12, fontWeight: 700,
-      letterSpacing: 0, textTransform: 'uppercase',
-      color, background: `${color}1A`,
-      padding: '6px 12px', borderRadius: 9999,
-    }}>
-      <span style={{
-        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-        background: color, marginRight: 8, verticalAlign: 'middle',
-      }} />
-      {label}
-    </div>
-  );
-}
 
 function EtaHero({ minutes, techFirst, source }) {
   const isNow = minutes != null && minutes < 1;
@@ -403,7 +385,7 @@ function PrepLink({ data }) {
       style={{
         display: 'block', marginTop: 16, padding: '12px 16px',
         border: `1px solid ${TRACK_SURFACE.border}`, borderRadius: 8,
-        textAlign: 'center', fontSize: 15, fontWeight: 600,
+        textAlign: 'center', fontSize: 16, fontWeight: 600,
         color: COLORS.glassNavy, textDecoration: 'none',
       }}
     >
@@ -461,7 +443,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
     <div style={{ marginTop: 16 }}>
       {stopsAhead > 0 ? (
         <>
-          <div style={{ fontSize: 15, color: TRACK_SURFACE.body }}>
+          <div style={{ fontSize: 16, color: TRACK_SURFACE.body }}>
             {started ? `${techFirst} is out on the route —` : `${techFirst}'s route today —`}
           </div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 2 }}>
@@ -501,7 +483,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, vehicleApprox, p
                 <div style={{
                   width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
                   border: `1.5px solid ${COLORS.grayLight}`, color: TRACK_SURFACE.muted,
-                  fontSize: 12, fontWeight: 700, display: 'flex',
+                  fontSize: 14, fontWeight: 700, display: 'flex',
                   alignItems: 'center', justifyContent: 'center',
                 }}>
                   {s}
@@ -554,13 +536,10 @@ function ScheduledCard({ data }) {
   const window = formatWindow(data.window?.start);
   return (
     <Card accent={COLORS.wavesBlue}>
-      <div style={{ fontSize: 14, color: TRACK_SURFACE.muted, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0 }}>
-        Scheduled
-      </div>
-      <div style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3 }}>
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
         {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}
         your {data.service?.type?.toLowerCase() || 'service'} is booked{window ? ` for ${window}` : ''}.
-      </div>
+      </h1>
       <StopsAheadHero
         stopsAhead={data.stopsAhead}
         routeProgress={data.routeProgress}
@@ -568,7 +547,7 @@ function ScheduledCard({ data }) {
         vehicleApprox={data.vehicleApprox}
         property={data.property}
       />
-      <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         You'll get a text as soon as {techFirst} is on the way.
       </div>
       <ClientMeta data={data} />
@@ -594,7 +573,9 @@ function EnRouteCard({ data }) {
   return (
     <>
       <Card accent={status.color}>
-        <StatusPill label={status.label} color={status.color} />
+        {/* Distance-derived progress as plain text (no chip) — the only
+            textual signal when the ETA provider returns nothing. */}
+        <div style={{ fontSize: 14, fontWeight: 600, color: status.color }}>{status.label}</div>
         <EtaHero minutes={v?.etaMinutes} techFirst={techFirst} source={v?.etaSource} />
 
         {techCoords && property ? (
@@ -645,13 +626,10 @@ function OnPropertyCard({ data }) {
   const elapsed = useElapsed(data.arrivedAt);
   return (
     <Card accent={COLORS.green}>
-      <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
-        On property
-      </div>
       <TechBlock tech={data.tech} size="lg" />
-      <div style={{ fontSize: 22, fontWeight: 600, marginTop: 20, lineHeight: 1.3 }}>
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: '20px 0 0' }}>
         {techFirst} is servicing your property.
-      </div>
+      </h1>
       {elapsed ? (
         <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 10 }}>
           On site for {elapsed}.
@@ -669,15 +647,12 @@ function CompleteCard({ data }) {
   return (
     <>
       <Card accent={COLORS.green}>
-        <div style={{ fontSize: 14, color: COLORS.green, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
-          Service complete
-        </div>
         <TechBlock tech={data.tech} size="lg" />
-        <div style={{ fontSize: 22, fontWeight: 600, marginTop: 20, lineHeight: 1.3 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: '20px 0 0' }}>
           Thanks for choosing Waves
           {data.customerFirstName ? `, ${data.customerFirstName}` : ''}.
-        </div>
-        <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 8 }}>
+        </h1>
+        <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 8 }}>
           {data.service?.type} completed{summary.completedAt ? ` on ${formatCompleteDate(summary.completedAt)}` : ''}.
         </div>
 
@@ -728,7 +703,7 @@ function CompleteCard({ data }) {
             data-glass="chip"
             style={{
               display: 'block', padding: '14px 20px', background: TRACK_SURFACE.surface, color: TRACK_SURFACE.text,
-              textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
+              textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none', border: `1px solid ${TRACK_SURFACE.border}`,
             }}
           >View invoice</a>
@@ -760,7 +735,7 @@ function CancelledCard({ data }) {
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.glassNavy, color: COLORS.white,
-          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
+          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
           textDecoration: 'none',
         }}
       >Call to reschedule</a>
@@ -775,10 +750,10 @@ function NoShowCard({ data }) {
       <div style={{ fontSize: 14, color: COLORS.orange, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 600 }}>
         Missed visit
       </div>
-      <div style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3 }}>
+      <h1 style={{ fontSize: 22, fontWeight: 600, lineHeight: 1.3, margin: 0 }}>
         We missed you{data.customerFirstName ? `, ${data.customerFirstName}` : ''}.
-      </div>
-      <div style={{ fontSize: 15, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
+      </h1>
+      <div style={{ fontSize: 16, color: TRACK_SURFACE.body, marginTop: 12, lineHeight: 1.5 }}>
         We weren't able to complete your {data.service?.type?.toLowerCase() || 'service'}
         {when ? ` on ${when}` : ' today'}. Let's get you back on the schedule — reschedule any time and we'll find a slot that works for you.
       </div>
@@ -788,7 +763,7 @@ function NoShowCard({ data }) {
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
           background: COLORS.glassNavy, color: COLORS.white,
-          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
+          textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
           textDecoration: 'none',
         }}
       >Call to reschedule</a>
@@ -844,7 +819,7 @@ function TransientErrorCard({ onRetry }) {
           style={{
             minHeight: 44, padding: '0 24px', borderRadius: 10, border: 'none',
             background: TRACK_SURFACE.text, color: '#fff',
-            fontSize: 15, fontWeight: 700, cursor: 'pointer',
+            fontSize: 16, fontWeight: 700, cursor: 'pointer',
           }}
         >
           Try again
@@ -856,7 +831,7 @@ function TransientErrorCard({ onRetry }) {
 
 // ── Main ─────────────────────────────────────────────────────────
 export default function TrackPage() {
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   const { token } = useParams();
   const [data, setData] = useState(null);
