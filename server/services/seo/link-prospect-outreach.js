@@ -563,10 +563,12 @@ async function replyCheck(trx, { prospectId, current, mode, now, followUp }) {
   const own = M.normalizeEmail(gmailClient.ownAddress());
   const froms = messages.map((m) => addressOf(headerOf(m, 'From')));
   // …and a SECOND message of our own in the thread is a follow-up already sent by hand from the inbox (the owner
-  // answering silence before the due date): the ONE follow-up the plan allows exists — the scheduled one settles
+  // answering silence before the due date): the ONE follow-up the plan allows exists — the scheduled one settles. A
+  // Gmail DRAFT in the thread (threads.get lists it, own address, DRAFT label) was never sent: not a follow-up
+  const ownSent = messages.filter((m, i) => froms[i] === own && !(m.labelIds || []).includes('DRAFT')).length;
   const reason = froms.some((a) => /^(mailer-daemon|postmaster)@/.test(a)) ? 'bounce'
     : froms.some((a) => a && a !== own) ? 'reply'
-      : froms.filter((a) => a === own).length > 1 ? 'manual_follow_up' : null;
+      : ownSent > 1 ? 'manual_follow_up' : null;
   if (reason) {
     await trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted' }).update({ follow_up_status: 'skipped', follow_up_skipped_reason: reason, updated_at: now });
     logger.info(`[link-outreach] follow-up for ${prospectId} skipped: ${reason}`);
@@ -605,8 +607,8 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
     : current && SENDABLE_STATUSES.includes(current.status) && (mode !== 'auto' || current.status === 'prospect') && !M.AMBIGUOUS_SEND_STATUSES.includes(current.follow_up_status);
   if (!sendable) return { ok: false, code: 'not_actionable' };
   if (current.target_domain !== prospect.target_domain) return { ok: false, code: 'not_actionable', error: 'the placement moved to another domain while you looked at it — reload and send again' };
-  if (!current.path_id) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
-  const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first();
+  if (!current.path_id && !followUp) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
+  const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first(); // a follow-up's NULL path_id (deleted) reads no path: settled below
   // the pitch sends on a standing path at the revision the draft was bound to; the drafted follow-up's route is
   // SETTLED here (retired, re-drafted or refused — settleDraftedFollowUp), the one place that reads its binding
   const settled = followUp
@@ -637,12 +639,14 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
 async function settleDraftedFollowUp(trx, { prospectId, current, onPath, mode }) {
   if (mode === 'auto' && M.OWNER_MARKERS.includes(current.follow_up_skipped_reason)) return { ok: false, code: 'not_authorized', error: `an earlier automatic attempt was refused (${current.follow_up_skipped_reason}) — the follow-up is the owner's` };
   const drafted = () => trx('seo_link_prospects').where({ id: prospectId, follow_up_status: 'drafted', path_id: current.path_id });
-  // the contract OFF after the draft (a redeploy): nothing can ever send it — retired on this attempt, as the lease
+  // the contract OFF after the draft (a redeploy), or the path DELETED after the draft (FK SET NULL — the due claim
+  // cannot reclaim it, no card can act on it): nothing can ever send it — retired on this attempt, as the lease
   // retires a due one (followUpRetirement), so the conversation completes and the closure sweep releases the inbox
-  if (!isEnabled('linkAuthority')) {
-    await drafted().update({ follow_up_status: 'skipped', follow_up_skipped_reason: M.GATE_OFF_REASON, updated_at: new Date() });
-    logger.info(`[link-outreach] follow-up for ${prospectId} retired — ${M.GATE_OFF_REASON}`);
-    return { ok: false, code: 'not_authorized', error: `${M.GATE_OFF_REASON}; the follow-up is retired` };
+  const gone = !isEnabled('linkAuthority') ? M.GATE_OFF_REASON : !current.path_id ? M.followUpRetirement({ row: current, path: null }) : null;
+  if (gone) {
+    await drafted().update({ follow_up_status: 'skipped', follow_up_skipped_reason: gone, updated_at: new Date() });
+    logger.info(`[link-outreach] follow-up for ${prospectId} retired — ${gone}`);
+    return { ok: false, code: current.path_id ? 'not_authorized' : 'path_moved', error: `${gone}; the follow-up is retired` };
   }
   if (onPath && onPath.superseded_by) {
     await drafted().update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path superseded before the follow-up', updated_at: new Date() });
@@ -1076,9 +1080,12 @@ async function closeSilentConversations({ now = new Date(), limit = 50 } = {}) {
   // more — the drafter and the bridge are gated, no send is attempted — so THIS sweep, gated on the outreach lane
   // only, settles them (skipped, GATE_OFF_REASON: what the pitch stamps when it schedules under the gate off) and
   // the conversations below complete on the same run. A leased row belongs to its lease until the stale sweep.
+  // A SCHEDULED follow-up only: `none` counts with a due date (the pitch's schedule) — a pre-migration send carries the
+  // column default (`none`, no due date: never scheduled, left for the owner's review) and is not settled or closed here.
   if (!isEnabled('linkAuthority')) {
-    out.settled = await db('seo_link_prospects').where({ outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due', 'drafted']).whereNull('claimed_at')
-      .update({ follow_up_status: 'skipped', follow_up_due_at: null, follow_up_skipped_reason: M.GATE_OFF_REASON, updated_at: now });
+    const settle = (q) => q.where({ outreach_status: 'sent' }).whereNull('claimed_at').update({ follow_up_status: 'skipped', follow_up_due_at: null, follow_up_skipped_reason: M.GATE_OFF_REASON, updated_at: now });
+    out.settled = (await settle(db('seo_link_prospects').whereIn('follow_up_status', ['due', 'drafted'])))
+      + (await settle(db('seo_link_prospects').where({ follow_up_status: 'none' }).whereNotNull('follow_up_due_at')));
     if (out.settled) logger.info(`[link-outreach] closure: ${out.settled} pending follow-up(s) settled — ${M.GATE_OFF_REASON}`);
   }
   // silent = CONVERSATION_SILENT_ET_DAYS ET calendar days after the last send AT ITS ET WALL-CLOCK TIME (as the

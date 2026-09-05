@@ -1317,6 +1317,31 @@ describe('Codex r2 on #3854', () => {
     expect(gmail.sendMessage).not.toHaveBeenCalled();
     expect(approvals(s.db)).toHaveLength(0);
   });
+  test('P2 (Codex r23): a Gmail DRAFT of ours in the thread is not a follow-up (never sent) — silence still proven, the follow-up goes out', async () => {
+    const s = await conversation();
+    gmail.getThread.mockResolvedValue({ id: 'thr1', messages: [ours('msg1'), { ...ours('d1'), labelIds: ['DRAFT'] }] });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: true });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'sent' });
+  });
+  test('P2 (Codex r23): the gate-off settlement touches SCHEDULED follow-ups only — a pre-migration send (`none`, no due date) is neither settled nor closed', async () => {
+    const s = await conversation();
+    Object.assign(placement(s.db), { follow_up_status: 'none', follow_up_due_at: null, follow_up_subject: null, follow_up_body: null }); // the migration default on a historical send
+    isEnabled.mockImplementation((g) => g !== 'linkAuthority');
+    const until = addETDaysAtWallClock(new Date(placement(s.db).outreach_sent_at), 45);
+    expect(await Outreach.closeSilentConversations({ now: until })).toMatchObject({ settled: 0, scanned: 0, closed: 0 });
+    expect(placement(s.db)).toMatchObject({ follow_up_status: 'none', conversation_closed_at: null });
+    placement(s.db).follow_up_due_at = new Date(Date.now() - DAY); // scheduled: settled
+    expect(await Outreach.closeSilentConversations({ now: until })).toMatchObject({ settled: 1, closed: 1 });
+    isEnabled.mockImplementation(() => true);
+  });
+  test('P2 (Codex r23): a DRAFTED follow-up whose path was deleted after the draft (FK SET NULL) retires on the send attempt — not a path_unlinked refusal that leaves it drafted forever', async () => {
+    const s = await conversation();
+    Object.assign(placement(s.db), { path_id: null });
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'Adam', mode: 'owner', followUp: true, draftHash: M.followUpHash(placement(s.db)), now: LATER })).toMatchObject({ ok: false, code: 'path_moved', error: expect.stringMatching(/deleted/) });
+    expect(placement(s.db)).toMatchObject({ status: 'contacted', follow_up_status: 'skipped', follow_up_skipped_reason: 'acquisition path deleted before the follow-up' });
+    const until = addETDaysAtWallClock(new Date(placement(s.db).outreach_sent_at), 45);
+    expect(await Outreach.closeSilentConversations({ now: until })).toMatchObject({ closed: 1 });
+  });
   test('P2 (Codex r19): a SKIP of an ambiguous follow-up keeps the attempt stamp (Gmail may have delivered it — the ET-day cap counts every attempt); only a confirmed-not-sent requeue clears it', async () => {
     const s = await conversation();
     expect((await Outreach.sendOutreach({ prospectId: s.row.id, mode: 'auto', followUp: true, now: NOW })).ok).toBe(true);
