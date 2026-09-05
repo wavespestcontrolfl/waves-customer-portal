@@ -880,7 +880,7 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
 
 test('the real Sticker Mule adapter is history-total + count quantity; the real SiteOne adapter is vendor-total + package quantity + login', () => {
   expect(require('../services/procurement/adapters/stickermule')).toMatchObject({ preSubmitTotal: 'history', packagedQuantity: false });
-  expect(require('../services/procurement/adapters/siteone')).toMatchObject({ preSubmitTotal: 'vendor', packagedQuantity: true, loginRequired: true });
+  expect(require('../services/procurement/adapters/siteone')).toMatchObject({ preSubmitTotal: 'vendor', packagedQuantity: true, loginRequired: true, loginConfigured: expect.any(Function) }); // a loginRequired adapter exports loginConfigured — the dispatcher calls it unconditionally
 });
 
 test('a bell that fails to send is persisted with the park, reported, and re-rung by the next run (r1 P1)', async () => {
@@ -935,7 +935,7 @@ test('a loginRequired adapter places with the vendor row\'s stored login on top 
     expect(await beforeSubmit(9900)).toEqual({ ok: true });
     return { dryRun: true, amountCents: 9900, externalOrderNumber: null, evidence: {} };
   });
-  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, place });
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place });
   expect(r).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
   expect(place).toHaveBeenCalledTimes(1);
 });
@@ -997,7 +997,7 @@ test('a credential lookup that THROWS is run-level: nothing claimed, nothing par
   mockState.product = talstar;
   mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
   const place = jest.fn();
-  await expect(run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, place })).rejects.toMatchObject({ runLevel: true, adapterKey: 'siteone', message: expect.stringMatching(/credential lookup failed/) });
+  await expect(run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place })).rejects.toMatchObject({ runLevel: true, adapterKey: 'siteone', message: expect.stringMatching(/credential lookup failed/) });
   expect(place).not.toHaveBeenCalled();
   expect(mockState.ledgerRows).toHaveLength(0); // the lookup precedes the claim: nothing to release
   expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status)).toHaveLength(0); // never parked

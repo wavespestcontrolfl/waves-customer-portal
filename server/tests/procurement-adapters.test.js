@@ -244,7 +244,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
       // a document-wide loginSubmit read is what a hidden responsive login form ahead of the visible one would poison.
-      const submit = el({ count: 1, visible: true, onClick: () => { st.loginSubmits = (st.loginSubmits || 0) + 1; if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
+      // loginClickThrows: the submit click's promise rejects — 'unsent' before anything posted, 'sent' after the credential went out (a slow navigation)
+      const submit = el({ count: 1, visible: true, onClick: () => { if (st.loginClickThrows === 'unsent') throw new Error('locator.click: Target closed'); st.loginSubmits = (st.loginSubmits || 0) + 1; if (st.loginClickThrows === 'sent') { st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; throw new Error('locator.click: Navigation interrupted'); } if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
       // Models Playwright's descendant matching from the form: a selector that itself starts with `form` would
       // look for a NESTED form and miss the button (r18 P1) — only a form-relative control selector resolves it.
       const loginForm = el({ count: 1, sub: (sub) => (sub === S.loginSubmit && !/^\s*form\b/.test(sub) ? (st.formSubmitCount === 0 ? el() : submit) : el()) });
@@ -646,6 +647,21 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ loginRejects: true });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_rejected', adapterDown: true }); // adapterDown: the dispatcher claims no more SiteOne requests this run (r21 P1)
     expect(st.loginSubmits).toBe(1);
+  });
+
+  test('a submit click whose promise rejects AFTER the credential went out is not resubmitted with Enter — the signed-in page is accepted, one submit (r23 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ loginClickThrows: 'sent' });
+    await expect(s1.place(args({ dryRun: true }), deps)).resolves.toMatchObject({ dryRun: true });
+    expect(st.loginSubmits).toBe(1);
+    expect(st.pressed || []).not.toContain('Enter');
+  });
+
+  test('a submit click whose promise rejects with the login form still up is neither retried nor Enter-submitted: login_unverified, adapter down (r23 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ loginClickThrows: 'unsent' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_unverified', adapterDown: true });
+    expect(st.loginSubmits || 0).toBe(0);
+    expect(st.pressed || []).not.toContain('Enter');
+    expect(st.addClicked).toBe(0);
   });
 
   test('a same-host page with no password field but no signed-in marker (MFA step / maintenance) is NOT a login: login_unverified, adapter down for the run, one submit (r22 P1)', async () => {
