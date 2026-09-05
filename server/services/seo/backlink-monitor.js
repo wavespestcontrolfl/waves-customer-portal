@@ -504,6 +504,11 @@ class BacklinkMonitor {
     // A requested snapshot that fails is reported, not swallowed: the result
     // carries snapshotOk=false + the error so the cron log and the admin
     // Scan button both show it instead of a false "done".
+    let outreachReconciliation = null;
+    if (scanComplete && require('../../config/feature-gates').isEnabled('linkAuthority')) {
+      try { outreachReconciliation = await require('./link-prospect-verifier').reconcileOutreach({ now }); }
+      catch (err) { outreachReconciliation = { error: err.message }; logger.error(`Outreach backlink reconciliation failed: ${err.message}`); }
+    }
     let snapshotOk = null, snapshotError = null;
     if (snapshot && scanComplete) {
       try { await this.takeSnapshot(); snapshotOk = true; }
@@ -514,7 +519,7 @@ class BacklinkMonitor {
 
     logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${missed} missing, ${lostLinks.length} lost (verified), ${verifiedLive} survived crawl, ${unverified} unreachable, ${relChanges} rel changes, ${respelled} respelled, ${merged} twins merged, ${recovered} recovered, ${lostDomains.length} domains lost, ${recoveryQueued} queued for recovery (scanComplete: ${scanComplete})`);
     return {
-      scanned, newCritical, scanComplete, missed,
+      scanned, newCritical, scanComplete, missed, outreachReconciliation,
       lostCount: lostLinks.length, verifiedLive, unverified, relChanges, respelled, merged, recovered, unresolvedRecoveries,
       lostDomains: lostDomains.length, highValueLost: alertable.length, alertedNew: alertNow.length, alerted, recoveryQueued,
       ...(snapshot ? { snapshotOk, snapshotError } : {}),

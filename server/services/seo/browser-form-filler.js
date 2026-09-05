@@ -196,7 +196,7 @@ async function callVision(anthropic, screenshotB64, text) {
  * fillCitationForm — submit one free citation form. Returns a structured outcome;
  * never throws (engine errors → { outcome:'failed' }).
  */
-async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launchBrowser = defaultLaunch, anthropic, resolveHostIps = resolvePublicIps } = {}) {
+async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launchBrowser = defaultLaunch, anthropic, resolveHostIps = resolvePublicIps, beforeSubmit } = {}) {
   let client = anthropic;
   if (!client && Anthropic && process.env.ANTHROPIC_API_KEY) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   if (!client) return { outcome: 'failed', errorCode: 'no_anthropic', notes: 'no LLM client' };
@@ -281,6 +281,8 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
         } catch { isSubmitReq = false; isFormNav = false; }
         let ok = false;
         try { ok = requestAllowed({ url: req.url(), allowedHosts: pinned }); } catch { ok = false; }
+        // Discovery and filling never grant mutation authority, including page-script POSTs.
+        if (!submitPhase && !['GET', 'HEAD', 'OPTIONS'].includes(String(req.method()).toUpperCase())) return route.abort();
         if (!ok) {
           if (isSubmitReq) submitAborted = true;       // a submit/nav request went off-host → reached nothing
           if (isFormNav) submitNavOffHost = true;      // the form NAVIGATED off-host with its data → real submit blocked
@@ -386,20 +388,27 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       }
     }
 
-    // The submit click is the point of no return. Split ACTIONABILITY (was the button
-    // found/enabled — auto-waited before dispatch) from the triggered NAVIGATION
-    // (noWaitAfter:true so click() does NOT wait for, and cannot throw on, the POST's
-    // redirect being aborted/timing out). So: click() throws ONLY if the button was
-    // never actionable → nothing dispatched → genuinely retryable. Once it dispatches
-    // (no throw), the POST may have landed — we NEVER auto-retry; any later navigation
-    // /verification error becomes placed+pending below.
+    // Check actionability without dispatch before reserving the mutation boundary.
+    try {
+      await page.click(last.selector, { trial: true });
+    } catch {
+      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: 'submit not actionable (nothing dispatched)' };
+    }
+    // Once the real click starts, an exception cannot establish whether requests landed.
+    if (typeof beforeSubmit !== 'function' || !(await beforeSubmit())) {
+      return { outcome: 'failed', errorCode: 'not_authorized', notes: 'submission authority refused before mutation' };
+    }
     submitPhase = true; // requests from here are the submission (POST / nav)
     try {
       await page.click(last.selector, { noWaitAfter: true });
     } catch (e) {
-      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit not actionable (nothing dispatched): ${e.message}` };
+      submitPhase = false;
+      return { outcome: 'failed', errorCode: 'submit_failed', screenshot: shot1, notes: `submit dispatch uncertain: ${e.message}` };
     }
     await page.waitForLoadState('domcontentloaded').catch(() => {}); // best-effort settle; never fatal post-dispatch
+    // Keep the pinned-host mutation window open for asynchronous validation/POSTs.
+    try { await page.waitForTimeout(5000); } catch { /* page may have closed after submit */ }
+    submitPhase = false;
 
     // Verification is best-effort (its own try/catch — a throw here must NOT fall to the
     // outer catch's retryable engine_error). The verifier also reports a clear REJECTION
@@ -408,7 +417,6 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     let verify = null;
     let shot2 = null;
     try {
-      await page.waitForTimeout(1500);
       shot2 = await boundedShot(page);
       verify = await callVision(client, shot2.toString('base64'),
         'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection OR a next-step gate that wasn\'t completed (validation error, "required field", a login/CAPTCHA/payment wall, a phone/SMS verification step, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}');
