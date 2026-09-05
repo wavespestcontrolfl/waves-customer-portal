@@ -310,24 +310,34 @@ async function login(page, creds) {
     let submitUnsettled = false;
     if (formSubmits.length === 1) await formSubmits[0].click().catch(() => { submitUnsettled = true; });
     else await passField.press('Enter').catch(() => { submitUnsettled = true; });
-    // Signed in = EVERY password field gone or hidden (a hidden responsive
-    // duplicate must not read as "still on the login page" — pre-push P1).
-    await page.waitForFunction((passSel) => Array.from(document.querySelectorAll(passSel)).every((pw) => !pw.offsetParent), SELECTORS.loginPass, { timeout: LOGIN_TIMEOUT }).catch(() => {});
-    await page.waitForTimeout(1500);
-    // Signed in = the password form GONE and a SHOWN account marker, on the
-    // trusted host. Both: an intermediate page (MFA step, maintenance, an
-    // error page on the same host) is 'unverified', never a session (Codex
-    // #3853 r22 P1); and a login page that keeps its password field up while
-    // its header carries a generic account link (.my-account, /my-account)
-    // is a REJECTED login, never a session (Codex #3853 r24 P1).
-    const passShown = (await matches(page, SELECTORS.loginPass)).shown.length > 0;
-    if (!passShown && (await matches(page, SELECTORS.accountMarker)).shown.length && isTrustedSiteOneUrl(page.url())) return 'ok';
-    // An unsettled submit cannot tell "not submitted" from "submitted and
-    // still loading": neither a rejection nor a transient error (both would
-    // resubmit the credential) — it parks unverified (r23 P1).
-    if (submitUnsettled) return 'unverified';
-    if (passShown || !isTrustedSiteOneUrl(page.url())) return 'rejected';
-    return 'unverified';
+    // The credential is OUT. From here nothing may throw into the retry
+    // loop — a locator count failing mid-navigation would otherwise restart
+    // the attempt and submit the same credential again (pre-push hook P1 on
+    // 0f3febfec): an inspection that fails is an unproven session, parked
+    // 'unverified' with the adapter down.
+    try {
+      // Signed in = EVERY password field gone or hidden (a hidden responsive
+      // duplicate must not read as "still on the login page" — pre-push P1).
+      await page.waitForFunction((passSel) => Array.from(document.querySelectorAll(passSel)).every((pw) => !pw.offsetParent), SELECTORS.loginPass, { timeout: LOGIN_TIMEOUT }).catch(() => {});
+      await page.waitForTimeout(1500);
+      // Signed in = the password form GONE and a SHOWN account marker, on the
+      // trusted host. Both: an intermediate page (MFA step, maintenance, an
+      // error page on the same host) is 'unverified', never a session (Codex
+      // #3853 r22 P1); and a login page that keeps its password field up while
+      // its header carries a generic account link (.my-account, /my-account)
+      // is a REJECTED login, never a session (Codex #3853 r24 P1).
+      const passShown = (await matches(page, SELECTORS.loginPass)).shown.length > 0;
+      if (!passShown && (await matches(page, SELECTORS.accountMarker)).shown.length && isTrustedSiteOneUrl(page.url())) return 'ok';
+      // An unsettled submit cannot tell "not submitted" from "submitted and
+      // still loading": neither a rejection nor a transient error (both would
+      // resubmit the credential) — it parks unverified (r23 P1).
+      if (submitUnsettled) return 'unverified';
+      if (passShown || !isTrustedSiteOneUrl(page.url())) return 'rejected';
+      return 'unverified';
+    } catch (e) {
+      logger.warn(`[siteone-bot] post-submit login inspection failed: ${String(e.message).slice(0, 120)}`);
+      return 'unverified';
+    }
   };
   let outcome = null; // 'ok' | 'rejected' | 'unverified' — the last attempt that RETURNED
   let lastError = null;
