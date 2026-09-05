@@ -593,7 +593,9 @@ async function paragraphForVisit(facts, { dbh = db, deps = {} } = {}) {
       else this.whereNull('job_card_generated_at');
     })
     .update({ job_card: JSON.stringify(row), job_card_generated_at: new Date() })
-    .catch((err) => logger.warn(`[job-card] cache write skipped: ${err.message}`));
+    // Knex error messages carry the SQL with its bindings — the paragraph
+    // itself. Log the visit and the driver code only, never the message.
+    .catch((err) => logger.warn(`[job-card] cache write skipped for ${facts.serviceId}: ${err.code || err.name || 'error'}`));
   return { ...written, cached: false };
 }
 
