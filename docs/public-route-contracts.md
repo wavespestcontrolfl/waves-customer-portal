@@ -809,8 +809,10 @@ minting a second one — plus a 60 req/min router limit and 10 req/min on
 the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
 GET returns the visit summary (service type, date + window_start, the
 server-derived arrival range, plan/one-time flag, confirmed flag, and
-`vanScene` — a boolean that is exactly `GATE_VAN_SCENE` (feature-gates
-`vanScene`: dev-open, prod dark; unset = false) telling the page to render
+`vanScene` — a boolean that is exactly `GATE_VAN_SCENE` in production
+(feature-gates `vanScene`: prod dark, unset = false; every other NODE_ENV
+— local, preview, test — returns true regardless of the variable, so the
+unset kill switch is a PRODUCTION statement) telling the page to render
 the "look for this van" scene under the header card; it carries no visit
 data and no other field changes with it) plus
 decorations that are each individually fail-open: assigned tech first name
@@ -835,8 +837,9 @@ the same visit, UID-stable per visit so re-downloading updates rather
 than duplicates).
 `GET /api/booking/config` (the /book page's public config payload, no token)
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
-to show the van scene above the secure-card block. Unset gate = `false`;
-no other field changes.
+to show the van scene above the secure-card block. Unset gate = `false`
+in production (non-production envs return true, as above); no other field
+changes.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.
