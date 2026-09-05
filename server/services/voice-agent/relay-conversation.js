@@ -703,19 +703,7 @@ class RelayConversation {
       const { loadResumeState } = require('./relay-recovery');
       this._resumeReady = loadResumeState(db, this.callSid)
         .then((state) => {
-          this._resume = state || null;
-          // The earlier leg's lead IS this call's capture: the session may
-          // end when the caller is done, and the close records
-          // lead_captured truthfully (hook P1). A later capture_lead updates
-          // that lead by the same-call reuse rule.
-          if (state && state.relayLeadId) this.leadCaptured = true;
-          // The earlier legs' promises (with their spoken expectation and
-          // original timestamp) carry over, so the close's commitments pass
-          // keeps the deadline Sandy actually gave; a promise this leg
-          // makes for the same kind supersedes it.
-          for (const p of (state && state.promises) || []) {
-            if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
-          }
+          this._applyResumeState(state);
           if (state) logger.info(`[voice-relay] resumed session proven callSid=${maskSid(this.callSid)} reconnects=${state.reconnects} priorChars=${state.segmentsText.length} lead=${state.relayLeadId ? 'linked' : 'none'}`);
           else logger.warn(`[voice-relay] resumed hint NOT proven by the row callSid=${maskSid(this.callSid)} — treated as a fresh session`);
         })
@@ -1602,7 +1590,7 @@ class RelayConversation {
    * the raw turns. Best-effort, gated. `sessionKey` is re-fenced inside the
    * write: only the row's current claim owner may record.
    */
-  async _recordCommitments({ transcript, sessionKey }) {
+  async _recordCommitments({ transcript, sessionKey, promises = this._promises }) {
     if (!transcript) return;
     try {
       const { isEnabled } = require('../../config/feature-gates');
@@ -1611,9 +1599,9 @@ class RelayConversation {
       const recorded = await recordRelayCommitments(db, {
         callSid: this.callSid,
         transcript,
-        estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,
-        estimateExpectation: this._promises.get('send_estimate')?.expectation || null,
-        estimatePromisedAt: this._promises.get('send_estimate')?.at || null,
+        estimateQueued: promises.has('send_estimate') ? promises.get('send_estimate').verdict : null,
+        estimateExpectation: promises.get('send_estimate')?.expectation || null,
+        estimatePromisedAt: promises.get('send_estimate')?.at || null,
         // Re-fenced inside the write: a reconnect that takes the claim
         // after the reconcile must not have this session's promises
         // recorded under it.
@@ -1623,6 +1611,24 @@ class RelayConversation {
       else if (recorded.found) logger.info(`[voice-relay] recorded ${recorded.written} owed commitment(s) callSid=${maskSid(this.callSid)}`);
     } catch (err) {
       logger.warn(`[voice-relay] commitments not recorded callSid=${maskSid(this.callSid)}: ${err.message}`);
+    }
+  }
+
+  /**
+   * PR 2B — apply a proven resume state (the constructor's load AND the
+   * reload while the old socket was still draining): the earlier leg's lead
+   * IS this call's capture (the session may end when the caller is done and
+   * the close records lead_captured truthfully; a later capture_lead updates
+   * that lead by the same-call reuse rule), and the earlier legs' promises
+   * carry over with their spoken expectation and original timestamp — a
+   * promise THIS leg already made for the same kind is kept.
+   */
+  _applyResumeState(state) {
+    this._resume = state || null;
+    if (!state) return;
+    if (state.relayLeadId) this.leadCaptured = true;
+    for (const p of state.promises || []) {
+      if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
   }
 
@@ -1692,7 +1698,7 @@ class RelayConversation {
       this._resumeReloads = (this._resumeReloads || 0) + 1;
       try {
         const fresh = await require('./relay-recovery').loadResumeState(db, this.callSid);
-        if (fresh && fresh.segmentsText) this._resume = fresh;
+        if (fresh && fresh.segmentsText) this._applyResumeState(fresh); // the same restoration as the constructor's load (hook P1)
       } catch { /* fail-soft: the next turn retries */ }
     }
     if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
@@ -2061,9 +2067,15 @@ class RelayConversation {
             2000,
             null,
           );
-          const owner = row ? ((typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) || {}).relay_session_claim_owner || null : null;
+          const meta = row ? ((typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) || {}) : {};
+          const owner = meta.relay_session_claim_owner || null;
           if (row && typeof row.transcription === 'string' && row.transcription) {
-            await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null });
+            // The ROW's latest promise per kind (the just-appended segment
+            // included) — never this superseded socket's own map, which
+            // could overwrite a deadline the resumed leg gave (hook P1).
+            const promises = new Map(require('./relay-recovery').latestPromises(meta.relay_segments)
+              .map((p) => [p.kind, { verdict: p.verdict, expectation: p.expectation, at: p.at ? new Date(p.at) : null }]));
+            await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });
           }
         } catch (err) {
           logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);

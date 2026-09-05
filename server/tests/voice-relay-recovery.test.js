@@ -271,12 +271,17 @@ describe('the conversation side', () => {
 
   test('a superseded socket whose late segment recomposed the call runs the commitments pass on the PERSISTED transcript under the CURRENT owner (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    primeDb({ firstRow: { transcription: 'Caller: first\n\n[Reconnected]\nCaller: second', metadata: { relay_session_claim_owner: 'nonce-NEW' } } });
+    primeDb({ firstRow: { transcription: 'Caller: first\n\n[Reconnected]\nCaller: second', metadata: { relay_session_claim_owner: 'nonce-NEW', relay_segments: [
+      { generation: 1, text: 'Caller: first', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] },
+      { generation: 2, text: 'Caller: second', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'by_tomorrow', at: '2026-09-05T02:09:00.000Z' }] },
+    ] } } });
     const convo = convoWithTurns({ sessionKey: 'nonce-OLD', sessionGeneration: 1 });
+    convo._promises.set('send_estimate', { verdict: true, expectation: 'about_15_minutes', at: new Date('2026-09-05T02:00:00.000Z') }); // this superseded socket's OWN (older) promise
     convo._callerVerified = true;
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');
-    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ transcript: 'Caller: first\n\n[Reconnected]\nCaller: second', sessionKey: 'nonce-NEW' }));
+    // …submitted with the ROW's latest promise (the resumed leg's), never this socket's older one (hook P1)
+    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ transcript: 'Caller: first\n\n[Reconnected]\nCaller: second', sessionKey: 'nonce-NEW', estimateExpectation: 'by_tomorrow', estimatePromisedAt: new Date('2026-09-05T02:09:00.000Z') }));
   });
 
   test('commitments on a reconnected call read the PERSISTED composed transcript under the owner fence (hook P1)', async () => {
@@ -313,11 +318,14 @@ describe('the conversation side', () => {
     expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, promises: [], callerTurns: [] });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
-    builder.first = jest.fn(async () => ({ metadata: { relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: my ants are back' }] } })); // the old socket's append landed
+    builder.first = jest.fn(async () => ({ metadata: { relay_reconnects: 1, relay_lead_id: 'L9', relay_segments: [{ generation: 1, text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } })); // the old socket's append landed
     await convo._runLoop('where were we').catch(() => {});
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'));
     expect(seeded).toHaveLength(1);
     expect(seeded[0].content).toContain('Caller: my ants are back');
+    // …and the reload restores the same state the constructor's load would (lead, promises) (hook P1)
+    expect(convo.leadCaptured).toBe(true);
+    expect(convo._promises.get('send_estimate')).toEqual({ verdict: true, expectation: 'about_15_minutes', at: new Date('2026-09-05T02:00:00.000Z') });
     // bounded: after RESUME_RELOAD_ATTEMPTS turns without a segment it stops re-reading
     const again = new RelayConversation({ callSid: 'CA-race2', from: '+19415551234', send: jest.fn(), resumed: true });
     builder.first = jest.fn(async () => ({ metadata: { relay_reconnects: 1 } }));

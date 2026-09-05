@@ -53,15 +53,15 @@ describe('relay session → owed commitments', () => {
     const site = conversation.slice(recordAt - 1500, recordAt + 200);
     expect(site).toContain('if ((updated || transferSalvaged) && (transcriptUpdate?.transcription || composedFromRowOnly)) {'); // the transfer's salvage qualifies too (PR 2A codex r2 P2); a resumed socket's row-only composition too (PR 2B)
     expect(site).toContain('let commitmentsTranscript = transcriptUpdate ? transcriptUpdate.transcription : null;'); // the scrubbed transcript the reconcile wrote… or, on a reconnected call, the persisted composed one (PR 2B)
-    const helperAt = conversation.indexOf('async _recordCommitments({ transcript, sessionKey }) {');
+    const helperAt = conversation.indexOf('async _recordCommitments({ transcript, sessionKey, promises = this._promises }) {');
     expect(helperAt).toBeGreaterThan(-1);
     const helper = conversation.slice(helperAt, helperAt + 1600);
     expect(helper).toContain("isEnabled('callCommitments')");
     expect(helper).toContain("const { recordRelayCommitments } = require('../call-commitments');");
-    expect(helper).toContain("estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,");
-    expect(helper).toContain("estimateExpectation: this._promises.get('send_estimate')?.expectation || null,");
+    expect(helper).toContain("estimateQueued: promises.has('send_estimate') ? promises.get('send_estimate').verdict : null,");
+    expect(helper).toContain("estimateExpectation: promises.get('send_estimate')?.expectation || null,");
     // The deadline runs from the moment the tool spoke the expectation, not from the close.
-    expect(helper).toContain("estimatePromisedAt: this._promises.get('send_estimate')?.at || null,");
+    expect(helper).toContain("estimatePromisedAt: promises.get('send_estimate')?.at || null,");
     // The claim nonce rides into the write so the owner is re-checked under
     // the row lock, not only by the reconcile UPDATE before it.
     expect(site).toContain('sessionKey: this.sessionKey || null });');
@@ -88,6 +88,6 @@ describe('relay session → owed commitments', () => {
     const recordAt = conversation.indexOf("await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });");
     expect(guardAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(guardAt);
-    expect(conversation).toContain("await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null });");
+    expect(conversation).toContain("await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });"); // the ROW's latest promises, never the superseded socket's map
   });
 });
