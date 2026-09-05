@@ -55,10 +55,15 @@ const TRANSCRIBE_FAILED = 'no_transcription';
 const EXTRACT_FAILED = /_failed$|^api_unavailable$/;
 // extraction landed; the customer / lead write after it did not (its own step)
 const LINK_FAILED = new Set(['customer_creation_failed', 'lead_creation_failed']);
-// PAN quarantine clears recording_url by design; the row's MASKED
-// transcript is still queued work (the processor's transcript-only branch
-// in processAllPending), so the prefilter admits it like a recording.
+// A never-claimed row (processing_status NULL / pending) is queued work only
+// when the processor's restart-safe sweep would claim it: a non-empty
+// recording over 10 s (processAllPending's duration gate), or a PAN-
+// quarantined row whose recording_url is cleared by design but whose MASKED
+// transcript still needs processing (its transcript-only branch). Anything
+// else with those statuses is a recording the sweep never picks up — not a
+// run (Codex r6).
 const PAN_TRANSCRIPT_ONLY = "((transcription_metadata::jsonb ->> 'pan_detected') = 'true' AND transcription IS NOT NULL)";
+const CLAIMABLE_RECORDING = "(recording_url IS NOT NULL AND recording_url <> '' AND COALESCE(recording_duration_seconds, duration_seconds, 0) > 10)";
 
 function stepStatus(done, running) {
   return done ? 'done' : running ? 'running' : 'skipped';
@@ -119,9 +124,12 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
     const rows = await keyset(notMirrored(db('call_log')
       .select(COLUMNS())
       // a fresh, never-claimed row is processing_status NULL (the processor
-      // treats NULL as queued); a call with neither a status nor a
-      // recording (nor a quarantined transcript) is not work
-      .where((q) => q.whereNotNull('processing_status').orWhereNotNull('recording_url').orWhereRaw(PAN_TRANSCRIPT_ONLY))
+      // treats NULL as queued): listed only when the sweep would claim it
+      .where((q) => {
+        q.whereNotNull('processing_status').whereNot('processing_status', 'pending');
+        q.orWhereRaw(CLAIMABLE_RECORDING);
+        q.orWhereRaw(PAN_TRANSCRIPT_ONLY);
+      })
       // a voice-agent sandbox call is not a run anyone supervises
       .modify((qb) => whereNotSandboxCall(qb))
       .where((q) => {

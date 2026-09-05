@@ -31,6 +31,7 @@ const COLUMNS = () => [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',
   'latency_ms', 'input_tokens', 'output_tokens', 'created_at', 'run_id', 'trace_id', 'workload',
   db.raw(`(SELECT count(*) ${TURNS}) AS turns`),
+  db.raw(`(SELECT count(*) ${TURNS} AND t.ok IS NOT FALSE) AS turns_ok`),
   db.raw(`${SESSION_START} AS started_at`),
   db.raw(`${LAST_TURN} AS last_turn_at`),
 ];
@@ -59,7 +60,8 @@ function fromRow(s) {
     finishedAt,
     // the latency for one turn; the wall span for a session that kept turning
     durationMs: s.latency_ms == null ? null : finishedAt.getTime() - startedAt.getTime(),
-    stepsDone: turns,
+    // a failed turn (ok = false) is not done — the detail timeline labels it failed
+    stepsDone: s.turns_ok == null ? turns : Number(s.turns_ok),
     stepsTotal: turns,
     steps: [],
     link: '/admin/agents?tab=models',

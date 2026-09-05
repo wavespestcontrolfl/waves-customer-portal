@@ -108,16 +108,13 @@ function jsonb(value) {
   }
 }
 
+// Every event is written inside the transaction of the transition it
+// narrates, on the trx DIRECTLY (never through guarded): a swallowed error
+// there leaves the PostgreSQL transaction aborted, so its COMMIT silently
+// rolls back while the callback reports success — the write must throw to
+// the transaction's own guard.
 function eventRow(runId, eventType, message = null, metadata = null) {
   return { run_id: runId, event_type: clip(eventType, 40), message: clip(message, 2000), metadata: jsonb(metadata) };
-}
-
-// Standalone (guarded) event write. Inside a transaction, insert eventRow()
-// on the trx DIRECTLY: a swallowed error there leaves the PostgreSQL
-// transaction aborted, so its COMMIT silently rolls back while the callback
-// reports success — the write must throw to the transaction's own guard.
-async function insertEvent(runId, eventType, message = null, metadata = null) {
-  return guarded('run_events', () => db('run_events').insert(eventRow(runId, eventType, message, metadata)));
 }
 
 // ── Inert handle (gate off / DB refused) ─────────────────────────────
@@ -333,14 +330,31 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   let closed = false;
   const spent = () => closed;
 
-  async function touch(patch, extendLease = true) {
+  // The fenced stamp (unguarded: inside a transaction it must throw, see insertEvent).
+  function stamp(conn, patch, extendLease) {
     const now = new Date();
-    return guarded('heartbeat', () => fenced().update({
+    return fenced(conn).update({
       last_heartbeat_at: now,
       ...(extendLease ? { lease_expires_at: new Date(now.getTime() + policy.stall_after_ms) } : {}),
       updated_at: now,
       ...patch,
-    }));
+    });
+  }
+
+  async function touch(patch, extendLease = true) {
+    return guarded('heartbeat', () => stamp(db, patch, extendLease));
+  }
+
+  // A transition and its event are one transaction: the event exists only
+  // when the fenced stamp moved the run, and a reopen racing the commit
+  // cannot interleave its `resumed` event with this attempt's (Codex r6).
+  async function transition(eventType, patch, { extendLease = true, message = null, metadata = null } = {}) {
+    return guarded(eventType, () => db.transaction(async (trx) => {
+      const n = await stamp(trx, patch, extendLease);
+      if (!Number(n)) return false;
+      await trx('run_events').insert(eventRow(runId, eventType, message, metadata));
+      return true;
+    }), false);
   }
 
   async function heartbeat({ progress: progressed = false } = {}) {
@@ -360,11 +374,7 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
     // the event only when the fenced stamp moved the run: a stale handle
     // (a newer attempt opened) must not narrate a budget transition the
     // current attempt never made (Codex r3)
-    const moved = await guarded('budget', () => fenced().update({
-      summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]),
-      updated_at: new Date(),
-    }));
-    if (Number(moved)) await insertEvent(runId, 'budget_exceeded', null, { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls });
+    await transition('budget_exceeded', { summary: db.raw("summary || ?::jsonb", [jsonb({ budget_exceeded: kind })]) }, { extendLease: false, metadata: { kind, max_steps: budget.max_steps, max_tool_calls: budget.max_tool_calls } });
   }
 
   async function step({ key, label = null, toolName = null } = {}, fn) {
@@ -431,23 +441,17 @@ function liveHandle({ run, attemptId, attemptNo, workItemId, laneId, policy, tra
   async function wait(kind = 'external', reason = null) {
     if (spent()) return null;
     const lifecycle = kind === 'human' ? 'waiting_human' : 'waiting_external';
-    const moved = await touch({ lifecycle, last_progress_at: new Date() }, false);
-    if (Number(moved)) await insertEvent(runId, 'waiting', clip(reason, 2000), { kind });
-    return Number(moved) > 0;
+    return transition('waiting', { lifecycle, last_progress_at: new Date() }, { extendLease: false, message: clip(reason, 2000), metadata: { kind } });
   }
 
   async function resume(reason = null) {
     if (spent()) return null;
-    const moved = await touch({ lifecycle: 'running', last_progress_at: new Date() });
-    if (Number(moved)) await insertEvent(runId, 'resumed', clip(reason, 2000));
-    return Number(moved) > 0;
+    return transition('resumed', { lifecycle: 'running', last_progress_at: new Date() }, { message: clip(reason, 2000) });
   }
 
   async function checkpoint(data = {}) {
     if (spent()) return null;
-    const moved = await touch({ summary: db.raw('summary || ?::jsonb', [jsonb(data)]), last_progress_at: new Date() });
-    if (Number(moved)) await insertEvent(runId, 'checkpoint', null, data);
-    return Number(moved) > 0;
+    return transition('checkpoint', { summary: db.raw('summary || ?::jsonb', [jsonb(data)]), last_progress_at: new Date() }, { metadata: data });
   }
 
   // Rows for the finish transaction (inserted on the trx directly, see insertEvent).

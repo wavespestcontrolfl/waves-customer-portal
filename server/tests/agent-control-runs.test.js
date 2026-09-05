@@ -307,7 +307,7 @@ describe('concurrent starts', () => {
       await h.checkpoint({ title: 'Jane Doe 941-555-0100' });
     } finally { nowSpy.mockRestore(); }
     expect(mockWarn).toHaveBeenCalledTimes(1);
-    expect(mockWarn.mock.calls[0][0]).toBe('[agent-runs] run_events failed (Error)');
+    expect(mockWarn.mock.calls[0][0]).toBe('[agent-runs] checkpoint failed (Error)'); // the transition, not the table
   });
 });
 
@@ -362,6 +362,12 @@ describe('a spent handle', () => {
     for (let i = 0; i <= max; i += 1) await a.step({ key: `a${i}` }, async () => i);
     expect(events(b.id)).not.toContain('budget_exceeded');
     expect(runRow().summary?.budget_exceeded).toBeUndefined();
+    // nor may the stale handle narrate wait / resume / checkpoint on the newer attempt
+    expect(await a.wait('human', 'x')).toBe(false);
+    expect(await a.resume('y')).toBe(false);
+    expect(await a.checkpoint({ k: 1 })).toBe(false);
+    expect(events(b.id).filter((e) => ['waiting', 'checkpoint'].includes(e))).toEqual([]);
+    expect(runRow().lifecycle).toBe('running');
     for (let i = 0; i <= max; i += 1) await b.step({ key: `b${i}` }, async () => i);
     expect(events(b.id).filter((e) => e === 'budget_exceeded')).toHaveLength(1);
     expect(runRow().summary.budget_exceeded).toBe('steps');

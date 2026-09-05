@@ -64,22 +64,28 @@ describe('adapters project onto the canonical shape', () => {
   });
 
   test('autonomous_runs: outcome → lifecycle / result / disposition, stages → steps, shadow subtitle', () => {
-    const base = { id: 'a', action_type: 'new_post', page_type: 'blog', claim_ms: 5, brief_ms: 7, created_at: ago(60e3), claimed_at: ago(50e3) };
-    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_published', completed_at: ago(1e3), published_url: 'https://x/y' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', link: 'https://x/y', laneId: 'blog_draft' });
+    const base = { id: 'a', action_type: 'new_post', page_type: 'blog', claim_ms: 5, brief_ms: 7, total_ms: 4200, created_at: ago(60e3), claimed_at: ago(50e3) };
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_published', completed_at: ago(1e3), published_url: 'https://x/y' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', link: 'https://x/y', laneId: 'blog_draft', durationMs: 4200 });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(2e3) })).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted', link: '/admin/blog?tab=autopilot' });
     // a parked run keeps waiting through an open approval, and closes on the newest emailed decision or the in-review stamp
-    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'awaiting_reply', approval_at: ago(1e3) })).toMatchObject({ lifecycle: 'waiting_human', lastProgressAt: ago(1e3).toISOString() });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'awaiting_reply', approval_sent_at: ago(900), approval_at: ago(1e3) })).toMatchObject({ lifecycle: 'waiting_human', lastProgressAt: ago(1e3).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'approved', approval_at: ago(1e3) })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'passed', finishedAt: ago(1e3).toISOString(), link: null });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'rejected' })).toMatchObject({ disposition: 'rejected', verification: 'failed' });
     // executing = active again FROM the decision: its own start / heartbeat, no finish (a draft parked past the hard timeout is not stalled the moment the owner replies)
     const executing = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), updated_at: ago(40e3), approval_status: 'executing', approval_at: ago(1e3) });
-    expect(executing).toMatchObject({ lifecycle: 'running', startedAt: ago(1e3).toISOString(), lastHeartbeatAt: ago(1e3).toISOString(), lastProgressAt: ago(1e3).toISOString(), finishedAt: null });
+    expect(executing).toMatchObject({ lifecycle: 'running', startedAt: ago(1e3).toISOString(), lastHeartbeatAt: ago(1e3).toISOString(), lastProgressAt: ago(1e3).toISOString(), finishedAt: null, durationMs: null });
+    // the approval email never left: waiting on the sender since it was raised, never an owner wait
+    const unsent = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), approval_status: 'awaiting_reply', approval_sent_at: null, approval_at: ago(5e3), approval_error: 'smtp 451' });
+    expect(unsent).toMatchObject({ lifecycle: 'waiting_external', disposition: 'drafted', startedAt: ago(5e3).toISOString(), finishedAt: null, errorCode: null, detail: 'Approval email not delivered yet: smtp 451' });
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', approval_status: 'awaiting_reply', approval_sent_at: ago(4e3), approval_at: ago(5e3) })).toMatchObject({ lifecycle: 'waiting_human' });
     // a failed emailed approval names ITS failure (content_email_approvals.last_error), not the parked generation outcome
     // … and keeps the execution's own span: the decision → the failure (approval_at = the approval row's updated_at for a failed one)
     const approvalFailed = autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', completed_at: ago(40e3), approval_status: 'failed', execution_started_at: ago(30e3), approval_at: ago(1e3), approval_error: 'astro PR open failed: 502' });
     expect(approvalFailed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', errorCode: 'approval_failed', errorMessage: 'astro PR open failed: 502', detail: 'astro PR open failed: 502', startedAt: ago(30e3).toISOString(), finishedAt: ago(1e3).toISOString(), durationMs: 29e3 });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'completed_pending_review', trust_build_approved_at: ago(500) })).toMatchObject({ lifecycle: 'terminal', disposition: 'applied', finishedAt: ago(500).toISOString() });
     expect(autonomousRuns.fromRow({ ...base, outcome: 'skipped_gate_fail', quality_gate_result: { ok: false } })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'instruction' });
+    // a gate failure the runner parked for the owner (opportunity pending_review) is an owner-action run
+    expect(autonomousRuns.fromRow({ ...base, outcome: 'skipped_gate_fail', skip_reason: 'facts_insufficient', opportunity_status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human', disposition: 'drafted', link: '/admin/blog?tab=autopilot', detail: 'facts insufficient' });
     // an in-app approval flips a parked draft to publishing_* in place (completed_at stays, only updated_at moves): running, active from that claim, kept live by the list predicate however old
     const { runStatus } = require('../services/agent-activity');
     const publishingRow = { ...base, outcome: 'publishing_named_competitor', completed_at: ago(3 * 864e5), claimed_at: ago(3 * 864e5), updated_at: ago(2e3) };
@@ -261,8 +267,10 @@ describe('adapters project onto the canonical shape', () => {
 
   test('managed_sessions: a session row is a finished run keyed by its provider ref; turns are the steps', () => {
     // the row is written when the session is billed: created_at is the finish, start = finish − latency
-    const ok = managedSessions.fromRow({ provider_ref: 'sess_1', lane_id: 'agent_bi', ok: true, served_model: 'claude-x', latency_ms: 5000, created_at: ago(9e3), turns: 3 });
+    const ok = managedSessions.fromRow({ provider_ref: 'sess_1', lane_id: 'agent_bi', ok: true, served_model: 'claude-x', latency_ms: 5000, created_at: ago(9e3), turns: 3, turns_ok: 3 });
     expect(ok).toMatchObject({ key: 'managed_sessions:sess_1', lifecycle: 'terminal', result: 'succeeded', durationMs: 5000, stepsDone: 3, subtitle: 'claude-x · 3 turns', area: 'agents' });
+    // a failed turn is not done
+    expect(managedSessions.fromRow({ provider_ref: 's4', lane_id: 'agent_bi', ok: false, created_at: ago(9e3), turns: 3, turns_ok: 2 })).toMatchObject({ stepsDone: 2, stepsTotal: 3 });
     expect(ok.finishedAt).toBe(ago(9e3).toISOString());
     expect(ok.startedAt).toBe(ago(14e3).toISOString());
     expect(managedSessions.fromRow({ provider_ref: 's2', lane_id: 'agent_bi', ok: false, error_code: 'anthropic_529', created_at: ago(1e3) })).toMatchObject({ result: 'errored', failureClass: 'provider', errorCode: 'anthropic_529' });

@@ -14,8 +14,17 @@ const LANE = 'blog_draft';
 // is executing its decision — and once that execution FAILED — the
 // decision's time is the run's start (the failed execution keeps its span:
 // decided_at → the approval row's updated_at, Codex r5).
+// An awaiting_reply row whose email never left (email_sent_at NULL,
+// last_error set, status kept for the sender's retry) is a DELIVERY problem
+// waiting on the sender since it was raised — not an owner action
+// (agent-activity's rule; Codex r6).
 const NEWEST_APPROVAL = 'FROM content_email_approvals a WHERE a.run_id = autonomous_runs.id ORDER BY a.created_at DESC LIMIT 1';
-const EXECUTION_STARTED_AT = `(SELECT CASE WHEN a.status IN ('executing', 'failed') THEN a.decided_at END ${NEWEST_APPROVAL})`;
+const EXECUTION_STARTED_AT = `(SELECT CASE WHEN a.status IN ('executing', 'failed') THEN a.decided_at WHEN a.status = 'awaiting_reply' AND a.email_sent_at IS NULL THEN a.created_at END ${NEWEST_APPROVAL})`;
+// A gate failure the runner parked for the owner (_pendingReviewClaimOrThrow
+// leaves the opportunity pending_review) is an owner-action run, not a
+// terminal skip (Codex r6).
+const OPPORTUNITY_STATUS = '(SELECT o.status FROM opportunity_queue o WHERE o.id = autonomous_runs.opportunity_id)';
+const REVIEW_PARKED_GATE = `(outcome = 'skipped_gate_fail' AND ${OPPORTUNITY_STATUS} = 'pending_review')`;
 // An in-app approval of a parked draft flips its outcome to publishing_*
 // IN PLACE (autonomous-runner: outcome + updated_at only; completed_at and
 // claimed_at stay) — agent-activity's runStatus reads publishing* as
@@ -40,6 +49,8 @@ const COLUMNS = () => [
   db.raw(`(SELECT COALESCE(CASE WHEN a.status = 'failed' THEN a.updated_at END, a.decided_at, a.created_at) ${NEWEST_APPROVAL}) AS approval_at`),
   db.raw(`${EXECUTION_STARTED_AT} AS execution_started_at`),
   db.raw(`(SELECT a.last_error ${NEWEST_APPROVAL}) AS approval_error`),
+  db.raw(`(SELECT a.email_sent_at ${NEWEST_APPROVAL}) AS approval_sent_at`),
+  db.raw(`${OPPORTUNITY_STATUS} AS opportunity_status`),
 ];
 // A run parked for the owner (completed_pending_review) stays live until a
 // terminal emailed decision or the in-review approval stamp lands.
@@ -53,6 +64,8 @@ const DECIDED = Object.freeze({
   failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure' },
   executing: { lifecycle: 'running' },
 });
+// the approval email has not left yet: waiting on the sender, not the owner
+const UNSENT = Object.freeze({ lifecycle: 'waiting_external', disposition: 'drafted', verification: 'unjudged' });
 
 // agent-activity status → (lifecycle, result, disposition, failureClass)
 const STATUS_MAP = Object.freeze({
@@ -101,23 +114,35 @@ function decisionFor(run, status) {
   if (status !== 'awaiting_review') return null;
   if (run.approval_status && TERMINAL_APPROVAL[run.approval_status]) return DECIDED[run.approval_status] || null;
   if (run.trust_build_approved_at) return DECIDED.approved;
+  if (run.approval_status === 'awaiting_reply' && !run.approval_sent_at) return UNSENT;
   return null;
 }
 
+// What the run's status maps to: a gate failure the runner parked for the
+// owner waits on them like any parked draft.
+function statusMap(run, status) {
+  if (status === 'blocked' && run.opportunity_status === 'pending_review') return STATUS_MAP.awaiting_review;
+  return STATUS_MAP[status] || STATUS_MAP.completed;
+}
+
 // The run's active span. Normally the claim → completion (a decided run
-// closes at its decision). While the poller executes an emailed decision
-// the run is active AGAIN from that decision: judged from its own start
-// (a draft parked past the hard timeout is not stalled the moment the
-// owner replies) and with no finish yet (Codex r1).
+// closes at its decision), with the generation's own total_ms. While the
+// poller executes an emailed decision (or the sender still owes the
+// approval email, or an in-app approval is publishing) the run is active
+// AGAIN from that event: judged from its own start (a draft parked past
+// the hard timeout is not stalled the moment the owner replies), no finish
+// yet, and the duration derived from the span — never the generation's
+// total_ms (Codex r1 / r6).
 function spanFor(run, decided, decidedAt) {
-  if (decided === DECIDED.executing) return { startedAt: decidedAt, finishedAt: null, lastHeartbeatAt: decidedAt };
+  if (decided === DECIDED.executing || decided === UNSENT) return { startedAt: decidedAt, finishedAt: null, lastHeartbeatAt: decidedAt, durationMs: null };
   // a failed execution keeps its own span: the decision → the failure
-  if (decided === DECIDED.failed) return { startedAt: run.execution_started_at || run.claimed_at || run.created_at, finishedAt: decidedAt, lastHeartbeatAt: decidedAt };
-  if (PUBLISHING_RE.test(run.outcome || '')) return { startedAt: run.updated_at || run.claimed_at || run.created_at, finishedAt: null, lastHeartbeatAt: run.updated_at };
+  if (decided === DECIDED.failed) return { startedAt: run.execution_started_at || run.claimed_at || run.created_at, finishedAt: decidedAt, lastHeartbeatAt: decidedAt, durationMs: null };
+  if (PUBLISHING_RE.test(run.outcome || '')) return { startedAt: run.updated_at || run.claimed_at || run.created_at, finishedAt: null, lastHeartbeatAt: run.updated_at, durationMs: null };
   return {
     startedAt: run.claimed_at || run.created_at,
     finishedAt: decided ? decidedAt || run.completed_at : run.completed_at,
     lastHeartbeatAt: run.updated_at || run.claimed_at,
+    durationMs: run.total_ms,
   };
 }
 
@@ -126,13 +151,14 @@ function spanFor(run, decided, decidedAt) {
 // time outcome, which was a parked success (Codex r2).
 function failureFor(run, decided) {
   if (decided === DECIDED.failed) return { code: 'approval_failed', message: run.approval_error };
+  if (decided === UNSENT) return { code: null, message: `Approval email not delivered yet${run.approval_error ? `: ${run.approval_error}` : ''}` };
   return { code: run.outcome, message: run.failure_message };
 }
 
 function fromRow(run) {
   const status = runStatus(run);
   const decided = decisionFor(run, status);
-  const map = decided || STATUS_MAP[status] || STATUS_MAP.completed;
+  const map = decided || statusMap(run, status);
   // an emailed approval (raised or decided) or the in-review stamp is the run's latest event
   const decidedAt = run.approval_at || run.trust_build_approved_at;
   const steps = stepsFor(run, status);
@@ -152,7 +178,6 @@ function fromRow(run) {
     createdAt: run.created_at,
     ...spanFor(run, decided, decidedAt),
     lastProgressAt: decidedAt || run.updated_at || run.claimed_at,
-    durationMs: run.total_ms,
     steps,
     link: map.lifecycle === 'waiting_human' ? REVIEW_LINK : run.published_url,
     detail: failure.message || skipReason || run.published_url,
@@ -167,6 +192,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
       .where((q) => {
         q.whereNull('completed_at');
         q.orWhereRaw(PARKED);
+        q.orWhereRaw(REVIEW_PARKED_GATE);
         q.orWhereRaw(PUBLISHING);
         q.orWhere(START(), '>=', from);
       }), { source: SOURCE, idColumn: 'autonomous_runs.id' }), { start: START(), id: ID, cursor, limit });
