@@ -11540,16 +11540,17 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) 
   // The term LINK outlives the coverage: a voided/refunded prepay flips the
   // term to cancelled/refunded and clearPrepaidStampsForTerm keeps
   // annual_prepay_term_id on the visits for audit (annual-prepay-renewals).
-  // Only a term that is still live is money held (Codex #3878 r1 P2). An
-  // unreadable terms table keeps every linked visit covered (fail-closed).
+  // Only a term whose PAID coverage is still live is money held (Codex #3878
+  // r1 P2) — decided through the canonical reader, coveredTermsAsOf, not a
+  // status list: a 'cancelled' term with renewal_decision 'cancel' is a paid
+  // non-renewal riding out its window (still covered, pre-push P0), and a
+  // paid invoice can be clawed back by a dispute (no longer covered). A
+  // reader failure keeps every linked visit covered (fail-closed).
   const termIds = [...new Set(visits.map((v) => v.annual_prepay_term_id).filter(Boolean))];
   let liveTermIds = new Set(termIds);
   if (termIds.length > 0) {
-    const DEAD_TERM_STATUSES = ['cancelled', 'canceled', 'refunded'];
-    const liveTerms = await conn('annual_prepay_terms')
-      .whereIn('id', termIds)
-      .whereNotIn('status', DEAD_TERM_STATUSES)
-      .select('id');
+    const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+    const liveTerms = await coveredTermsAsOf(conn).whereIn('t.id', termIds).select('t.id');
     liveTermIds = new Set(liveTerms.map((t) => t.id));
   }
   for (const v of visits) {

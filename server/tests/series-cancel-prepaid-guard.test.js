@@ -37,7 +37,7 @@ jest.mock('../services/visit-cancellation-followthrough', () => ({
 }));
 
 jest.mock('../models/db', () => {
-  const state = { rows: [], invoices: [], terms: [], writes: [], hasTableCalls: [] };
+  const state = { rows: [], invoices: [], terms: [], writes: [], hasTableCalls: [], reads: [] };
   const makeBuilder = (table) => {
     const b = {
       _where: {},
@@ -56,6 +56,7 @@ jest.mock('../models/db', () => {
       whereNull() { return b; },
       whereNotNull() { return b; },
       leftJoin() { return b; },
+      whereRaw() { return b; },
       orderBy() { return b; },
       forUpdate() { return b; },
       modify(cb) { cb(b); return b; },
@@ -83,11 +84,12 @@ jest.mock('../models/db', () => {
       // Awaiting the builder (the target select) resolves every scheduled
       // service — the harness owns the scope filtering by what it seeds.
       then(resolve, reject) {
+        state.reads.push(String(table));
         const rows = table === 'scheduled_services' ? state.rows.map((r) => ({ ...r }))
           : table === 'invoices' ? state.invoices.map((r) => ({ ...r }))
-          // Live terms only — the harness models the whereNotIn(dead statuses)
-          // by seeding what a live read would return.
-          : table === 'annual_prepay_terms' ? state.terms.filter((t) => !['cancelled', 'canceled', 'refunded'].includes(t.status)).map((t) => ({ id: t.id })) : [];
+          // coveredTermsAsOf reads 'annual_prepay_terms as t' — the harness
+          // seeds what its paid-coverage predicate would return (`covered`).
+          : String(table).startsWith('annual_prepay_terms') ? state.terms.filter((t) => t.covered).map((t) => ({ id: t.id })) : [];
         return Promise.resolve(rows).then(resolve, reject);
       },
     };
@@ -135,7 +137,7 @@ const future = (days) => {
   const d = new Date(); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10);
 };
 
-function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', status: 'active' }] } = {}) {
+function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', covered: true }] } = {}) {
   db.__state.invoices = invoices;
   db.__state.terms = terms;
   db.__state.rows = [
@@ -145,6 +147,7 @@ function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', status: 'a
   ];
   db.__state.writes = [];
   db.__state.hasTableCalls = [];
+  db.__state.reads = [];
   mockTransitionJobStatus.mockClear();
   mockHandleSeriesCancellation.mockClear();
   mockRunFollowThrough.mockClear();
@@ -193,7 +196,7 @@ test('a target whose invoice already holds money (paid, neither visit field stam
 });
 
 test('a visit linked to a REFUNDED term (link kept for audit, stamp cleared) is not covered — cancel proceeds (Codex #3878 r1 P2)', async () => {
-  seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null }, terms: [{ id: 'term-1', status: 'refunded' }] });
+  seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null }, terms: [{ id: 'term-1', covered: false }] });
   const { status, body } = await cancel('series');
   expect(status).toBe(200);
   expect(body.cancelledCount).toBe(3);
@@ -231,4 +234,23 @@ test('POST /admin/schedule/:id/prepaid still stamps a live visit', async () => {
   });
   expect(res.status).toBe(200);
   expect(db.__state.writes.some((w) => w.op === 'update' && Number(w.u.prepaid_amount) === 95)).toBe(true);
+});
+
+describe('term coverage is decided by the canonical reader, not a status list (pre-push P0 on #3878)', () => {
+  test('the guard reads the linked terms through coveredTermsAsOf (aliased "annual_prepay_terms as t")', async () => {
+    seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null } });
+    await cancel('series');
+    expect(db.__state.reads).toContain('annual_prepay_terms as t');
+    expect(db.__state.reads).not.toContain('annual_prepay_terms');
+  });
+
+  test('coveredTermsAsOf keeps a cancelled term with renewal_decision=cancel (paid non-renewal) covered and drops refunded money', () => {
+    // Real query builder, no connection: pin the SQL the guard now inherits.
+    const knex = require('knex')({ client: 'pg' });
+    const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+    const sql = coveredTermsAsOf(knex).whereIn('t.id', ['term-1']).select('t.id').toString();
+    expect(sql).toMatch(/"t"\."status" = 'cancelled' and "t"\."renewal_decision" = 'cancel'/);
+    expect(sql).toMatch(/not exists \(\s*select 1 from payments p/);
+    expect(sql).toMatch(/"t"\."id" in \('term-1'\)/);
+  });
 });
