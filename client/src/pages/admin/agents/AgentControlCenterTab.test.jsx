@@ -206,7 +206,8 @@ describe("AgentControlCenterTab", () => {
     expect(screen.getByText(/fallback rates are not available/)).toBeInTheDocument();
     expect(screen.getByText(/No prior window to compare with/)).toBeInTheDocument();
     expect(within(card).getByText("fallback — (chain recorder off)")).toBeInTheDocument();
-    expect(within(card).getByText("753 tokens")).toBeInTheDocument();
+    // never a cross-provider total: input and output, the two counts every provider agrees on
+    expect(within(card).getByText("600 in · 120 out")).toBeInTheDocument();
   });
 
   it("registers the hub refresh handle and shows the fetch error", async () => {

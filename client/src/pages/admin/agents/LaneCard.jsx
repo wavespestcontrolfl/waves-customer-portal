@@ -34,11 +34,15 @@ const NOT_YET = {
   verification: "arrives with verification",
 };
 
+// No single total: providers disagree on what input / output contain
+// (OpenAI and Gemini count cached and reasoning tokens INSIDE input and
+// output; Anthropic reports cache reads and writes beside input), and a
+// lane may have run on more than one — so the line shows the two counts
+// every provider agrees on, and says how many rows had no usage at all.
 function tokensLine(tokens) {
   if (!tokens) return null;
-  const total = (tokens.input || 0) + (tokens.cachedInput || 0) + (tokens.cacheWrite || 0) + (tokens.output || 0) + (tokens.reasoning || 0);
   const parts = [];
-  if (total > 0) parts.push(`${nf.format(total)} tokens`);
+  if ((tokens.input || 0) + (tokens.output || 0) > 0) parts.push(`${nf.format(tokens.input || 0)} in · ${nf.format(tokens.output || 0)} out`);
   if (tokens.unknownRows > 0) parts.push(`${tokens.unknownRows} without usage`);
   return parts.join(" · ") || null;
 }
