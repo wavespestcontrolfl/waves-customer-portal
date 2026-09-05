@@ -1663,6 +1663,8 @@ class RelayConversation {
     // The earlier legs' caller turns count toward this CALL's turn cap
     // (codex r3 P2): a reconnect is not a fresh budget.
     this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
+    // …and so do the customer-book lookups already spent (codex r4 P2).
+    this._lookupsUsed = Math.max(this._lookupsUsed, Number(state.lookupsUsed) || 0);
     // A re-service already FILED on an earlier leg is this call's artifact:
     // no lead is owed (the floor stays down) and the close reports it filed.
     // A capture that deliberately created NO lead (an existing lifecycle
@@ -1711,6 +1713,21 @@ class RelayConversation {
       const verified = this._callerVerified === true;
       const phone = toE164((verified && row && row.from_phone) || this.from || '');
       if (!isLikelyE164(phone)) return false;
+      // ONE callback per call (codex r4 P1): the same atomic claim the
+      // voicemail lane uses (call_log.voicemail_callback_alerted_at) — a
+      // reconnected leg whose first leg already filed the bell does not file
+      // a second; the promise already made stands, so it may be spoken.
+      const claimed = await withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid).whereNull('voicemail_callback_alerted_at').update({ voicemail_callback_alerted_at: new Date() }).catch(() => 0),
+        2000,
+        0,
+      );
+      if (!(Number(claimed) > 0)) {
+        const already = row && (await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('voicemail_callback_alerted_at').catch(() => null), 2000, null));
+        const filedBefore = Boolean(already && already.voicemail_callback_alerted_at);
+        logger.warn(`[voice-relay] provider-failure callback ${filedBefore ? 'already filed on this call' : 'claim unconfirmed'} callSid=${maskSid(this.callSid)} — ${filedBefore ? 'not filed again' : 'no promise made'}`);
+        return filedBefore;
+      }
       const { triggerNotification } = require('../notification-triggers');
       const res = await withTimeout(triggerNotification('customer_voicemail_callback', {
         name: (this._estimateFields && this._estimateFields.first_name) || null,
@@ -2180,6 +2197,7 @@ class RelayConversation {
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
           startedAt: this._startedAt,
+          lookupsUsed: this._lookupsUsed,
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)

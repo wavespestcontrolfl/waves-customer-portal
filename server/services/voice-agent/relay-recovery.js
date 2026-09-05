@@ -102,8 +102,11 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0 }) {
   return {
+    // Customer-book lookups consumed on this leg — the per-call anti-fishing
+    // budget continues across the reconnect (codex r4 P2).
+    lookups_used: Number(lookupsUsed) || 0,
     // When this leg's session started (the first leg's is the CALL's start —
     // restored on the resumed leg so duration_seconds covers the whole call,
     // hook r25 P1).
@@ -296,6 +299,7 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         // A lead captured on an earlier leg even when its relay_lead_id
         // stamp (best-effort) did not land (codex r3 P2).
         leadCaptured: legs.some((seg) => seg.lead_captured === true),
+        lookupsUsed: legs.reduce((max, seg) => Math.max(max, Number(seg.lookups_used) || 0), 0),
         // The earliest leg's start = the call's start (null when no leg recorded one).
         startedAtMs: legs.map((seg) => Date.parse(seg.started_at || '')).filter((ms) => Number.isFinite(ms) && ms > 0).reduce((min, ms) => (min === null || ms < min ? ms : min), null),
         // The LATEST leg's hold (a later complete capture clears it) and the

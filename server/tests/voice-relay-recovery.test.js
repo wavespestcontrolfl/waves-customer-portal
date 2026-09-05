@@ -161,7 +161,7 @@ describe('relay-recovery module', () => {
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'other-nonce' })).toBeNull(); // not this socket's claim ⇒ nothing (hook P0)
     expect(await recovery.loadResumeState(db, 'CA-1')).toBeNull(); // no key ⇒ nothing
-    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
+    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
     primeDb({ firstRow: { metadata: JSON.stringify({ ...OWNED, relay_segments: [{ generation: 1, text: 'x' }] }) } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toBeNull(); // no reconnect stamp ⇒ a forged <Parameter resumed> proves nothing
     primeDb({ firstRow: null });
@@ -556,6 +556,44 @@ describe('the conversation side', () => {
     expect(trig).toHaveBeenLastCalledWith('customer_voicemail_callback', expect.objectContaining({ phone: '+19415550000', customerId: 'C1', callLogId: 'cl-9' }));
   });
 
+  test('customer-book lookups already spent ride the segment and the resumed leg continues the per-call budget (codex r4 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    expect(recovery.buildSegment({ generation: 1, text: 'x', lookupsUsed: 2 }).lookups_used).toBe(2);
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', lookups_used: 3 }] } } });
+    const convo = resumedConvo({ callSid: 'CA-lookups' });
+    await convo._resumeReady;
+    expect(convo._resume.lookupsUsed).toBe(3);
+    expect(convo._lookupsUsed).toBe(3);
+    expect(convo._buildToolCtx().consumeLookup()).toBe(false); // the budget is exhausted for THIS call
+  });
+
+  test('a resumed socket gets only what is left of the call\'s hard duration cap (codex r4 P2)', () => {
+    const { resumedSessionBudgetMs, WS_MAX_SESSION_MS, WS_RESUMED_MIN_SESSION_MS } = require('../services/voice-agent/relay-server');
+    const now = Date.now();
+    expect(resumedSessionBudgetMs(null)).toBe(WS_MAX_SESSION_MS);
+    expect(resumedSessionBudgetMs({ created_at: new Date(now - 10 * 60 * 1000), metadata: {} }, { now })).toBe(WS_MAX_SESSION_MS); // never reconnected ⇒ the full cap
+    expect(resumedSessionBudgetMs({ created_at: new Date(now - 10 * 60 * 1000), metadata: JSON.stringify({ relay_reconnects: 1 }) }, { now })).toBe(5 * 60 * 1000);
+    expect(resumedSessionBudgetMs({ created_at: new Date(now - 20 * 60 * 1000), metadata: { relay_reconnects: 1 } }, { now })).toBe(WS_RESUMED_MIN_SESSION_MS);
+    expect(resumedSessionBudgetMs({ created_at: null, metadata: { relay_reconnects: 1 } }, { now })).toBe(WS_MAX_SESSION_MS);
+  });
+
+  test('the provider-failure callback is filed ONCE per call: the atomic voicemail_callback_alerted_at claim — a reconnected leg finds it filed and makes no second bell, but the promise stands (codex r4 P1)', async () => {
+    const { triggerNotification: trig } = require('../services/notification-triggers');
+    const { builder } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', voicemail_callback_alerted_at: '2026-09-05T06:00:00Z' } });
+    builder.update.mockImplementation(async () => 0); // claim already taken by the first leg
+    const convo = new RelayConversation({ callSid: 'CA-cb-dup', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    trig.mockClear();
+    expect(await convo._fileFailureCallback()).toBe(true);
+    expect(trig).not.toHaveBeenCalled();
+    expect(builder.whereNull).toHaveBeenCalledWith('voicemail_callback_alerted_at');
+    // an UNCONFIRMED claim (0 rows, no stamp on the row) ⇒ no bell, no promise
+    const { builder: b2 } = primeDb({ firstRow: { id: 'cl-9', customer_id: null, from_phone: '+19415551234', voicemail_callback_alerted_at: null } });
+    b2.update.mockImplementation(async () => 0);
+    const second = new RelayConversation({ callSid: 'CA-cb-unc', sessionKey: 'nonce-1', from: '+19415551234', send: jest.fn() });
+    expect(await second._fileFailureCallback()).toBe(false);
+    expect(trig).not.toHaveBeenCalled();
+  });
+
   test('a lead captured on an earlier leg whose relay_lead_id stamp did not land is still restored as captured (segment lead_captured) (codex r3 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', lead_captured: true }] } } });
@@ -665,7 +703,7 @@ describe('the conversation side', () => {
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
     const convo = resumedConvo({ callSid: 'CA-res', sessionGeneration: 2 });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
     await convo._runLoop('where were we').catch(() => {}); // no Anthropic client in tests: the seeding half runs
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call, before the line dropped'));
     expect(seeded).toHaveLength(1);
@@ -682,7 +720,7 @@ describe('the conversation side', () => {
     const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } }); // proven, but no segment yet
     const convo = resumedConvo({ callSid: 'CA-race' });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
     builder.first = jest.fn(async () => ({ metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L9', relay_segments: [{ generation: 1, text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } })); // the old socket's append landed

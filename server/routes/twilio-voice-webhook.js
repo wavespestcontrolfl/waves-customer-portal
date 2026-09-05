@@ -1721,6 +1721,7 @@ router.post('/relay-complete', async (req, res) => {
   // second failure hands the caller to the office (transfer gate on, office
   // open) or falls to today's paths below. Gate off ⇒ this block is skipped
   // and everything below is byte-identical to today.
+  let secondFailureFallback = false; // the resumed leg failed and no staff ring was possible ⇒ today's voicemail, with a terminal status (codex r4 P2)
   if (failed && callSid && require('../services/voice-agent/relay-recovery').isRecoveryGateOn()) {
     const reconnect = await attemptRelayReconnect(req, callSid, failure);
     if (reconnect.xml) return res.type('text/xml').send(reconnect.xml);
@@ -1736,6 +1737,7 @@ router.post('/relay-complete', async (req, res) => {
     if (reconnect.secondFailure && (req.query || {}).sandbox !== '1' && await appendSecondFailureTransfer(req, twiml, callSid)) {
       return res.type('text/xml').send(twiml.toString());
     }
+    secondFailureFallback = reconnect.secondFailure === true;
   }
   // A sandbox call (the signed ?sandbox=1 the sandbox route itself rendered)
   // never falls to voicemail: a recording on a test call would enter the
@@ -1770,8 +1772,12 @@ router.post('/relay-complete', async (req, res) => {
     // deterministic, no DB dependency on the failover path.
     const language = relayCompleteLanguage(req);
     if (callSid) {
+      // The reconnect claim put the row back to 'in-progress'; nothing after
+      // this voicemail finalizes it (the recorder's action is a no-op and the
+      // resumed socket's close is fenced out), so the second-failure fallback
+      // stamps the terminal status here. Gate off / first failure: unchanged.
       await db('call_log').where('twilio_call_sid', callSid)
-        .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
+        .update({ answered_by: 'voicemail', call_outcome: 'voicemail', ...(secondFailureFallback ? { status: 'completed' } : {}), updated_at: new Date() })
         .catch((err) => logger.warn(`[relay-complete] call_log reconcile failed for ${maskSid(callSid)}: ${err.message}`));
       queueVoiceMessageSync(callSid);
     }

@@ -189,6 +189,19 @@ describe('/relay-complete — the second failure', () => {
     expect(updates.some((u) => u.metadata && String(u.metadata.sql).includes('relay_transfer_ring_at'))).toBe(true);
   });
 
+  test('the second-failure voicemail fallback stamps a TERMINAL status (the claim had put the row back to in-progress); a first failure / gate off does not touch status (codex r4 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb({ claimRows: 0, firstRow: RECONNECTED_ROW });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: { gen: '777' } }, res);
+    expect(res.body).toContain('<Record');
+    expect(updates.find((u) => u.call_outcome === 'voicemail')).toEqual(expect.objectContaining({ answered_by: 'voicemail', status: 'completed' }));
+    delete process.env.GATE_VOICE_RELAY_RECOVERY;
+    const { updates: off } = primeDb();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, mockRes());
+    expect(off.find((u) => u.call_outcome === 'voicemail')).not.toHaveProperty('status');
+  });
+
   test('office closed, or the transfer gate off ⇒ today\'s voicemail', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
