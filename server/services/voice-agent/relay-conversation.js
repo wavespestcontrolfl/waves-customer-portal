@@ -594,6 +594,7 @@ class RelayConversation {
     // just per-query criteria rules: three DB-reaching lookups, then the tool
     // is closed for the rest of the call.
     this._lookupsUsed = 0;
+    this._priorLookupsUsed = 0;
     // Session-scoped OFFERED-SLOT registry. Same opaque-ref doctrine as the
     // lookup refs: the availability tools speak "Tuesday August 18 at 9 AM"
     // (no ISO date anywhere), so request_booking takes a ref instead of making
@@ -1393,7 +1394,8 @@ class RelayConversation {
       // Per-call lookup budget: true while the caller still has lookups left.
       consumeLookup: () => {
         const { LOOKUP_SESSION_BUDGET } = require('./relay-context');
-        if (this._lookupsUsed >= LOOKUP_SESSION_BUDGET) return false;
+        if (this._resumedHint && require('./relay-recovery').isRecoveryGateOn() && !this._resume?.segmentsText) return false;
+        if (this._lookupsUsed + this._priorLookupsUsed >= LOOKUP_SESSION_BUDGET) return false;
         this._lookupsUsed += 1;
         return true;
       },
@@ -1675,7 +1677,7 @@ class RelayConversation {
     // (codex r3 P2): a reconnect is not a fresh budget.
     this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
     // …and so do the customer-book lookups already spent (codex r4 P2).
-    this._lookupsUsed = Math.max(this._lookupsUsed, Number(state.lookupsUsed) || 0);
+    this._priorLookupsUsed = Math.max(this._priorLookupsUsed, Number(state.lookupsUsed) || 0);
     for (const [ref, customerId] of (state.lookupRefs || [])) {
       if (this._lookupRefs.has(ref)) continue;
       this._lookupRefs.set(ref, customerId);
@@ -2263,7 +2265,7 @@ class RelayConversation {
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,
           startedAt: this._startedAt,
-          lookupsUsed: this._lookupsUsed,
+          lookupsUsed: this._priorLookupsUsed + this._lookupsUsed,
           lookupRefs: [...this._lookupRefs.entries()],
         });
         const appended = await withTimeout(
