@@ -301,7 +301,7 @@ describe('buildMixAmount', () => {
 
   test.each([
     ['missing rate', { ratePer1000: null, carrierGalPer1000: 2, gallons: 110 }, 'No verified rate on file'],
-    ['expired/missing calibration', { ratePer1000: 1.5, carrierGalPer1000: null, gallons: 110 }, 'Rig not calibrated'],
+    ['missing calibration', { ratePer1000: 1.5, carrierGalPer1000: null, gallons: 110 }, 'Rig not calibrated'],
     ['odd volume', { ratePer1000: 1.5, carrierGalPer1000: 2, gallons: 5 }, 'Pick 110 or 1 gallons'],
   ])('%s → null amount with reason', (_l, input, reason) => {
     expect(jobCard.buildMixAmount(input)).toMatchObject({ amount: null, reason });
@@ -320,18 +320,14 @@ describe('property coordinates', () => {
 });
 
 describe('tankFromCalibrations', () => {
-  const now = new Date('2026-09-04T12:00:00Z');
-  test('expired calibration is not calibrated', () => {
-    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }], now))
-      .toMatchObject({ calibrated: false, reason: 'Rig calibration expired', carrierGalPer1000: 2 });
+  test('an expired or unverified calibration still mixes — expiry / field-verification blocks were retired (#3935)', () => {
+    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }]))
+      .toMatchObject({ calibrated: true, reason: null, carrierGalPer1000: 2 });
   });
+  const now = new Date('2026-09-04T12:00:00Z');
   test('live calibration', () => {
     expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }], now))
       .toMatchObject({ calibrated: true, reason: null, tankCapacityGal: 110 });
-  });
-  test('unexpired but not field verified → not calibrated (Codex r3 P1, plan-engine block reused)', () => {
-    expect(jobCard.tankFromCalibrations([{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'estimated_not_field_verified', tank_capacity_gal: 110, system_name: 'Rig' }], now))
-      .toMatchObject({ calibrated: false, reason: 'Rig calibration not field verified', carrierGalPer1000: 2 });
   });
   test('two active rigs and no assignment → ambiguous, no mix (Codex r4 P1)', () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' };
@@ -601,16 +597,6 @@ describe('mixForProduct', () => {
     expect(evaluateApprovals).not.toHaveBeenCalled();
   });
 
-  test('a rig that lapses before the booked window start gives no searched dose (Codex r10 P1)', async () => {
-    const lapsing = { ...live, expires_at: '2026-09-04T17:30:00Z' }; // 13:30 ET, after noon, before the 3 pm start
-    const dbh = makeDb({ scheduled_services: [{ ...visit, window_start: '15:00:00' }], products_catalog: [product], equipment_calibrations: [lapsing] });
-    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, ...at });
-    expect(out.tank.calibrated).toBe(false);
-    expect(out.amount).toBeNull();
-    // No window booked → judged at noon → still valid.
-    const noon = makeDb({ scheduled_services: [visit], products_catalog: [product], equipment_calibrations: [lapsing] });
-    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: noon, ...at })).amount).toBe(6.215);
-  });
 
   test('a lawn visit at a non-primary address gets no plan and no searched dose (Codex r12 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [{ ...lawnVisit, address_diverges: true }], products_catalog: [product], equipment_calibrations: [live] });
@@ -684,15 +670,6 @@ describe('mixForProduct', () => {
     expect(await jobCard.mixForProduct('p1', 110, { dbh, now: new Date('2026-09-04T12:00:00Z') })).toBeNull();
   });
 
-  test('expired calibration → amount withheld with the tank reason', async () => {
-    const dbh = makeDb({
-      scheduled_services: [visit],
-      products_catalog: [product],
-      equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-07-11T00:00:00Z', tank_capacity_gal: 110, system_name: 'Rig' }],
-    });
-    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, now: new Date('2026-09-04T12:00:00Z') });
-    expect(out).toMatchObject({ amount: null, reason: 'Rig not calibrated', tank: { calibrated: false, reason: 'Rig calibration expired' } });
-  });
 
   test('granular product → no tank amount even on a live rig (Codex r1 P1)', async () => {
     const dbh = makeDb({
@@ -912,18 +889,14 @@ describe('PR review r6', () => {
     expect(card.order.quantity).toBeCloseTo(11.4, 2);
   });
 
-  test('a rig that lapsed after noon withholds the card amounts with the tank reason (hook P1)', async () => {
+  test('no usable rig withholds the card amounts with the tank reason (hook P1; expiry retired by #3935)', async () => {
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
-    const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'Rig calibration expired' });
+    const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'No rig calibration on file' });
     expect(card.planned).toBeNull();
-    expect(card.amountNote).toBe('Rig calibration expired — amount withheld');
+    expect(card.amountNote).toBe('No rig calibration on file — amount withheld');
     const [ok] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: null });
     expect(ok.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
-    // The boundary: a calibration valid at noon but expired by the time the card opens.
-    const cal = { carrier_gal_per_1000: 2, expires_at: '2026-09-04T18:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
-    expect(jobCard.tankFromCalibrations([cal], new Date('2026-09-04T16:00:00Z')).calibrated).toBe(true);
-    expect(jobCard.tankFromCalibrations([cal], new Date('2026-09-04T20:00:00Z')).calibrated).toBe(false);
   });
 
   test('the lawn plan is built strict so a catalog outage is a plan block, not an empty card (P2)', async () => {

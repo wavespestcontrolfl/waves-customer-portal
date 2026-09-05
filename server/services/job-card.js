@@ -836,14 +836,12 @@ function rigAssignment(svc) {
   return { equipmentSystemId: svc?.assigned_equipment_system_id || null, calibrationId: svc?.assigned_calibration_id || null };
 }
 
-// The plan engine's calibration resolution and validation (assigned rig
-// first, one active rig otherwise, ambiguous / expired / not field
-// verified = no mix) decide the tank; only the wording is the card's.
+// The plan engine's calibration resolution (assigned rig first, one active
+// rig otherwise, none / ambiguous = no mix) decides the tank; only the
+// wording is the card's.
 const TANK_BLOCK_REASON = {
   missing_calibration: 'No rig calibration on file',
   equipment_selection_required: 'More than one rig is active — assign the rig on the Lawn plan',
-  expired_calibration: 'Rig calibration expired',
-  calibration_not_field_verified: 'Rig calibration not field verified',
 };
 
 async function loadRigCalibrations(dbh, rig) {
@@ -852,8 +850,8 @@ async function loadRigCalibrations(dbh, rig) {
 
 // The instant a calibration must still be valid at: the later of now and
 // the appointment start — window_start on the service day, noon ET when no
-// window is booked. Expiry is an exact timestamp, so a rig lapsing between
-// noon and a 3 pm start is expired when treatment begins.
+// window is booked. The spray check is judged from it: a 3 pm stop opened
+// at 8 am is checked against the 3 pm hours.
 function serviceStartInstant(serviceDate, windowStart = null) {
   const wall = /^\d{2}:\d{2}/.exec(String(windowStart || ''));
   return serviceDate ? parseETDateTime(`${serviceDate}T${wall ? wall[0] : '12:00'}`) : null;
@@ -863,8 +861,10 @@ function serviceDayInstant(serviceDate, now = new Date(), windowStart = null) {
   return start && start.getTime() > now.getTime() ? start : now;
 }
 
-function tankFromCalibrations(rows, now = new Date()) {
-  const { selected: cal, blocks } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [], date: now });
+// Calibration expiry / field verification no longer block (owner ruling,
+// #3935): the engine's remaining blocks are no rig and an ambiguous rig.
+function tankFromCalibrations(rows) {
+  const { selected: cal, blocks } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [] });
   const block = blocks[0] || null;
   const carrier = Number(cal?.carrier_gal_per_1000 || 0);
   return {
@@ -1083,10 +1083,8 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // The catalog contract holds on this path too: a rate whose label
     // provenance is unverified is not shown as an actionable amount.
     const unverified = line.planMix?.amount > 0 && !p.label_verified_at;
-    // The plan validates the rig at noon on the service day; the card judges
-    // it at the later of noon and now (tankFromCalibrations). A rig that
-    // lapsed since noon withholds every planned amount here too, with the
-    // Tank section's own reason.
+    // No usable rig (none on file, ambiguous) withholds every planned
+    // amount here too, with the Tank section's own reason.
     const demandMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
     const plannedMix = !blocked && !tankReason && !unverified ? demandMix : null;
     // Unrounded: the client converts small doses to g / mL and rounds once.
@@ -1185,7 +1183,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
 
   // The spray check is a same-day call: a visit on another day is judged
   // on that day (the next 4 h of weather say nothing about tomorrow), and
-  // the rig must still be in calibration at the appointment start.
+  // the limits are judged from the appointment start.
   const isToday = facts.scheduledDate === etDateString(now);
   const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
   const [paragraph, catalog, calibrations, hourly] = await Promise.all([
@@ -1194,7 +1192,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     loadRigCalibrations(dbh, facts.rig),
     isToday && facts.coords.lat != null ? (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null) : Promise.resolve(null),
   ]);
-  const tank = tankFromCalibrations(calibrations, serviceInstant);
+  const tank = tankFromCalibrations(calibrations);
   const { visit, lines, blocks } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   // Limits are judged from the appointment start (now once the window has
@@ -1247,14 +1245,14 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
       ? dbh('scheduled_services as ss')
         .join('customers as c', 'c.id', 'ss.customer_id')
         .where('ss.id', serviceId)
-        .select('ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.window_start', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`))
+        .select('ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', dbh.raw(`(${stampedDivergesSql('ss', 'c')}) as address_diverges`))
         .first().catch(() => null)
       : Promise.resolve(null),
   ]);
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
-  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start));
+  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)));
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
