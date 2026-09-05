@@ -1,3 +1,4 @@
+jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn(async () => ({})) }));
 // Opt-in integration against a dedicated migrated dev/QA database. Every test
 // rolls back its synthetic records, including the real audit writer's inserts.
 jest.mock('../models/db', () => new Proxy((...args) => mockDb(...args), {

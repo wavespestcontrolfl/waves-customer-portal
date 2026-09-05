@@ -83,3 +83,10 @@ shared writer. Frozen grouped visits remain subject to the shared guard.
 An opt-in PostgreSQL integration suite exercises real migrated tables, the
 shared address writer and audit insert inside rollback-only synthetic fixtures;
 CI runs it against its dedicated `waves_test` database.
+
+Pre-push review identified a missing live dispatch refresh after an IB address
+commit. The tool now broadcasts every affected job after the transaction resolves;
+a broadcast failure retains committed success and surfaces a manual-refresh
+warning. A regression covers both broadcast invocation and failure behavior.
+The broader Intelligence Bar/tech/address/dispatch suite passed 620 tests before
+this follow-up; its five switch-property tests passed after the broadcast fix.

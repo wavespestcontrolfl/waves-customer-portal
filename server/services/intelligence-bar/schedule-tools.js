@@ -226,7 +226,7 @@ async function switchAppointmentProperty(input, actionContext) {
   const plan = await planAppointmentAddress(db, input.appointment_id, input.property_id, 'visit');
   if (input.confirmed !== true) return appointmentPropertyPreview(db, plan);
   if (!actionContext.confirmed || !input._verified_address_fingerprint) return { error: 'Use the confirmation card to approve this change.' };
-  return db.transaction(async trx => {
+  const result = await db.transaction(async trx => {
     await require('../scheduling/occupancy').acquireOccupancyLocks(trx, plan.rows.map(row => require('../visit-groups').dateOnly(row.scheduled_date)));
     await require('../scheduling/tech-day-lock').lockTechDays(trx, plan.rows.map(row => ({ techId: row.technician_id, date: require('../visit-groups').dateOnly(row.scheduled_date) })));
     await lockAppointmentAddress(trx, plan);
@@ -242,6 +242,16 @@ async function switchAppointmentProperty(input, actionContext) {
     const ids = await applyAppointmentAddress(trx, plan, actionContext.technicianId);
     return { success: true, updated_service_ids: ids, destination: preview.destination, messages_sent: false };
   });
+  if (result.success) {
+    const { emitDispatchJobUpdate } = require('../dispatch-assignment');
+    const broadcasts = await Promise.allSettled(result.updated_service_ids.map(jobId =>
+      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId })));
+    if (broadcasts.some(item => item.status === 'rejected')) {
+      logger.warn('[intelligence-bar] address saved but dispatch refresh broadcast failed');
+      result.warning = 'Address saved. Live refresh failed; refresh the technician schedule to see the new destination.';
+    }
+  }
+  return result;
 }
 
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────

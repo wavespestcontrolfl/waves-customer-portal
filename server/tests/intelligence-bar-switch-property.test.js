@@ -1,3 +1,4 @@
+jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn(async () => ({})) }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn() }));
 jest.mock('../utils/customer-comms-lock', () => ({ lockCustomerComms: jest.fn() }));
 jest.mock('../models/db', () => {
@@ -12,6 +13,7 @@ jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn() }));
 const db = require('../models/db');
 const address = require('../services/appointment-address');
 const gates = require('../config/feature-gates');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
 const input = { appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002' };
@@ -51,6 +53,8 @@ test('confirmed execution holds locks and applies only the pinned preview', asyn
   expect(result).toMatchObject({ success: true, messages_sent: false });
   expect(address.lockAppointmentAddress).toHaveBeenCalled();
   expect(address.applyAppointmentAddress).toHaveBeenCalledWith(db, expect.objectContaining({ scope: 'visit' }), 'actor');
+  expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'stop', actorId: 'actor' });
+  expect(emitDispatchJobUpdate.mock.invocationCallOrder[0]).toBeGreaterThan(address.applyAppointmentAddress.mock.invocationCallOrder[0]);
 });
 
 test('destination changes between approval and commit refuse without writes', async () => {
@@ -71,4 +75,11 @@ test('missing server confirmation, dark gate, terminal visits, and recurring tem
   plan.rows[0] = { ...plan.rows[0], status: 'pending', is_recurring: true, recurring_parent_id: null };
   expect((await call()).error).toMatch(/template/);
   expect(address.applyAppointmentAddress).not.toHaveBeenCalled();
+});
+
+test('broadcast failure preserves committed success with a refresh warning', async () => {
+  const preview = await call();
+  emitDispatchJobUpdate.mockRejectedValueOnce(new Error('fixture broadcast failure'));
+  const result = await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true });
+  expect(result).toMatchObject({ success: true, warning: expect.stringContaining('refresh') });
 });
