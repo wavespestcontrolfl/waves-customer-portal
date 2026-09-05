@@ -21,6 +21,13 @@ const BG = '#FAF8F3';
 const TEXT = '#04395E';
 const BODY = '#3F4A65';
 
+// Urgency stays as plain text (no chip, owner 2026-09-04).
+const URGENCY_LABEL = {
+  high: 'Worth addressing quickly',
+  moderate: 'Worth getting ahead of',
+  low: 'No emergency',
+};
+
 const SAFETY_LABELS = [
   ['venomous', 'Venomous — don’t handle'],
   ['stinging', 'Can sting'],
@@ -237,6 +244,9 @@ export default function PestReportViewPage() {
             if (report.identified?.hedged && !/^Likely\b/.test(label)) return `Possible ${label}`;
             return label;
           })()}
+        </p>
+        <p style={{ margin: '12px 0 0', fontSize: 15, fontWeight: 600, color: TEXT, lineHeight: 1.5 }}>
+          {report.not_a_pest ? 'Good news' : (URGENCY_LABEL[report.urgency] || URGENCY_LABEL.low)}
         </p>
         {/* Safety flags stay as one plain line — the chips are gone (owner
             2026-09-04) but "don't handle" must still be said. */}
