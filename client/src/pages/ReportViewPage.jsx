@@ -3532,7 +3532,6 @@ function AppliedProductsSection({ data, mode = 'live' }) {
       <div className="applied-products-header">
         <div>
           <h2>Products Applied</h2>
-          <p>Why these products were selected for today&apos;s service.</p>
         </div>
       </div>
       {isLawn && (
@@ -5512,7 +5511,7 @@ function SmsReportPreview({ data }) {
                 ? `${data.lawnAssessment.scores.overallScore ?? '-'}% overall`
                 : dynamicContext.pressureTrend?.customerSummary || `${formatPressureIndex(data.pressureIndex)} pressure index`}
             </strong>
-            <span>{isLawn ? 'Higher is better' : 'Lower is better'}</span>
+            {!isLawn && <span>Lower is better</span>}
           </div>
           <div className="sms-preview-tile">
             <div className="sms-preview-eyebrow">Ready to re-enter</div>
