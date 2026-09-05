@@ -1913,15 +1913,42 @@ const RECEIPT_INVOICE_STATUSES = ['paid', 'refunded'];
  * URL, nothing minted.
  */
 const RECEIPT_CANDIDATES = 20;
-// When the invoice settled, from the linked payment the receipt viewer
-// renders: the refund webhook NULLs paid_at on a full refund (its updated_at
-// is that refund event), so the row's own stamps alone misorder a refunded
-// invoice against a later-created one paid earlier (GH Codex #3893 r7 P2).
+// When the invoice settled — the PAYMENT event, from the linked payment the
+// receipt viewer renders: the refund webhook NULLs paid_at on a full refund,
+// so the row's own stamps alone misorder a refunded invoice against a
+// later-created one paid earlier (GH Codex #3893 r7 P2). Nothing durable
+// records the refund itself (payments.refunded_at is never written —
+// pnl-report.js — and updated_at moves on unrelated edits), and a receipt
+// documents the payment that occurred, so a refund does not make it newer
+// (r9 P2).
 function receiptSettledAt(invoice, payment) {
-  const stamp = invoice.status === 'refunded'
-    ? (payment.refunded_at || invoice.updated_at)
-    : (invoice.paid_at || payment.created_at || invoice.updated_at);
-  return new Date(stamp || invoice.created_at || 0).getTime();
+  return new Date(invoice.paid_at || payment.created_at || invoice.created_at || 0).getTime();
+}
+
+// Receipt texts carry their own consent — the payment_receipt /
+// payment_confirmation_sms toggles, the payment_receipt_channel email-only
+// preference, STOP and the suppression list — which InvoiceService.sendReceipt
+// runs through the messaging policy, while the composer's /sms dispatches
+// as 'conversational'. receipt_sent_at is stamped after an email-only
+// delivery too, so it proves nothing about texts. Same validators, same
+// policy, same input shape (hasEmailLeg: the receipt path pairs an email),
+// evaluated before the link is offered (GH Codex #3893 r9 P1).
+const RECEIPT_TEXT_BLOCKED_COPY = {
+  CHANNEL_EMAIL_ONLY: 'This customer receives receipts by email only',
+  PURPOSE_OPTED_OUT: 'This customer has opted out of receipt texts',
+};
+async function receiptTextBlockedReason(customerId) {
+  const { PURPOSE_POLICY } = require('./messaging/policy');
+  const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
+  const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
+  let contactState = await loadContactState({ customerId });
+  const input = { customerId, to: contactState.customer?.phone || null, channel: 'sms', audience: 'customer', purpose: 'payment_receipt', hasEmailLeg: true };
+  contactState = await loadSuppressionState(input, contactState);
+  for (const check of [checkSuppression, checkConsentForPurpose]) {
+    const result = await check(input, PURPOSE_POLICY.payment_receipt, contactState);
+    if (!result.ok) return RECEIPT_TEXT_BLOCKED_COPY[result.code] || 'This customer cannot receive receipt texts';
+  }
+  return null;
 }
 
 async function buildReceiptLink(customerIds) {
@@ -1938,8 +1965,8 @@ async function buildReceiptLink(customerIds) {
     // Codex #3893 r8 P1; same ruling as price notices, r2).
     .whereNotNull('receipt_sent_at')
     // A bounded recent window; the pick below orders by the linked
-    // payment's settlement event, which the row alone cannot.
-    .orderByRaw('COALESCE(paid_at, updated_at, created_at) DESC, id DESC')
+    // payment's event, which the row alone cannot.
+    .orderByRaw('COALESCE(paid_at, created_at) DESC, id DESC')
     .limit(RECEIPT_CANDIDATES);
   // The receipt route's own payment resolution (metadata, PI / charge id,
   // manual-payment description). A refunded invoice whose refund record
@@ -1960,6 +1987,8 @@ async function buildReceiptLink(customerIds) {
     if (at > settledAt) { invoice = row; settledAt = at; }
   }
   if (!invoice) return { url: null, line: '', reason: 'No paid invoice on this account yet' };
+  const blocked = await receiptTextBlockedReason(invoice.customer_id);
+  if (blocked) return { url: null, line: '', reason: blocked };
   const url = `${publicPortalUrl()}/receipt/${invoice.token}`;
   const number = invoice.invoice_number ? `invoice ${invoice.invoice_number}` : 'your payment';
   return {

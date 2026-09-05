@@ -73,6 +73,16 @@ jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest
 // The receipt route's own payment resolution (metadata → PI / charge →
 // manual description); the receipt quick link orders and vets by it.
 jest.mock('../routes/receipt-v2', () => ({ loadPaymentForInvoice: jest.fn(async () => null) }));
+// The messaging policy's own receipt-text consent (payment_receipt purpose):
+// the receipt quick link runs the real validators before offering a link.
+jest.mock('../services/messaging/validators/consent', () => ({
+  loadContactState: jest.fn(async () => ({ prefs: {}, customer: { id: 'c2', phone: '+19415550100' }, lookupFailed: false })),
+  checkConsentForPurpose: jest.fn(async () => ({ ok: true })),
+}));
+jest.mock('../services/messaging/validators/suppression', () => ({
+  loadSuppressionState: jest.fn(async (_input, state) => state),
+  checkSuppression: jest.fn(async () => ({ ok: true })),
+}));
 // The real predicate: typedReportDelivery set to anything but auto_send is
 // suppressed (internal_only / disabled typed reports 404 publicly).
 jest.mock('../routes/reports-public', () => ({
@@ -1043,6 +1053,14 @@ describe('buildReceiptLink', () => {
     const r = await buildReceiptLink(['c1', 'c2']);
     // Vetted by the receipt route's own payment linkage.
     expect(loadPaymentForInvoice).toHaveBeenCalledWith('inv-1', 'c2', { stripePaymentIntentId: 'pi_1', stripeChargeId: null, invoiceNumber: 'INV-1042' });
+    // … and by the receipt policy's own text consent, for the invoice's
+    // customer, with the receipt path's input shape (r9 P1).
+    const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+    const { checkSuppression } = require('../services/messaging/validators/suppression');
+    const { PURPOSE_POLICY } = require('../services/messaging/policy');
+    const input = { customerId: 'c2', to: '+19415550100', channel: 'sms', audience: 'customer', purpose: 'payment_receipt', hasEmailLeg: true };
+    expect(checkSuppression).toHaveBeenCalledWith(input, PURPOSE_POLICY.payment_receipt, expect.any(Object));
+    expect(checkConsentForPurpose).toHaveBeenCalledWith(input, PURPOSE_POLICY.payment_receipt, expect.any(Object));
     expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
     // Exactly the statuses the receipt viewer renders: a 'prepaid' close-out
     // shows "Payment not completed" and its PDF 409s (pre-push Codex P1), an
@@ -1071,15 +1089,39 @@ describe('buildReceiptLink', () => {
     expect(r.reason).toMatch(/No paid invoice/);
   });
 
-  test('ordered by the linked payment\'s settlement event: a full refund NULLs paid_at, so an older-created invoice refunded last still wins (GH Codex #3893 r7 P2)', async () => {
-    const refunded = { ...PAID, id: 'inv-0', token: 'q'.repeat(64), invoice_number: 'INV-1001', status: 'refunded', paid_at: null, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-09-02T10:00:00Z' };
+  test('ordered by the linked PAYMENT event: a full refund NULLs paid_at, so an older-created invoice whose payment came last still wins — never the mutable updated_at (GH Codex #3893 r7 + r9 P2)', async () => {
+    const refunded = { ...PAID, id: 'inv-0', token: 'q'.repeat(64), invoice_number: 'INV-1001', status: 'refunded', paid_at: null, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z' };
     mockBuilders = { invoices: chainBuilder({ rows: [PAID, refunded] }) };
     loadPaymentForInvoice
       .mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' })
-      .mockResolvedValueOnce({ id: 'pay-0', created_at: '2026-08-02T15:00:00Z', refunded_at: '2026-09-02T10:00:00Z' });
+      .mockResolvedValueOnce({ id: 'pay-0', created_at: '2026-09-02T15:00:00Z' });
     const r = await buildReceiptLink(['c1', 'c2']);
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'q'.repeat(64)}`);
     expect(r.receipt.status).toBe('refunded');
+    // An edit bumping updated_at on an old refunded invoice does not make it newest.
+    const edited = { ...refunded, updated_at: '2026-09-04T00:00:00Z' };
+    mockBuilders = { invoices: chainBuilder({ rows: [edited, PAID] }) };
+    loadPaymentForInvoice
+      .mockResolvedValueOnce({ id: 'pay-0', created_at: '2026-08-02T15:00:00Z' })
+      .mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' });
+    expect((await buildReceiptLink(['c1', 'c2'])).url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
+  });
+
+  test('the receipt policy\'s text consent gates the link: email-only receipts, a receipt-texts opt-out, STOP — each a reason, never a link (r9 P1)', async () => {
+    const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+    const { checkSuppression } = require('../services/messaging/validators/suppression');
+    for (const [code, copy] of [['CHANNEL_EMAIL_ONLY', /email only/], ['PURPOSE_OPTED_OUT', /opted out of receipt texts/], ['CONSENT_LOOKUP_FAILED', /cannot receive receipt texts/]]) {
+      mockBuilders = { invoices: chainBuilder({ rows: [PAID] }) };
+      loadPaymentForInvoice.mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' });
+      checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code });
+      const r = await buildReceiptLink(['c1', 'c2']);
+      expect(r.url).toBeNull();
+      expect(r.reason).toMatch(copy);
+    }
+    mockBuilders = { invoices: chainBuilder({ rows: [PAID] }) };
+    loadPaymentForInvoice.mockResolvedValueOnce({ id: 'pay-1', created_at: '2026-08-30T15:00:00Z' });
+    checkSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSED_OPT_OUT' });
+    expect((await buildReceiptLink(['c1', 'c2'])).reason).toMatch(/cannot receive receipt texts/);
   });
 
   test('a refunded invoice with no resolvable refund record has no receipt (its PDF 409s) — skipped, never shadowing an older valid one (r7 P2)', async () => {
