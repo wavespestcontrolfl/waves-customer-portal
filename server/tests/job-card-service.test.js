@@ -929,6 +929,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(describeLine('Distance IGR 6 fl oz/100 gal foliar, only if crawlers are present')).toBe('Distance IGR foliar, only if crawlers are present');
     expect(describeLine('Headway G 3 lbs/1000 broadcast')).toBe('Headway G broadcast');
     expect(describeLine('IMA-jet or Propizol only when diagnosis supports it')).toBe('IMA-jet or Propizol only when diagnosis supports it');
+    // Real protocol formats (hook P1): percentages, ranges, per-100-gal, tsp/gal, and owner prices.
+    expect(describeLine('TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)')).toBe('TriTek spray oil: standard, only with active scale/mites and safe weather');
+    expect(describeLine('TriTek spray oil: 1.0-1.5% only if safe ($6.08)')).toBe('TriTek spray oil: only if safe');
+    expect(describeLine('KPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified ($4.68)')).toBe('KPHITE 7LP: FRAC P07 where root/oomycete risk is justified');
+    expect(describeLine('Liquid copper (Southern Ag 27.15%): 1-2 tsp/gal for labeled leaf spot, separate from oil ($11.35)')).toBe('Liquid copper (Southern Ag): for labeled leaf spot, separate from oil');
+    expect(describeLine('Mainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)')).toBe('Mainspring GNL: IRAC 28 where target pest fits');
+    expect(describeLine('LESCO 24-0-11 75% PolyPlus fert ($8.68)')).toBe('LESCO 24-0-11 PolyPlus fert');
   });
 
   test('a lineMeta line phrased "if …" stays conditional too (hook P1)', () => {

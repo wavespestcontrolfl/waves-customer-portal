@@ -1042,9 +1042,22 @@ function linesFromProtocolText(visit, catalog) {
 // Dosing values never ride in the descriptive line text: a rate shown there
 // would survive every withhold (unverified, held, blocked). Rates come only
 // from the resolved, permitted mix (`planned`).
-const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?\s*(?:-\s*\d+(?:[.,]\d+)?\s*)?(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|%)\b\.?(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000))?/gi;
+const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(?:%|(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
+// Owner-only unit prices the protocol text carries ("($6.08)") never reach a
+// technician's card either.
+const PRICE_TOKEN_RE = /\(\s*\$\s*\d[\d.,]*\s*\)/g;
 function describeLine(raw) {
-  return String(raw || '').replace(RATE_TOKEN_RE, ' ').replace(/\s*[,;]\s*(?=[,;]|$)/g, '').replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').replace(/\s+([,;.)])/g, '$1').trim();
+  return String(raw || '')
+    .replace(PRICE_TOKEN_RE, ' ')
+    .replace(RATE_TOKEN_RE, ' ')
+    .replace(/\(\s*\)/g, ' ')
+    .replace(/\s+\)/g, ')')
+    .replace(/:\s*,/g, ':')
+    .replace(/,\s*,/g, ',')
+    .replace(/\s+([,;.)])/g, '$1')
+    .replace(/[,;:]\s*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
