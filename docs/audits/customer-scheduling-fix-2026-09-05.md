@@ -29,7 +29,7 @@ Verification:
 - ESLint passed with zero errors; existing large-function/depth warnings remain in touched legacy modules. Whitespace checks passed.
 - Desktop (1440) and mobile (390) browser verification used the actual reschedule page and estimate picker with synthetic API responses. Checked truthful recommendation labels, 1 PM selection and confirmation request, lookup failure, retry recovery, and mobile layout. Screenshots were inspected visually. The estimate component fixture used the application's reset and typography, not the complete estimate/payment page.
 - External networking was blocked in test/browser fixtures; no live account was exercised. Knex compiled the correlated legacy-copy exclusion without a connection.
-- No verified dev/preview database was available. Migrations were not run and database-backed end-to-end behavior is not claimed. The actual cause of each production screenshot date remains a separate production-side diagnosis.
+- PostgreSQL verification passed against isolated Railway PR #3956 after its migrations completed. Transaction-local tables cloned from the migrated schema preserved column types, defaults and CHECK constraints. Actual route enumeration, estimate filtering, commit occupancy, booking/reschedule builders, replacement caps and the legacy-copy query passed synthetic cases; all temporary data rolled back. This verifies SQL and availability behavior, not full HTTP booking/communications. No local migrations or production DB access occurred.
 
 Local visual evidence (not included in a production bundle):
 
@@ -39,4 +39,4 @@ Local visual evidence (not included in a production bundle):
 
 Merged current main into the task branch and carried the label/error fixes onto its shared SchedulePicker and ScheduleFlowPage architecture. The retired ReschedulePage was not restored. Rechecked the build and desktop/mobile interactions after integration.
 
-Deployment remains unperformed; PR review and isolated preview database checks are next.
+PR #3956 is open with native screenshots. Its Railway preview deployed successfully. Codex reviewed 2b136470c4 clean. Full server CI found one outdated admin-lead dedupe assertion for the shared inactive status set; the assertion is corrected without further production changes. Final-head CI/review and production release remain pending.
