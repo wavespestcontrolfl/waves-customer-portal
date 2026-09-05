@@ -264,8 +264,9 @@ async function resolveSides(reader, id) {
     const legacy = legacyReader && legacyReader !== agentRuns && keyed(legacyReader.SOURCE, canonical.run.sourceRunId) ? await legacyReader.get(canonical.run.sourceRunId) : null;
     return { canonical, legacy, legacySource: legacy ? legacyReader : null };
   }
-  const legacy = await reader.get(id);
-  const canonicalId = legacy ? await agentRuns.findMirror(reader.SOURCE, id) : null;
+  // both sides independently: a legacy row that was pruned (llm_dispatch_log
+  // keeps 30 days) or deleted still has its durable mirror (Codex r4)
+  const [legacy, canonicalId] = await Promise.all([reader.get(id), agentRuns.findMirror(reader.SOURCE, id)]);
   return { canonical: canonicalId ? await agentRuns.get(canonicalId) : null, legacy, legacySource: legacy ? reader : null };
 }
 

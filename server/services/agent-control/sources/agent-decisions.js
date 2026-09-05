@@ -14,11 +14,14 @@ const SOURCE = 'agent_decisions';
 // until it is due: the decision's active span starts at the scheduling
 // transition (updated_at — markSuggestionScheduled writes it) or at the
 // send's scheduled_for when that is later, never at the original decision
-// (Codex r3). Sort / page key = that start, so the cursor and rows agree.
+// (Codex r3). The dispatcher claims the row to 'sending' while the
+// decision is still 'scheduled' (scheduler.claimDueScheduledSms), so the
+// claimed row still anchors the span (Codex r4). Sort / page key = that
+// start, so the cursor and rows agree.
 // `t` = the agent_decisions alias (message-drafts projects the same span
 // onto a suggested draft through its linked decision).
 function activeFrom(t) {
-  const scheduledSend = `(SELECT s.scheduled_for FROM sms_log s WHERE s.status = 'scheduled' AND (s.metadata::jsonb ->> 'agent_decision_id') = ${t}.id::text ORDER BY s.scheduled_for DESC LIMIT 1)`;
+  const scheduledSend = `(SELECT s.scheduled_for FROM sms_log s WHERE s.status IN ('scheduled', 'sending') AND (s.metadata::jsonb ->> 'agent_decision_id') = ${t}.id::text ORDER BY s.scheduled_for DESC LIMIT 1)`;
   return `CASE WHEN ${t}.status = 'scheduled' THEN GREATEST(${t}.updated_at, COALESCE(${scheduledSend}, ${t}.updated_at)) ELSE ${t}.created_at END`;
 }
 const ACTIVE_FROM = activeFrom('agent_decisions');
@@ -28,6 +31,9 @@ const COLUMNS = () => [
   'id', 'workflow', 'agent_name', 'mode', 'status', 'entity_type', 'entity_id', 'customer_id', 'lead_id',
   'detected_intent', 'confidence', 'confidence_label', 'safety_flags', 'model', 'prompt_version',
   'human_verdict', 'reviewed_at', 'created_at', 'updated_at',
+  // the producers' one free-text field: sms-auto-send's failClaim / orphan
+  // recovery write WHY a send did not go out here (Codex r4)
+  'correction_note',
   db.raw(`${ACTIVE_FROM} AS active_from`),
 ];
 
@@ -98,6 +104,13 @@ function flagNames(flags) {
   return flags.map((f) => (typeof f === 'string' ? f : f?.code || f?.name)).filter(Boolean);
 }
 
+// An errored decision's cause: the status is the code, the producer's note
+// (sms-auto-send failClaim / orphan recovery) the message.
+const NO_FAILURE = Object.freeze({ errorCode: null, errorMessage: null, detail: null });
+function failureOf(d, map) {
+  return map.result === 'errored' ? { errorCode: d.status, errorMessage: d.correction_note, detail: d.correction_note } : NO_FAILURE;
+}
+
 function confidenceLabel(d) {
   return d.confidence == null ? d.confidence_label : `confidence ${Math.round(Number(d.confidence) * 100)} %`;
 }
@@ -120,6 +133,7 @@ function fromRow(d) {
     title: [humanize(workflow), humanize(d.detected_intent)].filter(Boolean).join(' · ') || 'Decision',
     subtitle: [d.mode ? `${d.mode} mode` : null, confidence].filter(Boolean).join(' · ') || null,
     ...map,
+    ...failureOf(d, map),
     verification: verdict.verification,
     disposition: verdict.disposition ?? map.disposition ?? null,
     createdAt: d.created_at,

@@ -176,8 +176,9 @@ describe('adapters project onto the canonical shape', () => {
     // auto-send: in flight, sent, failed
     expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'sending' })).toMatchObject({ lifecycle: 'running', laneId: 'sms_draft', area: 'sms' });
     expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_sent' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' });
-    const failed = agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_send_failed' });
-    expect(failed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider' });
+    const failed = agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_send_failed', correction_note: 'Auto-send did not go out: quiet hours' });
+    expect(failed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider', errorCode: 'auto_send_failed', errorMessage: 'Auto-send did not go out: quiet hours', detail: 'Auto-send did not go out: quiet hours' });
+    expect(agentDecisions.fromRow({ ...base, status: 'auto_sent', correction_note: 'n/a' })).toMatchObject({ errorCode: null, errorMessage: null, detail: null });
     expect(runIndex.bucketsOf({ ...failed, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
     // a deterministic guard keeps the SMS area with no lane; a business workflow is office; an unknown status surfaces
     expect(agentDecisions.fromRow({ ...base, workflow: 'comms_guards', status: 'auto_resolved' })).toMatchObject({ laneId: null, area: 'sms', disposition: 'no_action' });
@@ -459,6 +460,13 @@ describe('getRun', () => {
     expect(agentGet).not.toHaveBeenCalled();
     expect(callGet).not.toHaveBeenCalled();
     expect(jobHealth.get).toHaveBeenCalledWith('missing');
+    // a legacy row that was pruned (session ledger rows keep 30 days) still opens through its durable mirror
+    jest.spyOn(managedSessions, 'get').mockResolvedValue(null);
+    jest.spyOn(agentRuns, 'findMirror').mockResolvedValueOnce(uid(11));
+    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: uid(11), sourceSystem: 'managed_sessions', sourceRunId: 'sess_gone', laneId: 'agent_bi', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [], artifacts: [], events: [], workItem: null });
+    const pruned = await runIndex.getRun('managed_sessions', 'sess_gone', { now: NOW });
+    expect(pruned.run.key).toBe(`agent_runs:${uid(11)}`);
+    expect(pruned.legacy).toBeNull();
     jest.spyOn(messageDrafts, 'get').mockResolvedValue({ run: canonicalRun({ source: 'message_drafts', id: uid(4), laneId: 'sms_draft', lifecycle: 'waiting_human', createdAt: ago(1e3) }) });
     jest.spyOn(agentRuns, 'findMirror').mockResolvedValue(null);
     const d = await runIndex.getRun('message_drafts', uid(4), { now: NOW });
