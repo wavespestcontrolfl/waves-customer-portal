@@ -60,6 +60,7 @@ describeWithPostgres('pending estimates in the appointment picker (PostgreSQL)',
       { ...base, id: 9, customer_phone: null, customer_email: null },
       { ...base, id: 10, customer_phone: '9415550102' },
       { ...base, id: 11, customer_id: customerId, status: 'accepted', expires_at: past },
+      { ...base, id: 12, status: 'accepted' },
     ]);
   });
   afterAll(async () => { await transaction?.rollback(); await database?.destroy(); });
@@ -76,6 +77,11 @@ describeWithPostgres('pending estimates in the appointment picker (PostgreSQL)',
     expect(estimates.find((row) => row.id === 1)).toMatchObject({
       status: 'sent', onetimeTotal: 125, lines: [expect.objectContaining({ price: 125 })],
     });
+  });
+  test('does not discover an unowned accepted quote through a shared contact', async () => {
+    const estimates = await load();
+    expect(estimates.some((row) => row.id === 12)).toBe(false);
+    expect(estimates.some((row) => row.id === 11)).toBe(true);
   });
   test('missing or incomplete contact never matches blank unowned quotes', async () => {
     await transaction('customers').where({ id: customerId }).update({ phone: '0101', email: ' ' });
