@@ -395,6 +395,9 @@ describe('lineMeta hints keep the secondary line\'s role (pre-push P1)', () => {
     expect(byLine('Distance IGR or Talus 70 DF IGR for crawlers')).toEqual(['d', 't']);
     expect(byLine('Iron Plus + Mn Combo foliar')).toEqual(['fe', 'mn']);
     expect(lines).toHaveLength(4);
+    // "and" joins products too (May tree & shrub, Codex r15 P1); the trailing condition never becomes a card.
+    const npk = [{ id: 'palm', name: '8-2-12 Palm Fertilizer', cost_per_unit: 1 }, { id: 'orn', name: '13-0-13 Ornamental Fertilizer', cost_per_unit: 1 }];
+    expect(jobCard._test.linesFromProtocolText({ primary: '8-2-12 palm fertilizer and 13-0-13 ornamental fertilizer only if needed and legal before blackout ($9.63)', secondary: '' }, npk).map((l) => l.product.id).sort()).toEqual(['orn', 'palm']);
     // A single-product line is unchanged.
     expect(jobCard._test.linesFromProtocolText({ primary: 'Conserve SC 0.1-0.2 fl oz/gal for caterpillars', secondary: '' }, [{ id: 'c', name: 'Conserve SC', cost_per_unit: 1 }]).map((l) => l.product.id)).toEqual(['c']);
   });
@@ -438,6 +441,18 @@ describe('order quantity (PR r1 P2)', () => {
     expect(orderFor({ inventory_unit: 'each' }, null, null).quantity).toBe(1);
     // An unconvertible pack unit withholds ordering (hook P1 on the add-ons PR).
     expect(orderFor({ inventory_unit: 'fl_oz' }, '1 each', null).quantity).toBeNull();
+  });
+  test('fractional, multipack and underscored packs read through the costing parser (Codex r15 P1)', () => {
+    // "1/2 gal" is half a gallon, not the regex's "2 gal" (four times the pack).
+    expect(orderFor({ inventory_unit: 'fl_oz' }, '1/2 gal', null).quantity).toBe(64);
+    expect(orderFor({ inventory_unit: 'gal' }, '2 x 1/2 gal', null).quantity).toBe(1);
+    expect(orderFor({ inventory_unit: 'g' }, '4 x 30g tubes', null).quantity).toBe(120);
+    expect(orderFor({ inventory_unit: 'oz' }, '18 lb pail', null).quantity).toBe(288);
+    expect(orderFor({ inventory_unit: 'fl_oz' }, '32 fl_oz', null).quantity).toBe(32);
+    // Count packs order the count only for counted stock; an unreadable pack withholds.
+    expect(orderFor({ inventory_unit: 'each' }, '12 each', null).quantity).toBe(12);
+    expect(orderFor({ inventory_unit: 'each' }, '1/2 gal', null).quantity).toBeNull();
+    expect(orderFor({ inventory_unit: 'fl_oz' }, 'case', null).quantity).toBeNull();
   });
 });
 
@@ -962,7 +977,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     dbh.raw = (sql) => sql;
     return dbh;
   };
-  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', away_mode_until: '2099-01-01', watering_days: '["Mon"]' };
+  const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', away_mode_until: '2099-01-01', watering_days: '["Mon"]', chemical_sensitivities: true, chemical_sensitivity_details: 'asthma, no pyrethroids' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
@@ -970,16 +985,43 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
     expect(away.access.codes).toEqual([]);
     // Pets and the securing plan are the primary home's as well (Codex r9 P1).
-    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '', instructions: '', awayUntil: null });
+    // The household's chemical sensitivity is the primary home's as well (Codex r15 P1): unknown here, said so.
+    expect(away.facts).toMatchObject({ gates: [], entry: '', parking: '', alternateAddress: true, pets: '', petsSecured: '', instructions: '', awayUntil: null, chemicalSensitivity: '' });
+    expect(away.notes.chemicalSensitivity).toBeNull();
     const awayText = jobCard.buildTemplateParagraph(away.facts);
-    expect(awayText).toMatch(/visit at a non-primary address — the home's pets and access details are not shown/i);
-    expect(awayText).not.toMatch(/dog|crated|north side|away/);
+    expect(awayText).toMatch(/visit at a non-primary address — the home's pets, sensitivities and access details are not shown/i);
+    expect(awayText).not.toMatch(/dog|crated|north side|away|pyrethroid/);
     // The primary home's code is still scrubbed from notes and still a leak check for the rewrite (hook P1).
     expect(away.facts.visitNotes).toBe('Try [code] first');
     expect(away.knownCodes).toEqual([{ label: 'Property gate', code: '4545#' }]);
     const home = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs }), deps);
     expect(home.access.codes).toEqual([{ label: 'Property gate', code: '4545#' }]);
-    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage', instructions: 'Enter from the north side', awayUntil: '2099-01-01' });
+    expect(home.facts).toMatchObject({ gates: ['Property gate'], entry: 'Side gate', parking: 'Driveway', alternateAddress: false, pets: 'dog', petsSecured: 'crated in garage', instructions: 'Enter from the north side', awayUntil: '2099-01-01', chemicalSensitivity: 'asthma, no pyrethroids' });
+    expect(home.notes.chemicalSensitivity).toBe('asthma, no pyrethroids');
+  });
+
+  test('the property pin is one complete pair — never the visit\'s latitude with the customer\'s longitude (Codex r15 P1)', () => {
+    const lat = jobCard._test.visitPinSql('lat', 'latitude');
+    const lng = jobCard._test.visitPinSql('lng', 'longitude');
+    for (const sql of [lat, lng]) expect(sql).toMatch(/^CASE WHEN ss\.lat IS NOT NULL AND ss\.lng IS NOT NULL THEN ss\.(lat|lng) WHEN NOT \(/);
+    expect(lat).toMatch(/THEN ss\.lat WHEN/); expect(lat).toMatch(/THEN c\.latitude END$/);
+    expect(lng).toMatch(/THEN ss\.lng WHEN/); expect(lng).toMatch(/THEN c\.longitude END$/);
+    expect(lat).not.toMatch(/^COALESCE\(ss\./);
+  });
+
+  test('a failed calibration read is "check unavailable", not "no rig on file" (Codex r15 P2)', async () => {
+    const failing = (table) => {
+      const chain = {};
+      for (const m of ['join', 'where', 'select', 'orderBy']) chain[m] = () => chain;
+      chain.catch = (fn) => Promise.reject(new Error('relation missing')).catch(fn);
+      return chain;
+    };
+    expect(await jobCard._test.loadRigCalibrations(failing, null)).toBeNull();
+    expect(jobCard._test.tankFromCalibrations(null)).toMatchObject({ calibrated: false, unavailable: true, reason: 'Rig calibration check unavailable', carrierGalPer1000: null });
+    expect(jobCard._test.tankFromCalibrations([])).toMatchObject({ calibrated: false, reason: 'No rig calibration on file' });
+    expect(jobCard._test.tankFromCalibrations([])).not.toHaveProperty('unavailable');
+    // The Lawn plan's own read keeps its empty-list default.
+    expect(await require('../services/waveguard-plan-engine').getActiveCalibrations(failing, {})).toEqual([]);
   });
 
   test('special instructions and the visit note reach the card verbatim, outside the paragraph budget (hook P1)', async () => {

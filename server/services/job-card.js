@@ -38,7 +38,8 @@ const {
   itemHasNitrogen, itemHasPhosphorus, parseProtocolLines,
 } = require('./waveguard-plan-engine');
 const { stampedDivergesSql } = require('./stamped-address');
-const { convertInventoryQuantity } = require('./inventory-units');
+const { convertInventoryQuantity, normalizeInventoryUnit } = require('./inventory-units');
+const { parsePackSize } = require('./product-costing');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 
@@ -164,6 +165,14 @@ function wateringLine(prefs) {
 // Present AND in range, checked before any numeric coercion (Number(null)
 // and Number('') are 0, which would send the NWS lookup to the Gulf of
 // Guinea instead of the office fallback).
+// The booked property's pin, one source per pair: the visit's own lat/lng
+// when BOTH are stored; else the customer's primary pair, only when the
+// stamped address does not diverge from it (dispatch's rule) — else no
+// pin, no forecast. Never one coordinate from each source (the arrival
+// detector's rule): a hybrid point is a wrong location with a real verdict.
+function visitPinSql(visitCol, customerCol) {
+  return `CASE WHEN ss.lat IS NOT NULL AND ss.lng IS NOT NULL THEN ss.${visitCol} WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.${customerCol} END`;
+}
 function propertyCoords(latRaw, lngRaw) {
   if (latRaw == null || latRaw === '' || lngRaw == null || lngRaw === '') return null;
   const lat = Number(latRaw);
@@ -300,11 +309,8 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       'ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.status', 'ss.notes',
       'ss.job_card', 'ss.job_card_generated_at', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
       'c.first_name', 'c.last_name', 'c.phone', 'c.lawn_water_area_id',
-      // The booked property's pin: the visit's own lat/lng first; the
-      // customer's primary pin only when the stamped address does not
-      // diverge from it (dispatch's rule) — else no pin, office forecast.
-      dbh.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
-      dbh.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`),
+      dbh.raw(`${visitPinSql('lat', 'latitude')} as latitude`),
+      dbh.raw(`${visitPinSql('lng', 'longitude')} as longitude`),
       // The same predicate gates every property-bound preference below:
       // property_preferences is the primary home's row, so a visit stamped
       // elsewhere must not show that home's codes, entry, parking or
@@ -357,7 +363,7 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
     notes: scrubKnownCodes({
       instructions: clean(propertyPrefs?.special_instructions, 2000) || null,
       visitNotes: clean(svc.notes, 2000) || null,
-      chemicalSensitivity: prefs?.chemical_sensitivities ? (clean(prefs.chemical_sensitivity_details, 2000) || 'yes') : null,
+      chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? (clean(propertyPrefs.chemical_sensitivity_details, 2000) || 'yes') : null,
       petsSecured: clean(propertyPrefs?.pets_secured_plan, 2000) || null,
     }, knownCodes),
     knownCodes,
@@ -377,7 +383,9 @@ async function loadJobCardFacts(serviceId, dbh = db, deps = {}) {
       alternateAddress,
       instructions: clean(propertyPrefs?.special_instructions, 120),
       contactPreference: prefs?.contact_preference || null,
-      chemicalSensitivity: prefs?.chemical_sensitivities ? clean(prefs.chemical_sensitivity_details, 80) || 'yes' : '',
+      // The sensitivity is the primary home's household's too (Codex r15):
+      // unknown at an alternate address, said so in the paragraph.
+      chemicalSensitivity: propertyPrefs?.chemical_sensitivities ? clean(propertyPrefs.chemical_sensitivity_details, 80) || 'yes' : '',
       awayUntil: awayUntil(propertyPrefs),
       visitNotes: clean(svc.notes, 140),
       lastVisit: lastVisitFact,
@@ -411,7 +419,7 @@ function buildTemplateParagraph(facts, { isLawn = false } = {}) {
   if (facts.pets) add(1, `Pets: ${facts.pets}${facts.petsSecured ? ` (${facts.petsSecured})` : ''}`);
   else if (facts.petsSecured) add(1, `Pets secured: ${facts.petsSecured}`);
   if (facts.gates.length) add(1, `${facts.gates.join(' and ').toLowerCase()} code on file, tap to show`);
-  if (facts.alternateAddress) add(1, 'visit at a non-primary address — the home\'s pets and access details are not shown');
+  if (facts.alternateAddress) add(1, 'visit at a non-primary address — the home\'s pets, sensitivities and access details are not shown');
   add(1, facts.entry, 4);
   add(1, facts.parking, 9);
   if (facts.chemicalSensitivity) add(1, `chemical sensitivity${facts.chemicalSensitivity !== 'yes' ? `: ${facts.chemicalSensitivity}` : ''}`);
@@ -805,9 +813,18 @@ const TANK_BLOCK_REASON = {
   equipment_selection_required: 'More than one rig is active — assign the rig on the Lawn plan',
 };
 
+// null = the read failed: the tank says the check is unavailable rather
+// than "no rig on file", which would send the tech to assign a rig for a
+// data outage.
 async function loadRigCalibrations(dbh, rig) {
-  return getActiveCalibrations(dbh, { equipmentSystemId: rig?.equipmentSystemId || null, calibrationId: rig?.calibrationId || null });
+  try {
+    return await getActiveCalibrations(dbh, { equipmentSystemId: rig?.equipmentSystemId || null, calibrationId: rig?.calibrationId || null }, { strict: true });
+  } catch (err) {
+    logger.warn(`[job-card] calibration read failed: ${err.message}`);
+    return null;
+  }
 }
+const TANK_UNAVAILABLE = { calibrated: false, unavailable: true, reason: 'Rig calibration check unavailable', carrierGalPer1000: null, tankCapacityGal: null, expiresAt: null, systemName: null };
 
 // The instant a calibration must still be valid at: the later of now and
 // the appointment start — window_start on the service day, noon ET when no
@@ -825,6 +842,7 @@ function serviceDayInstant(serviceDate, now = new Date(), windowStart = null) {
 // Calibration expiry / field verification no longer block (owner ruling,
 // #3935): the engine's remaining blocks are no rig and an ambiguous rig.
 function tankFromCalibrations(rows) {
+  if (rows === null) return { ...TANK_UNAVAILABLE };
   const { selected: cal, blocks } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [] });
   const block = blocks[0] || null;
   const carrier = Number(cal?.carrier_gal_per_1000 || 0);
@@ -1013,10 +1031,11 @@ function linesFromLineMeta(visit, catalog) {
 }
 
 // A line may name more than one product ("Distance or Talus", "Iron Plus
-// + Mn Combo"): the whole line first (its best match), then each
-// alternative segment, one card per product. Only " or " and " + " split —
-// "/" would hand tiny fragments ("Mg") to the reverse alias match.
-const LINE_ALTERNATIVES = /\s+or\s+|\s\+\s/i;
+// + Mn Combo", "8-2-12 palm fertilizer and 13-0-13 ornamental fertilizer"):
+// the whole line first (its best match), then each " or " / " and " / " + "
+// segment, one card per product. "/" does not split — it would hand tiny
+// fragments ("Mg") to the reverse alias match.
+const LINE_ALTERNATIVES = /\s+(?:or|and)\s+|\s\+\s/i;
 // A segment's trailing words ("Mn Combo foliar") defeat the alias match, so
 // each segment is probed by its leading words down to two — never one, a
 // lone word would reverse-match inside many aliases.
@@ -1128,12 +1147,19 @@ function orderFor(product, packSize, shortage, { includePricing = false } = {}) 
   let quantity = null;
   if (shortage > 0) quantity = Math.ceil(shortage * 100) / 100;
   else {
-    const m = String(packSize || '').match(/(\d+(?:\.\d+)?)\s*([a-z_ ]+)/i);
-    if (m && unit) {
-      const packUnit = m[2].trim().toLowerCase().replace(/\s+/g, '_');
-      quantity = packUnit === String(unit).toLowerCase() ? Number(m[1]) : convertInventoryQuantity(Number(m[1]), packUnit, unit);
-      // A pack whose unit cannot be converted withholds ordering (quantity
-      // null → button disabled) rather than requesting one unit of it.
+    if (packSize && unit) {
+      // The distributor's pack string through the costing parser (fractions,
+      // mixed numbers, multipacks: "1/2 gal", "4 x 30g tubes"), then into the
+      // inventory unit; a count pack ("12 each") orders that count when the
+      // stock is counted too. A pack it cannot read, or whose unit cannot be
+      // converted, withholds ordering (quantity null → button disabled)
+      // rather than requesting the wrong amount.
+      const pack = parsePackSize(String(packSize).replace(/_/g, ' '));
+      if (pack) quantity = convertInventoryQuantity(pack.amount, pack.unit, unit);
+      else {
+        const count = /^\s*(\d+(?:\.\d+)?)\s*(?:each|ea|ct|count)\b/i.exec(String(packSize));
+        quantity = count && normalizeInventoryUnit(unit) === 'each' ? Number(count[1]) : null;
+      }
       if (!(quantity > 0)) quantity = null;
     } else {
       quantity = 1;
@@ -1339,5 +1365,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes },
+  _test: { accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, visitPinSql, loadRigCalibrations, tankFromCalibrations },
 };
