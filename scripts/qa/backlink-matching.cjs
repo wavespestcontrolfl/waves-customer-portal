@@ -33,6 +33,7 @@ stub('models/db', proxy);
     for (const [pid,location] of [[first,'sarasota'],[second,'bradenton']]) await trx('seo_link_prospects').insert({id:pid,domain_id:oid,path_id:opath,target_domain:publisher,target_page:target,location_key:location,status:'contacted',link_type:'resource',outreach_status:'sent',outreach_sent_at:sent,follow_up_status:'drafted'});
     await trx('seo_backlinks').insert({id:backlink,source_domain:publisher,source_url:`https://${publisher}/resources`,target_url:target,status:'active',discovery_source:'dataforseo',first_seen:require(`${root}/server/utils/datetime-et`).etDateString(new Date())});
     assert.deepEqual(await V.reconcileOutreach(), {matched:0,ambiguous:2});
+    assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 2 });
     const queue = await Q.listOwnerQueue(proxy);
     assert.equal(queue.cards.filter(c=>c.backlink_match?.id===backlink).length,2);
     for (const status of ['lost', 'disavowed']) {

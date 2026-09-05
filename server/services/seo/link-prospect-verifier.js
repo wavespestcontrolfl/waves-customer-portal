@@ -315,13 +315,13 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
         }
         if (placements.some((p) => p.backlink_id === link.id && p.id !== match.placement?.id)) continue;
         const targets = match.ambiguous.filter(outreachAwaitingPlacement);
+        ambiguous += targets.length;
         for (const p of targets) {
           const quality = parseQuality(p.quality_signals);
           if (quality.outreach_match_ambiguous === link.id) continue;
           quality.outreach_match_ambiguous = link.id;
           await trx('seo_link_prospects').where({ id: p.id }).update({ quality_signals: quality, updated_at: now });
           p.quality_signals = quality;
-          ambiguous++;
         }
         const p = match.placement;
         if (!p || !outreachAwaitingPlacement(p) || p.claimed_at || ['sending', 'send_error'].includes(p.follow_up_status)) continue;
