@@ -256,6 +256,13 @@ function generationFenceSql(q, generation) {
   return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0]);
 }
 
+/** A failure callback may finalize only the generation it proved. */
+function fallbackFence(q, { generation, callbackGeneration }) {
+  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [generation])
+    .whereRaw("(?::bigint = 0 OR ?::bigint = ?::bigint OR COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?)",
+      [generation, callbackGeneration, generation, generation]);
+}
+
 /** Order segments the way the SQL does; the in-memory twin for summaries/tests. */
 function segmentsText(segments = []) {
   return [...(Array.isArray(segments) ? segments : [])]
@@ -401,6 +408,7 @@ module.exports = {
   appendSegmentPatch,
   composeSegmentsSql,
   generationFenceSql,
+  fallbackFence,
   segmentsText,
   loadResumeState,
   readReconnectState,
