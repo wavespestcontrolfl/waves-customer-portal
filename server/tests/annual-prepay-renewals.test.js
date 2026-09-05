@@ -309,6 +309,30 @@ describe('annual prepay renewal helpers', () => {
     expect(updateTwo.update).toHaveBeenCalledWith(expect.objectContaining({
       prepaid_method: 'annual_prepay_invoice',
     }));
+    // The status skip is re-asserted IN the UPDATE (#3878 r5): a visit
+    // cancelled between the eligibility read and this write is never
+    // stamped — the predicate rides the same statement as the write.
+    expect(updateTwo.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['cancelled', 'no_show', 'skipped', 'completed']));
+  });
+
+  test('a visit cancelled between the eligibility read and the stamp write is not counted as stamped (0-row update, #3878 r5)', async () => {
+    const rows = [
+      { id: 'svc-1', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'pending' },
+    ];
+    const columnQuery = query({ columnInfo: { prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {} } });
+    const rowsQuery = query({ rows });
+    // The row read as 'pending' was cancelled before the UPDATE ran: the
+    // status predicate matches nothing and returning() is empty.
+    const racedUpdate = query({ returning: [] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, racedUpdate] });
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm({
+      id: 'term-1', customer_id: 'customer-1', prepay_amount: 200,
+      term_start: '2026-06-15', term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 1,
+    });
+    expect(racedUpdate.update).toHaveBeenCalled();
+    expect(result.stampedCount).toBe(0);
   });
 
   test('a term whose owner moved under the comms fence (merge-undo) defers every seed — no visits on the stale kept owner', async () => {

@@ -1641,8 +1641,14 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     if (cols.annual_prepay_term_id) updates.annual_prepay_term_id = term.id;
     if (cols.updated_at) updates.updated_at = now;
 
+    // The status skip above read a pre-transaction row; re-assert it IN the
+    // UPDATE so a visit cancelled between that read and this write (a
+    // series cancel committing mid-activation, #3878 r5) is never stamped
+    // — a 0-row update here simply leaves stampedCount short, which the
+    // coverage-shortfall exception already surfaces.
     const updated = await conn('scheduled_services')
       .where({ id: row.id })
+      .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
       .update(updates)
       .returning(['id']);
     if (Array.isArray(updated) ? updated.length > 0 : updated) stampedCount++;

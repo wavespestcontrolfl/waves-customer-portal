@@ -26,6 +26,26 @@ const INVOICE_UNCOLLECTIBLE_STATUSES = Object.freeze([
   'cancelled',
 ]);
 
+// A visit in one of these states never ran and never will — an invoice
+// still pointing at it must NOT take money (settlement, credit, prepaid
+// stamps). The cancel paths void such invoices post-commit; a writer that
+// wins the race against that void would otherwise leave money attached to
+// a visit that never happens. Checked by the writers UNDER their row lock,
+// so a cancel that commits first is always seen (#3878 r2/r5 windows).
+// 'completed' is deliberately absent (normal billing) and so is
+// 'rescheduled' (a pending reschedule REQUEST parks the same row).
+const VISIT_NEVER_RAN_STATUSES = Object.freeze(['cancelled', 'canceled', 'no_show', 'skipped']);
+
+// Read the linked visit's status under the caller's transaction (FOR UPDATE
+// — same lock the settlement paths already take on the visit) and return
+// the terminal status when the invoice must refuse money, else null.
+async function visitRefusesSettlement(trx, scheduledServiceId) {
+  if (!scheduledServiceId) return null;
+  const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first('id', 'status');
+  const status = invoiceStatusKey(visit?.status);
+  return VISIT_NEVER_RAN_STATUSES.includes(status) ? status : null;
+}
+
 function invoiceStatusKey(status) {
   return String(status || '').trim().toLowerCase();
 }
@@ -107,6 +127,8 @@ function formatCardLine(brand, last4) {
 module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   INVOICE_UNCOLLECTIBLE_STATUSES,
+  VISIT_NEVER_RAN_STATUSES,
+  visitRefusesSettlement,
   assertInvoiceCollectible,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,

@@ -134,6 +134,47 @@ describe('recordManualPayment — refusal contract', () => {
     expect(err.currentStatus).toBe('paid');
   });
 
+  test.each(['cancelled', 'no_show', 'skipped'])('invoice whose visit is %s under the lock → 409 visitNeverRan, no paid flip, no ledger row (#3878 r2 fence)', async (visitStatus) => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
+    let invoiceUpdate = null;
+    let paymentsInsert = null;
+    let visitLocked = false;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] }); invoiceUpdate = r.update; return r; }
+        if (table === 'scheduled_services') { const r = recorder({ first: { id: 'svc-1', status: visitStatus } }); r.forUpdate = jest.fn(() => { visitLocked = true; return r; }); return r; }
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash' }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(new RegExp(`visit is ${visitStatus.replace('_', '-')}`));
+    expect(err.visitNeverRan).toBe(visitStatus);
+    expect(visitLocked).toBe(true);
+    expect(invoiceUpdate).not.toHaveBeenCalled();
+    expect(paymentsInsert).toBeNull();
+  });
+
+  test("a 'rescheduled' visit (pending reschedule request parks the same row) still takes the payment", async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
+    let invoiceUpdate = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [openInvoice({ scheduled_service_id: 'svc-1', status: 'paid' })] }); invoiceUpdate = r.update; return r; }
+        if (table === 'scheduled_services') return recorder({ first: { id: 'svc-1', status: 'rescheduled' } });
+        if (table === 'payments') return recorder();
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    await recordManualPayment('inv-1', { method: 'cash' });
+    expect(invoiceUpdate).toHaveBeenCalled();
+  });
+
   test('a new standalone PI minted under the lock → 409 retry message', async () => {
     db.mockImplementation(() => recorder({ first: openInvoice() }));
     db.transaction.mockImplementation(async () => ({ racedNewPaymentIntent: 'pi_new' }));

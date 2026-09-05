@@ -169,6 +169,30 @@ describe('active payment plans auto-complete when the invoice settles', () => {
     });
   });
 
+  test("apply-credit refuses (409 visit_never_ran) when the invoice's visit is cancelled under the lock — no prepaid flip, no credit movement (#3878 r2 fence)", async () => {
+    const withVisit = { ...INVOICE, scheduled_service_id: 'svc-1' };
+    trxInvoices.first = jest.fn(async () => ({ ...withVisit }));
+    const trxVisits = makeRecorder({ first: jest.fn(async () => ({ id: 'svc-1', status: 'cancelled' })) });
+    const prev = trx.getMockImplementation();
+    trx.mockImplementation((table) => (table === 'scheduled_services' ? trxVisits : prev(table)));
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => ({ ...withVisit })) });
+      if (table === 'activity_log') return makeRecorder();
+      throw new Error(`unexpected table ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toMatch(/visit is cancelled/);
+      expect(trxVisits.forUpdate).toHaveBeenCalled();
+      expect(trxInvoices.update).not.toHaveBeenCalled();
+      expect(trx).not.toHaveBeenCalledWith('payment_plans');
+    });
+  });
+
   test('apply-credit completes the active plan on the same transaction as the prepaid flip', async () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/invoices/inv-1/apply-credit`, {
