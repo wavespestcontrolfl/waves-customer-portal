@@ -182,6 +182,9 @@ function scenario({
       if (op === 'columnInfo') return {};
       return [];
     }
+    // The guard now confirms the linked term is still live (Codex #3878 r1
+    // P2): 'term-1' is an active term in this harness.
+    if (table === 'annual_prepay_terms') return [{ id: 'term-1' }];
     if (table === 'estimate_card_holds') {
       if (op === 'await') {
         return cardHoldVisitIds.map((id) => ({ scheduled_service_id: id }));

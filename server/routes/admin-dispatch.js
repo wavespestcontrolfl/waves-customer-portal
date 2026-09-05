@@ -3667,8 +3667,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
           if (scope === 'following') {
             targetQuery.where('scheduled_date', '>=', svc.scheduled_date);
           }
+          // FOR UPDATE: the coverage read below and the per-row transitions
+          // must see one consistent row state. A prepaid writer (single-visit
+          // /:id/prepaid, stampSeriesPrepaid) updates prepaid_amount without
+          // touching status, so the transition's status-only CAS would not
+          // notice a payment that landed between this select and the
+          // transition (Codex #3878 r1 P1). Row locks make the writer wait
+          // for this commit (its own status filter then sees 'cancelled') or
+          // make this select wait for the writer's commit and read the stamp.
           targets = await targetQuery
             .orderBy('scheduled_date', 'asc')
+            .forUpdate()
             .select('id', 'status', 'customer_id', 'service_type', 'scheduled_date', 'annual_prepay_term_id', 'prepaid_amount');
           if (!targets.length) return; // nothing written — 409 after commit
 

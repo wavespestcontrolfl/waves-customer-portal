@@ -37,7 +37,7 @@ jest.mock('../services/visit-cancellation-followthrough', () => ({
 }));
 
 jest.mock('../models/db', () => {
-  const state = { rows: [], invoices: [], writes: [], hasTableCalls: [] };
+  const state = { rows: [], invoices: [], terms: [], writes: [], hasTableCalls: [] };
   const makeBuilder = (table) => {
     const b = {
       _where: {},
@@ -72,7 +72,10 @@ jest.mock('../models/db', () => {
       // service — the harness owns the scope filtering by what it seeds.
       then(resolve, reject) {
         const rows = table === 'scheduled_services' ? state.rows.map((r) => ({ ...r }))
-          : table === 'invoices' ? state.invoices.map((r) => ({ ...r })) : [];
+          : table === 'invoices' ? state.invoices.map((r) => ({ ...r }))
+          // Live terms only — the harness models the whereNotIn(dead statuses)
+          // by seeding what a live read would return.
+          : table === 'annual_prepay_terms' ? state.terms.filter((t) => !['cancelled', 'canceled', 'refunded'].includes(t.status)).map((t) => ({ id: t.id })) : [];
         return Promise.resolve(rows).then(resolve, reject);
       },
     };
@@ -118,8 +121,9 @@ const future = (days) => {
   const d = new Date(); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10);
 };
 
-function seed({ prepaidChild, invoices = [] } = {}) {
+function seed({ prepaidChild, invoices = [], terms = [{ id: 'term-1', status: 'active' }] } = {}) {
   db.__state.invoices = invoices;
+  db.__state.terms = terms;
   db.__state.rows = [
     { id: 'parent', technician_id: 'tech-1', customer_id: 'cust-1', status: 'confirmed', scheduled_date: future(3), service_type: 'Pest Control', is_recurring: true, recurring_parent_id: null, recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
     { id: 'child-1', technician_id: 'tech-1', customer_id: 'cust-1', status: 'pending', scheduled_date: future(33), service_type: 'Pest Control', is_recurring: false, recurring_parent_id: 'parent', recurring_ongoing: true, annual_prepay_term_id: null, prepaid_amount: null },
@@ -172,6 +176,13 @@ test('a target whose invoice already holds money (paid, neither visit field stam
   expect(body.error).toMatch(/invoice that has money on it/);
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
   expect(db.__state.writes.map((w) => `${w.table}:${w.op}`)).toEqual(['<trx>:begin', '<trx>:rollback']);
+});
+
+test('a visit linked to a REFUNDED term (link kept for audit, stamp cleared) is not covered — cancel proceeds (Codex #3878 r1 P2)', async () => {
+  seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null }, terms: [{ id: 'term-1', status: 'refunded' }] });
+  const { status, body } = await cancel('series');
+  expect(status).toBe(200);
+  expect(body.cancelledCount).toBe(3);
 });
 
 test('an unpaid series still cancels through the same branch (guard is not a blanket refusal)', async () => {

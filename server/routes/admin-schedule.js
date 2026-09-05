@@ -11522,8 +11522,23 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
+  // The term LINK outlives the coverage: a voided/refunded prepay flips the
+  // term to cancelled/refunded and clearPrepaidStampsForTerm keeps
+  // annual_prepay_term_id on the visits for audit (annual-prepay-renewals).
+  // Only a term that is still live is money held (Codex #3878 r1 P2). An
+  // unreadable terms table keeps every linked visit covered (fail-closed).
+  const termIds = [...new Set(visits.map((v) => v.annual_prepay_term_id).filter(Boolean))];
+  let liveTermIds = new Set(termIds);
+  if (termIds.length > 0) {
+    const DEAD_TERM_STATUSES = ['cancelled', 'canceled', 'refunded'];
+    const liveTerms = await conn('annual_prepay_terms')
+      .whereIn('id', termIds)
+      .whereNotIn('status', DEAD_TERM_STATUSES)
+      .select('id');
+    liveTermIds = new Set(liveTerms.map((t) => t.id));
+  }
   for (const v of visits) {
-    if (v.annual_prepay_term_id) mark(v.id, 'covered by an annual prepay term');
+    if (v.annual_prepay_term_id && liveTermIds.has(v.annual_prepay_term_id)) mark(v.id, 'covered by an annual prepay term');
     // Hand-collected prepayment (cash / phone card / Zelle), single-visit or
     // stamped across the series by POST /:id/prepaid. Cancelling one of these
     // silently is money taken for a visit that never happens (Codex #3337 P1).
