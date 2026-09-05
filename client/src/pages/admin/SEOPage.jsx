@@ -3655,17 +3655,6 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     fontFamily: MONO,
   };
 
-  const matchBacklink = async (card) => {
-    setBusy(card.domain.id);
-    setError(null);
-    try {
-      await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/reconcile-backlink`, { method: "POST", body: { backlink_id: card.backlink_match.id } });
-      setResult({ tone: D.text, text: "Link matched to this placement. Verification will confirm whether it is live." });
-      await refresh();
-    } catch (e) { setError(e?.message || "Could not match backlink"); }
-    finally { setBusy(null); }
-  };
-
   const cards = data?.cards || [];
   return (
     <Card style={{ marginBottom: 20 }}>
@@ -3696,12 +3685,6 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         const p = c.path;
         return (
           <div key={c.placement.id} style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
-            {c.backlink_match && <div style={{ fontSize: 14, marginBottom: 12 }}>
-              <p>A backlink was found, but more than one placement could match it. Review the source page before assigning it to this placement.</p>
-              <a href={c.backlink_match.source_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>Review source page</a>
-              <button disabled={domainBusy} onClick={() => matchBacklink(c)} style={{ ...btn(domainBusy), fontSize: 14, marginLeft: 12 }}>Assign to this placement</button>
-            </div>}
-
             <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: D.heading, fontFamily: MONO }}>
                 {c.domain.domain}
