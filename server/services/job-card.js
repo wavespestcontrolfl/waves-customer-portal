@@ -714,7 +714,8 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     const verdict = verdicts.find((v) => v.productId === p.id) || { verdict: 'unknown', reason: 'No limit on file' };
     // The appointment plan's own mix (lawn only) — never recomputed here.
     const plannedMix = !blocked && line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
-    const planned = plannedMix ? { amount: Math.round(plannedMix.amount * 100) / 100, unit: plannedMix.amountUnit || p.rate_unit || null } : null;
+    // Unrounded: the client converts small doses to g / mL and rounds once.
+    const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
     // stock in the inventory unit (gal) — the plan engine's snapshot owns
     // that conversion. Unconvertible pairs are not "short", they are flagged.
