@@ -263,7 +263,10 @@ const decisionInputsHash = (dimension, ctx) => sha256(decisionInputs(dimension, 
 
 // Which authority instances a path REQUIRES (§3.3b / §6.3 2a–2c), independent
 // of the level each gets. Exported so the bridge and tests share one answer.
-function requiredInstances(path) {
+// `followUp` = the placement carries a drafted (or in-flight) follow-up (§6.4,
+// link-outreach-mandate followUpPending): the communication/followup instance
+// is required for it — a placement-level fact, so the caller supplies it.
+function requiredInstances(path, { followUp = false } = {}) {
   const type = path.acquisition_type;
   const outreach = OUTREACH_ACQUISITION_TYPES.includes(type);
   const out = [];
@@ -271,6 +274,7 @@ function requiredInstances(path) {
   if (!outreach || path.account_required === true || type === 'content_submission') out.push({ dimension: 'execution', instance_kind: '-' });
   if (path.payment_required === true) out.push({ dimension: 'payment', instance_kind: '-' });
   if (outreach) out.push({ dimension: 'communication', instance_kind: '-' });
+  if (outreach && followUp === true) out.push({ dimension: 'communication', instance_kind: 'followup' });
   return out;
 }
 
@@ -319,14 +323,17 @@ function validityFailure(path, domain, score) {
  *   score           the placement/domain score (defaults to domain.score)
  *   d30Confidence   learned D30 confidence in [0,1] or null (step 7 — null ⇒ never AUTO_PAID)
  *   monthSpendCents AUTO spend already reserved/settled this ET month (excluding this placement)
- *   draftClean      true only when a lint-clean draft exists AND passes the §6.4 classifier
+ *   draftClean      true only when a lint-clean draft exists AND passes the §6.4 classifier — the draft of the
+ *                   communication instance being decided: the initial pitch, or the follow-up when `followUp`
+ *   followUp        the placement carries a follow-up to decide (§6.4): a communication/followup instance is
+ *                   required and decided by the same 2c rule on the follow-up's draft
  *   waiver          a VALID floor waiver ({ id }) — floors treated as passed; never promotes anything
  * → { verdict: 'ok'|'DENY'|'INVALID', reason, instances: [{ dimension, instance_kind, level, reason }] }
  */
-function decideAuthority({ path, domain, policy, score, d30Confidence = null, monthSpendCents = 0, draftClean = false, waiver = null }) {
+function decideAuthority({ path, domain, policy, score, d30Confidence = null, monthSpendCents = 0, draftClean = false, followUp = false, waiver = null }) {
   const p = policy;
   const s = score === undefined ? num(domain?.score) : num(score);
-  const required = requiredInstances(path || {});
+  const required = requiredInstances(path || {}, { followUp });
   const stamp = (level, reason) => ({ verdict: level, reason, instances: required.map((r) => ({ ...r, level, reason })) });
 
   // 1a. validity — non-overrideable
@@ -399,12 +406,14 @@ function decideAuthority({ path, domain, policy, score, d30Confidence = null, mo
     }
   }
 
-  // 2c. communication
+  // 2c. communication — the initial send, and the follow-up (§6.4) under the same mandate on ITS draft
   if (outreach) {
-    if (path.legal_attestation && p.legal_attestation_requires_owner) push('communication', '-', LEVELS.OWNER_LEGAL, 'send bound to a signed agreement');
-    else if (configured(p.auto_outreach_min_score) && configured(p.auto_outreach_daily_cap) && p.auto_outreach_daily_cap > 0
-      && s >= p.auto_outreach_min_score && draftClean === true) push('communication', '-', LEVELS.AUTO_OUTREACH, 'score + clean draft within the mandate');
-    else push('communication', '-', LEVELS.OWNER_OUTREACH, draftClean === true ? 'outside the auto-outreach policy' : 'no lint-clean draft yet');
+    for (const kind of followUp === true ? ['-', 'followup'] : ['-']) {
+      if (path.legal_attestation && p.legal_attestation_requires_owner) push('communication', kind, LEVELS.OWNER_LEGAL, 'send bound to a signed agreement');
+      else if (configured(p.auto_outreach_min_score) && configured(p.auto_outreach_daily_cap) && p.auto_outreach_daily_cap > 0
+        && s >= p.auto_outreach_min_score && draftClean === true) push('communication', kind, LEVELS.AUTO_OUTREACH, 'score + clean draft within the mandate');
+      else push('communication', kind, LEVELS.OWNER_OUTREACH, draftClean === true ? 'outside the auto-outreach policy' : 'no lint-clean draft yet');
+    }
   }
 
   return { verdict: 'ok', reason: waived, instances };

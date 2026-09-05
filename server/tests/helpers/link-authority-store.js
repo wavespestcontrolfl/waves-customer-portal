@@ -19,7 +19,9 @@ function makeDb(seed = {}) {
   const tables = Object.fromEntries(TABLES.map((t) => [t, []]));
   for (const [t, rows] of Object.entries(seed)) tables[t] = rows.map((r) => ({ ...r }));
   const raws = [];
-  const op = (a, l, r) => (a === '<' ? l < r : a === '<=' ? l <= r : a === '>' ? l > r : a === '>=' ? l >= r : a === '<>' || a === '!=' ? l !== r : l === r);
+  // Dates compare by instant (a lease token round-trips through toISOString, the store keeps the Date)
+  const eq = (l, r) => ((l instanceof Date || r instanceof Date) && l != null && r != null ? new Date(l).getTime() === new Date(r).getTime() : l === r);
+  const op = (a, l, r) => (a === '<' ? l < r : a === '<=' ? l <= r : a === '>' ? l > r : a === '>=' ? l >= r : a === '<>' || a === '!=' ? !eq(l, r) : eq(l, r));
   function builder(table) {
     const rows = tables[table];
     if (!rows) throw new Error(`unknown table ${table}`);
@@ -36,9 +38,9 @@ function makeDb(seed = {}) {
     };
     const q = {
       where(a, b, c) {
-        if (typeof a === 'object') st.preds.push((r) => Object.entries(a).every(([k, v]) => r[k] === v));
+        if (typeof a === 'object') st.preds.push((r) => Object.entries(a).every(([k, v]) => eq(r[k], v)));
         else if (c !== undefined) st.preds.push((r) => op(b, r[a], c));
-        else st.preds.push((r) => r[a] === b);
+        else st.preds.push((r) => eq(r[a], b));
         return q;
       },
       whereNull(col) { st.preds.push((r) => r[col] == null); return q; },
@@ -54,9 +56,16 @@ function makeDb(seed = {}) {
         else if (new RegExp(`^split_part\\(${STORED}, '@', 2\\) = ANY\\(\\?\\) OR split_part\\(${STORED}, '@', 2\\) LIKE ANY\\(\\?\\)$`).test(sql)) st.preds.push((r) => { const host = lower(r[bindings[0]]).split('@')[1] || ''; return bindings[1].includes(host) || bindings[3].some((p) => host.endsWith(p.slice(1))); });
         else if (/gmail-canonical/.test(sql)) st.preds.push((r) => { const c = canonicalEmail(r[bindings[0]]); return Boolean(c) && bindings[1].includes(c.split('@')[1]) && bindings[3].includes(c.split('@')[0]); });
         else if (/split_part/.test(sql)) st.preds.push((r) => canonicalProspectDomain(r.target_domain) === bindings[0]);
-        // the sender's trailing-24h attempt count (link-prospect-outreach dailySendCount): rows attempted since `since`
-        else if (/outreach_attempted_at >= \?/.test(sql)) { st.count = true; st.preds.push((r) => r.outreach_attempted_at != null && new Date(r.outreach_attempted_at).getTime() >= new Date(bindings[0]).getTime()); }
+        // the sender's ET-day attempt count (link-prospect-outreach dailySendCount): every initial AND follow-up attempt since `since`
+        else if (/outreach_attempted_at >= \?/.test(sql)) {
+          const since = new Date(bindings[0]).getTime();
+          const attempted = (v) => v != null && new Date(v).getTime() >= since;
+          st.count = (r) => (attempted(r.outreach_attempted_at) ? 1 : 0) + (attempted(r.follow_up_attempted_at) ? 1 : 0);
+          st.preds.push((r) => st.count(r) > 0);
+        }
         else if (/COALESCE\(link_type, ''\) NOT IN/.test(sql)) st.preds.push((r) => !bindings.includes(r.link_type || ''));
+        // the domain admission guard (prospect-domain-lock notClosedConversation): a closure-stamped conversation is not in flight
+        else if (/^\(conversation_closed_at IS NULL OR status NOT IN/.test(sql)) st.preds.push((r) => r.conversation_closed_at == null || !bindings.includes(r.status));
         else throw new Error(`unsupported whereRaw: ${sql}`);
         return q;
       },
@@ -65,7 +74,7 @@ function makeDb(seed = {}) {
       // `col as alias` projections (the recipient lookup selects `id as id` / `customer_id as id`)
       select(...cols) { const named = cols.filter((c) => typeof c === 'string'); st.cols = named.length ? named : null; return q; },
       forUpdate() { raws.push(`FOR UPDATE ${table}`); return q; },
-      async first(...cols) { if (cols.length) st.cols = cols; if (st.count) return { c: String(resolve().length) }; return resolve()[0]; },
+      async first(...cols) { if (cols.length) st.cols = cols; if (st.count) return { c: String(rows.filter(matches).reduce((n, r) => n + st.count(r), 0)) }; return resolve()[0]; },
       // resolves to the affected count; `.returning('*')` yields the updated rows (the sender's CAS + finalize)
       update(patch) {
         const apply = () => { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); if (db._beforeUpdate) db._beforeUpdate(table, db); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit; };

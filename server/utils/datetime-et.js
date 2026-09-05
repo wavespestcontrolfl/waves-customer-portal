@@ -13,16 +13,25 @@ function parseETDateTime(input) {
   const naive = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(input);
   if (!naive) return new Date(input);
   const [, y, mo, d, h, mi, s] = naive;
-  const utcGuess = Date.UTC(+y, +mo - 1, +d, +h, +mi, +(s || 0));
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).formatToParts(new Date(utcGuess));
-  const p = (t) => parseInt(parts.find(x => x.type === t).value, 10);
-  let etH = p('hour'); if (etH === 24) etH = 0;
-  const etAsUtc = Date.UTC(p('year'), p('month') - 1, p('day'), etH, p('minute'), p('second'));
-  const offsetMs = utcGuess - etAsUtc;
-  return new Date(utcGuess + offsetMs);
+  const wanted = Date.UTC(+y, +mo - 1, +d, +h, +mi, +(s || 0)); // the wall time, read as if it were UTC
+  // the ET wall time of an instant, read as if it were UTC — so (instant − etAsUtc) is ET's offset AT that instant
+  const etAsUtc = (ms) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(new Date(ms));
+    const p = (t) => parseInt(parts.find(x => x.type === t).value, 10);
+    let etH = p('hour'); if (etH === 24) etH = 0;
+    return Date.UTC(p('year'), p('month') - 1, p('day'), etH, p('minute'), p('second'));
+  };
+  // the offset is resolved at the CANDIDATE instant, not at the naive guess: the guess sits hours earlier, and on the
+  // fall-back Sunday it reads the pre-transition offset — 02:30 ET (which exists once, in EST) would resolve as
+  // 01:30. One correction pass lands the offset in force at the target; a wall time that does not exist (the
+  // spring-forward gap) verifies under neither and keeps the first candidate (03:30 EDT for 02:30), as before
+  const first = wanted + (wanted - etAsUtc(wanted));
+  if (etAsUtc(first) === wanted) return new Date(first);
+  const second = wanted + (first - etAsUtc(first));
+  return new Date(etAsUtc(second) === wanted ? second : first);
 }
 
 function formatETDay(dt) {
@@ -71,6 +80,18 @@ function etDateString(date = new Date()) {
 function addETDays(date, days) {
   const et = etParts(date);
   return new Date(Date.UTC(et.year, et.month - 1, et.day + days, 12, 0, 0));
+}
+
+// Returns the instant N ET-calendar-days away from `date` at the SAME ET wall-clock
+// time (hour:minute:second.ms) — across a DST seam the elapsed time is 23 or 25 hours,
+// never a fixed 24×N. Use for "N days after this event" deadlines; addETDays anchors
+// at noon for calendar-day arithmetic.
+function addETDaysAtWallClock(date, days) {
+  const at = date instanceof Date ? date : new Date(date);
+  const t = etParts(at);
+  const pad = (n) => String(n).padStart(2, '0');
+  const then = parseETDateTime(`${etDateString(addETDays(at, days))}T${pad(t.hour)}:${pad(t.minute)}:${pad(t.second || 0)}`);
+  return new Date(then.getTime() + at.getUTCMilliseconds());
 }
 
 // Returns a Date N ET-calendar-months away from `date`, preserving the
@@ -280,7 +301,7 @@ function lastCompletedWeekEndingET(now = new Date()) {
 module.exports = {
   lastCompletedWeekEndingET,
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
-  etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
+  etParts, etDateString, addETDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,
 };

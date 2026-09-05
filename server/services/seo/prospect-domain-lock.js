@@ -117,6 +117,12 @@ async function findPlacementRow(q, domain, targetPage, { excludeId = null, locat
   return (await qb.first(...columns)) || null;
 }
 
+// A conversation (contacted / negotiating) carrying the durable closure stamp (§13 / §3.3: proven silent, its inbox
+// released) is OVER — it holds the domain no more than the inbox. Only those statuses: a reopened row (prospect /
+// awaiting_owner) may still carry the stamp until the send claim drops it, and it IS the domain's next conversation.
+const CONVERSATION_STATUSES = Object.freeze(['contacted', 'negotiating']);
+const notClosedConversation = (qb) => qb.whereRaw(`(conversation_closed_at IS NULL OR status NOT IN (${CONVERSATION_STATUSES.map(() => '?').join(', ')}))`, [...CONVERSATION_STATUSES]);
+
 async function lockProspectDomain(trx, domain) {
   const key = canonicalProspectDomain(domain);
   if (!key) return null;
@@ -137,9 +143,29 @@ async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STA
   const set = new Set(statuses);
   let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...set]);
   if (lanes === 'outreach') qb = qb.whereRaw(`COALESCE(link_type, '') NOT IN (${SIGNUP_TYPES.map(() => '?').join(', ')})`, [...SIGNUP_TYPES]);
+  qb = notClosedConversation(qb);
   const row = await qb.first('id', 'status', 'target_page');
   // Belt and braces for test doubles / stale readers: only a row in the set counts.
-  return { domain: key, inFlight: row && set.has(row.status) ? row : null };
+  if (row && set.has(row.status)) return { domain: key, inFlight: row };
+  return { domain: key, inFlight: await followUpOwedRow(trx, key, lanes) };
 }
 
-module.exports = { lockProspectDomain, claimProspectDomain, findPlacementRow, canonicalProspectDomain, locationKeyOf, byDomain, TARGET_DOMAIN_CANONICAL_SQL, targetPathOf, targetPageOf, targetPageVariants, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };
+// …and a submit-first placement past its outcome (placed / live / indexed — the Judge's statuses, outside every
+// caller's active set) whose ONE follow-up is still OWED (§6.4, M.followUpOwed — the inbox guard's reader) or whose
+// follow-up send is AMBIGUOUS (sending / send_error: Gmail may have delivered it — held whatever the path, as the
+// inbox guard holds it) is an open conversation for the publisher: the domain is held until the follow-up is sent or
+// skipped, so no writer admits a second placement (and a second recipient) beside it
+async function followUpOwedRow(trx, key, lanes) {
+  const M = require('./link-outreach-mandate');
+  let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...M.FOLLOW_UP_JUDGE_STATUSES]).where({ outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due', 'drafted', ...M.AMBIGUOUS_SEND_STATUSES]);
+  if (lanes === 'outreach') qb = qb.whereRaw(`COALESCE(link_type, '') NOT IN (${SIGNUP_TYPES.map(() => '?').join(', ')})`, [...SIGNUP_TYPES]);
+  const rows = (await qb.select('id', 'status', 'target_page', 'path_id', 'outreach_status', 'follow_up_status', 'follow_up_due_at')) || [];
+  if (!rows.length) return null;
+  const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
+  const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'execution_after_send', 'acquisition_type', 'account_required') : [];
+  const pathById = new Map(paths.map((p) => [p.id, p]));
+  const owed = rows.find((r) => M.AMBIGUOUS_SEND_STATUSES.includes(r.follow_up_status) || M.followUpOwed(r, pathById.get(r.path_id) || null));
+  return owed ? { id: owed.id, status: owed.status, target_page: owed.target_page } : null;
+}
+
+module.exports = { lockProspectDomain, claimProspectDomain, notClosedConversation, findPlacementRow, canonicalProspectDomain, locationKeyOf, byDomain, TARGET_DOMAIN_CANONICAL_SQL, targetPathOf, targetPageOf, targetPageVariants, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };
