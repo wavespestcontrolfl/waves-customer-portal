@@ -1075,9 +1075,13 @@ router.put('/:id', async (req, res, next) => {
 
     // Manual status edits (Kanban drags / detail-pane changes) mirror onto the
     // lead's ad_service_attribution funnel row. Monotonic + best-effort; a
-    // status with no funnel meaning no-ops inside the bridge.
+    // status with no funnel meaning no-ops inside the bridge. A manual WON is
+    // a conversion: it runs the shared settlement (bridge + wizard-repeat
+    // settlement) like the book route, so a repeat's win lands on its root's
+    // row instead of on the row /calculate deleted (codex #3834 r34 P1).
     if (updates.status && updates.status !== existingLead.status) {
-      await bridgeLeadFunnelStage(req.params.id, updates.status);
+      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, lead.customer_id || null);
+      else await bridgeLeadFunnelStage(req.params.id, updates.status);
     }
 
     await db('lead_activities').insert({
@@ -1727,10 +1731,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       logger.warn(`[leads] booking pre-draft hook unavailable: ${predraftErr.message}`);
     }
 
-    // Funnel-row mirror for the in-transaction 'won' conversion above.
-    // Post-commit deliberately: the bridge must never abort the booking
-    // transaction, and it is monotonic + idempotent on its own.
-    await bridgeLeadFunnelStage(req.params.id, 'won');
+    // Funnel-row mirror for the in-transaction 'won' conversion above — the
+    // same settlement markConverted runs (a booked wizard repeat lands on its
+    // root's row or its own rebuilt one, codex #3834 r32 P1). Post-commit
+    // deliberately: it must never abort the booking transaction, and it is
+    // monotonic + idempotent on its own.
+    await leadAttribution.settleWonFunnelRow(req.params.id, customerId);
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({
