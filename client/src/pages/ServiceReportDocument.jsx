@@ -39,10 +39,10 @@ import {
 // copy comes only from the approved per-product label facts.
 
 const NAVY = '#04395E';
-const INK = '#17242F';
-const MUTED = '#5B6A77';
-const LINE = '#C9CED4';
-const HAIR = '#E2E6EA';
+const INK = '#04395E'; // sheet ink (theme-doc DOC.ink)
+const MUTED = '#3F4A65'; // DOC.muted
+const LINE = '#D8D0C0'; // DOC.borderStrong
+const HAIR = '#E7E2D7'; // DOC.border
 const TZ = 'America/New_York';
 // Link precedence for the permanent document:
 //   1. data.publicOrigin — the server's canonical PUBLIC portal origin. The
@@ -316,7 +316,7 @@ function SectionHeader({ children }) {
   return (
     <div className="doc-keep-with-next" style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
-      color: NAVY, fontSize: 10.5, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase',
+      color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
   );
 }
@@ -918,7 +918,7 @@ export default function ServiceReportDocument({ data, token }) {
         <div className="doc-keep" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
-            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 800 }}>Waves Pest Control, LLC</div>
+            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
             <div>{WAVES_SUPPORT_PHONE_DISPLAY} · wavespestcontrol.com</div>
             <div>contact@wavespestcontrol.com</div>
             <div>Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}</div>
@@ -930,7 +930,7 @@ export default function ServiceReportDocument({ data, token }) {
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8,
         }}>
-          <div style={{ color: NAVY, fontSize: 21, fontWeight: 800, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
+          <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em' }}>SERVICE REPORT</div>
           <div style={{ fontSize: 11, color: MUTED }}>
             Report #{reportNumber} · {fmtServiceDate(data.serviceDate)}
           </div>
@@ -1295,7 +1295,7 @@ export default function ServiceReportDocument({ data, token }) {
         {(tracedMapUrl || (schematicSrc && hasRenderableTreatment)) && (
           <div className="doc-keep">
             <SectionHeader>Where we treated</SectionHeader>
-            <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 10, overflow: 'hidden' }}>
               {tracedMapUrl
                 ? <img src={tracedMapUrl} alt="Technician-traced treatment map" onError={() => markImageFailed(tracedMapUrl)} style={{ display: 'block', width: '100%' }} />
                 : <img src={schematicSrc} alt="Treatment map of the serviced areas" style={{ display: 'block', width: '100%' }} />}
@@ -1319,7 +1319,7 @@ export default function ServiceReportDocument({ data, token }) {
             <SectionHeader>{stationMap.program === 'trapping' ? 'Trap placement' : 'Bait station placement'}</SectionHeader>
             <div style={{
               position: 'relative', width: '100%', aspectRatio: '32 / 17',
-              background: '#F4F6F8', border: `1px solid ${HAIR}`, borderRadius: 6,
+              background: '#F4F6F8', border: `1px solid ${HAIR}`, borderRadius: 10,
             }}>
               {stationMap.stations.map((station) => (
                 <span
@@ -1413,7 +1413,7 @@ export default function ServiceReportDocument({ data, token }) {
                   // height-capped portrait case codex flagged measured exact
                   // either way; this is the case that actually moved.
                   boxSizing: 'border-box',
-                  borderRadius: 4, border: `1px solid ${HAIR}`,
+                  borderRadius: 10, border: `1px solid ${HAIR}`,
                 }}
               />
               {(marked.marks || []).map((mark) => (
@@ -1474,7 +1474,7 @@ export default function ServiceReportDocument({ data, token }) {
                   {photo.unavailable ? (
                     <div style={{
                       display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center',
-                      width: '100%', height: 190, background: '#F7F8F9', borderRadius: 4,
+                      width: '100%', height: 190, background: '#F7F8F9', borderRadius: 10,
                       border: `1px dashed ${LINE}`, color: MUTED, fontSize: 9.5, padding: 8, boxSizing: 'border-box',
                     }}>
                       Photo unavailable in this document — view it in your online report
@@ -1488,7 +1488,7 @@ export default function ServiceReportDocument({ data, token }) {
                        readers and the PDF accessibility layer (codex P1). */
                     alt={(!suppressPhotoCaption(photo) && photo.caption) || 'Service photo'}
                     onError={() => markImageFailed(photo.url)}
-                    style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 4, border: `1px solid ${HAIR}` }}
+                    style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 10, border: `1px solid ${HAIR}` }}
                   />
                   )}
                   {!suppressPhotoCaption(photo) && (photo.caption || photo.stateBadge) && (
