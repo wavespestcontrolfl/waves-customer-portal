@@ -187,7 +187,8 @@ function Showcase() {
   useGlassSurface(true, 'full');
   return (
     <WavesShell>
-      <main style={{ width: DOC_COLUMN, margin: '32px auto 56px', padding: '0 0 24px' }}>
+      {/* WavesShell owns the page's one <main>; the showcase is a plain column. */}
+      <div style={{ width: DOC_COLUMN, margin: '32px auto 56px', padding: '0 0 24px' }}>
         <div data-gt="eyebrow" style={DOC_EYEBROW}>Customer glass showcase · dev only</div>
         <h1>One sheet for every customer page</h1>
         <p style={{ fontSize: FS.lead, color: '#3F4A65', margin: '12px 0 0', maxWidth: '62ch' }}>
@@ -208,7 +209,7 @@ function Showcase() {
         <Forms />
         <ListsAndAlerts />
         <States />
-      </main>
+      </div>
     </WavesShell>
   );
 }

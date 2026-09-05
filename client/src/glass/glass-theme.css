@@ -150,20 +150,6 @@ html[data-glass-theme] [data-gt="body"] {
   line-height: 1.5 !important;
   letter-spacing: -0.005em !important;
 }
-html[data-glass-theme] [data-gt="h2x"] {
-  font-size: clamp(1.6rem, 2.6vw, 2rem) !important;
-  font-weight: 600 !important;
-  line-height: 1.1 !important;
-  letter-spacing: -0.03em !important;
-  color: var(--brand) !important;
-}
-html[data-glass-theme] [data-gt="h3x"] {
-  font-size: 1.35rem !important;
-  font-weight: 600 !important;
-  line-height: 1.18 !important;
-  letter-spacing: -0.02em !important;
-  color: var(--brand) !important;
-}
 html[data-glass-theme] [data-g-contact],
 html[data-glass-theme] [data-g-contact] * {
   font-weight: 700 !important;
@@ -532,8 +518,16 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
+  /* Accent controls too: solid gold, no blur, no sheen. */
+  html[data-glass-theme] [data-glass-accent] {
+    background: #F4B014 !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
   html[data-glass-theme] [data-glass]::before,
-  html[data-glass-theme] [data-glass]::after {
+  html[data-glass-theme] [data-glass]::after,
+  html[data-glass-theme] [data-glass-accent]::before,
+  html[data-glass-theme] [data-glass-accent]::after {
     display: none !important;
   }
 }
