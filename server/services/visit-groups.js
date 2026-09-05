@@ -2808,6 +2808,22 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           break;
         }
       }
+      // The row moved but stays on its old technician: that tech's "visit
+      // moved" card was suppressed on the member's rebooker call (the
+      // reassignment was going to send the pair) — send it now so the move
+      // is never silent for the person still holding the stop.
+      if (Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        && (options.technicianId || null) !== (target.expect.technician_id || null)
+        && target.expect.technician_id) {
+        const win = targetTuple(target);
+        void require('./tech-visit-notifications').notifyVisitRescheduled({
+          visitId: target.id,
+          technicianId: target.expect.technician_id,
+          actorId: options.actorId || initiatedBy || null,
+          previous: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
+          snapshot: { date: newDateStr, windowStart: win.window_start ?? null, windowEnd: win.window_end ?? null },
+        });
+      }
       await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`, { movedButUnassigned: true });
     };
     const syncSiblingReminder = async () => {
