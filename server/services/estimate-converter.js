@@ -2580,6 +2580,60 @@ function recurringLineAnnualAmount(item = {}) {
 // (firstApplicationRowAmounts — the figures it summed into the reserved
 // price, preference credits included), those are the authority and the
 // annual/visits reconstruction is not used.
+// Route-rows authority for the split: one row per family (the station-rental
+// rider folds into the bait share the converter bills it on), every amount
+// rounded to what the children will store. Returns a resolver that hands
+// each line its row once (a second ask for the same family is 0) plus an
+// exhaustiveness check, or null when the rows cannot be keyed.
+function routeRowLineAmounts(rowAmounts) {
+  const byKey = new Map();
+  for (const row of rowAmounts) {
+    const key = recurringServiceKey(row || {});
+    const amount = Number(row?.amount);
+    if (!key || !(amount > 0) || byKey.has(key)) return null;
+    byKey.set(key, amount);
+  }
+  for (const baitKey of ['termite_bait', 'commercial_termite_bait']) {
+    if (byKey.has('termite_station_rental') && byKey.has(baitKey)) {
+      byKey.set(baitKey, byKey.get(baitKey) + byKey.get('termite_station_rental'));
+      byKey.delete('termite_station_rental');
+    }
+  }
+  if (byKey.has('termite_station_rental')) return null;
+  // Reconcile the amounts that will be STORED (codex #3938 r4 P2): round
+  // each row first, so a sub-cent drift between the raw rows and the
+  // reserved price declines rather than stamping figures that no longer
+  // add up to it.
+  for (const [key, amount] of byKey) byKey.set(key, roundMoney(amount));
+  const used = new Set();
+  return {
+    amountFor(svc) {
+      const key = recurringServiceKey(svc);
+      if (!byKey.has(key) || used.has(key)) return 0;
+      used.add(key);
+      return byKey.get(key);
+    },
+    allRowsConsumed: () => used.size === byKey.size,
+  };
+}
+
+// Line-derived per-visit amount for the split when the route passed no rows:
+// the line's annual over its visits, rounded — the same per-visit rule as
+// perApplicationChargeAmount (billing-cadence.js). Pest bills at the
+// ACCEPTED cadence (acceptedPestSelectionVisits doctrine) — but the line's
+// annual was priced at ITS cadence, so an accept that CHANGED the pest
+// cadence leaves no per-service figure to split from (codex #3938 r1 P1):
+// decline rather than divide a quote-time annual by the accepted count.
+function lineAnnualPerVisitAmount(svc, acceptedPlanFrequency) {
+  const annual = recurringLineAnnualAmount(svc);
+  const lineVisits = visitsPerYearForRecurringService(svc);
+  const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
+  if (acceptedVisits && lineVisits && acceptedVisits !== lineVisits) return 0;
+  const visits = acceptedVisits ?? lineVisits;
+  if (!(annual > 0) || !(visits > 0)) return 0;
+  return roundMoney(annual / visits);
+}
+
 function reservedAcceptPerVisitSplit({
   reservedPrice,
   reservedService,
@@ -2595,61 +2649,11 @@ function reservedAcceptPerVisitSplit({
   const promotedLines = promotedServices.map(toLines);
   if (!(target > 0) || !reservedLines.length || !promotedLines.length
     || promotedLines.some((lines) => !lines.length)) return null;
-  let lineAmount;
-  let routeRowsUsed = null;
-  let routeRowCount = 0;
-  if (Array.isArray(rowAmounts)) {
-    // The accept route's own per-row first-visit figures (preference-
-    // adjusted, WaveGuard-net) are the authority when present: one row per
-    // family, every row consumed by exactly one seeded line, or no split.
-    const byKey = new Map();
-    for (const row of rowAmounts) {
-      const key = recurringServiceKey(row || {});
-      const amount = Number(row?.amount);
-      if (!key || !(amount > 0) || byKey.has(key)) return null;
-      byKey.set(key, amount);
-    }
-    // The station-rental rider is billed as part of the bait visit (the
-    // converter folds it into the bait line's per-treatment amount), so a
-    // route row for it belongs to the bait share (codex #3938 r3 P1).
-    for (const baitKey of ['termite_bait', 'commercial_termite_bait']) {
-      if (byKey.has('termite_station_rental') && byKey.has(baitKey)) {
-        byKey.set(baitKey, byKey.get(baitKey) + byKey.get('termite_station_rental'));
-        byKey.delete('termite_station_rental');
-      }
-    }
-    if (byKey.has('termite_station_rental')) return null;
-    // Reconcile the amounts that will be STORED (codex #3938 r4 P2): round
-    // each row first, so a sub-cent drift between the raw rows and the
-    // reserved price declines rather than stamping figures that no longer
-    // add up to it.
-    for (const [key, amount] of byKey) byKey.set(key, roundMoney(amount));
-    routeRowsUsed = new Set();
-    routeRowCount = byKey.size;
-    lineAmount = (svc) => {
-      const key = recurringServiceKey(svc);
-      if (!byKey.has(key) || routeRowsUsed.has(key)) return 0;
-      routeRowsUsed.add(key);
-      return byKey.get(key);
-    };
-  } else {
-    lineAmount = (svc) => {
-      const annual = recurringLineAnnualAmount(svc);
-      // Pest bills at the ACCEPTED cadence (acceptedPestSelectionVisits
-      // doctrine) — but the line's annual was priced at ITS cadence, so an
-      // accept that CHANGED the pest cadence leaves no per-service figure to
-      // split from (codex #3938 r1 P1): decline rather than divide a
-      // quote-time annual by the accepted count.
-      const lineVisits = visitsPerYearForRecurringService(svc);
-      const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
-      if (acceptedVisits && lineVisits && acceptedVisits !== lineVisits) return 0;
-      const visits = acceptedVisits ?? lineVisits;
-      if (!(annual > 0) || !(visits > 0)) return 0;
-      // Same per-visit rule as perApplicationChargeAmount (billing-cadence.js):
-      // the plan annual over its visits, rounded to cents.
-      return roundMoney(annual / visits);
-    };
-  }
+  const routeRows = Array.isArray(rowAmounts) ? routeRowLineAmounts(rowAmounts) : null;
+  if (Array.isArray(rowAmounts) && !routeRows) return null;
+  const lineAmount = routeRows
+    ? (svc) => routeRows.amountFor(svc)
+    : (svc) => lineAnnualPerVisitAmount(svc, acceptedPlanFrequency);
   const sumLines = (lines) => lines.reduce((acc, svc) => {
     if (acc === null) return null;
     const amount = lineAmount(svc);
@@ -2658,7 +2662,7 @@ function reservedAcceptPerVisitSplit({
   const reserved = sumLines(reservedLines);
   const promoted = promotedLines.map(sumLines);
   if (reserved === null || promoted.some((amount) => amount === null)) return null;
-  if (routeRowsUsed && routeRowsUsed.size !== routeRowCount) return null;
+  if (routeRows && !routeRows.allRowsConsumed()) return null;
   const sum = roundMoney(promoted.reduce((acc, amount) => acc + amount, reserved));
   if (sum !== target) return null;
   return { reserved: roundMoney(reserved), promoted: promoted.map(roundMoney) };
