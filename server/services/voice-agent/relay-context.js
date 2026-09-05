@@ -225,10 +225,10 @@ async function claimOwnedElsewhere(q, callSid, sessionKey) {
  * office-confirm recovery and the late-segment summary refresh resolve through
  * it). Fail-soft: the lead is the durable artifact and must never be lost to it.
  */
-async function stampCallLeadLinkage(callSid, leadId) {
+async function stampCallLeadLinkage(callSid, leadId, { trx = null } = {}) {
   if (!callSid || !leadId) return false;
   try {
-    const db = require('../../models/db');
+    const db = trx || require('../../models/db');
     await db('call_log')
       .where({ twilio_call_sid: callSid })
       .update({
@@ -239,6 +239,7 @@ async function stampCallLeadLinkage(callSid, leadId) {
       });
     return true;
   } catch (linkErr) {
+    if (trx) throw linkErr; // the capture and its recovery evidence commit together
     logger.warn(`[voice-relay] call→lead linkage stamp failed callSid=${callSid}: ${linkErr.message}`);
     return false;
   }

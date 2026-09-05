@@ -1401,7 +1401,10 @@ class RelayConversation {
         if (!row || !row.id) return null;
         const existing = this._lookupRefsByCustomer.get(row.id);
         if (existing) return existing;
-        const ref = `C${this._lookupRefs.size + 1}`;
+        // A delayed prior segment must never alias a handle already issued
+        // by this leg. Handles are opaque and generation-scoped in recovery.
+        const prefix = require('./relay-recovery').isRecoveryGateOn() ? `${this.sessionGeneration || 0}-` : '';
+        const ref = `C${prefix}${this._lookupRefs.size + 1}`;
         this._lookupRefs.set(ref, row.id);
         this._lookupRefsByCustomer.set(row.id, ref);
         return ref;
@@ -1673,6 +1676,11 @@ class RelayConversation {
     this._priorCallerTurns = Math.max(this._priorCallerTurns || 0, (state.callerTurns || []).length);
     // …and so do the customer-book lookups already spent (codex r4 P2).
     this._lookupsUsed = Math.max(this._lookupsUsed, Number(state.lookupsUsed) || 0);
+    for (const [ref, customerId] of (state.lookupRefs || [])) {
+      if (this._lookupRefs.has(ref)) continue;
+      this._lookupRefs.set(ref, customerId);
+      if (!this._lookupRefsByCustomer.has(customerId)) this._lookupRefsByCustomer.set(customerId, ref);
+    }
     // A re-service already FILED on an earlier leg is this call's artifact:
     // no lead is owed (the floor stays down) and the close reports it filed.
     // A capture that deliberately created NO lead (an existing lifecycle
@@ -2256,7 +2264,7 @@ class RelayConversation {
           estimateFields: this._estimateFields || null,
           startedAt: this._startedAt,
           lookupsUsed: this._lookupsUsed,
-          writesInFlight: [...this._inFlightWrites.keys()],
+          lookupRefs: [...this._lookupRefs.entries()],
         });
         const appended = await withTimeout(
           db('call_log').where('twilio_call_sid', this.callSid)
@@ -2666,14 +2674,10 @@ class RelayConversation {
       logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — capture_lead is still in flight past the drain bound (never race a second lead write)`);
       return;
     }
-    // …and the same across the reconnect (hook r37 P1): a write the EARLIER
-    // leg's close left in flight is that call's artifact committing; this
-    // leg's floor must not race it either. The segment carries the names.
-    const priorInFlight = (this._resume && Array.isArray(this._resume.writesInFlight)) ? this._resume.writesInFlight : [];
-    if (priorInFlight.includes('capture_lead') || priorInFlight.includes('request_reservice')) {
-      logger.warn(`[voice-relay] capture-floor SUPPRESSED callSid=${this.callSid} — an earlier leg's ${priorInFlight.includes('capture_lead') ? 'capture_lead' : 'request_reservice'} was still in flight at its close (never race a second artifact across the reconnect)`);
-      return;
-    }
+    // Prior sockets' pending-write snapshots are not outcomes. Takeover waits
+    // for their locked writes to commit (including lead/ticket evidence), and
+    // any older write reaching the lock afterwards is refused. The verified
+    // resume read above therefore suppresses only a durable successful capture.
     // ⭐ A SLOW request_reservice OUTRANKS THE FLOOR TOO. A filed re-service is
     // this call's durable artifact and suppresses the floor once it lands — but
     // one still blocked in its transaction past the drain bound left the floor

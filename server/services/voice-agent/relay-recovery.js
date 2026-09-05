@@ -102,12 +102,9 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0, writesInFlight = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [], holdOpen = false, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [] }) {
   return {
-    // Write tools still running past this leg's close drain (capture_lead /
-    // request_reservice): the resumed leg's capture floor must not race a
-    // second artifact against them (hook r37 P1).
-    writes_in_flight: (Array.isArray(writesInFlight) ? writesInFlight : []).map((n) => String(n || '')).filter(Boolean),
+    lookup_refs: lookupRefs,
     // Customer-book lookups consumed on this leg — the per-call anti-fishing
     // budget continues across the reconnect (codex r4 P2).
     lookups_used: Number(lookupsUsed) || 0,
@@ -298,13 +295,14 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
         modelFailures: latest ? Number(latest.model_failures) || 0 : 0,
         toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
-        reserviceFiled: legs.some((seg) => seg.reservice_filed === true),
+        reserviceFiled: meta.relay_reservice_filed === true || legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
         // A lead captured on an earlier leg even when its relay_lead_id
         // stamp (best-effort) did not land (codex r3 P2).
         leadCaptured: legs.some((seg) => seg.lead_captured === true),
         lookupsUsed: legs.reduce((max, seg) => Math.max(max, Number(seg.lookups_used) || 0), 0),
-        writesInFlight: [...new Set(legs.flatMap((seg) => (Array.isArray(seg.writes_in_flight) ? seg.writes_in_flight : [])).map(String))],
+        lookupRefs: legs.flatMap((seg) => Array.isArray(seg.lookup_refs) ? seg.lookup_refs : [])
+          .filter((entry) => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' && typeof entry[1] === 'string'),
         // The earliest leg's start = the call's start (null when no leg recorded one).
         startedAtMs: legs.map((seg) => Date.parse(seg.started_at || '')).filter((ms) => Number.isFinite(ms) && ms > 0).reduce((min, ms) => (min === null || ms < min ? ms : min), null),
         // The LATEST leg's hold (a later complete capture clears it) and the
