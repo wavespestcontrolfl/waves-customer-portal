@@ -992,7 +992,7 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
   // during which the page may recalculate once more; the click happens only
   // when the figure on screen is the one the cap approved (pre-push P0).
   // Order at the boundary (Codex #3876 r4 P1): total read → (changed: gate,
-  // start over) → Place Order proven actionable → tender + blockers
+  // start over) → claim re-asserted → Place Order proven actionable → tender + blockers
   // re-checked → account + ship-to re-checked → order lines re-checked →
   // confirmation baseline → total read AGAIN — the very last await before the click is that pure
   // read, and it must equal the figure the cap approved.
@@ -1021,17 +1021,21 @@ async function submitAndReadOrderNumber(page, { evidence, upload, markSubmitted,
     // during the awaits above can expose a second visible Place Order, and
     // an `nth()` locator saved earlier would re-resolve to one of them
     // without the ambiguity refusal (Codex #3900 r1 P2).
+    // The claim is re-asserted on EVERY pass, changed figure or not: the
+    // page checks can outlive the claim (stale recovery parks it after
+    // prolonged heartbeat failures), and only the reservation — conditional
+    // on `status = 'placing'` — refuses `claim_lost`; without it the click
+    // would spend after the claim was settled (Codex #3900 r5 P1). It is an
+    // awaited DB write, so it runs FIRST, like the trial click: everything
+    // the page must still prove — tender, blockers, identity, lines, the
+    // control, the baseline, the total — is read AFTER it (pre-push hook P1
+    // on c30aa1cee), and a checkout that switched tender, ship-to, or SKU
+    // during the wait is caught by those re-checks.
+    await gate(cents, 'final claim check');
     placeHandle = await trialPlaceOrder(page, await visibleControl(page, SELECTORS.placeOrder, 'place_order', evidence), refuse);
     await recheckTenderAtClick(page, radio, { evidence, upload });
     await identity();
     await lines();
-    // The claim is re-asserted on the final pass even when the figure did
-    // not change: the checks above can outlive the claim (stale recovery
-    // parks it after prolonged heartbeat failures), and only the reservation
-    // — conditional on `status = 'placing'` — refuses `claim_lost`; without
-    // it the click would spend after the claim was settled (Codex #3900 r5
-    // P1). It is an awaited DB write, so the total is read again after it.
-    await gate(cents, 'final claim check');
     // Still the validated element, still shown: a detached handle is a
     // replaced control — refused, nothing submitted (hook P1). Read BEFORE
     // the baseline and the final total read; a control replaced during

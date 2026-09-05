@@ -739,6 +739,16 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.cart).toEqual([]);
   });
 
+  test('the checkout is re-proven AFTER the final claim check: a tender reset during that DB wait is caught by the tender re-check — refused, no click (pre-push hook P1 on c30aa1cee)', async () => {
+    let calls = 0;
+    const { st, deps } = fakeSiteOne();
+    // call 1 = the checkout-stage cap check, call 2 = the changed total at the click, call 3 = the final claim check
+    await expect(s1.place(args({ beforeSubmit: async () => { calls += 1; if (calls >= 3) st.accountChecked = false; return { ok: true }; } }), deps)).rejects.toMatchObject({ refuse: 'bill_to_account_unverified' });
+    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(st.placeClicked).toBe(0);
+    expect(st.cart).toEqual([]);
+  });
+
   test('a confirmation-selector node that cannot be read after the click leaves the scan unresolved — the readable node never settles beside it (r5 P2 on #3900)', async () => {
     const { deps } = fakeSiteOne({ orderNumberUnreadableBeside: true, checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
