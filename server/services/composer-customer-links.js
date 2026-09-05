@@ -1103,8 +1103,8 @@ async function checkProjectReportLinks(ctx, onRecipientAccount) {
 }
 
 // Price-change notices: the notice must still be one the composer would
-// insert (a delivered or unreachable notice for a change still ahead — the
-// builder's predicate, re-run) and belong to the recipient's own row.
+// insert (a delivered notice for a change still ahead — the builder's
+// predicate, re-run) and belong to the recipient's own row.
 async function checkPriceChangeLinks(ctx) {
   for (const run of linkRuns(ctx.runs, /\/price-change\//i)) {
     const token = canonicalPortalToken(run, ctx.hosts, PRICE_CHANGE_TOKEN_RE);
@@ -1917,18 +1917,22 @@ async function buildReceiptLink(customerIds) {
   };
 }
 
-// A notice the composer may hand out: one the notices lane delivered (sent /
-// viewed) or could not reach the customer with ('unreachable' — the case an
-// operator texts by hand). draft / sending rows are the lane's in-flight
-// state and never leave here.
-const PRICE_CHANGE_LINKABLE_STATUSES = ['sent', 'viewed', 'unreachable'];
+// A notice the composer may RE-SHARE: one the notices lane already delivered
+// (sent / viewed). The lane owns first delivery — its claim (draft /
+// unreachable → sending), the price_change_notice SMS template with its
+// opt-out footer, and the sms_sent / sent finalization — so an 'unreachable'
+// notice is re-attempted from Pricing → Notices once the contact is fixed,
+// never texted from here (GH Codex #3893 r2 P1 ×2); draft / sending rows
+// are its in-flight state.
+const PRICE_CHANGE_LINKABLE_STATUSES = ['sent', 'viewed'];
 
 /**
- * Price-change notice link — the phone owner's OWN newest notice for a
- * change still ahead (effective today or later, ET). The page shows the
- * customer's first name and their price, so the route resolves the row
- * strictly (STRICT_OWNER_KINDS) and /sms re-binds it. Permanent token, raw
- * URL — the same link the notices lane texts (price-change-notices.js).
+ * Price-change notice link — the phone owner's OWN newest DELIVERED notice
+ * for a change still ahead (effective today or later, ET): a "here it is
+ * again" for a customer who asks. The page shows the customer's first name
+ * and their price, so the route resolves the row strictly
+ * (STRICT_OWNER_KINDS) and /sms re-binds it. Permanent token, raw URL — the
+ * same link the notices lane texted (price-change-notices.js).
  */
 async function buildPriceChangeNoticeLink(customerId) {
   const notice = await db('price_change_notices')

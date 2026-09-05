@@ -1056,19 +1056,22 @@ describe('buildReceiptLink', () => {
 });
 
 describe('buildPriceChangeNoticeLink', () => {
-  const NOTICE = { id: 'n1', notice_token: 'a'.repeat(32), effective_date: '2099-01-01', current_amount_cents: 6500, new_amount_cents: 7000, cadence_label: 'month', status: 'unreachable' };
+  const NOTICE = { id: 'n1', notice_token: 'a'.repeat(32), effective_date: '2099-01-01', current_amount_cents: 6500, new_amount_cents: 7000, cadence_label: 'month', status: 'sent' };
 
-  test('the phone owner\'s own newest upcoming notice (sent / viewed / unreachable) — immediate-only, permanent token', async () => {
+  test('the phone owner\'s own newest upcoming DELIVERED notice (sent / viewed) — immediate-only, permanent token', async () => {
     mockBuilders = { price_change_notices: chainBuilder({ firstRow: NOTICE }) };
     const r = await buildPriceChangeNoticeLink('c1');
     expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ customer_id: 'c1' });
-    expect(mockBuilders.price_change_notices.whereIn).toHaveBeenCalledWith('status', ['sent', 'viewed', 'unreachable']);
+    // Re-share only: first delivery (claim, template + opt-out footer, sent
+    // finalization) is the notices lane's — an 'unreachable' notice is never
+    // texted from the composer (GH Codex #3893 r2 P1 ×2).
+    expect(mockBuilders.price_change_notices.whereIn).toHaveBeenCalledWith('status', ['sent', 'viewed']);
     // Still ahead: effective today (ET) or later.
     expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith('effective_date', '>=', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     expect(r.url).toBe(`https://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`);
     expect(r.line).toMatch(/^Here are the details of your upcoming price change, effective .*2099: https:\/\/portal/);
     expect(r.immediateOnly).toBe(true);
-    expect(r.priceChange).toEqual({ id: 'n1', effectiveDate: '2099-01-01', currentPrice: '$65', newPrice: '$70', cadenceLabel: 'month', status: 'unreachable' });
+    expect(r.priceChange).toEqual({ id: 'n1', effectiveDate: '2099-01-01', currentPrice: '$65', newPrice: '$70', cadenceLabel: 'month', status: 'sent' });
   });
 
   test('no upcoming notice → reason', async () => {
@@ -1983,8 +1986,8 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       mockBuilders.price_change_notices = chainBuilder({ firstRow: row });
     }
 
-    test('a delivered or unreachable notice for a change still ahead, owned by the recipient, passes as a bearer', async () => {
-      wireNotice({ row: notice({ status: 'unreachable' }) });
+    test('a delivered notice for a change still ahead, owned by the recipient, passes as a bearer', async () => {
+      wireNotice({ row: notice({ status: 'viewed' }) });
       expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
       expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
       expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c1' });
@@ -1995,8 +1998,11 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
     });
 
-    test('an in-flight (draft / sending) notice, a past change, a vanished token, or another customer\'s notice refuses', async () => {
+    test('an undelivered (draft / sending / unreachable) notice, a past change, a vanished token, or another customer\'s notice refuses', async () => {
       wireNotice({ row: notice({ status: 'sending' }) });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+      // First delivery is the notices lane's (claim + template + finalization).
+      wireNotice({ row: notice({ status: 'unreachable' }) });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
       wireNotice({ row: notice({ effective_date: '2020-01-01' }) });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
