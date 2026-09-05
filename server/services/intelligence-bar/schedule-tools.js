@@ -588,6 +588,7 @@ async function assignTechnician(input, actionContext = {}) {
   // covering the day.
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   let count;
+  let committedAssignRows = [];
   try {
     count = await db.transaction(async trx => {
     await lockTechDays(trx, services.flatMap(s => [
@@ -634,11 +635,16 @@ async function assignTechnician(input, actionContext = {}) {
       .whereIn('id', serviceIds)
       .where('technician_id', tech.id)
       .count('id as count');
-    const changed = await trx('scheduled_services')
+    // The COMMITTED schedule of every reassigned row rides back for the
+    // notices (pre-push audit P1): a same-day window edit landing between
+    // the card's read and this lock must not make the "new visit" card
+    // describe the old window.
+    committedAssignRows = await trx('scheduled_services')
       .whereIn('id', serviceIds)
       .whereRaw('technician_id IS DISTINCT FROM ?', [tech.id])
-      .update({ technician_id: tech.id, route_order: null, updated_at: new Date() });
-    return changed + Number(alreadyOn);
+      .update({ technician_id: tech.id, route_order: null, updated_at: new Date() })
+      .returning(['id', 'scheduled_date', 'window_start', 'window_end']);
+    return committedAssignRows.length + Number(alreadyOn);
     });
   } catch (err) {
     if (err && err.previewChanged) {
@@ -653,11 +659,14 @@ async function assignTechnician(input, actionContext = {}) {
   // delivery into the tool's response; the operator's own moves stay silent.
   {
     const { notifyAssignmentChange } = require('../tech-visit-notifications');
-    for (const s of services) {
-      if ((s.current_tech_id || null) === tech.id) continue;
+    // Recipients and snapshots come from the rows the UPDATE actually
+    // reassigned (a row already on tech.id was a no-op and stays silent).
+    const preById = new Map(services.map((s) => [String(s.id), s]));
+    for (const row of committedAssignRows) {
+      const pre = preById.get(String(row.id));
       void notifyAssignmentChange({
-        visitId: s.id, fromTechId: s.current_tech_id || null, toTechId: tech.id, actorId: actionContext.technicianId || null,
-        snapshot: { date: s.scheduled_date_str, windowStart: s.window_start || null, windowEnd: s.window_end || null },
+        visitId: row.id, fromTechId: pre?.current_tech_id || null, toTechId: tech.id, actorId: actionContext.technicianId || null,
+        snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
       });
     }
   }
@@ -1328,6 +1337,7 @@ async function swapTechAssignments(input, actionContext = {}) {
     .whereNotIn('status', ['cancelled', 'completed', 'rescheduled'])
     .forUpdate()
     .select('id', 'visit_id');
+  let committedSwapRows = [];
   try {
     await db.transaction(async trx => {
       // Tech-day fence before any membership write — both real tech-days plus
@@ -1356,8 +1366,13 @@ async function swapTechAssignments(input, actionContext = {}) {
       if (bIds.length) await assertAssignableTechnician(techA.id, { conn: trx });
       if (aIds.length) await assertAssignableTechnician(techB.id, { conn: trx });
       if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: null, updated_at: new Date() });
-      if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
-      if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
+      // The COMMITTED schedule of every swapped row rides back for the
+      // notices (pre-push audit P1): a same-day window edit landing between
+      // the card's read and these locks must not put the old window on the
+      // receiving tech's card.
+      const swapReturning = ['id', 'scheduled_date', 'window_start', 'window_end'];
+      if (bIds.length) committedSwapRows.push(...await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() }).returning(swapReturning));
+      if (aIds.length) committedSwapRows.push(...await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() }).returning(swapReturning));
     });
   } catch (err) {
     if (err && err.previewChanged) {
@@ -1373,10 +1388,10 @@ async function swapTechAssignments(input, actionContext = {}) {
   {
     const { notifyAssignmentChange } = require('../tech-visit-notifications');
     const swapActor = actionContext.technicianId || null;
-    const swapRows = new Map([...aServices, ...bServices].map((r) => [String(r.id), r]));
+    const swapRows = new Map(committedSwapRows.map((r) => [String(r.id), r]));
     const swapSnapshot = (sid) => {
       const r = swapRows.get(String(sid));
-      return r ? { date: r.scheduled_date, windowStart: r.window_start, windowEnd: r.window_end } : null;
+      return r ? { date: r.scheduled_date, windowStart: r.window_start || null, windowEnd: r.window_end || null } : null;
     };
     for (const sid of aIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techA.id, toTechId: techB.id, actorId: swapActor, snapshot: swapSnapshot(sid) });
     for (const sid of bIds) void notifyAssignmentChange({ visitId: sid, fromTechId: techB.id, toTechId: techA.id, actorId: swapActor, snapshot: swapSnapshot(sid) });

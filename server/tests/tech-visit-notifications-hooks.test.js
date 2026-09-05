@@ -258,10 +258,16 @@ describe('direct creators tell the tech (source order)', () => {
     expect(block).toContain("kind: 'assigned', technicianId: row.technician_id, actorId: null,");
   });
 
-  test('IB assign_technician snapshots the window it assigned, and move_stops_to_day names the committed holder', () => {
+  test('IB assign_technician and swap_tech_assignments snapshot the COMMITTED schedule (UPDATE RETURNING), and move_stops_to_day names the committed holder', () => {
     const src = read('../services/intelligence-bar/schedule-tools.js');
-    expect(src).toContain("snapshot: { date: s.scheduled_date_str, windowStart: s.window_start || null, windowEnd: s.window_end || null },");
-    expect(src).toContain("'scheduled_services.window_start', 'scheduled_services.window_end',");
+    // assign: the notice loop walks the rows the UPDATE reassigned.
+    expect(src).toContain("committedAssignRows = await trx('scheduled_services')");
+    expect(src).toContain(".returning(['id', 'scheduled_date', 'window_start', 'window_end']);");
+    expect(src).toContain("for (const row of committedAssignRows) {");
+    expect(src).toContain("snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },");
+    // swap: both reassigning updates return the committed rows the snapshots use.
+    expect(src).toContain("const swapRows = new Map(committedSwapRows.map((r) => [String(r.id), r]));");
+    expect((src.match(/\.returning\(swapReturning\)/g) || []).length).toBe(2);
     expect(src).toContain(".returning(['id', 'technician_id']);\n      if (committedRows.length === 0) {");
     expect(src).toContain('technicianId: c.committedTechId,');
   });
