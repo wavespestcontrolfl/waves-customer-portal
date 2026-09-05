@@ -325,7 +325,8 @@ describe('getRun', () => {
     jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: 'r9', sourceSystem: 'call_log', sourceRunId: 'c1', laneId: 'call_extraction', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [{ attempt_no: 1 }], artifacts: [], events: [{ event_type: 'finished' }], workItem: { id: 'w' } });
     fixtures.llm_dispatch_log = [{ id: 1, row_kind: 'call' }];
     const d = await runIndex.getRun('call_log', 'c1', { now: NOW });
-    expect(d.run).toMatchObject({ key: 'agent_runs:r9', canonical: true, stepsDone: 1, health: 'healthy' });
+    // the timeline is the legacy steps; the counts stay the canonical run's (current attempt), not a recount
+    expect(d.run).toMatchObject({ key: 'agent_runs:r9', canonical: true, stepsDone: 0, stepsTotal: 0, health: 'healthy' });
     expect(d.steps).toEqual([{ key: 'transcribe', status: 'done' }]);
     expect(d.attempts).toHaveLength(1);
     expect(d.calls).toHaveLength(1);

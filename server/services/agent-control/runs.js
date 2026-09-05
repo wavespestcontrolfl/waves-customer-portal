@@ -129,12 +129,12 @@ function inertHandle(args = {}) {
 
 // ── Start ────────────────────────────────────────────────────────────
 
-async function upsertWorkItem(args, laneId, policy) {
+async function upsertWorkItem(conn, args, laneId, policy) {
   const wi = args.workItem;
   if (!wi || !wi.sourceRef) return null;
   const sourceSystem = clip(wi.sourceSystem || args.sourceSystem, 60);
   const sourceRef = clip(wi.sourceRef, 180);
-  await db('work_items')
+  await conn('work_items')
     .insert({
       lane_id: laneId,
       workflow_id: clip(args.workflowId, 80),
@@ -149,15 +149,15 @@ async function upsertWorkItem(args, laneId, policy) {
     })
     .onConflict(['source_system', 'source_ref'])
     .ignore();
-  const row = await db('work_items').where({ source_system: sourceSystem, source_ref: sourceRef }).first('id');
+  const row = await conn('work_items').where({ source_system: sourceSystem, source_ref: sourceRef }).first('id');
   return row ? row.id : null;
 }
 
-async function insertRun(args, laneId, policy, workItemId, traceId, now) {
+async function insertRun(conn, args, laneId, policy, workItemId, traceId, now) {
   const sourceSystem = clip(args.sourceSystem, 60);
   const sourceRunId = clip(args.sourceRunId, 180);
   const lease = new Date(now.getTime() + policy.stall_after_ms);
-  await db('agent_runs')
+  await conn('agent_runs')
     .insert({
       work_item_id: workItemId,
       lane_id: laneId,
@@ -183,7 +183,7 @@ async function insertRun(args, laneId, policy, workItemId, traceId, now) {
     })
     .onConflict(['source_system', 'source_run_id'])
     .ignore();
-  return db('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).first();
+  return conn('agent_runs').where({ source_system: sourceSystem, source_run_id: sourceRunId }).first();
 }
 
 // The attempt number is allocated by an atomic UPDATE … attempts + 1
@@ -192,12 +192,12 @@ async function insertRun(args, laneId, policy, workItemId, traceId, now) {
 // from a handle is fenced on `attempts = its attemptNo` (fenced() below):
 // once a newer attempt opened, the older handle's finish / fail / heartbeat
 // no longer touch the run — only its own attempt row.
-async function openAttempt(run, policy, now) {
+async function openAttempt(conn, run, policy, now) {
   // A reopened run gets a fresh lease, a clean current outcome and a fresh
   // clock — started_at / last_progress_at are THIS attempt's, so health.js
   // judges the retry from its own start (the previous attempt's timing,
   // result and error live on in agent_attempts).
-  const [updated] = await db('agent_runs').where({ id: run.id }).update({
+  const [updated] = await conn('agent_runs').where({ id: run.id }).update({
     attempts: db.raw('attempts + 1'),
     lifecycle: 'running',
     worker_id: WORKER_ID,
@@ -216,7 +216,7 @@ async function openAttempt(run, policy, now) {
     updated_at: now,
   }).returning('attempts');
   const attemptNo = Number(updated && updated.attempts != null ? updated.attempts : updated);
-  const [attempt] = await db('agent_attempts')
+  const [attempt] = await conn('agent_attempts')
     .insert({ run_id: run.id, attempt_no: attemptNo, worker_id: WORKER_ID, started_at: now })
     .returning('id');
   return { attemptId: attempt ? attempt.id || attempt : null, attemptNo };
@@ -241,15 +241,18 @@ async function startRun(args = {}) {
   const traceId = args.traceId || ambient.traceId || context.newTraceId();
   const now = new Date();
 
-  const opened = await guarded('startRun', async () => {
-    const workItemId = await upsertWorkItem(args, laneId, policy);
-    const run = await insertRun(args, laneId, policy, workItemId, traceId, now);
+  // Work item, run, the attempts counter and the attempt row land together
+  // or not at all: a crash between the counter bump and the attempt insert
+  // would otherwise leave a run whose current attempt has no row.
+  const opened = await guarded('startRun', () => db.transaction(async (trx) => {
+    const workItemId = await upsertWorkItem(trx, args, laneId, policy);
+    const run = await insertRun(trx, args, laneId, policy, workItemId, traceId, now);
     if (!run) throw new Error('run row missing after insert');
     const resumed = Number(run.attempts || 0) > 0 || run.lifecycle !== 'running';
-    const { attemptId, attemptNo } = await openAttempt(run, policy, now);
-    await insertEvent(run.id, resumed ? 'resumed' : 'started', null, { attempt: attemptNo, worker: WORKER_ID });
+    const { attemptId, attemptNo } = await openAttempt(trx, run, policy, now);
+    await trx('run_events').insert({ run_id: run.id, event_type: resumed ? 'resumed' : 'started', message: null, metadata: jsonb({ attempt: attemptNo, worker: WORKER_ID }) });
     return { run, attemptId, attemptNo, workItemId: run.work_item_id || workItemId };
-  });
+  }));
   if (!opened) return inertHandle(args);
   // a reopened run keeps the trace its ledger rows already carry
   return liveHandle({ ...opened, laneId, policy, traceId: opened.run.trace_id || traceId, workflowId: args.workflowId || null });

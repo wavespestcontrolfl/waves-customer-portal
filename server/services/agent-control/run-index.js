@@ -272,7 +272,9 @@ async function getRun(source, id, { now = new Date() } = {}) {
   const primary = canonical || legacy;
   const secondary = legacy || canonical;
   const steps = primary.run.steps.length ? primary.run.steps : secondary.run.steps;
-  const run = annotate({ ...primary.run, steps, stepsDone: steps.filter((s) => s.status === 'done').length, stepsTotal: steps.length }, now);
+  // the timeline lists every step; the counts (and so budget health) stay
+  // the run's own — the current attempt's for a canonical run
+  const run = annotate({ ...primary.run, steps }, now);
   const detail = canonical || NO_CANONICAL;
   const calls = await loadCalls({ canonicalId: canonical ? canonical.run.id : null, sessionId: legacySource === managedSessions ? legacy.run.id : null });
   return {

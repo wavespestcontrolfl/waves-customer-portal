@@ -119,12 +119,16 @@ describe('gate and failure isolation', () => {
     expect(store.agent_runs).toBeUndefined();
   });
 
-  test('missing identity → inert with one warning; DB refusing the start → inert, never a throw', async () => {
+  test('missing identity → inert with one warning; DB refusing the start → inert, never a throw; the start is one transaction', async () => {
     expect((await runs.startRun({ laneId: 'blog_draft' })).inert).toBe(true);
     expect(mockWarn).toHaveBeenCalledTimes(1);
     state.failNext = 'agent_runs';
     const h = await runs.startRun(base);
     expect(h.inert).toBe(true);
+    const trx = jest.spyOn(fakeDb, 'transaction');
+    await runs.startRun(base);
+    expect(trx).toHaveBeenCalledTimes(1);
+    trx.mockRestore();
   });
 
   test('a write failing mid-run is swallowed (rate-limited warn) and the handle keeps working', async () => {
