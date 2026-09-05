@@ -1592,9 +1592,10 @@ class RelayConversation {
    */
   async _maybeHandoffForFailure(toolCtx) {
     const { providerFailurePolicy } = require('./relay-recovery');
-    if (this._handoffForFailure || this.ended || this._ending) return false;
+    if ([this._handoffForFailure, this.ended, this._ending].some(Boolean)) return false;
     if (providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) !== 'handoff') return false;
     await withTimeout(Promise.allSettled([...this._inFlightWrites.values()]), WRITE_DRAIN_TIMEOUT_MS);
+    if (this.ended || this._ending) return true; // consume the turn without recording unsent speech
     if (this._inFlightWrites.size) {
       if (!await this._sessionSuperseded()) this.say(require('./relay-language').copy('writePending', this.language));
       return true; // the turn is answered; retry handoff on a later caller turn
@@ -2067,15 +2068,17 @@ class RelayConversation {
           // carry the caller's contact details and belongs in the lead row.
           this._recordTurn('tool', block.name);
           const toolStartAt = now();
-          toolCtx.toolFailed = false; // set by executeTool's catch (an operational failure answered with a string)
-          const out = await this._executeToolBounded(block.name, block.input, toolCtx);
+          // Detached tools retain their own outcome flag; live context getters stay live.
+          const invocationCtx = Object.defineProperties({}, Object.getOwnPropertyDescriptors(toolCtx));
+          invocationCtx.toolFailed = false;
+          const out = await this._executeToolBounded(block.name, block.input, invocationCtx);
           stat.toolMs += now() - toolStartAt;
           stat.toolCount += 1;
           // ok = the tool answered without failing (a timeout / in-flight
           // refusal / caught failure is not a success — the handoff card
           // must not tell staff a failed lookup succeeded, codex r1 P2).
           const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
-          const toolOk = !sentinel && toolCtx.toolFailed !== true;
+          const toolOk = !sentinel && invocationCtx.toolFailed !== true;
           if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
           this._toolOutcomes.push({ name: block.name, ok: toolOk });
           this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools

@@ -1283,6 +1283,35 @@ describe('the conversation side', () => {
       } finally { jest.useRealTimers(); }
     });
 
+    test.each([true, false])('disconnect during write drain records no speech (write settles: %s)', async (settles) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const executeTool = jest.fn();
+      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      const send = jest.fn();
+      const endSession = jest.fn();
+      const convo = new Convo({ callSid: 'CA-disconnected-drain', from: '+19415551234', send, endSession });
+      convo._modelFailures = 2;
+      convo._fileFailureCallback = jest.fn();
+      let settle;
+      const write = new Promise((resolve) => { settle = resolve; }).then(() => { convo._inFlightWrites.delete('request_booking'); });
+      convo._inFlightWrites.set('request_booking', write);
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+      try {
+        const pending = convo._maybeHandoffForFailure({ officeOpenNow: () => true });
+        await jest.advanceTimersByTimeAsync(1);
+        convo.ended = true; // end() sets this before waiting for the active turn.
+        if (settles) settle();
+        await jest.advanceTimersByTimeAsync(10010);
+        expect(await pending).toBe(true);
+        expect(send).not.toHaveBeenCalled();
+        expect(convo._transcript).toEqual([]);
+        expect(executeTool).not.toHaveBeenCalled();
+        expect(convo._fileFailureCallback).not.toHaveBeenCalled();
+        expect(endSession).not.toHaveBeenCalled();
+      } finally { settle(); await write; jest.useRealTimers(); }
+    });
+
     test.each(['_modelFailures', '_toolFailures'])('next caller turn retries a deferred %s handoff before another model round', async (counter) => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
       const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'How can I help?' }] }) }));
@@ -1388,5 +1417,87 @@ describe('the conversation side', () => {
       expect(convo._toolFailures).toBeGreaterThanOrEqual(2);
       expect(endSession).toHaveBeenCalledWith(expect.objectContaining({ reason: 'provider_failure' }));
     });
+  });
+});
+
+describe('provider failure tracking', () => {
+    function isolated({ streamImpl, executeToolImpl }) {
+      let Convo;
+      let leadWriter;
+      let dbIso;
+      jest.resetModules(); // relay-conversation requires relay-tools lazily — a cached instance from an earlier case must not win
+      jest.isolateModules(() => {
+        jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream: streamImpl } }; });
+        jest.doMock('../services/voice-agent/relay-tools', () => ({ TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: executeToolImpl }));
+        Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
+        leadWriter = require('../services/lead-from-extraction').createLeadFromExtraction; // the isolated registry's mocks
+        dbIso = require('../models/db');
+      });
+      return { Convo, leadWriter, dbIso };
+    }
+
+
+  test('a timed-out tool cannot mark a later successful invocation failed; copied getters stay live', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    let failFirst;
+    let finishSecond;
+    let secondCtx;
+    const firstDone = new Promise((resolve) => { failFirst = resolve; });
+    const secondDone = new Promise((resolve) => { finishSecond = resolve; });
+    const stream = jest.fn()
+      .mockReturnValueOnce({ finalMessage: async () => ({ stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 't1', name: 'get_services_catalog', input: {} },
+        { type: 'tool_use', id: 't2', name: 'find_slots', input: {} },
+      ] }) })
+      .mockReturnValue({ finalMessage: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Here are the options.' }] }) });
+    const executeTool = jest.fn(async (name, _input, ctx) => {
+      if (name === 'get_services_catalog') {
+        await firstDone;
+        ctx.toolFailed = true;
+        return 'Catalog unavailable.';
+      }
+      secondCtx = ctx;
+      await secondDone;
+      return 'An available slot.';
+    });
+    const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+    primeDb({ db: dbIso });
+    const endSession = jest.fn();
+    const convo = new Convo({ callSid: 'CA-overlap-fixture', from: '+19415551234', send: jest.fn(), endSession });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const pending = convo._runLoop('what is available');
+      await jest.advanceTimersByTimeAsync(3010);
+      expect(executeTool).toHaveBeenCalledTimes(2);
+      expect(convo._toolFailures).toBe(1);
+      failFirst();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(secondCtx.toolFailed).toBe(false);
+      convo._callerContext = { tier: 'full', customer: { id: 'customer-fixture' } };
+      expect(secondCtx.customerTier).toBe('full');
+      expect(secondCtx.customerId).toBe('customer-fixture');
+      finishSecond();
+      await pending;
+      expect(convo._toolOutcomes).toEqual([
+        { name: 'get_services_catalog', ok: false }, { name: 'find_slots', ok: true },
+      ]);
+      expect(convo._toolFailures).toBe(0);
+      expect(endSession).not.toHaveBeenCalled();
+    } finally { failFirst(); finishSecond(); jest.useRealTimers(); }
+  });
+
+  test('a successful model round clears only model failures', async () => {
+    const stream = jest.fn()
+      .mockReturnValueOnce({ finalMessage: async () => { throw new Error('provider unavailable'); } })
+      .mockReturnValue({ finalMessage: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Please continue.' }] }) });
+    const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+    primeDb({ db: dbIso });
+    const convo = new Convo({ callSid: 'CA-model-fixture', from: '+19415551234', send: jest.fn() });
+    convo._toolFailures = 1;
+    await convo._runLoop('first');
+    expect(convo._modelFailures).toBe(1);
+    await convo._runLoop('second');
+    expect(convo._modelFailures).toBe(0);
+    expect(convo._toolFailures).toBe(1);
   });
 });
