@@ -209,6 +209,18 @@ describe('buildSprayCheck', () => {
     expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: hotHour, now }).verdicts[0].verdict).toBe('hold');
   });
 
+  test('coverage is continuous timestamps, not a row count (Codex r2 P1)', () => {
+    // 09:30 start with rows at 09:00–12:00 covers only through 13:00.
+    const late = new Date(now.getTime() + 30 * 60000);
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: hourly.slice(0, 4), now: late });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature / wind forecast' });
+    // An interior gap with both boundary hours present never passes.
+    const gap = [hour(0), hour(1), hour(3)];
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 4 }], hourly: gap, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 4 h forecast' });
+    // The fifth row closes a 09:30 window.
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_wind_mph: 10 }], hourly: hourly.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
+  });
+
   test('no forecast → unknown with reason', () => {
     const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: null, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast' });
@@ -272,20 +284,36 @@ describe('access codes never enter the model-safe facts', () => {
   });
 });
 
-describe('resolveVisitProducts passes the canonical tier, not the display program (Codex r1 P1)', () => {
-  const catalog = [{ id: 'hyd', name: 'Hydretain ES Plus', default_rate_per_1000: 6, rate_unit: 'fl oz', cost_per_unit: 1 }];
-  const protocols = { lawn: { A: { visits: [{ month: 'Sep', visit: 9, primary: '', secondary: 'Premium only: Hydretain ES Plus 6 oz' }] } } };
-  const facts = (tier) => ({ isLawn: true, trackKey: 'A', waveguardTier: tier, strip: { program: `Lawn Care · WaveGuard ${tier}` } });
+describe('resolveVisitProducts reuses the appointment plan for lawn visits (Codex r2 P1)', () => {
+  const catalog = [
+    { id: 'orig', name: 'Celsius WG', rate_unit: 'oz' },
+    { id: 'sub', name: 'Speedzone Southern', rate_unit: 'fl oz' },
+    { id: 'hyd', name: 'Hydretain ES Plus', rate_unit: 'fl oz' },
+  ];
+  const plan = {
+    propertyGate: { month: 'Sep', visit: 9 },
+    mixCalculator: {
+      items: [{ raw: 'Celsius WG 0.113 oz', role: 'base', selected: true, product: { id: 'sub' }, mix: { amount: 12.4, amountUnit: 'fl oz' }, substitution: { originalProductName: 'Celsius WG' } }],
+      conditionalOptions: [{ raw: 'Premium only: Hydretain', role: 'conditional', selected: false, product: { id: 'hyd' }, mix: { amount: 6, amountUnit: 'fl oz' }, substitution: null }],
+    },
+  };
+  const facts = { serviceId: 'svc1', isLawn: true, strip: { program: 'Lawn Care · WaveGuard platinum' } };
 
-  test('platinum customer → the premium line is selected', () => {
-    const { lines } = jobCard.resolveVisitProducts({ facts: facts('platinum'), protocols, catalog, month: 'Sep' });
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({ scope: 'PREMIUM_ONLY', selected: true, product: { id: 'hyd' } });
+  test('the plan\'s substitute, its mix and the visit stamp flow into the lines', async () => {
+    const buildPlan = jest.fn().mockResolvedValue(plan);
+    const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });
+    expect(buildPlan).toHaveBeenCalledWith('svc1', expect.objectContaining({ db: expect.any(Function) }));
+    expect(out.visit).toEqual({ month: 'Sep', visit: 9 });
+    expect(out.lines).toEqual([
+      expect.objectContaining({ selected: true, product: catalog[1], planMix: { amount: 12.4, amountUnit: 'fl oz' }, substitutedFor: 'Celsius WG' }),
+      expect.objectContaining({ selected: false, product: catalog[2], substitutedFor: null }),
+    ]);
   });
 
-  test('bronze customer → the premium line is not selected', () => {
-    const { lines } = jobCard.resolveVisitProducts({ facts: facts('bronze'), protocols, catalog, month: 'Sep' });
-    expect(lines[0]).toMatchObject({ scope: 'PREMIUM_ONLY', selected: false });
+  test('a plan failure yields no lines instead of a crash', async () => {
+    const buildPlan = jest.fn().mockRejectedValue(new Error('Scheduled service not found'));
+    const out = await jobCard.resolveVisitProducts({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan } });
+    expect(out).toEqual({ visit: null, lines: [] });
   });
 });
 

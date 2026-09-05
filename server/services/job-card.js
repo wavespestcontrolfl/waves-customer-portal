@@ -28,27 +28,11 @@ const { detectServiceCategory } = require('../utils/service-normalizer');
 const { addETDays, etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 const { redactAccessCodes } = require('./context-aggregator');
 const { matchServiceProtocol } = require('./protocol-matcher');
-const {
-  calculateProductAmount,
-  effectiveAreaFactor,
-  parseProtocolLines,
-  resolveProtocolItems,
-  matchCatalogProduct,
-  parseVisitNutrientTargets,
-  buildProductInventorySnapshot,
-} = require('./waveguard-plan-engine');
+const { buildPlanForService, matchCatalogProduct, buildProductInventorySnapshot } = require('./waveguard-plan-engine');
 const { latestComparableGroupApplication } = require('./waveguard-approval-engine');
 
 const PROMPT_VERSION = 'job_card_paragraph_v1';
 const LANE_ID = 'job_card_paragraph';
-const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const TRACK_MAP = {
-  A_St_Aug_Sun: 'st_augustine',
-  B_St_Aug_Shade: 'st_augustine',
-  C1_Bermuda: 'bermuda',
-  C2_Zoysia: 'zoysia',
-  D_Bahia: 'bahia',
-};
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
 const OFFICE_COORDS = { lat: 27.40, lng: -82.40 };
@@ -228,11 +212,8 @@ async function loadJobCardFacts(serviceId, dbh = db) {
   if (!svc) return null;
 
   const serviceLine = detectServiceCategory(svc.service_type);
-  const [prefs, turf, lastVisit, issues] = await Promise.all([
+  const [prefs, lastVisit, issues] = await Promise.all([
     dbh('property_preferences').where({ customer_id: svc.customer_id }).first().catch(() => null),
-    serviceLine === 'lawn'
-      ? dbh('customer_turf_profiles').where({ customer_id: svc.customer_id }).select('track_key', 'grass_type', 'lawn_sqft').first().catch(() => null)
-      : Promise.resolve(null),
     loadLastVisit(dbh, svc.customer_id, serviceLine),
     loadOpenIssues(dbh, svc.customer_id),
   ]);
@@ -252,11 +233,6 @@ async function loadJobCardFacts(serviceId, dbh = db) {
     serviceType: svc.service_type,
     serviceLine,
     isLawn: serviceLine === 'lawn',
-    trackKey: turf ? (TRACK_MAP[turf.track_key] || turf.track_key || turf.grass_type || null) : null,
-    lawnSqft: turf?.lawn_sqft != null ? Number(turf.lawn_sqft) : null,
-    // Canonical tier for the plan engine's PREMIUM_ONLY selection; the strip
-    // carries the display string.
-    waveguardTier: svc.waveguard_tier || null,
     strip: { name, program, phone: clean(svc.phone, 24) || null },
     access: { codes: accessCodes(prefs) },
     coords: coords ? { ...coords, source: 'property' } : { ...OFFICE_COORDS, source: 'office' },
@@ -464,7 +440,20 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
     const t = Date.parse(h.startTime);
     return Number.isFinite(t) && t + 3600000 > start && t < start + hours * 3600000;
   });
-  const covers = (rows, hours) => rows.length >= Math.ceil(hours);
+  // Continuous coverage from now through now + hours: each period must start
+  // no later than the previous one ended (a 09:30 start needs the 13:00 row
+  // for a 4 h window; an interior gap never passes).
+  const covers = (rows, hours) => {
+    const end = start + hours * 3600000;
+    let cursor = start;
+    const starts = rows.map((h) => Date.parse(h.startTime)).filter(Number.isFinite).sort((a, b) => a - b);
+    for (const t of starts) {
+      if (t > cursor) return false;
+      cursor = Math.max(cursor, t + 3600000);
+      if (cursor >= end) return true;
+    }
+    return cursor >= end;
+  };
 
   const verdicts = products.map((product) => {
     const limits = productLimits(product);
@@ -615,17 +604,36 @@ function precautionText(product) {
 
 /**
  * The visit's protocol product lines resolved to catalog rows. Lawn visits
- * come from the track's month visit through the plan engine's line
- * resolver; other lines from the matched protocol visit's catalog hints.
+ * reuse the appointment's resolved plan (buildPlanForService: turf profile,
+ * soil P branch, tier, stress flags, saved substitutions with their rate
+ * overrides, assigned calibration) so the card never disagrees with the
+ * plan; other lines come from the matched protocol visit's catalog hints.
  */
-function resolveVisitProducts({ facts, protocols, catalog, month }) {
+async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps = {}, now = new Date() }) {
   if (facts.isLawn) {
-    const track = protocols.lawn?.[facts.trackKey];
-    const visit = track?.visits?.find((v) => v.month === month);
-    if (!visit) return { visit: null, lines: [] };
-    const lines = [...parseProtocolLines(visit.primary, 'base'), ...parseProtocolLines(visit.secondary, 'conditional')];
-    const resolved = resolveProtocolItems(lines, catalog, { plan: facts.waveguardTier });
-    return { visit, lines: resolved.filter((l) => l.product) };
+    let plan;
+    try {
+      plan = await (deps.buildPlan || buildPlanForService)(facts.serviceId, { db: dbh, now });
+    } catch (err) {
+      logger.warn(`[job-card] plan unavailable for ${facts.serviceId}: ${err.message}`);
+      return { visit: null, lines: [] };
+    }
+    const items = [...(plan?.mixCalculator?.items || []), ...(plan?.mixCalculator?.conditionalOptions || [])];
+    const lines = [];
+    for (const item of items) {
+      const product = item.product ? catalog.find((p) => p.id === item.product.id) : null;
+      if (!product) continue;
+      lines.push({
+        raw: item.raw,
+        role: item.role,
+        selected: item.selected,
+        product,
+        planMix: item.mix || null,
+        substitutedFor: item.substitution?.originalProductName || null,
+      });
+    }
+    const gate = plan?.propertyGate || {};
+    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines };
   }
   const match = matchServiceProtocol(protocols, facts.serviceType);
   const visit = match?.matchedVisit || match?.program?.visits?.[0] || null;
@@ -644,8 +652,7 @@ function resolveVisitProducts({ facts, protocols, catalog, month }) {
   return { visit, lines };
 }
 
-async function buildProductCards({ facts, lines, tank, verdicts, packSizes, dbh = db, visit }) {
-  const nutrientTargets = facts.isLawn && visit ? parseVisitNutrientTargets(visit.notes) : {};
+async function buildProductCards({ facts, lines, verdicts, packSizes, dbh = db }) {
   // One card per catalog product: two protocol lines can resolve to the same
   // row (a base line plus a conditional). The selected line wins the card;
   // the other line's text rides along.
@@ -663,16 +670,9 @@ async function buildProductCards({ facts, lines, tank, verdicts, packSizes, dbh 
   for (const line of byProduct.values()) {
     const p = line.product;
     const verdict = verdicts.find((v) => v.productId === p.id) || { verdict: 'unknown', reason: 'No limit on file' };
-    let planned = null;
-    let plannedMix = null;
-    if (facts.isLawn && facts.lawnSqft && tank.calibrated && line.selected !== false) {
-      const areaFactor = effectiveAreaFactor(line, { plan: facts.waveguardTier });
-      const mix = calculateProductAmount({ product: p, lawnSqft: facts.lawnSqft, carrierGalPer1000: tank.carrierGalPer1000, areaFactor, ...nutrientTargets });
-      if (mix?.amount > 0) {
-        plannedMix = mix;
-        planned = { amount: Math.round(mix.amount * 100) / 100, unit: mix.amountUnit || p.rate_unit || null };
-      }
-    }
+    // The appointment plan's own mix (lawn only) — never recomputed here.
+    const plannedMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
+    const planned = plannedMix ? { amount: Math.round(plannedMix.amount * 100) / 100, unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
     // stock in the inventory unit (gal) — the plan engine's snapshot owns
     // that conversion. Unconvertible pairs are not "short", they are flagged.
@@ -687,7 +687,7 @@ async function buildProductCards({ facts, lines, tank, verdicts, packSizes, dbh 
       name: p.name,
       role: line.role || 'base',
       conditional: line.selected === false,
-      line: [line.raw, ...line.extraLines].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
+      line: [line.substitutedFor ? `Substitute for ${line.substitutedFor}` : null, line.raw, ...line.extraLines].map((r) => clean(r, 120)).filter(Boolean).join(' · '),
       verdict: verdict.verdict,
       verdictReason: verdict.reason,
       planned,
@@ -729,7 +729,6 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
   const facts = await loadJobCardFacts(serviceId, dbh);
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
-  const month = MONTH_ABBR[Number(String(facts.scheduledDate).slice(5, 7)) - 1] || null;
 
   const [paragraph, catalog, calibration, hourly] = await Promise.all([
     paragraphForVisit(facts, { dbh, deps }),
@@ -738,11 +737,11 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
     (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null),
   ]);
   const tank = tankFromCalibration(calibration, now);
-  const { visit, lines } = resolveVisitProducts({ facts, protocols, catalog, month });
+  const { visit, lines } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
-  const cards = await buildProductCards({ facts, lines, tank, verdicts: sprayCheck.verdicts, packSizes, dbh, visit });
+  const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, dbh });
 
   return {
     enabled: true,
