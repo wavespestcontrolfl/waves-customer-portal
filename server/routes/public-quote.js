@@ -1946,6 +1946,28 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the label moves, lands, or clears on this row only; nothing on the
       // original is written.
       const relabelable = (row) => !!row && row.lead_type === 'quote_wizard' && (row.status === 'new' || row.status === 'duplicate');
+      // ONE write lands this request's fields on the run's own row under
+      // `claim`. With a label (a marker, or null for 'new') the status and
+      // marker that label implies land in the same statement over the
+      // replace snapshot (quote_wizard rows: each stage supersedes the last)
+      // that carries forward additional_properties, the declared timeline
+      // and a won_estimate_id stamp — never the carried marker. Without a
+      // label the fields land through the merge write (updateFields, which
+      // keeps the stored marker) and the label stays the row's own. 0 rows
+      // leaves `lead` null.
+      const land = async (claim, label) => {
+        const relabel = label === undefined ? {} : {
+          status: label ? 'duplicate' : 'new',
+          extracted_data: db.raw(
+            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb || ?::jsonb",
+            [extractedData, JSON.stringify(label ? { duplicate_of_lead_id: label } : {})],
+          ),
+        };
+        const rows = await claim(ownRow()).update({ ...updateFields, ...relabel }).returning(RETURNING);
+        lead = rows[0] || null;
+        if (lead && label !== undefined) duplicateOfLeadId = label;
+        else if (relabelable(lead)) duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+      };
       // The typed fields and the label they imply land in ONE claimed
       // write: the row's status and marker, as read just before, are the
       // claim. A fields-first write followed by a separate relabel left a
@@ -1973,64 +1995,31 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         const priorExtraCount = parseExtracted(prior.extracted_data)?.additional_properties?.length || 0;
         const widerInquiry = additionalProperties.length > 0 || priorExtraCount > 0;
         const desired = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: prior.id, beforeCreatedAt: prior.created_at });
-        // The replace snapshot (quote_wizard rows: each stage supersedes the
-        // last) carries forward additional_properties, the declared
-        // timeline and a won_estimate_id stamp; the marker is whatever THIS
-        // request derived, never the carried one.
-        // ...and the stored extra-property list as read: a concurrent
-        // submission on this token that added properties (status still
-        // 'new', marker still null) made it a wider inquiry, and this claim
-        // must lose rather than label it a duplicate (pre-push P1).
-        const rows = await ownRow()
+        // ...claimed on the stored extra-property list as read as well: a
+        // concurrent submission on this token that added properties (status
+        // still 'new', marker still null) made it a wider inquiry, and this
+        // claim must lose rather than label it a duplicate (pre-push P1).
+        await land((q) => q
           .where({ status: prior.status })
           .whereRaw("extracted_data->>'duplicate_of_lead_id' IS NOT DISTINCT FROM ?", [stored])
-          .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [priorExtraCount])
-          .update({
-            ...updateFields,
-            status: desired ? 'duplicate' : 'new',
-            extracted_data: db.raw(
-              "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb || ?::jsonb",
-              [extractedData, JSON.stringify(desired ? { duplicate_of_lead_id: desired } : {})],
-            ),
-          })
-          .returning(RETURNING);
-        lead = rows[0] || null;
-        if (lead) duplicateOfLeadId = desired;
-        else prior = await ownRow().first(RETURNING);
+          .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [priorExtraCount]), desired);
+        if (!lead) prior = await ownRow().first(RETURNING);
       }
-      if (!lead && relabelable(prior)) {
-        // Claims exhausted while the row is still a wizard row in play
-        // (concurrent requests on one token retyping in a tight loop): this
-        // request's fields must never land under a marker another request
-        // derived for ITS fields — that is the mismatch the claimed write
-        // exists to prevent (pre-push P1 on 5e2777f). The row reopens as
-        // 'new' with the marker cleared: one self-consistent open lead (the
-        // pre-dedupe outcome), never a mislabelled one. Still claimed on
-        // the status being in play, so a staff transition wins here too.
-        const rows = await ownRow()
-          .whereIn('status', ['new', 'duplicate'])
-          .update({
-            ...updateFields,
-            status: 'new',
-            extracted_data: db.raw(
-              "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb",
-              [extractedData],
-            ),
-          })
-          .returning(RETURNING);
-        lead = rows[0] || null;
-        if (lead) duplicateOfLeadId = null;
-      }
-      if (!lead) {
-        // Gate off, or the row left play (a staff transition won): the
-        // fields land through the merge write and the label is the row's
-        // own — the stored marker when the gate is off; whatever the
-        // winning write left otherwise (nothing follows a marker on a row
-        // that is no longer 'duplicate').
-        const rows = await ownRow().update(updateFields).returning(RETURNING);
-        lead = rows[0];
-        if (relabelable(lead)) duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
-      }
+      // Claims exhausted while the row is still a wizard row in play
+      // (concurrent requests on one token retyping in a tight loop): this
+      // request's fields must never land under a marker another request
+      // derived for ITS fields — that is the mismatch the claimed write
+      // exists to prevent (pre-push P1 on 5e2777f). The row reopens as
+      // 'new' with the marker cleared: one self-consistent open lead (the
+      // pre-dedupe outcome), never a mislabelled one. Still claimed on the
+      // status being in play, so a staff transition wins here too.
+      if (!lead && relabelable(prior)) await land((q) => q.whereIn('status', ['new', 'duplicate']), null);
+      // Gate off, or the row left play (a staff transition won): the fields
+      // land through the merge write and the label is the row's own — the
+      // stored marker when the gate is off; whatever the winning write left
+      // otherwise (nothing follows a marker on a row that is no longer
+      // 'duplicate').
+      if (!lead) await land((q) => q);
       if (relabelable(lead)) {
         // The identity this request wrote (contact, address, service,
         // extra-property count as observed on the row) scopes every later

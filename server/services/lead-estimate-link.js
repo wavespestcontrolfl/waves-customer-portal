@@ -873,10 +873,10 @@ async function acceptWizardNamedLead(database, { dataLeadId, estimate, estimateI
   // them, or unlinked with a contact that matches the accepted estimate —
   // the rule the root is held to, so an old estimate never undoes a staff
   // reassignment (pre-push P1 on d3edd30).
-  const namedOurs = () => (named.customer_id
-    ? !customerId || String(named.customer_id) === String(customerId)
-    : leadMatchesEstimateContact(named, estimate));
-  if (named.status === 'duplicate' && duplicateMarkerOf(named) && !named.deleted_at && !named.estimate_id && !creditedOnOriginal && namedOurs()) await convert(named, DUPLICATE_LEAD_CLAIM);
+  // An acceptance that carries no customer judges the contact, never a
+  // linked row as automatically its own (codex #3883 r1 P1).
+  const namedOurs = () => fallbackRowOurs(named, estimate, customerId);
+  if (named.status === 'duplicate' && duplicateMarkerOf(named) && !named.deleted_at && !named.estimate_id && !creditedOnOriginal && namedOurs()) await convert(named, DUPLICATE_LEAD_CLAIM, fallbackConvertExtra(estimateId, customerId));
 }
 
 // Status sets the accept path's conditional stamps claim against (see
@@ -884,6 +884,19 @@ async function acceptWizardNamedLead(database, { dataLeadId, estimate, estimateI
 // still carry the dedupe label.
 const OPEN_LEAD_CLAIM = OPEN_LEAD_STATUSES;
 const DUPLICATE_LEAD_CLAIM = ['duplicate'];
+// Whether a wizard-fallback row (the named repeat; a stamped-but-never-
+// converted repeat resumed on retry) is still this acceptance's: linked to
+// its customer when both sides carry one, else — the row unlinked, or the
+// acceptance without a customer — a contact that matches the accepted
+// estimate. A linked row is never automatically its own on an acceptance
+// that carries no customer (codex #3883 r1 P1).
+const fallbackRowOurs = (row, estimate, customerId) => (row.customer_id && customerId
+  ? String(row.customer_id) === String(customerId)
+  : !!estimate && leadMatchesEstimateContact(row, estimate));
+// The fallback conversion's overrides (see `convert`): it wins only as the
+// sole live row of the estimate, and an acceptance without a customer
+// leaves the row's own customer link untouched.
+const fallbackConvertExtra = (estimateId, customerId) => ({ onlyIfSoleLinkedRow: estimateId, ...(customerId ? {} : { customerId: undefined }) });
 
 async function markLinkedLeadEstimateAccepted({
   estimateId,
@@ -911,7 +924,12 @@ async function markLinkedLeadEstimateAccepted({
   // onlyIfStatusIn), so a staff closure landing between the stamp and the
   // conversion is never overwritten (codex #3834 r11 P1). The direct path
   // keeps its unconditional stamp and conversion as before.
-  const convert = async (lead, claim) => {
+  // `extra` overrides the conversion's arguments for the fallback rows:
+  // the sole-linked-row claim, and — when this acceptance carries no
+  // customer (a manual acceptance of an estimate without one) — no
+  // customer_id at all, so the row's existing link is preserved rather
+  // than written NULL (codex #3883 r1 P1).
+  const convert = async (lead, claim, extra = {}) => {
     let stamped = 0;
     if (!lead.estimate_id) {
       const stamp = database('leads').where({ id: lead.id });
@@ -956,6 +974,7 @@ async function markLinkedLeadEstimateAccepted({
       // nothing between the stamp and the conversion can hand the row to a
       // different customer (codex #3834 r11 P1, r18 P1).
       ...(claim ? { onlyIfStatusIn: claim, onlyIfIdentity: identityOf(lead) } : {}),
+      ...extra,
     });
     if (claim && !converted) {
       // The stamp landed but the status claim lost (a closure in between):
@@ -1006,15 +1025,17 @@ async function markLinkedLeadEstimateAccepted({
     // none), still this customer's, and no other live row of this estimate
     // open or already won (that row is the deal's lead) — through the same
     // claimed conversion, which pins 'duplicate' and the identity read here.
+    // The no-other-row rule is judged here on the rows read, and AGAIN in
+    // the conversion's own statement (onlyIfSoleLinkedRow): a retry racing
+    // another retry, or a link of the original to this estimate, converts
+    // 0 rows instead of leaving two won rows on one estimate (codex #3883
+    // r1 P1).
     const resumable = linked.filter((lead) => lead.status === 'duplicate' && duplicateMarkerOf(lead) && !lead.deleted_at);
     const otherRowStands = (lead) => linked.some((other) => other.id !== lead.id && !other.deleted_at && (other.status === 'won' || !CLOSED_LEAD_STATUSES.has(other.status)));
     if (resumable.length === 1 && !otherRowStands(resumable[0])) {
       const [lead] = resumable;
       const estimate = await database('estimates').where({ id: estimateId }).first();
-      const ours = lead.customer_id
-        ? !customerId || String(lead.customer_id) === String(customerId)
-        : !!estimate && leadMatchesEstimateContact(lead, estimate);
-      if (ours) await convert(lead, DUPLICATE_LEAD_CLAIM);
+      if (fallbackRowOurs(lead, estimate, customerId)) await convert(lead, DUPLICATE_LEAD_CLAIM, fallbackConvertExtra(estimateId, customerId));
     }
     return;
   }

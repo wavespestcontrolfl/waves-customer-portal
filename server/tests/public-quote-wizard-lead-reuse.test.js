@@ -207,27 +207,29 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     // ...and the stored extra-property list as read: a concurrent
     // submission that added properties made the row a wider inquiry, and
     // this claim must lose rather than label it a duplicate (pre-push P1).
-    expect(block).toMatch(/const rows = await ownRow\(\)\n\s+\.where\(\{ status: prior\.status \}\)\n\s+\.whereRaw\("extracted_data->>'duplicate_of_lead_id' IS NOT DISTINCT FROM \?", \[stored\]\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[priorExtraCount\]\)\n\s+\.update\(\{\n\s+\.\.\.updateFields,\n\s+status: desired \? 'duplicate' : 'new',/);
-    expect(block).toMatch(/'won_estimate_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'won_estimate_id'\)\) \|\| \?::jsonb \|\| \?::jsonb",\n\s+\[extractedData, JSON\.stringify\(desired \? \{ duplicate_of_lead_id: desired \} : \{\}\)\],/);
+    expect(block).toMatch(/await land\(\(q\) => q\n\s+\.where\(\{ status: prior\.status \}\)\n\s+\.whereRaw\("extracted_data->>'duplicate_of_lead_id' IS NOT DISTINCT FROM \?", \[stored\]\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[priorExtraCount\]\), desired\);/);
+    // One write function lands the fields for every outcome (codex #3883 r1
+    // P2): a label (marker, or null for 'new') lands status + marker in the
+    // same statement over the replace snapshot; no label = the merge write.
+    const landSrc = src.slice(src.indexOf('const land = async (claim, label) => {'), src.indexOf('let prior = dedupeOn'));
+    expect(landSrc).toMatch(/status: label \? 'duplicate' : 'new',/);
+    expect(landSrc).toMatch(/'won_estimate_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'won_estimate_id'\)\) \|\| \?::jsonb \|\| \?::jsonb",\n\s+\[extractedData, JSON\.stringify\(label \? \{ duplicate_of_lead_id: label \} : \{\}\)\],/);
+    expect(landSrc).toMatch(/const rows = await claim\(ownRow\(\)\)\.update\(\{ \.\.\.updateFields, \.\.\.relabel \}\)\.returning\(RETURNING\);\n\s+lead = rows\[0\] \|\| null;/);
+    expect(landSrc).toMatch(/if \(lead && label !== undefined\) duplicateOfLeadId = label;\n\s+else if \(relabelable\(lead\)\) duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
     // The claimed snapshot never carries the OLD marker forward.
-    const claimedRaw = block.slice(block.indexOf('.update({'), block.indexOf('.returning(RETURNING)'));
-    expect(claimedRaw).not.toMatch(/'duplicate_of_lead_id', COALESCE/);
+    expect(landSrc).not.toMatch(/'duplicate_of_lead_id', COALESCE/);
     // 0 rows: re-read the row AS IT IS NOW and claim once more (a concurrent
     // request on this token moved the label), never the stale read (codex
-    // r17 P1); two lost claims fall through to the merge write, which leaves
-    // the label to the write that won.
+    // r17 P1); two lost claims fall through to the reopen, then the merge.
     expect(block).toMatch(/for \(let attempt = 0; !lead && relabelable\(prior\) && attempt < 2; attempt\+\+\) \{/);
-    expect(block).toMatch(/if \(lead\) duplicateOfLeadId = desired;\n\s+else prior = await ownRow\(\)\.first\(RETURNING\);/);
+    expect(block).toMatch(/if \(!lead\) prior = await ownRow\(\)\.first\(RETURNING\);/);
     // Claims exhausted with the row still in play: this request's fields
     // never land under another request's marker — the row reopens as 'new'
     // with the marker cleared, claimed on the status still being in play
     // (pre-push P1 on 5e2777f). Only a row that left play (gate off, or a
     // staff transition) takes the merge write, whose marker nothing follows.
-    expect(block).toMatch(/if \(!lead && relabelable\(prior\)\) \{\n[\s\S]*?const rows = await ownRow\(\)\n\s+\.whereIn\('status', \['new', 'duplicate'\]\)\n\s+\.update\(\{\n\s+\.\.\.updateFields,\n\s+status: 'new',/);
-    const reopenRaw = block.slice(block.indexOf("if (!lead && relabelable(prior)) {"), block.indexOf("if (!lead) {"));
-    expect(reopenRaw).not.toMatch(/duplicate_of_lead_id/);
-    expect(reopenRaw).toMatch(/if \(lead\) duplicateOfLeadId = null;/);
-    expect(block).toMatch(/if \(!lead\) \{\n[\s\S]*?const rows = await ownRow\(\)\.update\(updateFields\)\.returning\(RETURNING\);\n\s+lead = rows\[0\];\n\s+if \(relabelable\(lead\)\) duplicateOfLeadId = lead\.status === 'duplicate' \? duplicateOfFromExtracted\(lead\.extracted_data\) : null;/);
+    expect(block).toMatch(/if \(!lead && relabelable\(prior\)\) await land\(\(q\) => q\.whereIn\('status', \['new', 'duplicate'\]\), null\);/);
+    expect(block).toMatch(/if \(!lead\) await land\(\(q\) => q\);/);
     expect(block).not.toMatch(/duplicateOfLeadId = stored;/);
     // The identity predicate is defined once and shared with the reopen.
     expect(src).toMatch(/const scopedToTypedIdentity = \(qb\) => qb\n\s+\.where\(\{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, service_key: leadServiceKey, service_interest: serviceInterest \}\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[observedExtraCount\]\);/);

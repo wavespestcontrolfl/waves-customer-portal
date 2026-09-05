@@ -12,6 +12,10 @@ jest.mock('../models/db', () => {
       where: (...a) => { mockCalls.push([table, 'where', ...a]); return q; },
       whereNull: (...a) => { mockCalls.push([table, 'whereNull', ...a]); return q; },
       whereIn: (...a) => { mockCalls.push([table, 'whereIn', ...a]); return q; },
+      whereNot: (...a) => { mockCalls.push([table, 'whereNot', ...a]); return q; },
+      orWhereIn: (...a) => { mockCalls.push([table, 'orWhereIn', ...a]); return q; },
+      select: (...a) => { mockCalls.push([table, 'select', ...a]); return q; },
+      whereNotExists: (sub) => { mockCalls.push([table, 'whereNotExists', sub]); return q; },
       update: async (patch) => { mockCalls.push([table, 'update', patch]); return mockUpdateRows; },
       insert: async (row) => { mockCalls.push([table, 'insert', row]); return [row]; },
       first: async () => mockFirstRow,
@@ -115,6 +119,32 @@ describe('markConverted claims', () => {
       ['leads', 'where', identity],
     ]);
     expect(mockCalls.find((c) => c[1] === 'update')[2]).toEqual(expect.objectContaining({ status: 'won', customer_id: 'c1' }));
+  });
+
+  test('onlyIfSoleLinkedRow makes the status write conditional on NO other live row of that estimate being open or won — in the same statement (codex #3883 r1 P1)', async () => {
+    const ok = await markConverted('lead-dup', { customerId: 'c1', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: 'c1' }, onlyIfSoleLinkedRow: 'estimate-1', estimateId: 'estimate-1' });
+    expect(ok).toBe(true);
+    const outer = claimCalls().filter((c) => c[1] !== 'select');
+    expect(outer.slice(0, 4)).toEqual([
+      ['leads', 'where', 'id', 'lead-dup'],
+      ['leads', 'whereNull', 'deleted_at'],
+      ['leads', 'whereIn', 'status', ['duplicate']],
+      ['leads', 'where', { customer_id: 'c1' }],
+    ]);
+    // The subquery: other rows of this estimate, live, won or open.
+    const sub = claimCalls().slice(claimCalls().findIndex((c) => c[1] === 'select') + 1);
+    expect(sub.slice(0, 3)).toEqual([
+      ['leads', 'where', 'estimate_id', 'estimate-1'],
+      ['leads', 'whereNot', 'id', 'lead-dup'],
+      ['leads', 'whereNull', 'deleted_at'],
+    ]);
+    const grouped = sub[3];
+    expect(grouped[1]).toBe('where');
+    const inner = [];
+    const g = { where: (...a) => { inner.push(['where', ...a]); return g; }, orWhereIn: (...a) => { inner.push(['orWhereIn', ...a]); return g; } };
+    grouped[2](g);
+    expect(inner).toEqual([['where', 'status', 'won'], ['orWhereIn', 'status', ['new', 'contacted', 'estimate_sent', 'estimate_viewed']]]);
+    expect(sub[4][1]).toBe('whereNotExists');
   });
 
   test('a lost claim (0 rows) converts nothing — no bridge, no settling, no funnel row, no activity', async () => {

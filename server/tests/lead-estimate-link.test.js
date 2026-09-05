@@ -312,8 +312,25 @@ describe('lead-estimate link service', () => {
       await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: 'customer-1', database });
       expect(database._updates).toHaveLength(0);
       expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup', expect.objectContaining({
-        estimateId: 'estimate-1', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: null, phone: '9412269100', email: null, estimate_id: 'estimate-1' },
+        customerId: 'customer-1', estimateId: 'estimate-1', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: null, phone: '9412269100', email: null, estimate_id: 'estimate-1' },
+        // ...and only as the SOLE live row of the estimate, judged in the
+        // conversion's own statement: a retry racing another retry, or a
+        // link of the original to this estimate, converts 0 rows instead of
+        // leaving two won rows (codex #3883 r1 P1).
+        onlyIfSoleLinkedRow: 'estimate-1',
       }));
+    });
+
+    test('an acceptance that carries NO customer (a manual acceptance of an estimate without one) judges the contact and preserves the row\'s own customer link — never treats a linked row as its own, never writes customer_id NULL (codex #3883 r1 P1)', async () => {
+      // linked to another customer, contact matches the estimate: resumed, link preserved
+      let database = makeAcceptDb({ linked: [marked({ customer_id: 'customer-2' })], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: null, database });
+      expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup', expect.objectContaining({ customerId: undefined, onlyIfSoleLinkedRow: 'estimate-1' }));
+      // linked to another customer, contact drifted from the estimate: not ours
+      jest.clearAllMocks();
+      database = makeAcceptDb({ linked: [marked({ customer_id: 'customer-2', phone: '9415550000' })], estimate });
+      await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-1', customerId: null, database });
+      expect(leadAttribution.markConverted).not.toHaveBeenCalled();
     });
 
     test('a duplicate staff closed by hand (no marker) stays closed', async () => {
@@ -655,7 +672,20 @@ describe('lead-estimate link service', () => {
     expect(database._updates).toEqual([{ id: 'lead-dup5', patch: expect.objectContaining({ estimate_id: 'estimate-2f' }), conditional: true }]);
     // The other offer's funnel is not ours to book; the named row gets its own (codex r14 P2).
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
-    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'] }));
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup5', expect.objectContaining({ customerId: 'customer-1', onlyIfStatusIn: ['duplicate'], onlyIfSoleLinkedRow: 'estimate-2f' }));
+  });
+
+  test('the named-row fallback on an acceptance with NO customer: a named row linked to another customer converts only on a matching contact, with its link preserved (codex #3883 r1 P1)', async () => {
+    const leadsById = {
+      'lead-dup15': { id: 'lead-dup15', status: 'duplicate', customer_id: 'customer-2', phone: '9415550142', email: 'a@example.com', extracted_data: { duplicate_of_lead_id: 'lead-gone15' } },
+    };
+    let database = makeAcceptDb({ linked: [], estimate: { id: 'estimate-15', estimate_data: { lead_id: 'lead-dup15' }, customer_phone: '9415550142', customer_email: 'a@example.com' }, leadsById });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-15', customerId: null, database });
+    expect(leadAttribution.markConverted).toHaveBeenCalledWith('lead-dup15', expect.objectContaining({ customerId: undefined, onlyIfStatusIn: ['duplicate'], onlyIfSoleLinkedRow: 'estimate-15' }));
+    jest.clearAllMocks();
+    database = makeAcceptDb({ linked: [], estimate: { id: 'estimate-15', estimate_data: { lead_id: 'lead-dup15' }, customer_phone: '9415550000', customer_email: 'b@example.com' }, leadsById });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-15', customerId: null, database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
   });
 
   test('an indirectly resolved original that is ALREADY won records no second win on the duplicate row', async () => {
