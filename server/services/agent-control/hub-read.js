@@ -33,6 +33,7 @@ const modelSwitchboard = require('../model-switchboard');
 const { policyFor } = require('./lane-policies');
 const { riskTierFor } = require('./taxonomy');
 const { gateEnvValue } = require('../../config/feature-gates');
+const { RETENTION_DAYS } = require('../llm-dispatch-metrics');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 
 const TABLE = 'llm_dispatch_log';
@@ -74,11 +75,14 @@ function sameETWallClock(day, now) {
   return parseETDateTime(`${etDateString(day)}T${hms}`);
 }
 
-// { key, unit, from, to, prior:{from,to}, buckets:[key…] } or null for an
-// unknown preset. Bucket keys match the SQL to_char formats below so a
-// quiet bucket still renders as a zero.
+// { key, unit, from, to, prior:{from,to}, priorAvailable, buckets:[key…] } or
+// null for an unknown preset (own keys only: `?window=constructor` is not a
+// preset — Codex r3). Bucket keys match the SQL to_char formats below so a
+// quiet bucket still renders as a zero. `priorAvailable` is false when the
+// prior window starts before the ledger's RETENTION_DAYS prune horizon —
+// the 30d delta would compare against rows that no longer exist (Codex r3).
 function resolveWindow(preset = '7d', now = new Date()) {
-  const spec = WINDOWS[preset];
+  const spec = Object.hasOwn(WINDOWS, preset) ? WINDOWS[preset] : null;
   if (!spec) return null;
   const from = etStartOfDay(addETDays(now, -(spec.days - 1)));
   const to = now;
@@ -94,7 +98,8 @@ function resolveWindow(preset = '7d', now = new Date()) {
   } else {
     for (let d = spec.days - 1; d >= 0; d -= 1) buckets.push(etDateString(addETDays(now, -d)));
   }
-  return { key: preset, unit: spec.unit, from, to, prior, buckets };
+  const priorAvailable = prior.from.getTime() >= now.getTime() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  return { key: preset, unit: spec.unit, from, to, prior, priorAvailable, buckets };
 }
 
 // ── Ledger SQL ───────────────────────────────────────────────────────
@@ -130,6 +135,7 @@ function laneAggregates(from, to) {
     db.raw('COUNT(*) FILTER (WHERE ok)::int AS ok_calls'),
     db.raw('COALESCE(SUM(input_tokens), 0)::bigint AS input_tokens'),
     db.raw('COALESCE(SUM(cached_input_tokens), 0)::bigint AS cached_input_tokens'),
+    db.raw('COALESCE(SUM(cache_write_tokens), 0)::bigint AS cache_write_tokens'),
     db.raw('COALESCE(SUM(output_tokens), 0)::bigint AS output_tokens'),
     db.raw('COALESCE(SUM(reasoning_tokens), 0)::bigint AS reasoning_tokens'),
     db.raw('(percentile_disc(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE latency_ms IS NOT NULL))::int AS p50_latency_ms'),
@@ -205,7 +211,7 @@ async function loadLedger(window, now) {
   const recentSince = new Date(now.getTime() - 60 * 60 * 1000);
   const [current, prior, chains, buckets, recent] = await Promise.all([
     laneAggregates(window.from, window.to),
-    laneAggregates(window.prior.from, window.prior.to),
+    window.priorAvailable ? laneAggregates(window.prior.from, window.prior.to) : Promise.resolve([]),
     chainAggregates(window.from, window.to),
     bucketRows(window.from, window.to, window.unit),
     recentAggregates(recentSince, now),
@@ -335,7 +341,7 @@ function buildLanes({ lanes, window, ledger, reasons = [] }) {
 
   return lanes.map((lane) => {
     const row = current.get(lane.id) || null;
-    const metrics = laneMetrics(row, prior.get(lane.id) || null, chains.get(lane.id) || null);
+    const metrics = laneMetrics(row, window.priorAvailable ? prior.get(lane.id) || null : null, chains.get(lane.id) || null, window.priorAvailable);
     const attentionReasons = laneReasons(recent.get(lane.id) || null, extraByLane.get(lane.id) || []);
     return {
       ...laneIdentity(lane, policyFor(lane.id)),
@@ -371,11 +377,9 @@ function laneIdentity(lane, policy) {
 
 // The ledger half: this window's aggregate row, the prior window's, and the
 // chain row the fallback rate comes from — any of them null for a quiet lane.
-function laneMetrics(row, before, chain) {
+function laneMetrics(row, before, chain, priorAvailable) {
   const calls = num(row?.calls);
   const okRate = rate(num(row?.ok_calls), calls);
-  const priorCalls = num(before?.calls);
-  const priorOkRate = rate(num(before?.ok_calls), priorCalls);
   return {
     calls,
     okRate: round(okRate),
@@ -385,15 +389,23 @@ function laneMetrics(row, before, chain) {
     tokens: {
       input: num(row?.input_tokens),
       cachedInput: num(row?.cached_input_tokens),
+      cacheWrite: num(row?.cache_write_tokens),
       output: num(row?.output_tokens),
       reasoning: num(row?.reasoning_tokens),
     },
     estCostUsd: null,
     lastActiveAt: row?.last_active_at ? new Date(row.last_active_at).toISOString() : null,
-    deltaVsPrior: {
-      calls: calls - priorCalls,
-      okRate: okRate == null || priorOkRate == null ? null : round(okRate - priorOkRate),
-    },
+    deltaVsPrior: priorAvailable ? deltaVsPrior(calls, okRate, before) : null,
+  };
+}
+
+// null = no prior window to compare with (it starts before the prune horizon)
+function deltaVsPrior(calls, okRate, before) {
+  const priorCalls = num(before?.calls);
+  const priorOkRate = rate(num(before?.ok_calls), priorCalls);
+  return {
+    calls: calls - priorCalls,
+    okRate: okRate == null || priorOkRate == null ? null : round(okRate - priorOkRate),
   };
 }
 
@@ -420,7 +432,7 @@ function buildAreas({ areas, laneRows, window, ledger }) {
     const calls = rows.reduce((n, l) => n + l.calls, 0);
     const attention = emptyAttention();
     for (const l of rows) for (const k of Object.keys(attention)) attention[k] += l.attention[k];
-    const priorCalls = rows.reduce((n, l) => n + (l.calls - l.deltaVsPrior.calls), 0);
+    const priorCalls = rows.reduce((n, l) => n + (l.calls - (l.deltaVsPrior?.calls || 0)), 0);
     return {
       key: area.key,
       label: area.label,
@@ -432,7 +444,7 @@ function buildAreas({ areas, laneRows, window, ledger }) {
       fallbackRate: round(rate(fallbacks.get(area.key) || 0, chains.get(area.key) || 0)),
       p95LatencyMs: p95.has(area.key) ? p95.get(area.key) : null,
       estCostUsd: null,
-      deltaVsPrior: { calls: calls - priorCalls },
+      deltaVsPrior: window.priorAvailable ? { calls: calls - priorCalls } : null,
       spark: sumSparks(rows.map((l) => l.spark), window),
     };
   });
@@ -453,6 +465,8 @@ function basisFor(window) {
     // Off = no new rows are being written; what is shown is history.
     ledgerRecording: gateEnvValue('GATE_LLM_CALL_LEDGER'),
     window: { key: window.key, from: window.from.toISOString(), to: window.to.toISOString(), unit: window.unit },
+    // false = deltaVsPrior is null everywhere: the ledger keeps RETENTION_DAYS
+    priorAvailable: window.priorAvailable,
   };
 }
 

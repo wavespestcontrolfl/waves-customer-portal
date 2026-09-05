@@ -492,8 +492,9 @@ function messageText(value) {
 // turn's latency and outcome. Windowed reads (agent-control hub) sum turn
 // rows, so a session live across a window edge contributes only what it
 // did inside the window (GH codex #3869 r2). The read-then-write runs in
-// one transaction under a per-session advisory lock, so two overlapping
-// turns of the same session cannot both subtract the same snapshot.
+// one transaction under a per-session advisory lock taken before the usage
+// GET (recordSessionUsage), so two overlapping turns of the same session
+// fetch-and-subtract in order and cannot both claim the same tokens.
 //
 // A turn is identified by (session id, turn start): step_id = uuid v5 of
 // that pair, unique per turn row (migration 000030). Every re-record of the
@@ -529,28 +530,22 @@ function monotoneMerge(db) {
     ...Object.fromEntries(SESSION_COUNTERS.map((col) => [col, greatest(col)])),
   };
 }
-async function upsertSessionRow(row, turnKey) {
-  try {
-    const db = require('../models/db');
-    return await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [row.provider_ref]);
-      const prev = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session' }).first(SESSION_COUNTERS);
-      const id = await writtenId(trx('llm_dispatch_log')
-        .insert(row)
-        .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
-        .merge(monotoneMerge(db)));
-      if (turnKey) {
-        await trx('llm_dispatch_log')
-          .insert(sessionTurnRow(row, prev || null, turnKey))
-          .onConflict(db.raw("(step_id) WHERE row_kind = 'session_turn'"))
-          .merge(monotoneMerge(db));
-      }
-      return id;
-    });
-  } catch (err) {
-    logger.debug(`[llm-dispatch-metrics] session upsert failed: ${err.message}`);
-    return null;
+// Inside recordSessionUsage's locked transaction (`trx`); the caller's catch
+// turns any failure into a null id.
+async function upsertSessionRow(trx, row, turnKey) {
+  const db = require('../models/db');
+  const prev = await trx('llm_dispatch_log').where({ provider_ref: row.provider_ref, row_kind: 'session' }).first(SESSION_COUNTERS);
+  const id = await writtenId(trx('llm_dispatch_log')
+    .insert(row)
+    .onConflict(db.raw("(provider_ref) WHERE row_kind = 'session'"))
+    .merge(monotoneMerge(db)));
+  if (turnKey) {
+    await trx('llm_dispatch_log')
+      .insert(sessionTurnRow(row, prev || null, turnKey))
+      .onConflict(db.raw("(step_id) WHERE row_kind = 'session_turn'"))
+      .merge(monotoneMerge(db));
   }
+  return id;
 }
 
 /**
@@ -581,36 +576,43 @@ async function recordSessionUsage({ laneId, sessionId, agentId = null, model = n
   try {
     if (!ledgerEnabled() || !sessionId) return null;
     const latencyMs = startedAt ? toCount(Date.now() - Number(startedAt)) : null;
-    // Empty when the GET misses: the row still lands, without counts.
-    let session = {};
-    try {
-      const { anthropicSessionsFetch } = require('./intelligence-bar/managed-agents-ops-tools');
-      session = (await anthropicSessionsFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`)) || {};
-    } catch (err) {
-      logger.warn(`[llm-dispatch-metrics] session ${sessionId} usage unavailable (${err.message}) — recording the session without token counts`);
-    }
-    const tokens = extractUsage('anthropic', { usage: session.usage });
-    // The runner's own outcome first (session_error_event, max_events, an
-    // anthropic_429 — the codes the taxonomy classifies); a terminated
-    // session only names the failure when the runner had none (Codex r10).
-    const errorCode = failureCode(failure) || (session.status === 'terminated' ? 'session_terminated' : null);
     const ctx = agentContext.current();
     const lane = laneId || ctx.laneId || null;
-    logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
-    return await upsertSessionRow(ledgerRow({
-      ctx,
-      rowKind: 'session',
-      laneId: lane,
-      policyLabel: lane || `anthropic/${model || 'session'}`,
-      provider: 'anthropic',
-      requestedModel: model,
-      servedModel: session.model,
-      ok: !errorCode,
-      errorCode,
-      tokens,
-      latencyMs,
-      providerRef: sessionId,
-    }), sessionTurnKey(sessionId, startedAt));
+    const db = require('../models/db');
+    return await db.transaction(async (trx) => {
+      // The per-session lock is taken BEFORE the cumulative usage GET, so two
+      // overlapping turns fetch-and-subtract in lock order and the later
+      // turn can never claim the earlier one's tokens (GH codex #3869 r3).
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [sessionId]);
+      // Empty when the GET misses: the row still lands, without counts.
+      let session = {};
+      try {
+        const { anthropicSessionsFetch } = require('./intelligence-bar/managed-agents-ops-tools');
+        session = (await anthropicSessionsFetch(`/v1/sessions/${encodeURIComponent(sessionId)}`)) || {};
+      } catch (err) {
+        logger.warn(`[llm-dispatch-metrics] session ${sessionId} usage unavailable (${err.message}) — recording the session without token counts`);
+      }
+      const tokens = extractUsage('anthropic', { usage: session.usage });
+      // The runner's own outcome first (session_error_event, max_events, an
+      // anthropic_429 — the codes the taxonomy classifies); a terminated
+      // session only names the failure when the runner had none (Codex r10).
+      const errorCode = failureCode(failure) || (session.status === 'terminated' ? 'session_terminated' : null);
+      logger.debug(`[llm-dispatch-metrics] session ${sessionId} (${agentId}) usage in=${tokens.input_tokens} out=${tokens.output_tokens} ${errorCode || 'ok'}`);
+      return await upsertSessionRow(trx, ledgerRow({
+        ctx,
+        rowKind: 'session',
+        laneId: lane,
+        policyLabel: lane || `anthropic/${model || 'session'}`,
+        provider: 'anthropic',
+        requestedModel: model,
+        servedModel: session.model,
+        ok: !errorCode,
+        errorCode,
+        tokens,
+        latencyMs,
+        providerRef: sessionId,
+      }), sessionTurnKey(sessionId, startedAt));
+    });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] recordSessionUsage skipped: ${err.message}`);
     return null;
@@ -1054,6 +1056,7 @@ async function runLlmDispatchDigest() {
 }
 
 module.exports = {
+  RETENTION_DAYS,
   recordDispatch,
   recordHeartbeat,
   recordCall,

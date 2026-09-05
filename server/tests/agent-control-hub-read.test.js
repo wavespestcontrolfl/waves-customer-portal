@@ -32,6 +32,7 @@ const mockOpsQueue = jest.fn();
 jest.mock('../services/ops-queue', () => ({ getOpsQueue: (...a) => mockOpsQueue(...a) }));
 const mockActivity = jest.fn();
 jest.mock('../services/agent-activity', () => ({ getActivity: (...a) => mockActivity(...a) }));
+jest.mock('../services/llm-dispatch-metrics', () => ({ RETENTION_DAYS: 30 }));
 
 const hubRead = require('../services/agent-control/hub-read');
 const modelSwitchboard = require('../services/model-switchboard');
@@ -72,8 +73,12 @@ describe('resolveWindow', () => {
     expect(w.prior.to.toISOString()).toBe('2026-08-28T21:30:00.000Z');
     const today = hubRead.resolveWindow('today', NOW);
     expect(today.prior).toEqual({ from: new Date('2026-09-03T04:00:00.000Z'), to: new Date('2026-09-03T21:30:00.000Z') });
-    expect(hubRead.resolveWindow('30d', NOW).buckets).toHaveLength(30);
-    expect(hubRead.resolveWindow('30d', NOW).buckets[0]).toBe('2026-08-06');
+    expect(w.priorAvailable).toBe(true);
+    const month = hubRead.resolveWindow('30d', NOW);
+    expect(month.buckets).toHaveLength(30);
+    expect(month.buckets[0]).toBe('2026-08-06');
+    // its prior window starts 59 days back — past the 30-day ledger prune
+    expect(month.priorAvailable).toBe(false);
   });
 
   test('the prior window keeps its ET wall clock across a DST change', () => {
@@ -86,8 +91,10 @@ describe('resolveWindow', () => {
     expect(w.buckets).toHaveLength(7);
   });
 
-  test('unknown preset → null; default is 7d', () => {
+  test('unknown preset → null (inherited names included); default is 7d', () => {
     expect(hubRead.resolveWindow('yesterday', NOW)).toBeNull();
+    expect(hubRead.resolveWindow('constructor', NOW)).toBeNull();
+    expect(hubRead.resolveWindow('__proto__', NOW)).toBeNull();
     expect(hubRead.resolveWindow(undefined, NOW).key).toBe('7d');
   });
 });
@@ -96,7 +103,7 @@ describe('buildLanes', () => {
   const window = hubRead.resolveWindow('7d', NOW);
   const ledger = {
     current: [
-      { lane_id: 'sms_draft', calls: 6, ok_calls: 4, input_tokens: '600', cached_input_tokens: '0', output_tokens: '120', reasoning_tokens: '0', p50_latency_ms: 700, p95_latency_ms: 9000, last_active_at: '2026-09-04T21:00:00.000Z' },
+      { lane_id: 'sms_draft', calls: 6, ok_calls: 4, input_tokens: '600', cached_input_tokens: '0', cache_write_tokens: '33', output_tokens: '120', reasoning_tokens: '0', p50_latency_ms: 700, p95_latency_ms: 9000, last_active_at: '2026-09-04T21:00:00.000Z' },
       { lane_id: 'report_copy', calls: 1, ok_calls: 1, input_tokens: '10', cached_input_tokens: '0', output_tokens: '5', reasoning_tokens: '0', p50_latency_ms: 300, p95_latency_ms: 300, last_active_at: '2026-09-02T12:00:00.000Z' },
       { lane_id: 'email_classify', calls: 3, ok_calls: 0, input_tokens: '0', cached_input_tokens: '0', output_tokens: '0', reasoning_tokens: '0', p50_latency_ms: null, p95_latency_ms: null, last_active_at: '2026-09-04T20:00:00.000Z' },
     ],
@@ -123,7 +130,7 @@ describe('buildLanes', () => {
     const sms = rows.find((l) => l.id === 'sms_draft');
     expect(sms).toMatchObject({
       area: 'sms', status: 'attention', calls: 6, okRate: 0.667, fallbackRate: 0.5, p50LatencyMs: 700, p95LatencyMs: 9000,
-      tokens: { input: 600, cachedInput: 0, output: 120, reasoning: 0 },
+      tokens: { input: 600, cachedInput: 0, cacheWrite: 33, output: 120, reasoning: 0 },
       deltaVsPrior: { calls: 5, okRate: -0.333 },
       attention: { p0: 0, p1: 1, p2: 0, p3: 0 },
       sideEffectClass: 'customer_visible', riskTier: 2, maturity: 'M3', ledger: 'call', unrecordableReason: null,
@@ -185,6 +192,7 @@ describe('buildLanes', () => {
 describe('readLanes / readAreas', () => {
   test('validates window, status and area', async () => {
     await expect(hubRead.readLanes({ window: '90d', now: NOW })).rejects.toMatchObject({ status: 400 });
+    await expect(hubRead.readLanes({ window: 'constructor', now: NOW })).rejects.toMatchObject({ status: 400 });
     await expect(hubRead.readLanes({ status: 'broken', now: NOW })).rejects.toMatchObject({ status: 400 });
     await expect(hubRead.readLanes({ area: 'nope', now: NOW })).rejects.toMatchObject({ status: 400 });
     await expect(hubRead.readAreas({ window: 'x', now: NOW })).rejects.toMatchObject({ status: 400 });
@@ -241,6 +249,9 @@ describe('readLanes / readAreas', () => {
     const degraded = await hubRead.readLanes({ window: '30d', now: NOW });
     expect(mockActivity).toHaveBeenLastCalledWith({ windowHours: 168 });
     expect(degraded.counts.attention).toBe(0);
+    // 30d: no prior window survives the prune → deltas null, not "minus nearly zero"
+    expect(degraded.basis.priorAvailable).toBe(false);
+    expect(degraded.lanes.every((l) => l.deltaVsPrior === null)).toBe(true);
   });
 
   test('a ledger read failure surfaces as an error (the route 500s), never a silent empty hub', async () => {
@@ -294,6 +305,7 @@ describe('routes', () => {
       expect((await (await fetch(`${base}/api/admin/agents/control/hub`, admin)).json()).features.ledger).toBe(true);
       expect((await fetch(`${base}/api/admin/agents/control/lanes`, { headers: { Authorization: 'Bearer tech' } })).status).toBe(403);
       expect((await fetch(`${base}/api/admin/agents/control/lanes?window=90d`, admin)).status).toBe(400);
+      expect((await fetch(`${base}/api/admin/agents/control/lanes?window=constructor`, admin)).status).toBe(400);
       expect((await fetch(`${base}/api/admin/agents/control/areas?window=90d`, admin)).status).toBe(400);
 
       const lanes = await fetch(`${base}/api/admin/agents/control/lanes?area=ib&status=idle&window=today`, admin);
@@ -305,7 +317,9 @@ describe('routes', () => {
 
       const areas = await fetch(`${base}/api/admin/agents/control/areas?window=30d`, admin);
       expect(areas.status).toBe(200);
-      expect((await areas.json()).areas).toHaveLength(modelSwitchboard.AREAS.length);
+      const areasBody = await areas.json();
+      expect(areasBody.areas).toHaveLength(modelSwitchboard.AREAS.length);
+      expect(areasBody.areas[0].deltaVsPrior).toBeNull();
     });
   });
 });
