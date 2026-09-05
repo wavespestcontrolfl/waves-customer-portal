@@ -116,6 +116,34 @@ jobs:
         # service-worker asset failures that the jsdom test runtime cannot.
         run: npm run build
 
+  browser-previews:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:qa-workflow
+      - name: Portal, payment, report and completion previews
+        run: npm run qa:previews
+      - name: Estimate interaction and PDF previews
+        if: ${{ !cancelled() }}
+        env:
+          ESTIMATE_PREVIEW_SCENARIOS: pest,lawn,wdo,preslab,proposal,expired
+          ESTIMATE_PREVIEW_ARTIFACT_DIR: .tmp/qa/estimates
+        run: npm run audit:estimate-previews
+      - name: Browser QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-qa-${{ github.sha }}
+          path: .tmp/qa/
+          retention-days: 7
+
   native-android:
     runs-on: ubuntu-latest
     timeout-minutes: 30

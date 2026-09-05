@@ -1,5 +1,5 @@
 ---
-description: Read the last two weeks of Codex review findings, find the classes that keep recurring, and propose focused rule diffs to the skills / AGENTS.md as a docs-only PR
+description: Read recent Codex review findings and propose at most five focused instruction or regression-check diffs in the response; create a rules PR only when authorized
 argument-hint: optional --days N (default 14), --repo owner/name
 ---
 
@@ -54,7 +54,12 @@ Work the top clusters in order. For each one, before writing anything:
   never one that changes application behaviour or edits an existing
   behavioural test).
 
-## 3. Ship as a rules-only PR — never merge
+The default result is a proposal in the response, with at most five exact
+diffs and their evidence. Section 3 applies only when creating a rules PR
+is authorized. Invocation for an audit or proposal does not authorize
+files, commits, PRs, review tags, or scheduling.
+
+## 3. Ship as a rules-only PR when authorized — never merge
 
 Follow waves-ship §1–§4: worktree off `origin/main`, branch
 `docs/skill-doctor-<YYYY-MM-DD>`, commit from a message file, title
@@ -66,13 +71,10 @@ report) so the reviewer sees the evidence, not the argument. Tag `@codex`,
 run `scripts/verify-pr-checks.sh`, work the rounds under the severity gate.
 Stop at MERGE-READY — merging a rule change is Adam's call, every time.
 
-## Weekly run
+## Invocation
 
-Schedule it rather than remembering it:
-
-```
-/schedule weekly on Monday at 9am ET: /skill-doctor --days 7
-```
-
-(Creating the routine is the owner's action; this command never schedules
-itself.)
+Run manually after a relevant repeated failure or when instruction
+maintenance is requested. The existing skill-doctor.js is the evidence
+collector. This command does not create a schedule. Any future scheduled
+run needs a separately reviewed owner, scope, permissions, timeout,
+duplicate-run guard, failure notification, and disable mechanism.

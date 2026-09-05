@@ -106,4 +106,8 @@ function identity(context) {
     sha: git(context.root, 'rev-parse', 'HEAD'), ports: context.ports };
 }
 
-module.exports = { git, rootDirectory, readContext, setup, availablePort, childEnvironment, identity };
+function checkoutStamp(root) {
+  return crypto.createHash('sha256').update(fs.realpathSync(root) + ':' + git(root, 'rev-parse', 'HEAD')).digest('hex');
+}
+
+module.exports = { checkoutStamp, git, rootDirectory, readContext, setup, availablePort, childEnvironment, identity };
