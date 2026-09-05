@@ -704,6 +704,11 @@ class RelayConversation {
       this._resumeReady = loadResumeState(db, this.callSid)
         .then((state) => {
           this._resume = state || null;
+          // The earlier leg's lead IS this call's capture: the session may
+          // end when the caller is done, and the close records
+          // lead_captured truthfully (hook P1). A later capture_lead updates
+          // that lead by the same-call reuse rule.
+          if (state && state.relayLeadId) this.leadCaptured = true;
           if (state) logger.info(`[voice-relay] resumed session proven callSid=${maskSid(this.callSid)} reconnects=${state.reconnects} priorChars=${state.segmentsText.length} lead=${state.relayLeadId ? 'linked' : 'none'}`);
           else logger.warn(`[voice-relay] resumed hint NOT proven by the row callSid=${maskSid(this.callSid)} — treated as a fresh session`);
         })
@@ -1583,6 +1588,37 @@ class RelayConversation {
     return true;
   }
 
+  /**
+   * Sandy's own promises — "someone will call you back", a queued estimate —
+   * become owed commitments the office works from the same queue as human
+   * calls. Read from the SCRUBBED transcript that was just persisted, never
+   * the raw turns. Best-effort, gated. `sessionKey` is re-fenced inside the
+   * write: only the row's current claim owner may record.
+   */
+  async _recordCommitments({ transcript, sessionKey }) {
+    if (!transcript) return;
+    try {
+      const { isEnabled } = require('../../config/feature-gates');
+      if (!isEnabled('callCommitments')) return;
+      const { recordRelayCommitments } = require('../call-commitments');
+      const recorded = await recordRelayCommitments(db, {
+        callSid: this.callSid,
+        transcript,
+        estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,
+        estimateExpectation: this._promises.get('send_estimate')?.expectation || null,
+        estimatePromisedAt: this._promises.get('send_estimate')?.at || null,
+        // Re-fenced inside the write: a reconnect that takes the claim
+        // after the reconcile must not have this session's promises
+        // recorded under it.
+        sessionKey,
+      });
+      if (recorded.superseded) logger.info(`[voice-relay] commitments skipped, claim now foreign callSid=${maskSid(this.callSid)}`);
+      else if (recorded.found) logger.info(`[voice-relay] recorded ${recorded.written} owed commitment(s) callSid=${maskSid(this.callSid)}`);
+    } catch (err) {
+      logger.warn(`[voice-relay] commitments not recorded callSid=${maskSid(this.callSid)}: ${err.message}`);
+    }
+  }
+
   async _sessionSuperseded() {
     if (!this.sessionKey || !this.callSid) return false;
     // ⭐ ONLY A CLAIMED SESSION CAN BE SUPERSEDED. An UNVERIFIED session never
@@ -2007,6 +2043,23 @@ class RelayConversation {
         try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
           logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
         }
+        // …and the replacement's commitments pass may already have run on a
+        // transcript without this segment: reconcile once more, on the
+        // PERSISTED composed transcript, under the row's CURRENT owner (the
+        // write is idempotent per call). Bounded read; fail-soft.
+        try {
+          const row = await withTimeout(
+            db('call_log').where('twilio_call_sid', this.callSid).first('transcription', 'metadata').catch(() => null),
+            2000,
+            null,
+          );
+          const owner = row ? ((typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) || {}).relay_session_claim_owner || null : null;
+          if (row && typeof row.transcription === 'string' && row.transcription) {
+            await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null });
+          }
+        } catch (err) {
+          logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
       }
     }
 
@@ -2197,40 +2250,20 @@ class RelayConversation {
         // transfer's salvage, never a relay_failed row's or the sandbox's.
         const transferSalvaged = salvaged > 0 && this._transferRequested === true && this.sandbox !== true;
         if ((updated || transferSalvaged) && transcriptUpdate?.transcription) {
-          try {
-            const { isEnabled } = require('../../config/feature-gates');
-            if (isEnabled('callCommitments')) {
-              const { recordRelayCommitments } = require('../call-commitments');
-              // PR 2B: on a reconnected call the persisted transcript is the
-              // composed one (all segments); the commitments pass reads THAT
-              // under the same owner fence, so segment 1's promises reach
-              // Owed even though its own socket's pass was skipped (hook P1).
-              let commitmentsTranscript = transcriptUpdate.transcription;
-              if (composedTranscription) {
-                const persisted = await withTimeout(
-                  fenceOwner(db('call_log').where('twilio_call_sid', this.callSid)).first('transcription').catch(() => null),
-                  2000,
-                  null,
-                );
-                if (persisted && typeof persisted.transcription === 'string' && persisted.transcription) commitmentsTranscript = persisted.transcription;
-              }
-              const recorded = await recordRelayCommitments(db, {
-                callSid: this.callSid,
-                transcript: commitmentsTranscript,
-                estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,
-                estimateExpectation: this._promises.get('send_estimate')?.expectation || null,
-                estimatePromisedAt: this._promises.get('send_estimate')?.at || null,
-                // Re-fenced inside the write: a reconnect that takes the
-                // claim after the reconcile above must not have this
-                // session's promises recorded under it.
-                sessionKey: this.sessionKey || null,
-              });
-              if (recorded.superseded) logger.info(`[voice-relay] commitments skipped, claim now foreign callSid=${maskSid(this.callSid)}`);
-              else if (recorded.found) logger.info(`[voice-relay] recorded ${recorded.written} owed commitment(s) callSid=${maskSid(this.callSid)}`);
-            }
-          } catch (err) {
-            logger.warn(`[voice-relay] commitments not recorded callSid=${maskSid(this.callSid)}: ${err.message}`);
+          // PR 2B: on a reconnected call the persisted transcript is the
+          // composed one (all segments); the commitments pass reads THAT
+          // under the same owner fence, so segment 1's promises reach Owed
+          // even though its own socket's pass was skipped (hook P1).
+          let commitmentsTranscript = transcriptUpdate.transcription;
+          if (composedTranscription) {
+            const persisted = await withTimeout(
+              fenceOwner(db('call_log').where('twilio_call_sid', this.callSid)).first('transcription').catch(() => null),
+              2000,
+              null,
+            );
+            if (persisted && typeof persisted.transcription === 'string' && persisted.transcription) commitmentsTranscript = persisted.transcription;
           }
+          await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });
         }
       } catch (err) {
         logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);

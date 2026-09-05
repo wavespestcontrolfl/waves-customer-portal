@@ -14,10 +14,15 @@ jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction:
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
 jest.mock('../services/twilio-failure-alerts', () => ({ maskSid: (s) => String(s || '').slice(-4) }));
+// One file-level mock for the commitments write (relay-conversation requires it lazily — per-test doMocks
+// would race the module cache); the gate answers true so the close-time pass runs in every case.
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => undefined) }));
+jest.mock('../services/call-commitments', () => ({ recordRelayCommitments: jest.fn(async () => ({ found: true, written: 1 })) }));
 
 const recovery = require('../services/voice-agent/relay-recovery');
 const { RelayConversation } = require('../services/voice-agent/relay-conversation');
 const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+const { recordRelayCommitments } = require('../services/call-commitments');
 
 afterEach(() => { delete process.env.GATE_VOICE_RELAY_RECOVERY; delete process.env.GATE_VOICE_RELAY_TRANSFER; jest.clearAllMocks(); });
 
@@ -180,18 +185,35 @@ describe('the conversation side', () => {
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-rec');
   });
 
+  test('a proven prior lead restores the capture state (lead_captured true; the session may end when the caller is done) (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { relay_reconnects: 1, relay_lead_id: 'L1' } } });
+    const convo = new RelayConversation({ callSid: 'CA-lead', from: '+19415551234', send: jest.fn(), resumed: true });
+    await convo._resumeReady;
+    expect(convo.leadCaptured).toBe(true);
+    primeDb({ firstRow: { metadata: { relay_reconnects: 1 } } });
+    const none = new RelayConversation({ callSid: 'CA-nolead', from: '+19415551234', send: jest.fn(), resumed: true });
+    await none._resumeReady;
+    expect(none.leadCaptured).toBe(false);
+  });
+
+  test('a superseded socket whose late segment recomposed the call runs the commitments pass on the PERSISTED transcript under the CURRENT owner (hook P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { transcription: 'Caller: first\n\n[Reconnected]\nCaller: second', metadata: { relay_session_claim_owner: 'nonce-NEW' } } });
+    const convo = convoWithTurns({ sessionKey: 'nonce-OLD', sessionGeneration: 1 });
+    convo._callerVerified = true;
+    convo._sessionSuperseded = jest.fn(async () => true);
+    await convo.end('ws_close');
+    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ transcript: 'Caller: first\n\n[Reconnected]\nCaller: second', sessionKey: 'nonce-NEW' }));
+  });
+
   test('commitments on a reconnected call read the PERSISTED composed transcript under the owner fence (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => undefined) }));
-    const recordRelayCommitments = jest.fn(async () => ({ found: true, written: 1 }));
-    jest.doMock('../services/call-commitments', () => ({ recordRelayCommitments }));
     const { builder } = primeDb({ firstRow: { transcription: 'Caller: first leg\n\n[Reconnected]\nCaller: my ants are back' } });
     const convo = convoWithTurns({ sessionGeneration: 2 });
     await convo.end('ws_close');
     expect(builder.first).toHaveBeenCalledWith('transcription');
     expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ transcript: 'Caller: first leg\n\n[Reconnected]\nCaller: my ants are back' }));
-    jest.dontMock('../config/feature-gates');
-    jest.dontMock('../services/call-commitments');
   });
 
   test('a resumed session: the hint is proven from the row, the earlier turns are seeded ONCE as played text, and the floor is skipped when a lead is linked', async () => {
