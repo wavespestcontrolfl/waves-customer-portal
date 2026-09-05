@@ -401,6 +401,9 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.orderNumber && st.orderNumberRetained) return el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? st.orderNumberBeforeClick : 'Order # SO-778899' }) });
       // orderNumberUnreadableBeside: after the click, a second confirmation node's visibility read throws on every poll (r5 P2 on #3900)
       if (sel === S.orderNumber && st.orderNumberUnreadableBeside && st.placeClicked) return el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: true, text: 'Order # SO-778899' }) : el({ count: 1, isVisibleThrows: true, text: 'Order # SO-999999' })) });
+      // orderNumberAppendedMidScan: after the click a SECOND confirmation node (a different number) is appended between a scan's enumeration and its
+      // re-enumeration — resolutions 1–3 see one node, every later one sees two; a scan that never re-enumerates settles the first on its second poll (r10 P2 on #3900)
+      if (sel === S.orderNumber && st.orderNumberAppendedMidScan && st.placeClicked) { st.confResolves = (st.confResolves || 0) + 1; return st.confResolves <= 3 ? el({ count: 1, visible: true, text: 'Order # SO-778899' }) : el({ count: 2, nth: (i) => el({ count: 1, visible: true, text: i === 0 ? 'Order # SO-778899' : 'Order # SO-999999' }) }); }
       // orderNumberSequence: the confirmation node's text per post-click poll (last value repeats) (r1 P2 on #3900)
       if (sel === S.orderNumber && st.orderNumberSequence) { st.confReads = (st.confReads || 0) + 1; return el({ count: 1, visible: true, text: st.orderNumberSequence[Math.min(st.confReads - 1, st.orderNumberSequence.length - 1)] }); }
       // orderNumberLate: the confirmation element renders first as "Processing order…" and populates a few polls later
@@ -774,6 +777,12 @@ describe('siteone bot cart + tender rules (fake page)', () => {
   test('a confirmation-selector node that cannot be read after the click leaves the scan unresolved — the readable node never settles beside it (r5 P2 on #3900)', async () => {
     const { deps } = fakeSiteOne({ orderNumberUnreadableBeside: true, checkoutTotalText: 'Order total $105.93' });
     await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+  });
+
+  test('a confirmation node appended DURING a scan (after its enumeration, before its reads finish) leaves that scan unresolved — the first number never settles on it; the next poll sees two ids → ambiguous (r10 P2 on #3900)', async () => {
+    const { st, deps } = fakeSiteOne({ orderNumberAppendedMidScan: true, checkoutTotalText: 'Order total $105.93' });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ ambiguous: true, cents: 10593 });
+    expect(st.confResolves).toBeGreaterThanOrEqual(4);
   });
 
   test('the confirmation identifier must settle: a reference value rendered a tick before the order number is never recorded — the settled number is (r1 P2 on #3900)', async () => {
