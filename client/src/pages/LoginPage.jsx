@@ -106,7 +106,8 @@ export default function LoginPage() {
 
   return (
     <WavesShell>
-    <main
+    {/* WavesShell owns the page's one <main>; this is the login column. */}
+    <div
       className="portal-login-page"
       style={{
         '--login-blue': B.glassNavy,
@@ -682,7 +683,7 @@ export default function LoginPage() {
           )}
         </section>
       </div>
-    </main>
+    </div>
     </WavesShell>
   );
 }
