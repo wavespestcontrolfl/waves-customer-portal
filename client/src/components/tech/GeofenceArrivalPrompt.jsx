@@ -38,6 +38,10 @@ const POLL_MS = 10_000;
 const REMINDER_AUTODISMISS_MS = 5 * 60 * 1000;
 const STOP_TOAST_MS = 15_000;
 const MAX_STORM_CARDS = 2;
+// Visit cards never auto-dismiss, so a bulk assign or day swap could stack
+// dozens over the actionable geofence prompts: same cap + summary line as
+// storms, newest first, and prompts always render above them.
+const MAX_VISIT_CARDS = 2;
 
 // Visit cards are the tech's record of a schedule change; they never
 // auto-dismiss (the 5-min reminder timer would mark them read unseen).
@@ -118,10 +122,12 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
   // Storm cards are capped so a burst of alerts can never bury the home
   // screen: one card per stop (newest wins when the sweep re-alerts), at
   // most MAX_STORM_CARDS on screen, the rest summarized in one line.
-  const { cards, hiddenStormCount } = useMemo(() => {
+  const { cards, hiddenStormCount, hiddenVisitCount } = useMemo(() => {
     const stormByJob = new Map();
     const otherCards = [];
+    const visitCards = [];
     for (const n of active) {
+      if (VISIT_TYPES.has(n.type)) { visitCards.push(n); continue; }
       if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
       const jobKey = n.payload?.job_id || n.id;
       const prev = stormByJob.get(jobKey);
@@ -133,9 +139,14 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
     );
     const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
+    const visitsNewestFirst = [...visitCards].sort(
+      (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
+    );
+    const shownVisits = visitsNewestFirst.slice(0, MAX_VISIT_CARDS);
     return {
-      cards: [...otherCards, ...shownStorms],
+      cards: [...otherCards, ...shownVisits, ...shownStorms],
       hiddenStormCount: stormAlerts.length - shownStorms.length,
+      hiddenVisitCount: visitsNewestFirst.length - shownVisits.length,
     };
   }, [active]);
 
@@ -240,6 +251,13 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
           )}
         </div>
       ))}
+      {hiddenVisitCount > 0 && (
+        <div style={{ ...cardStyle(COLORS.muted), pointerEvents: 'auto', padding: 10 }} data-testid="visit-notice-more">
+          <div style={{ fontSize: 13, color: COLORS.muted }}>
+            🗓 {hiddenVisitCount} more schedule change{hiddenVisitCount === 1 ? '' : 's'} — they'll surface as you clear these.
+          </div>
+        </div>
+      )}
       {hiddenStormCount > 0 && (
         <div style={{ ...cardStyle(COLORS.amber), pointerEvents: 'auto', padding: 10 }}>
           <div style={{ fontSize: 13, color: COLORS.muted }}>

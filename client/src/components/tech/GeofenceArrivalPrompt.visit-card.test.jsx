@@ -52,30 +52,47 @@ describe('GeofenceArrivalPrompt — visit cards', () => {
     vi.useRealTimers();
   });
 
-  it('renders each kind with its headline, customer, details, and who acted', async () => {
-    stubFeed([ASSIGNED, MOVED, OFF, GONE]);
+  it.each([
+    ['assigned', ASSIGNED, ['New visit on your route', 'Ruiz', 'Pest Control · Thu Sep 10, 9–11 AM', '4312 Cortez Rd W, Bradenton', 'Assigned by Virginia']],
+    ['rescheduled', MOVED, ['Visit moved', 'Was Thu Sep 10, 9–11 AM', 'Now Fri Sep 11, 1–3 PM', 'Moved by the customer online']],
+    ['unassigned', OFF, ['Moved off your route', 'Now with Adam Benetti', 'Reassigned by Virginia']],
+    ['cancelled', GONE, ['Visit cancelled', 'Cancelled by the office']],
+  ])('renders the %s card with its headline, customer, details, and who acted', async (_kind, fixture, expected) => {
+    stubFeed([fixture]);
+    render(<GeofenceArrivalPrompt />);
+    await act(async () => { await Promise.resolve(); });
+
+    const card = await screen.findByTestId('visit-notice');
+    for (const text of expected) expect(card).toHaveTextContent(text);
+    // No "Open visit": the tech home has no per-visit page to land on.
+    expect(screen.queryByRole('button', { name: /open visit/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
+  });
+
+  it('caps the stack at two visit cards (newest first) behind any geofence prompt, and summarizes the rest', async () => {
+    const prompt = notification('geofence_arrival_reminder', { customer_name: 'Okafor' }, 'n-prompt');
+    const many = [1, 2, 3, 4, 5].map((i) => ({
+      ...notification('visit_assigned', { headline: 'New visit on your route', customer_name: `Customer ${i}` }, `n-v${i}`),
+      created_at: `2026-09-08T18:4${i}:00Z`,
+    }));
+    stubFeed([...many, prompt]);
     render(<GeofenceArrivalPrompt />);
     await act(async () => { await Promise.resolve(); });
 
     const cards = await screen.findAllByTestId('visit-notice');
-    expect(cards).toHaveLength(4);
-    expect(cards[0]).toHaveTextContent('New visit on your route');
-    expect(cards[0]).toHaveTextContent('Ruiz');
-    expect(cards[0]).toHaveTextContent('Pest Control · Thu Sep 10, 9–11 AM');
-    expect(cards[0]).toHaveTextContent('4312 Cortez Rd W, Bradenton');
-    expect(cards[0]).toHaveTextContent('Assigned by Virginia');
+    expect(cards).toHaveLength(2);
+    expect(cards[0]).toHaveTextContent('Customer 5');
+    expect(cards[1]).toHaveTextContent('Customer 4');
+    expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('3 more schedule changes');
+    // The actionable arrival prompt renders ABOVE the visit cards.
+    const promptCard = screen.getByText('Okafor');
+    expect(promptCard.compareDocumentPosition(cards[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    expect(cards[1]).toHaveTextContent('Was Thu Sep 10, 9–11 AM');
-    expect(cards[1]).toHaveTextContent('Now Fri Sep 11, 1–3 PM');
-    expect(cards[1]).toHaveTextContent('Moved by the customer online');
-
-    expect(cards[2]).toHaveTextContent('Now with Adam Benetti');
-    expect(cards[2]).toHaveTextContent('Reassigned by Virginia');
-
-    expect(cards[3]).toHaveTextContent('Visit cancelled');
-    expect(cards[3]).toHaveTextContent('Cancelled by the office');
-    // No "Open visit": the tech home has no per-visit page to land on.
-    expect(screen.queryByRole('button', { name: /open visit/i })).not.toBeInTheDocument();
+    // Clearing one promotes the next unread card; held-back cards were never marked read.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Got it' })[0]);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getAllByTestId('visit-notice')[1]).toHaveTextContent('Customer 3');
+    expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('2 more schedule changes');
   });
 
   it('stays until "Got it" (dismiss) — the 5-minute reminder timer never marks it read', async () => {
