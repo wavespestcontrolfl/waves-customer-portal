@@ -913,7 +913,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     } finally { bar.mockRestore(); repair.mockRestore(); }
   });
 
-  test('a remediation outage preserves an aged Codex blocker without retirement', async () => {
+  test.each(['throw', 'return'])('a remediation outage (%s) preserves an aged Codex blocker without retirement', async (failure) => {
     delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
     const run = makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
     const updates = setupDb({ pending: [run] });
@@ -924,7 +924,9 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     publisher.assertCodexReviewClear.mockRejectedValueOnce(Object.assign(new Error('findings remain'), { code: 'CODEX_REVIEW_REQUIRED' }));
     const remediation = require('../services/content/codex-remediation');
     const bar = jest.spyOn(remediation, 'p2OnlyMergeEligible').mockResolvedValueOnce({ eligible: false });
-    const repair = jest.spyOn(remediation, 'maybeRemediateAutonomousPr').mockRejectedValueOnce(new Error('provider unavailable'));
+    const repair = jest.spyOn(remediation, 'maybeRemediateAutonomousPr');
+    if (failure === 'throw') repair.mockRejectedValueOnce(new Error('provider unavailable'));
+    else repair.mockResolvedValueOnce({ skipped: true, transient: true, reason: 'publisher pin lookup unavailable' });
     try {
       const result = await poller.pollPending();
       expect(result.results[0]).toMatchObject({ pending: true, transient: true, reason: expect.stringMatching(/^codex_review_pending/) });

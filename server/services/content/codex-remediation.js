@@ -1939,7 +1939,8 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (expectedParentSha) {
     let liveHead = null;
     try { liveHead = await gh.getBranchSha(branch); } catch (_) { liveHead = null; }
-    if (String(liveHead || '').toLowerCase() !== String(expectedParentSha).toLowerCase()) {
+    if (!liveHead) return { skipped: true, transient: true, reason: 'branch head lookup unavailable' };
+    if (String(liveHead).toLowerCase() !== String(expectedParentSha).toLowerCase()) {
       return { skipped: true, reason: 'branch advanced off the pinned parent during remediation — foreign parent needs a human decision' };
     }
   }
@@ -2334,7 +2335,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
       const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
       if (headSha && pinned && pinned === headSha) { parentOk = true; expectedParentSha = pinned; }
       else if (headSha && fresh?.trust_build_approved_at && approvedSha && approvedSha === headSha) { parentOk = true; expectedParentSha = approvedSha; }
-    } catch (_) { parentOk = false; }
+    } catch (_) { return { skipped: true, transient: true, reason: 'publisher pin lookup unavailable' }; }
     if (!parentOk) {
       return { skipped: true, reason: 'pr head is not a publisher-pinned or human-approved commit — remediation withheld (foreign parent needs a human decision)' };
     }

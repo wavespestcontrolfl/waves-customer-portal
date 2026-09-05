@@ -1309,6 +1309,7 @@ async function maybeAutoMerge(run, pr) {
             const rem = await maybeRemediateAutonomousPr(pr, run, {
               prePushCheck: () => queueRowStillParked(run),
             });
+            transient = rem?.transient === true;
             if (rem?.remediated) {
               logger.info(`[autonomous-pr-poller] codex remediation round ${rem.round} pushed for run ${run.id} PR #${pr.number} (${rem.findings} finding(s))`);
               // A fresh head gets a fresh review window, even if the prior
