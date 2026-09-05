@@ -1993,6 +1993,16 @@ class RelayConversation {
     // composition below read that state, so it settles first (hook P1).
     if (this._resumeReady) {
       try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
+      // …and a snapshot that read the row before the old socket appended its
+      // segment is refreshed ONCE here (bounded): the floor below must see
+      // the earlier caller turns even when the caller never spoke on this
+      // leg, so the turn-time reload never ran (hook P1).
+      if (this._resume && !this._resume.segmentsText) {
+        try {
+          const fresh = await require('./relay-recovery').loadResumeState(db, this.callSid);
+          if (fresh && fresh.segmentsText) this._applyResumeState(fresh);
+        } catch { /* fail-soft */ }
+      }
     }
 
     // …and then drain the writes the chain does NOT cover. A tool that blew its
@@ -2249,7 +2259,10 @@ class RelayConversation {
         // processed onto the transferred row: the recording's transcript
         // owns the columns, but the AI segment still rides
         // metadata.relay_transcript on the transfer-marked row (hook P1).
-        if (transcriptUpdate && !updated && !salvaged && this._transferRequested === true) {
+        // PR 2B: a reconnected call that fell to voicemail stashes the same
+        // way (the processor composes the AI segment from the stash).
+        const recoveredCall = recoveryOn && (this._resume !== null || segmentAppended);
+        if (transcriptUpdate && !updated && !salvaged && (this._transferRequested === true || recoveredCall)) {
           // …and when the processor already wrote the RECORDED leg alone
           // (it read the row before this stash existed), the AI segment is
           // prepended to that transcript in the same statement — the shape
@@ -2257,7 +2270,7 @@ class RelayConversation {
           // an empty column is left alone; a composite has no structured form.
           const RECORDED_ONLY = "(transcription IS NOT NULL AND transcription <> '' AND transcription NOT LIKE '[AI segment]%' AND transcription_provider IS DISTINCT FROM 'conversation_relay')";
           const aiSegment = composedTranscription ? db.raw("'[AI segment]' || E'\\n' || ?", [composedTranscription]) : `[AI segment]\n${transcriptUpdate.transcription}`;
-          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['voicemail', 'ai_transferred']).whereRaw("(metadata->'relay_handoff') IS NOT NULL"))
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['voicemail', 'ai_transferred']).whereRaw("((metadata->'relay_handoff') IS NOT NULL OR COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)"))
             .update({
               metadata: relayStashSql,
               transcription: db.raw(

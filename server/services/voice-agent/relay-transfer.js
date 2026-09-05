@@ -436,7 +436,11 @@ function composeRelaySegment(call) {
   // /relay-complete stamps even when both packet writes failed (hook P1).
   const transferred = meta && typeof meta === 'object'
     && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || Boolean(meta.relay_transfer_ring_at));
-  if (!transferred) return null;
+  // PR 2B: a RECONNECTED call that fell to voicemail (second failure,
+  // transfer unavailable) carries no transfer marker but the same evidence
+  // problem — its recording must not erase the composed relay transcript.
+  const reconnected = meta && typeof meta === 'object' && (Number(meta.relay_reconnects) || 0) > 0;
+  if (!transferred && !reconnected) return null;
   const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
   // The durable copy first: end() stashes the relay transcript under
   // metadata.relay_transcript because the recording-status swap CLEARS the
