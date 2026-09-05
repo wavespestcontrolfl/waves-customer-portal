@@ -1,4 +1,4 @@
-import { COLORS, FONTS } from '../theme-brand';
+import { FONTS } from '../theme-brand';
 
 // The "look for this van" scene (owner 2026-09-03): the wrapped Waves van
 // pulling up to the customer's house, under the appointment header card and
@@ -44,11 +44,9 @@ function HouseSvg() {
   );
 }
 
-// eyebrow / title: the card's heading pair. stamp: the gold date·window chip.
-// tech: optional pill under the scene — omit where the page already shows
-// the technician block (the appointment page does).
-export default function VanScene({ eyebrow = 'Look for this van', title, stamp, tech, style }) {
-  const techName = tech?.firstName || 'Your technician';
+// title: the card's heading under the fixed eyebrow. stamp: the gold
+// date·window chip. (Both pages keep their own technician block.)
+export default function VanScene({ title, stamp, style }) {
   return (
     <section
       data-glass="card"
@@ -64,7 +62,7 @@ export default function VanScene({ eyebrow = 'Look for this van', title, stamp, 
     >
       <style>{KEYFRAMES}</style>
       <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.08em', lineHeight: 1.2, color: BODY, textTransform: 'uppercase', marginBottom: 8 }}>
-        {eyebrow}
+        Look for this van
       </div>
       {title ? (
         <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, lineHeight: 1.25, color: INK }}>
@@ -86,26 +84,6 @@ export default function VanScene({ eyebrow = 'Look for this van', title, stamp, 
       </div>
       {stamp ? (
         <div style={{ marginTop: -8 }}><span style={GOLD_CHIP}>{stamp}</span></div>
-      ) : null}
-      {tech ? (
-        <div data-glass="soft" style={{
-          display: 'flex', alignItems: 'center', gap: 12, margin: '16px auto 0',
-          padding: '9px 16px 9px 10px', borderRadius: 999, width: 'max-content', maxWidth: '100%',
-          fontSize: 14, color: BODY, textAlign: 'left',
-          background: '#F8FCFE', border: '1px solid #CFE7F5',
-        }}>
-          {tech.photoUrl ? (
-            <img src={tech.photoUrl} alt="" referrerPolicy="no-referrer" style={{ width: 38, height: 38, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
-          ) : (
-            <div style={{ width: 38, height: 38, borderRadius: '50%', flexShrink: 0, background: COLORS.glassNavy, color: COLORS.white, fontWeight: 700, fontSize: 17, display: 'grid', placeItems: 'center' }}>
-              {techName.charAt(0).toUpperCase()}
-            </div>
-          )}
-          <div>
-            <div style={{ color: INK, fontWeight: 700 }}>{techName}</div>
-            <div>{techName === 'Your technician' ? 'Texts you when on the way.' : `${techName} texts you when on the way.`}</div>
-          </div>
-        </div>
       ) : null}
     </section>
   );
