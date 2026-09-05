@@ -54,6 +54,7 @@ function connection({ rows = [row], visits = [], selected = property } = {}) {
     chain.update = async (patch) => { query.patch = patch; return result.length; };
     return chain;
   });
+  conn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   conn.fn = { now: () => 'now' };
   conn.calls = calls;
   return conn;
@@ -117,15 +118,20 @@ test('editing a child includes its template and outstanding siblings, not anothe
 });
 
 
-test('does not expand a historical template to terminal grouped siblings', async () => {
+test('changes future defaults without relocating a historical template or its siblings', async () => {
   const template = { ...row, id: 'template', status: 'completed', visit_id: 'historic' };
   const sibling = { ...template, id: 'historic-sibling', is_recurring: false };
   const child = { ...row, id: 'child', recurring_parent_id: 'template' };
   const conn = connection({ rows: [child, sibling, template], visits: [{ id: 'historic', stop_base_key: 'old:2099-01-01' }] });
   const plan = await planAppointmentAddress(conn, child.id, property.id);
   expect(plan.rows.map((r) => r.id)).toEqual(['child', 'template']);
-  await expect(applyAppointmentAddress(conn, plan, 'admin-a')).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
-  expect(conn.calls.some((call) => call.patch)).toBe(false);
+  await applyAppointmentAddress(conn, plan, 'admin-a');
+  const addressWrite = conn.calls.find((call) => call.patch?.service_address_line1);
+  expect(addressWrite.filters).toContainEqual(['whereIn', 'id', ['child']]);
+  const defaultWrite = conn.calls.find((call) => call.patch?.recurring_template_overrides);
+  expect(defaultWrite.filters).toContainEqual(['where', { id: 'template', customer_id: row.customer_id }]);
+  expect(JSON.parse(defaultWrite.patch.recurring_template_overrides.bindings[0]).appointment_address.property_id).toBe(property.id);
+  expect(frozenVisitVerdict).not.toHaveBeenCalled();
 });
 
 test.each(['issued_link', 'completion_in_flight', 'visit_not_open', 'unreadable'])('refuses frozen visit %s before any write', async (reason) => {

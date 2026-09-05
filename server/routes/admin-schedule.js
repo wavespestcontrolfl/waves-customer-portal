@@ -2542,7 +2542,7 @@ function computePriceServiceGroupChanges(before, updates) {
 
 // Non-edit provenance keys stored beside the edit overrides (see
 // recurring-appointment-seeder markParentRecurring).
-const PROVENANCE_OVERRIDE_KEYS = new Set(['anchored_split_per_visit']);
+const PROVENANCE_OVERRIDE_KEYS = new Set(['anchored_split_per_visit', 'appointment_address']);
 function readProvenanceOverrides(raw) {
   let value = raw;
   if (typeof value === 'string') {
@@ -2597,7 +2597,8 @@ async function stampRecurringTemplateOverrides(conn, parentId, fields, cols) {
   // so the provenance key is dropped rather than left to contradict it.
   const provenance = readProvenanceOverrides(row.recurring_template_overrides);
   const priceEdit = entries.some(([key]) => key === 'estimated_price');
-  const merged = { ...(priceEdit ? {} : provenance), ...existing };
+  const merged = { ...provenance, ...existing };
+  if (priceEdit) delete merged.anchored_split_per_visit;
   for (const [key, value] of entries) merged[key] = value === undefined ? null : value;
   const before = { ...provenance, ...existing };
   if (JSON.stringify(merged) === JSON.stringify(before)) return false;
@@ -9865,14 +9866,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           } catch { memberSeriesCovered = false; }
           // Make-this-recurring re-anchors the series on THIS row's current
-          // values — stale template overrides from an earlier series life
-          // must not shadow them for later extension writers. (Never
-          // overlaid here: the anchor row's columns carry this very save.)
+          // prices — stale pricing overrides must not shadow this save. Keep
+          // the independent future address default so completed history
+          // does not become the service location again.
           const spawnScopeCols = await trx('scheduled_services').columnInfo();
           if (spawnScopeCols.recurring_template_overrides && parent.recurring_template_overrides) {
+            const { appointment_address: futureAddress } = readProvenanceOverrides(parent.recurring_template_overrides);
             await trx('scheduled_services')
               .where({ id: parent.id })
-              .update({ recurring_template_overrides: null });
+              .update({ recurring_template_overrides: futureAddress
+                ? JSON.stringify({ appointment_address: futureAddress })
+                : null });
           }
           const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
           const spawnBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);

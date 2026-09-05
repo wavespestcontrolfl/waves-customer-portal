@@ -2,12 +2,14 @@ const { stopBaseKey, lockStop, frozenVisitVerdict } = require('./visit-groups');
 const { recordAuditEvent } = require('./audit-log');
 const { dateOnly } = require('./visit-groups');
 
+const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+
 const terminal = ['completed', 'cancelled', 'skipped', 'no_show'];
 const retry = () => Object.assign(new Error('Appointments changed while saving. Reload and choose the address again.'), { statusCode: 409, isOperational: true });
 
 // The template remains the address source for future recurrence generation.
-// Existing completed history stays intact except the explicitly edited row
-// and that template. A grouped stop keeps all its services at one property.
+// Completed history stays intact except the explicitly edited row. Future
+// defaults live in template overrides. A grouped stop stays at one property.
 async function planAppointmentAddress(conn, serviceId, propertyId) {
   const anchor = await conn('scheduled_services').where({ id: serviceId }).first();
   if (!anchor) throw Object.assign(new Error('Appointment not found'), { statusCode: 404, isOperational: true });
@@ -18,7 +20,8 @@ async function planAppointmentAddress(conn, serviceId, propertyId) {
       if (parentId) q.orWhere('id', parentId).orWhere((children) => children
         .where('recurring_parent_id', parentId).whereNotIn('status', terminal));
     }).orderBy('id');
-  const visitIds = [...new Set(rows.map((row) => row.visit_id).filter(Boolean))];
+  const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !terminal.includes(row.status))
+    .map((row) => row.visit_id).filter(Boolean))];
   if (visitIds.length) {
     const members = await conn('scheduled_services').whereIn('visit_id', visitIds).whereNotIn('status', terminal);
     if (members.some((row) => row.customer_id !== anchor.customer_id)) throw retry();
@@ -59,12 +62,13 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
+  const addressRows = locked.filter((row) => row.id === plan.anchor.id || !terminal.includes(row.status));
   for (const visit of fresh.visits) {
     const verdict = await frozenVisitVerdict(trx, visit.id);
     // A retained historical member must never be left at a different property
     // from its visit parent, even if that visit has no surviving artifact.
     const omittedMember = await trx('scheduled_services').where({ visit_id: visit.id })
-      .whereNotIn('id', locked.map((row) => row.id)).first('id');
+      .whereNotIn('id', addressRows.map((row) => row.id)).first('id');
     if (verdict.frozen || omittedMember) {
       throw Object.assign(new Error('This plan includes a visit with completed services, issued links or completion work. Its address cannot be moved here.'), {
         statusCode: 409, isOperational: true, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED',
@@ -76,9 +80,9 @@ async function applyAppointmentAddress(trx, plan, actorId) {
     property_id: property.id,
     service_address_line1: property.address_line1,
     service_address_line2: property.address_line2 || '',
-    service_address_city: property.city || '',
-    service_address_state: property.state || '',
-    service_address_zip: property.zip || '',
+    service_address_city: property.city,
+    service_address_state: property.state,
+    service_address_zip: property.zip,
     zone: null,
     route_order: null,
     lat: property.latitude ?? null,
@@ -88,7 +92,15 @@ async function applyAppointmentAddress(trx, plan, actorId) {
     pre_service_brief_generated_at: null,
     updated_at: trx.fn.now(),
   };
-  await trx('scheduled_services').whereIn('id', locked.map((row) => row.id)).update(stamp);
+  await trx('scheduled_services').whereIn('id', addressRows.map((row) => row.id)).update(stamp);
+  if (plan.parentId) {
+    await trx('scheduled_services').where({ id: plan.parentId, customer_id: plan.anchor.customer_id }).update({
+      recurring_template_overrides: trx.raw(
+        "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
+        [JSON.stringify({ appointment_address: recurringServiceAddress(stamp) })],
+      ),
+    });
+  }
   for (const visit of fresh.visits) {
     const key = stopBaseKey({ propertyId: property.id, customerId: visit.customer_id, scheduledDate: visit.scheduled_date });
     if (key === visit.stop_base_key) continue;
