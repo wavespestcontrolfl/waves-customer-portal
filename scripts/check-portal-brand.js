@@ -8,7 +8,7 @@
  *   1. Raw emoji characters          (use <Icon name="..." /> instead)
  *   2. Hardcoded brand font strings  (import FONTS from theme-brand)
  *   3. Local palette declarations    (import COLORS from theme-brand)
- *   4. Banned body font sizes (11, 13) per customer design brief
+ *   4. Banned font sizes (11, 12, 13) and weights above 700 per the customer glass sheet
  *
  * Run: `node scripts/check-portal-brand.js` or `npm run check:portal-brand`.
  * Exit code 0 = clean, 1 = violations found.
@@ -44,6 +44,8 @@ const EXCLUDED_FILES = new Set([
   // print artifact (GATE_ESTIMATE_DOC_PDF), modeled on the service-report
   // work-order format above — never an on-screen surface.
   'EstimateProposalDocument.jsx',
+  'AdminLoginPage.jsx', // admin surface that happens to live in pages/
+  'TechCapturePreview.jsx', // tech-portal preview harness in pages/
 ]);
 // Filename prefixes that belong to the admin/tech surfaces — separate design
 // system (D palette + DM Sans + density-first, per admin brief), NOT subject
@@ -68,7 +70,12 @@ const FONT_FAMILY_LITERAL_RX = new RegExp(
 
 const LOCAL_PALETTE_RX = /^(?:\s*(?:export\s+)?)const\s+(W|BRAND|PALETTE|THEME|COLORS|PALLETTE)\s*=\s*\{/;
 
-const BANNED_FONT_SIZE_RX = /fontSize:\s*(11|13)\b/;
+const BANNED_FONT_SIZE_RX = /fontSize:\s*(11|12|13)\b/;
+// Customer glass sheet (owner 2026-09-03/05): weights stop at 700. 800/850/900
+// literals render heavier on iPhone than on the Inter/Segoe fallbacks and read
+// as a different face next to the sheet's 600/700; 650/750 are variable-font
+// one-offs that snap unpredictably.
+const HEAVY_WEIGHT_RX = /fontWeight:\s*(6[5-9]\d|7[1-9]\d|[89]\d\d)\b/;
 
 // =========================================================================
 // Walk
@@ -134,7 +141,16 @@ function checkFile(filePath) {
       violations.push({
         rule: 'banned-font-size',
         line: n,
-        msg: `fontSize: ${m[1]} — brief bans 11px (too small) and 13px (body floor is 16, labels should be 14 min)`,
+        msg: `fontSize: ${m[1]} — nothing under 14px on a customer surface (labels 14, body 16; owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (HEAVY_WEIGHT_RX.test(line)) {
+      const m = line.match(HEAVY_WEIGHT_RX);
+      violations.push({
+        rule: 'heavy-weight',
+        line: n,
+        msg: `fontWeight: ${m[1]} — customer weights are 400 / 500 / 600 / 700 only (owner sheet 2026-09-03)`,
         snippet: line.trim().slice(0, 140),
       });
     }

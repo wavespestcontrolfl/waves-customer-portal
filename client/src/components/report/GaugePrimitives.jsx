@@ -90,7 +90,7 @@ export function PressureHistoryChart({ history, cadence }) {
         <div style={{ fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted, fontWeight: 700 }}>
           Score history
         </div>
-        <div style={{ fontSize: 12, color: CUSTOMER_SURFACE.muted }}>{subtitle}</div>
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted }}>{subtitle}</div>
       </div>
       <div style={{
         width: '100%', height: 180, padding: 6, boxSizing: 'border-box',
@@ -139,7 +139,7 @@ export function PressureHistoryChart({ history, cadence }) {
         </ResponsiveContainer>
       </div>
       {cadenceWord ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: CUSTOMER_SURFACE.muted, lineHeight: 1.45 }}>
+        <div style={{ marginTop: 8, fontSize: 14, color: CUSTOMER_SURFACE.muted, lineHeight: 1.45 }}>
           X-axis spacing reflects this customer's service cadence — {cadenceWord}.
         </div>
       ) : null}
@@ -208,7 +208,7 @@ export function TrendChip({ trend, delta }) {
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 6,
       padding: '4px 10px', borderRadius: 999, background: tone.bg, color: tone.fg,
-      fontSize: 12, fontWeight: 600, lineHeight: 1.2,
+      fontSize: 14, fontWeight: 600, lineHeight: 1.2,
     }}>
       <Icon size={12} aria-hidden="true" />
       <span>{meta.label}{deltaText ? ` · ${deltaText}` : ''}</span>

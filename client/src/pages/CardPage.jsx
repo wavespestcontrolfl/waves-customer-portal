@@ -229,7 +229,7 @@ export default function CardPage() {
             ...GLASS_MATERIAL, cursor: 'default', borderRadius: 24,
             padding: '28px 26px', maxWidth: 420, textAlign: 'center', marginTop: 60,
           }}>
-            <div style={{ fontSize: 18, fontWeight: 650, marginBottom: 6 }}>This card isn&rsquo;t available</div>
+            <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>This card isn&rsquo;t available</div>
             <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.75)', lineHeight: 1.5 }}>
               The link may be incomplete. Reach us any time at{' '}
               <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
@@ -330,11 +330,11 @@ export default function CardPage() {
               flex: 'none', width: 52, height: 52, borderRadius: 999,
               background: 'rgba(255,255,255,0.16)', border: '1px solid rgba(255,255,255,0.40)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 16, fontWeight: 680,
+              fontSize: 16, fontWeight: 600,
             }}>{initials || 'W'}</div>
           )}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-            <div style={{ fontSize: 22, fontWeight: 680, letterSpacing: '-0.01em' }}>{techName}</div>
+            <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em' }}>{techName}</div>
             <div style={{ fontSize: 14, color: AQUA }}>Your Waves technician</div>
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>

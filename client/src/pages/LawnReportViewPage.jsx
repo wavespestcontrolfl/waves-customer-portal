@@ -83,10 +83,10 @@ function NotFoundCard() {
   return (
     <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
       <SectionTitle>This lawn report isn&apos;t available</SectionTitle>
-      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -142,7 +142,7 @@ function QuoteRequestForm({ token, firstName }) {
 
   if (status === 'success') {
     return (
-      <div role="status" style={{ background: COLORS.greenLight, border: `1px solid ${COLORS.green}`, borderRadius: 10, padding: '16px 18px', color: '#166534', fontSize: 15, lineHeight: 1.5 }}>
+      <div role="status" style={{ background: COLORS.greenLight, border: `1px solid ${COLORS.green}`, borderRadius: 10, padding: '16px 18px', color: '#166534', fontSize: 16, lineHeight: 1.5 }}>
         Thanks{form.name ? `, ${form.name.split(' ')[0]}` : ''}! We&apos;ll reach out shortly with your free lawn plan.
       </div>
     );
@@ -154,7 +154,7 @@ function QuoteRequestForm({ token, firstName }) {
       <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" aria-label="Phone" type="tel" autoComplete="tel" className="waves-focus-ring" style={inputStyle} />
       <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" aria-label="Email" type="email" autoComplete="email" className="waves-focus-ring" style={inputStyle} />
       <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" aria-label="Best time to reach you (optional)" className="waves-focus-ring" style={inputStyle} />
-      <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 48, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
+      <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 48, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 700, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>
       {error ? (
@@ -253,7 +253,7 @@ export default function LawnReportViewPage() {
           Overall: {report.overall_status || 'Reviewed'}
         </p>
         {report.summary ? (
-          <p style={{ margin: 0, color: BODY, fontSize: 15, lineHeight: 1.6 }}>{report.summary}</p>
+          <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.6 }}>{report.summary}</p>
         ) : null}
       </SectionCard>
 
@@ -264,8 +264,8 @@ export default function LawnReportViewPage() {
           <div style={{ display: 'grid', gap: 10 }}>
             {findings.map((f, i) => (
               <div key={`${f.name}-${i}`} style={estimateInnerBox({ borderLeft: `4px solid ${SEVERITY_DOT[f.severity] || COLORS.teal}`, padding: '12px 14px' })}>
-                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT, marginBottom: f.customer_note ? 4 : 0 }}>{f.name}</div>
-                {f.customer_note ? <div style={{ fontSize: 15, color: BODY, lineHeight: 1.5 }}>{f.customer_note}</div> : null}
+                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT, marginBottom: f.customer_note ? 4 : 0 }}>{f.name}</div>
+                {f.customer_note ? <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5 }}>{f.customer_note}</div> : null}
               </div>
             ))}
           </div>
@@ -277,20 +277,20 @@ export default function LawnReportViewPage() {
         <SectionCard>
           <SectionTitle>Your plan &amp; what to expect</SectionTitle>
           {report.watering?.customer_sequence ? (
-            <p style={{ margin: '0 0 10px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>{report.watering.customer_sequence}</p>
+            <p style={{ margin: '0 0 10px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>{report.watering.customer_sequence}</p>
           ) : null}
           {report.watering?.restriction_summary ? (
             <p style={{ margin: '0 0 10px', color: BODY, fontSize: 14, lineHeight: 1.5 }}>{report.watering.restriction_summary}</p>
           ) : null}
           {expectationItems.length ? (
-            <ul style={{ margin: '6px 0 0', padding: '0 0 0 18px', color: BODY, fontSize: 15, lineHeight: 1.6 }}>
+            <ul style={{ margin: '6px 0 0', padding: '0 0 0 18px', color: BODY, fontSize: 16, lineHeight: 1.6 }}>
               {expectationItems.map(([key, val]) => <li key={key}>{val}</li>)}
             </ul>
           ) : null}
           {watchItems.length ? (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
               <div data-gt="eyebrow" style={{ ...DOC_EYEBROW, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
-              <ul style={{ margin: 0, padding: '0 0 0 18px', color: BODY, fontSize: 15, lineHeight: 1.6 }}>
+              <ul style={{ margin: 0, padding: '0 0 0 18px', color: BODY, fontSize: 16, lineHeight: 1.6 }}>
                 {watchItems.map((w, i) => <li key={i}>{w}</li>)}
               </ul>
             </div>
@@ -301,7 +301,7 @@ export default function LawnReportViewPage() {
       {report.seasonal_context ? (
         <SectionCard>
           <div data-gt="eyebrow" style={{ ...DOC_EYEBROW, marginBottom: 6 }}>Right now in Southwest Florida</div>
-          <p style={{ margin: 0, color: BODY, fontSize: 15, lineHeight: 1.55 }}>{report.seasonal_context}</p>
+          <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.55 }}>{report.seasonal_context}</p>
         </SectionCard>
       ) : null}
 
@@ -314,7 +314,7 @@ export default function LawnReportViewPage() {
             {report.pricing.tiers.map((tier, i) => (
               <div key={`${tier.label}-${i}`} style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
                 <div>
-                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
                     {tier.label}{tier.recommended ? ' · Most popular' : ''}
                   </div>
                   {/* Engine labels usually already read "N Applications" — only add
@@ -326,7 +326,7 @@ export default function LawnReportViewPage() {
                       visits when derivable, /mo only as the no-visit-count
                       fallback, never a /yr total, always two decimals. */}
                   {tier.monthly != null ? (
-                    <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                    <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: TEXT }}>
                       {tierPerApplication(tier) != null
                         ? <>${fmtCents(tierPerApplication(tier))}<span style={{ fontSize: 14, fontWeight: 600, color: BODY }}> / application</span></>
                         : <span style={{ fontSize: 14, fontWeight: 600, color: BODY }}>Priced per application</span>}
@@ -345,7 +345,7 @@ export default function LawnReportViewPage() {
       {/* CTA */}
       <SectionCard>
         <SectionTitle>Want us to take care of it?</SectionTitle>
-        <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+        <p style={{ margin: '0 0 14px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
           Tell us how to reach you and we&apos;ll put together a free, no-pressure plan to get {placeLabel} where you want it.
         </p>
         <QuoteRequestForm token={token} firstName={report.first_name} />

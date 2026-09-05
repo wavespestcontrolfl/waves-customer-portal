@@ -75,7 +75,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
   return (
     <section style={estimateCard()}>
       <div style={{
-        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        fontSize: 14, fontWeight: 700, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
       }}>
         The Waves app
@@ -153,7 +153,7 @@ export default function AppShowcaseCard({ onBookToday = null }) {
               border: 'none',
               borderRadius: 10,
               fontSize: 15,
-              fontWeight: 800,
+              fontWeight: 700,
               cursor: 'pointer',
             }}
           >

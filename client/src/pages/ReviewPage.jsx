@@ -125,7 +125,7 @@ export default function ReviewPage() {
             border: `3px solid ${COLORS.white}`, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
           }}>
             {!techPhoto && (
-              <span style={{ color: COLORS.white, fontSize: 28, fontFamily: FONTS.heading, fontWeight: 800 }}>
+              <span style={{ color: COLORS.white, fontSize: 28, fontFamily: FONTS.heading, fontWeight: 700 }}>
                 {(techName || 'W').charAt(0)}
               </span>
             )}
@@ -182,7 +182,7 @@ export default function ReviewPage() {
               })}
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
               <span>Not great</span><span>Amazing!</span>
             </div>
           </div>

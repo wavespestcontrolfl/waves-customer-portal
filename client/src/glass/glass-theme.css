@@ -30,6 +30,8 @@ html[data-glass-theme] {
   --border-strong: rgba(4, 57, 94, 0.24);
   --brand-soft: rgba(4, 57, 94, 0.08);
   --brand-ring: rgba(4, 57, 94, 0.18);
+  /* TrustFooter's legal lines read --text-subtle; the sheet's muted grey, not the marketing gray-500. */
+  --text-subtle: #475569;
 }
 
 /* Decorative orbs and the review ticker intentionally extend beyond their
@@ -474,7 +476,7 @@ html[data-glass-theme] .sr-cell, html[data-glass-theme] .applied-product-card, h
 html[data-glass-theme] .sr-cell-label, html[data-glass-theme] .section-eyebrow, html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"] {
   font-size: 14px !important; font-weight: 600 !important; letter-spacing: 0.06em !important; text-transform: uppercase; color: #3F4A65 !important;
 }
-html[data-glass-theme] .service-report-v1 .sr-section p, html[data-glass-theme] .service-report-v1 .report-card p { font-size: 15px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
+html[data-glass-theme] .service-report-v1 .sr-section p, html[data-glass-theme] .service-report-v1 .report-card p { font-size: 16px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
 html[data-glass-theme] .service-report-v1 .sr-section, html[data-glass-theme] .service-report-v1 .report-card, html[data-glass-theme] .service-report-v1 .review-request-card, html[data-glass-theme] .service-report-v1 .cross-sell-card, html[data-glass-theme] .service-report-v1 .service-status-card { margin-top: 16px !important; }
 html[data-glass-theme] [data-glass="soft"] {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.15)), rgba(244, 239, 224, 0.36) !important;
@@ -483,7 +485,7 @@ html[data-glass-theme] [data-glass="soft"] {
 /* Report Ask Waves = the estimate's Ask Waves card (owner 2026-09-03). */
 html[data-glass-theme] .waves-ask-card { display: grid !important; grid-template-columns: 1fr !important; gap: 12px !important; padding: 24px !important; margin: 16px 0 0 !important; position: static !important; }
 html[data-glass-theme] .waves-ask-title { margin: 0 !important; }
-html[data-glass-theme] .waves-ask-intro { margin: 0 !important; font-size: 15px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
+html[data-glass-theme] .waves-ask-intro { margin: 0 !important; font-size: 16px !important; color: #3F4A65 !important; line-height: 1.5 !important; }
 html[data-glass-theme] .waves-ask-form { display: grid !important; grid-template-columns: minmax(0, 1fr) auto !important; gap: 12px !important; align-items: center !important; }
 html[data-glass-theme] .waves-ask-form input { width: 100%; min-height: 48px !important; padding: 12px 16px !important; font-size: 16px !important; border: 1px solid rgba(4, 57, 94, 0.16) !important; border-radius: 10px !important; background: rgba(255, 255, 255, 0.8) !important; color: #04395E !important; outline: none; box-sizing: border-box; }
 html[data-glass-theme] .waves-ask-eyebrow { display: block !important; }
@@ -494,6 +496,35 @@ html[data-glass-theme] .waves-ask-row[data-first] { border-top: 0 !important; }
 /* The card is interactive chrome: never print it (the sheet's display: grid !important would otherwise beat the page's print rule). */
 @media print { html[data-glass-theme] .waves-ask-card { display: none !important; } }
 html[data-glass-theme] .waves-ask-go { font-size: 14px !important; font-weight: 600 !important; color: #3F4A65 !important; }
+/* Shared by the service report and the project report (moved out of ReportViewPage's style block 2026-09-05). */
+/* Ask Waves answer sits in the card's normal flow under the question
+   rows (the old sticky bar's dropdown was absolutely positioned). */
+html[data-glass-theme] .waves-ask-answer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  border: 1px solid rgba(4, 57, 94, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 12px 14px;
+  color: #04395E;
+  font-size: 15px;
+  line-height: 1.5;
+}
+html[data-glass-theme] .waves-ask-dismiss {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  margin: -10px -12px -10px 0;
+  border: 0;
+  background: transparent;
+  color: #475569;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
 html[data-glass-theme] .sr-shell section[data-glass], html[data-glass-theme] .sr-shell .pest-await { margin-bottom: 16px !important; }
 html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !important; }
 

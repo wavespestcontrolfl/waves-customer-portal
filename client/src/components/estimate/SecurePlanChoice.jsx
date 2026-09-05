@@ -30,7 +30,7 @@ function Badge({ tone, children }) {
     <span style={{
       display: 'inline-block',
       marginTop: 8,
-      fontSize: 12,
+      fontSize: 14,
       fontWeight: 700,
       padding: '3px 9px',
       borderRadius: 999,
@@ -87,8 +87,8 @@ function PlanOption({ selected, disabled, onClick, title, price, priceSuffix, st
       }}
     >
       <Radio selected={selected} />
-      <div style={{ fontSize: 15, fontWeight: 800, color: NAVY, paddingRight: 30 }}>{title}</div>
-      <div style={{ fontSize: 19, fontWeight: 800, color: NAVY, marginTop: 5 }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: NAVY, paddingRight: 30 }}>{title}</div>
+      <div style={{ fontSize: 19, fontWeight: 700, color: NAVY, marginTop: 5 }}>
         {strike ? (
           <span style={{ textDecoration: 'line-through', color: W.textCaption, fontWeight: 600, fontSize: 14, marginRight: 6 }}>
             {strike}
@@ -154,7 +154,7 @@ export default function SecurePlanChoice({ planContext, selected, onSelect, disa
         />
         )}
       </div>
-      <p style={{ fontSize: 12, color: W.textCaption, lineHeight: 1.5, marginTop: 11, marginBottom: 0 }}>
+      <p style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 11, marginBottom: 0 }}>
         {CARD_SURCHARGE_DISCLOSURE}
       </p>
     </div>

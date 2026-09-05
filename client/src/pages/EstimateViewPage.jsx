@@ -142,7 +142,7 @@ const TERMINAL_HERO = {
 // Small uppercase section kicker — same treatment as "How often?" /
 // "Customize your visit" so every card opens with a matching subheader.
 const SECTION_KICKER_STYLE = {
-  fontSize: 12,
+  fontSize: 14,
   fontWeight: 700,
   color: ESTIMATE_MUTED,
   textTransform: 'uppercase',
@@ -205,8 +205,8 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
           color: COLORS.white,
           border: 'none',
           borderRadius: 10,
-          fontSize: 15,
-          fontWeight: 800,
+          fontSize: 16,
+          fontWeight: 700,
           cursor: 'pointer',
           display: 'inline-flex',
           alignItems: 'center',
@@ -714,8 +714,8 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
                   marginTop: 16,
                   background: ESTIMATE_BUTTON_BG,
                   color: COLORS.white,
-                  fontSize: 15,
-                  fontWeight: 800,
+                  fontSize: 16,
+                  fontWeight: 700,
                   cursor: 'pointer',
                 }}
               >
@@ -724,7 +724,7 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
             ) : null}
           </>
         ) : requestState === 'requested' ? (
-          <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 20, lineHeight: 1.5, fontWeight: 600 }}>
+          <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 20, lineHeight: 1.5, fontWeight: 600 }}>
             Request sent — we've let our office know you'd like more time on this estimate. We'll reach out shortly.
           </div>
         ) : (
@@ -741,8 +741,8 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
                 marginTop: 20,
                 background: ESTIMATE_BUTTON_BG,
                 color: COLORS.white,
-                fontSize: 15,
-                fontWeight: 800,
+                fontSize: 16,
+                fontWeight: 700,
                 cursor: requestState === 'sending' ? 'not-allowed' : 'pointer',
                 opacity: requestState === 'sending' ? 0.8 : 1,
               }}
@@ -773,7 +773,7 @@ function formatCustomerPhone(phone) {
 // Eyebrow type treatment — shared by the "Your estimate · …" kicker and the
 // customer-contact lines under the headline (matches the SSR .hero-contact).
 const HEADER_EYEBROW_STYLE = {
-  fontSize: 12,
+  fontSize: 14,
   color: ESTIMATE_MUTED,
   letterSpacing: '0.12em',
   textTransform: 'uppercase',
@@ -826,7 +826,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         {headlineText}
       </h1>
       {subline ? (
-        <p style={{ margin: '16px 0 0', fontSize: phone ? 15 : 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
+        <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
           {subline}
         </p>
       ) : null}
@@ -841,7 +841,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
            per-application price cards. */
         <div style={{ marginTop: 14, display: 'grid', gap: 2 }}>
           {[nameLine, ...contactLines].filter(Boolean).map((line) => (
-            <div key={line} data-gt="" style={{ fontSize: 15, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>{line}</div>
+            <div key={line} data-gt="" style={{ fontSize: 16, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>{line}</div>
           ))}
         </div>
       ) : null}
@@ -922,7 +922,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       ) : null}
 
       {showYourWork?.overlaySatelliteUrl ? (
-        <div style={{ marginTop: 8, fontSize: 12, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+        <div style={{ marginTop: 8, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
           Red outline: your property boundary from county records.
         </div>
       ) : null}
@@ -955,7 +955,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
               </div>
               <div style={{
                 fontFamily: FONTS.serif,
-                fontSize: phone ? 15 : 16,
+                fontSize: 16,
                 fontWeight: 500,
                 color: ESTIMATE_TEXT,
               }}>
@@ -1032,7 +1032,7 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
                     background: '#E3F5FD',
                     color: '#065A8C',
                     fontSize: 14,
-                    fontWeight: 800,
+                    fontWeight: 700,
                     lineHeight: 1,
                     textTransform: 'uppercase',
                     letterSpacing: '0.04em',
@@ -1224,7 +1224,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
     <section id={ASK_SECTION_ID} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
       <div>
         <div style={{
-          fontSize: 12,
+          fontSize: 14,
           color: ESTIMATE_MUTED,
           letterSpacing: '0.12em',
           textTransform: 'uppercase',
@@ -1286,8 +1286,8 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
             padding: '0 20px',
             background: ESTIMATE_BUTTON_BG,
             color: COLORS.white,
-            fontSize: 15,
-            fontWeight: 800,
+            fontSize: 16,
+            fontWeight: 700,
             cursor: asking || !question.trim() ? 'not-allowed' : 'pointer',
             // Stay clearly navy while disabled — at 0.65 the button read
             // as gray next to the other brand buttons.
@@ -1715,7 +1715,7 @@ function ServiceJoinConfirmPanel({ label, quote, phase, onConfirm, onCancel, mod
   const restoring = mode === 'restore';
   return (
     <div style={estimateInnerBox({ padding: '14px 16px' })}>
-      <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+      <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
         {restoring ? `Add ${label} back?` : `Add ${label}?`}
       </div>
       {Number(quote.next?.onetimeTotal || 0) !== Number(quote.previous?.onetimeTotal || 0) ? (
@@ -1783,7 +1783,7 @@ export function EstimateAddServiceRequestCard({ offer, requestState, onRequest, 
     const showPanel = (priced.phase === 'preview' || priced.phase === 'submitting') && priced.quote;
     return (
       <section style={estimateCard({ padding: 16 })}>
-        <div style={{ fontSize: 16, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
           {offer.title}
         </div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 4 }}>
@@ -1814,8 +1814,8 @@ export function EstimateAddServiceRequestCard({ offer, requestState, onRequest, 
               borderRadius: 10,
               background: ESTIMATE_BUTTON_BG,
               color: COLORS.white,
-              fontSize: 15,
-              fontWeight: 800,
+              fontSize: 16,
+              fontWeight: 700,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -1834,7 +1834,7 @@ export function EstimateAddServiceRequestCard({ offer, requestState, onRequest, 
       {/* Icon chip removed (owner 2026-07-06) — copy carries the offer. */}
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 16, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
             {offer.title}
           </div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 4 }}>
@@ -1855,8 +1855,8 @@ export function EstimateAddServiceRequestCard({ offer, requestState, onRequest, 
               borderRadius: 10,
               background: isReceived ? W.green : ESTIMATE_BUTTON_BG,
               color: COLORS.white,
-              fontSize: 15,
-              fontWeight: 800,
+              fontSize: 16,
+              fontWeight: 700,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -1916,7 +1916,7 @@ export function OneTimePriceCard({ oneTimePrice, breakdown }) {
         <span style={{ fontFamily: FONTS.serif, fontSize: 34, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
           {fmtMoney(oneTimePrice)}
         </span>
-        <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
+        <span style={{ fontSize: 16, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
       <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.5 }}>
         {oneTimePriceCopy(breakdown)}
@@ -1934,7 +1934,7 @@ function OneTimeRowCopy({ copy }) {
   if (!copy) return null;
   return (
     <>
-      <div style={{ fontSize: 15, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 6, lineHeight: 1.5 }}>
         {copy.outcome}
       </div>
       {Array.isArray(copy.includes) && copy.includes.length ? (
@@ -2001,7 +2001,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
 
   return (
     <div style={estimateCard({ padding: 16 })}>
-      <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginBottom: 12 }}>
+      <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginBottom: 12 }}>
         {sectionTitle}
       </div>
       <div style={{ display: 'grid', gap: 12 }}>
@@ -2023,18 +2023,18 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   {customerOneTimeLabel(item)}
                 </div>
                 {item.detail ? (
-                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
                     {item.detail}
                   </div>
                 ) : null}
                 <OneTimeRowCopy copy={item.copy} />
                 {quoteNote ? (
-                  <div style={{ fontSize: 12, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                  <div style={{ fontSize: 14, color: '#92400E', marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     {quoteNote}
                   </div>
                 ) : null}
                 {showPrepayWaiverNote ? (
-                  <div style={{ fontSize: 12, color: W.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
+                  <div style={{ fontSize: 14, color: W.green, marginTop: 4, lineHeight: 1.35, fontWeight: 700 }}>
                     * {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
                   </div>
                 ) : null}
@@ -2061,7 +2061,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
         <div style={{
           display: 'flex', justifyContent: 'space-between', gap: 12,
           borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
-          fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
+          fontSize: 16, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
         }}>
           <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
           <span style={totalIsQuoteRequired ? { color: W.red } : null}>
@@ -2145,7 +2145,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           }}>
             Recurring total
           </div>
-          <div style={{ fontSize: 15, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 16, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
             Combined recurring services before any one-time items.
           </div>
         </div>
@@ -2209,7 +2209,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
           background: '#F0FDF4',
           color: W.green,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
           lineHeight: 1.35,
         }}>
           <span>{manualDiscount.label || 'Discount'}</span>
@@ -2285,7 +2285,7 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
       border: `1px solid ${W.greenLight}`,
       background: W.successWash,
       color: W.green,
-      fontWeight: 800,
+      fontWeight: 700,
       fontSize: 16,
     }}>
       <span>{creditLabel}</span>
@@ -2394,10 +2394,10 @@ function ExistingAppointmentCard({ appointment }) {
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         Existing appointment
       </div>
-      <div style={{ fontSize: 20, fontWeight: 800, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.35 }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginTop: 8, lineHeight: 1.35 }}>
         {formatAppointmentLabel(appointment)}
       </div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
         {appointment?.serviceType || 'Service visit'}
       </div>
       <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
@@ -3050,7 +3050,7 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
             {/* data-glass-accent: the gold glass CTA (owner 2026-08-12 —
                 primary sheet actions match the estimate's gold CTAs); the
                 inline gold is the non-glass fallback. */}
-            <button type="button" data-glass-accent="" onClick={onClose} style={{ width: '100%', padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow, color: COLORS.glassNavy, fontSize: 15, fontWeight: 700, cursor: 'pointer' }}>
+            <button type="button" data-glass-accent="" onClick={onClose} style={{ width: '100%', padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow, color: COLORS.glassNavy, fontSize: 16, fontWeight: 700, cursor: 'pointer' }}>
               Done
             </button>
           </>
@@ -3105,7 +3105,7 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
                 data-glass-accent=""
                 onClick={submit}
                 disabled={!canSubmit}
-                style={{ padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow, color: COLORS.glassNavy, fontSize: 15, fontWeight: 700, cursor: canSubmit ? 'pointer' : 'default', opacity: canSubmit ? 1 : 0.55 }}
+                style={{ padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow, color: COLORS.glassNavy, fontSize: 16, fontWeight: 700, cursor: canSubmit ? 'pointer' : 'default', opacity: canSubmit ? 1 : 0.55 }}
               >
                 {submitting ? 'Sending…' : 'Request re-measure'}
               </button>
@@ -3155,13 +3155,13 @@ const softExitChipStyle = (on) => ({
 });
 const softExitPrimaryStyle = (enabled) => ({
   padding: '12px 16px', borderRadius: 12, border: 'none', background: COLORS.yellow,
-  color: COLORS.glassNavy, fontSize: 15, fontWeight: 700,
+  color: COLORS.glassNavy, fontSize: 16, fontWeight: 700,
   cursor: enabled ? 'pointer' : 'default', opacity: enabled ? 1 : 0.55,
 });
 const softExitOptionStyle = {
   width: '100%', textAlign: 'left', padding: '14px 16px', borderRadius: 12,
   border: `1.5px solid ${ESTIMATE_BORDER}`, background: COLORS.white,
-  color: COLORS.glassNavy, fontSize: 15, fontWeight: 600, cursor: 'pointer',
+  color: COLORS.glassNavy, fontSize: 16, fontWeight: 600, cursor: 'pointer',
 };
 const softExitInputStyle = {
   width: '100%', boxSizing: 'border-box', borderRadius: 10, border: `1.5px solid ${ESTIMATE_BORDER}`,
@@ -3460,7 +3460,7 @@ function AcceptanceTermsLine({ terms }) {
       </button>
       {open ? (
         <div id={toggleId} style={{ ...estimateInnerBox({ padding: '12px 14px', marginTop: 10 }), display: 'grid', gap: 8, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
-          <div style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600 }}>Terms · {terms.version}</div>
+          <div style={{ fontSize: 14, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600 }}>Terms · {terms.version}</div>
           {(terms.terms || []).map((t) => (
             <div key={t.label}><strong style={{ color: ESTIMATE_TEXT }}>{t.label}</strong> — {t.text}</div>
           ))}
@@ -3488,7 +3488,7 @@ function AcceptanceRecordCard({ acceptance }) {
   ].filter(Boolean);
   return (
     <section style={estimateCard()} data-testid="acceptance-record">
-      <div style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600, marginBottom: 10 }}>Service &amp; payment authorization</div>
+      <div style={{ fontSize: 14, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600, marginBottom: 10 }}>Service &amp; payment authorization</div>
       <div style={{ display: 'grid', gap: 6, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
         {lines.map((line, i) => <div key={i}>{line}</div>)}
       </div>
@@ -3658,7 +3658,7 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         {invoicePayUrl ? (
           <a
             href={invoicePayUrl}
-            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 15 }}
+            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 16 }}
           >{payNowLabel}</a>
         ) : null}
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
@@ -3716,7 +3716,7 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         {bookingUrl ? (
           <a
             href={bookingUrl}
-            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 15 }}
+            style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, textDecoration: 'none', fontSize: 16 }}
           >Pick appointment</a>
         ) : null}
       </div>
@@ -3813,7 +3813,7 @@ export function DraftPreviewBanner() {
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: '1px solid #f5bb5c', marginBottom: 16,
     }}>
-      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.navy }}>
+      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.navy }}>
         Draft preview — not sent to the customer yet
       </div>
       <div style={{ fontSize: 14, color: COLORS.navy, marginTop: 4 }}>
@@ -3864,7 +3864,7 @@ function PropertyGroupSwitcher({ group }) {
           const inner = (
             <>
               <span style={{ minWidth: 0 }}>
-                <span style={{ display: 'block', fontSize: 15, fontWeight: 600, color: ESTIMATE_TEXT, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{ display: 'block', fontSize: 16, fontWeight: 600, color: ESTIMATE_TEXT, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {p.address || 'Property'}
                 </span>
                 <span style={{ display: 'block', fontSize: 14, color: ESTIMATE_BODY, marginTop: 2 }}>
@@ -3949,7 +3949,7 @@ function AcceptanceModeCard({ acceptance }) {
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           No appointment needed.
         </div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
           This renews your annual guarantee coverage — there is no service visit to
           schedule. Accept below and we will send your invoice by text and email.
         </div>
@@ -3965,7 +3965,7 @@ function AcceptanceModeCard({ acceptance }) {
         <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
           Approve online — we handle the scheduling.
         </div>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
           No appointment to pick here: after you approve, a Waves team member reaches out to
           schedule your commercial service, and your account manager confirms the exact price
           on a quick site visit before your first invoice.
@@ -3992,7 +3992,7 @@ function AcceptanceModeCard({ acceptance }) {
       marginBottom: 16,
     }}>
       <div style={{ fontSize: 20, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>{title}</div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{body}</div>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{body}</div>
       <a href={`tel:${WAVES_PHONE_TEL}`} style={estimateCallCtaStyle}>
         {acceptance.ctaLabel || 'Call Waves'}
       </a>
@@ -4020,7 +4020,7 @@ function ReviewBeforeBookingCard({ reason }) {
           ? 'Waves will confirm & schedule your trenching'
           : 'Waves will confirm & schedule this service'}
       </div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
         {isTrenching
           ? 'Your price is set from the measured treatment path. Because trenching drills concrete, lays a chemical soil barrier, and carries a retreat warranty, a Waves specialist confirms the plan with you — access, exact footage, product, and warranty — then schedules your visit, so it can’t be self-booked online.'
           : 'A Waves specialist reviews this quote with you and schedules your visit — it can’t be self-booked online.'}
@@ -4234,11 +4234,11 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
           if (lead && isTermiteInstall(item)) {
             return (
               <div key={`${item.service || item.label || 'item'}-${i}`}>
-                <div style={{ fontSize: 15, fontWeight: 800, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
                 {item.detail ? (
                   <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
                 ) : null}
-                <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
                   {amount} gets every station in the ground.
                 </div>
                 <OneTimeRowCopy copy={item.copy} />
@@ -4250,7 +4250,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
                 {item.detail ? (
-                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
                 ) : null}
                 <OneTimeRowCopy copy={item.copy} />
               </div>
@@ -4314,7 +4314,7 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
           .map(fmtVisitDay).filter(Boolean);
         return (
           <div key={svc.key || svc.label} style={{ marginTop: 14 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy }}>{svc.label}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: COLORS.navy }}>{svc.label}</div>
             {visitDays.length ? (
               <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2 }}>
                 {visitDays.length === 1 ? 'Upcoming visit: ' : 'Upcoming visits: '}
@@ -4325,7 +4325,7 @@ export function ExistingPlanUpgradeCard({ membership, waveGuardTier, readOnly = 
               <span style={{ fontSize: 16, color: ESTIMATE_MUTED, textDecoration: 'line-through', lineHeight: 1 }}>
                 {fmtMoney(svc.currentPerVisit)}
               </span>
-              <span style={{ fontSize: 20, fontWeight: 800, color: W.blueDeeper, lineHeight: 1 }}>
+              <span style={{ fontSize: 20, fontWeight: 700, color: W.blueDeeper, lineHeight: 1 }}>
                 {fmtMoney(svc.newPerVisit)}
               </span>
               {/* "/ application" is the estimate surface's one billing unit
@@ -4382,8 +4382,8 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
       // are inert here, so the estimate's own card typography rides inline.
       styles={{
         heading: { fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: COLORS.navy, margin: '0 0 14px' },
-        button: { ...estimateCtaStyle, display: 'inline-block', fontSize: 15 },
-        link: { ...estimateCtaStyle, display: 'inline-block', fontSize: 15, textDecoration: 'none', margin: '10px 6px 0' },
+        button: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16 },
+        link: { ...estimateCtaStyle, display: 'inline-block', fontSize: 16, textDecoration: 'none', margin: '10px 6px 0' },
         code: { fontSize: 20, fontWeight: 700, color: COLORS.navy, letterSpacing: '0.04em', marginRight: 10 },
         copy: { ...estimateSecondaryCtaStyle, padding: '6px 12px', fontSize: 14 },
       }}
@@ -4452,7 +4452,7 @@ export function LawnProgramCalendar({ program }) {
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         Your program
       </div>
-      <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
+      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
         {n} applications a year — {program.cadence}
       </div>
       <button
@@ -4462,7 +4462,7 @@ export function LawnProgramCalendar({ program }) {
         aria-controls="lawn-program-seasons"
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 8, padding: 0, border: 'none', background: 'transparent',
-          fontSize: 15, fontWeight: 600, color: COLORS.glassNavy, cursor: 'pointer', fontFamily: 'inherit',
+          fontSize: 16, fontWeight: 600, color: COLORS.glassNavy, cursor: 'pointer', fontFamily: 'inherit',
         }}
       >
         What each season covers
@@ -4485,7 +4485,7 @@ export function LawnProgramCalendar({ program }) {
             >
               <div aria-hidden="true" style={{ borderRadius: 2, background: s.current ? COLORS.glassNavy : ESTIMATE_BORDER }} />
               <div style={{ minWidth: 0 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, fontSize: 15, lineHeight: 1.4 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, fontSize: 16, lineHeight: 1.4 }}>
                   <div style={{ fontWeight: 600, color: ESTIMATE_BODY }}>
                     {s.label}
                     <span style={{ fontWeight: 400, color: ESTIMATE_MUTED, whiteSpace: 'nowrap' }}> {s.range}{s.current ? ' · now' : ''}</span>
@@ -4661,7 +4661,7 @@ export function ServiceSection({
         {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
           <>
             <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
               Monitoring is what keeps them working:
             </div>
           </>
@@ -4774,7 +4774,7 @@ export function ServiceSection({
                   {section.stationRental.label || 'Termite Station Rental'}
                 </div>
                 {section.stationRental.detail ? (
-                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
                     {section.stationRental.detail}
                   </div>
                 ) : null}
@@ -4788,7 +4788,7 @@ export function ServiceSection({
                 </div>
               )}
             </div>
-            <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 4, lineHeight: 1.35 }}>
+            <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4, lineHeight: 1.35 }}>
               Included in your plan pricing.
             </div>
           </div>
@@ -4803,7 +4803,7 @@ export function ServiceSection({
         {sectionSlug === 'termite_bait' && Array.isArray(section.bondOptions)
           && section.bondOptions.length > 0 && onSelectBondTerm && !frozen ? (
           <div style={{ marginTop: 6 }} aria-label="Termite bond options">
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
               Termite Bond — optional re-treatment warranty
             </div>
             <GlassFrequencyPills
@@ -4831,7 +4831,7 @@ export function ServiceSection({
         {section.key === 'commercial_pest' && section.interiorOption
           && onToggleInteriorService && !frozen ? (
           <div style={{ marginTop: 6 }} aria-label="Interior service options">
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: '#04395E', margin: '10px 0 2px' }}>
               Interior service — treatments inside the building
             </div>
             {section.interiorOption.detail ? (
@@ -4912,7 +4912,7 @@ export function ServiceSection({
                 middle of changing. */}
             {(serviceOptOut.phase === 'preview' || serviceOptOut.phase === 'submitting') && serviceOptOut.quote ? (
               <div style={estimateInnerBox({ padding: '14px 16px' })}>
-                <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
                   Remove {section.label}?
                 </div>
                 {/* No combined plan totals here — the owner's price-copy rule
@@ -7163,7 +7163,7 @@ function EstimateViewPageInner() {
                   }
                   return (
                     <div key={key} style={estimateInnerBox({ padding: '14px 16px' })}>
-                      <div style={{ fontSize: 15, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 8 }}>
                         Add {label} back?
                       </div>
                       {Number(optOut.quote.next?.onetimeTotal || 0)
@@ -7745,7 +7745,7 @@ function EstimateViewPageInner() {
                     onChange={(e) => setPrepayConsentChecked(e.target.checked)}
                     style={{ marginTop: 3, flexShrink: 0 }}
                   />
-                  <span style={{ fontSize: 12, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
+                  <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>
                     {['us_bank_account', 'ach'].includes(prepayChargeQuote.methodType) ? PREPAY_ACH_CONSENT_TEXT : PREPAY_CARD_CONSENT_TEXT}
                   </span>
                 </label>
@@ -7762,7 +7762,7 @@ function EstimateViewPageInner() {
                   setPrepayChargeQuote(null);
                   handleConfirm();
                 }}
-                style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, fontSize: 15 }}
+                style={{ ...estimateCtaStyle, display: 'inline-block', marginTop: 16, fontSize: 16 }}
               >{`Confirm & pay ${fmtMoney(prepayChargeQuote.total)}`}</button>
             </div>
             );

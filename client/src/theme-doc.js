@@ -42,7 +42,7 @@ export const DOC_FONT_SERIF = FONTS.serif;
 // scale starts at 14 (no micro/caption; the PDF twin keeps its own 8/9).
 export const FS = {
   body: 14, // meta rows, table cells, buttons, eyebrows, fine print
-  bodyLg: 15, // primary prose paragraphs
+  bodyLg: 16, // primary prose paragraphs (owner D1 2026-09-05: body prose is 16 on customer surfaces)
   lead: 16, // lead-ins, input text (16 = no iOS zoom)
   sub: 18, // sub-headings, intro lines
   h4: 16,

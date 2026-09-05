@@ -141,7 +141,7 @@ export default function NewsletterArchivePage() {
           style={{
             fontFamily: FONTS.ui,
             fontSize: 14,
-            fontWeight: 800,
+            fontWeight: 700,
             letterSpacing: 0,
             color: '#fff',
             background: B.glassNavy,
@@ -175,7 +175,7 @@ export default function NewsletterArchivePage() {
             href="https://www.wavespestcontrol.com/newsletter/"
             style={{
               fontFamily: FONTS.ui,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 700,
               letterSpacing: 0,
               textTransform: 'uppercase',
@@ -184,7 +184,7 @@ export default function NewsletterArchivePage() {
             }}
           >← Waves Newsletter</a>
           {dateLabel && (
-            <span style={{ fontFamily: FONTS.body, fontSize: 12, color: 'rgba(255,255,255,0.78)' }}>
+            <span style={{ fontFamily: FONTS.body, fontSize: 14, color: 'rgba(255,255,255,0.78)' }}>
               {dateLabel}
             </span>
           )}
