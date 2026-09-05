@@ -368,7 +368,8 @@ describe('reviewerSurnames', () => {
     // A comma fixes last-name-first order (GH codex r9 P1): the surname is
     // the head, a one-token head included; a suffix-only tail is normal order.
     expect(reviewerSurnames('Smith, John')).toEqual(['smith']);
-    expect(reviewerSurnames('De La Cruz, Maria')).toEqual(['de la cruz', 'la cruz', 'cruz']);
+    // The comma makes the surname boundary explicit: the whole head only (#3875 r2 P1).
+    expect(reviewerSurnames('De La Cruz, Maria')).toEqual(['de la cruz']);
     expect(reviewerSurnames('Smith, John, III')).toEqual(['smith']);
     expect(reviewerSurnames('John Smith, Jr.')).toEqual(['john smith', 'smith']);
     expect(reviewerSurnames('Smith, Jr.')).toEqual([]);
@@ -378,6 +379,12 @@ describe('reviewerSurnames', () => {
     expect(reviewerSurnames('Alex Vi')).toEqual(['alex vi', 'vi']);
     expect(reviewerSurnames('Smith, Søren')).toEqual(['smith']);
     expect(reviewerSurnames('Smith, Łukasz, Jr.')).toEqual(['smith']);
+    // Provider sentinels name nobody (#3875 r2 P1); a real person surnamed User still does.
+    expect(reviewerSurnames('A Google User')).toEqual([]);
+    expect(reviewerSurnames('Google User')).toEqual([]);
+    expect(reviewerSurnames('Anonymous')).toEqual([]);
+    expect(reviewerSurnames('Local Guide')).toEqual([]);
+    expect(reviewerSurnames('John User')).toEqual(['john user', 'user']);
     expect(reviewerSurnames('')).toEqual([]);
   });
 });
