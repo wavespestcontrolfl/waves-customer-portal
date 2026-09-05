@@ -32,7 +32,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { etCalendarDayOf } = require('../utils/datetime-et');
+const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
+const { formatDisplayDate } = require('../utils/date-only');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 
 // Estimate statuses that count as "open" for a composer insert: delivered or
@@ -629,6 +630,24 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
 const ANY_SCHEME = { anyScheme: true };
 const IMMEDIATE_ONLY_LINK_KINDS = [
   {
+    // A project report page (WDO / specialty) shows the customer's name,
+    // address and findings, can flip to a 402 payment hold, and only /sms
+    // binds it to the recipient's account — same class as a service report.
+    label: 'Project report',
+    fragment: /\/report\/project\//i,
+    token: (run, host) => canonicalPortalToken(run, host, PROJECT_REPORT_PATH_RE, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
+    // A price-change notice page is the customer's own (first name + their
+    // price); /sms binds it to the recipient row and re-reads that the
+    // change is still upcoming.
+    label: 'Price change notice',
+    fragment: /\/price-change\//i,
+    token: (run, host) => canonicalPortalToken(run, host, PRICE_CHANGE_TOKEN_RE, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
     label: 'Contract signing',
     fragment: /\/contract\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i, ANY_SCHEME),
@@ -713,6 +732,13 @@ function expiredShortRow(row) {
 
 const APPOINTMENT_TOKEN_RE = /^\/appointment\/([A-Za-z0-9_-]{16,})$/i;
 const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
+// /report/project/<vanity-slug>-<12-hex prefix> or /report/project/<32 hex>
+// (project-report-links.js extractProjectReportTokenLookup takes the
+// segment). Judged before the service-report seam, which skips these runs.
+const PROJECT_REPORT_PATH_RE = /^\/report\/project\/([A-Za-z0-9-]+)$/i;
+const PROJECT_REPORT_RUN_RE = /\/report\/project\//i;
+// price-change-notices.js mints notice_token as 16 random bytes, hex.
+const PRICE_CHANGE_TOKEN_RE = /^\/price-change\/([a-f0-9]{32})$/i;
 
 // Appointment page links (GH Codex #3844 r2 P1): every /appointment route
 // 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
@@ -1032,7 +1058,8 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
     if (!bad) ctx.bearers += 1;
     return bad;
   };
-  for (const run of linkRuns(ctx.runs, /\/report\//i)) {
+  // /report/project/… runs are the project-report seam's (checkProjectReportLinks).
+  for (const run of linkRuns(ctx.runs, /\/report\//i).filter((run) => !PROJECT_REPORT_RUN_RE.test(run))) {
     const token = canonicalPortalToken(run, ctx.hosts, REPORT_TOKEN_RE);
     if (!token) return refuseSend('A service report link in this message is not on the Waves portal — remove it before sending.');
     const bad = await bind(await publicReport({ report_view_token: token }));
@@ -1043,6 +1070,46 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
     if (!row.token) return refuseSend('This service report short link does not open a report — remove it and insert a fresh one.');
     const bad = await bind(await publicReport({ report_view_token: row.token }));
     if (bad) return bad;
+  }
+  return null;
+}
+
+// Project reports (WDO / specialty; long vanity or full-token form): the
+// public viewer's own lookup (extractProjectReportTokenLookup — a 12-hex
+// prefix must resolve to exactly one project, as /data does), never a
+// payment-held report (the page answers 402 with a pay card, not the
+// report), then the account binding — a household shares its projects.
+async function checkProjectReportLinks(ctx, onRecipientAccount) {
+  for (const run of linkRuns(ctx.runs, PROJECT_REPORT_RUN_RE)) {
+    const segment = canonicalPortalToken(run, ctx.hosts, PROJECT_REPORT_PATH_RE);
+    const lookup = segment && require('./project-report-links').extractProjectReportTokenLookup(segment);
+    if (!lookup) return refuseSend('A project report link in this message is not on the Waves portal — remove it before sending.');
+    const project = await linkableProjectReport(lookup);
+    if (!project) return refuseSend('This project report is no longer viewable — remove the link before sending.');
+    if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
+      return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
+    }
+    const bad = await onRecipientAccount(project.customer_id, 'project report link');
+    if (bad) return bad;
+    ctx.bearers += 1;
+  }
+  return null;
+}
+
+// Price-change notices: the notice must still be one the composer would
+// insert (a delivered or unreachable notice for a change still ahead — the
+// builder's predicate, re-run) and belong to the recipient's own row.
+async function checkPriceChangeLinks(ctx) {
+  for (const run of linkRuns(ctx.runs, /\/price-change\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, PRICE_CHANGE_TOKEN_RE);
+    if (!token) return refuseSend('A price change notice link in this message is not on the Waves portal — remove it before sending.');
+    const notice = await db('price_change_notices').where({ notice_token: token }).first('id', 'customer_id', 'status', 'effective_date');
+    if (!notice || !PRICE_CHANGE_LINKABLE_STATUSES.includes(notice.status) || dateOnly(notice.effective_date) < etDateString()) {
+      return refuseSend('This price change notice is no longer upcoming — remove the link and insert a fresh one.');
+    }
+    const bad = await ownedByRecipient(ctx, notice.customer_id, 'price change notice link');
+    if (bad) return bad;
+    ctx.bearers += 1;
   }
   return null;
 }
@@ -1063,7 +1130,8 @@ async function checkAccountBoundLinks(ctx) {
   }
   const onRecipientAccount = recipientAccountBinder(ctx);
   return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
-    || checkReportLinks(ctx, shortRows, onRecipientAccount);
+    || (await checkReportLinks(ctx, shortRows, onRecipientAccount))
+    || checkProjectReportLinks(ctx, onRecipientAccount);
 }
 
 // Contract signing links: a stored hash (a link the customer may hold —
@@ -1183,12 +1251,18 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
   const contracts = [];
   const statements = [];
   const preps = [];
-  const refusal = (await checkContractLinks(ctx, contracts))
-    || (await checkPrepLinks(ctx, preps))
-    || (await checkStatementLinks(ctx, statements))
-    || (await checkAccountBoundLinks(ctx))
-    || (await checkCardLinks(ctx, cards));
-  if (refusal) return refusal;
+  const checks = [
+    () => checkContractLinks(ctx, contracts),
+    () => checkPrepLinks(ctx, preps),
+    () => checkStatementLinks(ctx, statements),
+    () => checkPriceChangeLinks(ctx),
+    () => checkAccountBoundLinks(ctx),
+    () => checkCardLinks(ctx, cards),
+  ];
+  for (const check of checks) {
+    const refusal = await check();
+    if (refusal) return refusal;
+  }
   if (ctx.bearers && !ctx.usDestination) return refuseSend(NON_US_REFUSAL);
   const out = {
     ok: true,
@@ -1797,6 +1871,130 @@ async function buildContractSigningLink(customerIds) {
   };
 }
 
+// Receipts are records, not actions: /receipt/:token reuses the permanent
+// invoice token with no TTL (receipt-v2.js), and the page renders a settled
+// payment — paid or prepaid (a close-out), or a refund against it. An
+// in-flight ACH ('processing') has no receipt yet, and an open invoice is
+// the pay link's business (buildPayBalanceLink).
+const RECEIPT_INVOICE_STATUSES = ['paid', 'prepaid', 'refunded', 'partially_refunded'];
+
+/**
+ * Receipt link — the account's most recently settled invoice (a household
+ * shares its bills, like the pay link). Raw permanent URL, nothing minted.
+ */
+async function buildReceiptLink(customerIds) {
+  const invoice = await db('invoices')
+    .whereIn('customer_id', customerIds)
+    .whereIn('status', RECEIPT_INVOICE_STATUSES)
+    .whereNotNull('token')
+    // Settled most recently first; a row settled without a paid_at stamp
+    // falls back to its creation order, id last for a stable tie-break.
+    .orderByRaw('COALESCE(paid_at, created_at) DESC, id DESC')
+    .first('id', 'customer_id', 'token', 'invoice_number', 'status', 'total', 'paid_at');
+  if (!invoice) return { url: null, line: '', reason: 'No paid invoice on this account yet' };
+  const url = `${publicPortalUrl()}/receipt/${invoice.token}`;
+  const number = invoice.invoice_number ? `invoice ${invoice.invoice_number}` : 'your payment';
+  return {
+    url,
+    line: `Here is your receipt for ${number}: ${url}\n\n`,
+    receipt: { id: invoice.id, invoiceNumber: invoice.invoice_number || null, status: invoice.status, total: Number(invoice.total) || 0, paidAt: dateOnly(invoice.paid_at) },
+  };
+}
+
+// A notice the composer may hand out: one the notices lane delivered (sent /
+// viewed) or could not reach the customer with ('unreachable' — the case an
+// operator texts by hand). draft / sending rows are the lane's in-flight
+// state and never leave here.
+const PRICE_CHANGE_LINKABLE_STATUSES = ['sent', 'viewed', 'unreachable'];
+
+/**
+ * Price-change notice link — the phone owner's OWN newest notice for a
+ * change still ahead (effective today or later, ET). The page shows the
+ * customer's first name and their price, so the route resolves the row
+ * strictly (STRICT_OWNER_KINDS) and /sms re-binds it. Permanent token, raw
+ * URL — the same link the notices lane texts (price-change-notices.js).
+ */
+async function buildPriceChangeNoticeLink(customerId) {
+  const notice = await db('price_change_notices')
+    .where({ customer_id: customerId })
+    .whereIn('status', PRICE_CHANGE_LINKABLE_STATUSES)
+    .where('effective_date', '>=', etDateString())
+    .orderBy([{ column: 'effective_date', order: 'desc' }, { column: 'created_at', order: 'desc' }, { column: 'id', order: 'desc' }])
+    .first('id', 'notice_token', 'effective_date', 'current_amount_cents', 'new_amount_cents', 'cadence_label', 'status');
+  if (!notice) return { url: null, line: '', reason: 'No upcoming price change notice for this customer' };
+  const { formatMoney } = require('./price-change-notices');
+  const url = `${publicPortalUrl()}/price-change/${notice.notice_token}`;
+  const effectiveDate = dateOnly(notice.effective_date);
+  return {
+    url,
+    line: `Here are the details of your upcoming price change, effective ${formatDisplayDate(effectiveDate)}: ${url}\n\n`,
+    // Immediate sends only — the notice must still be upcoming at delivery.
+    immediateOnly: true,
+    priceChange: {
+      id: notice.id,
+      effectiveDate,
+      currentPrice: formatMoney(notice.current_amount_cents),
+      newPrice: formatMoney(notice.new_amount_cents),
+      cadenceLabel: notice.cadence_label || 'month',
+      status: notice.status,
+    },
+  };
+}
+
+// A project whose public viewer would answer 402 (pay card) instead of the
+// report — reports-public heldReportPaymentContext's own set.
+const PROJECT_REPORT_HELD_STATUSES = ['held', 'releasing'];
+// Reports that have been issued: the same status set project-report-links
+// numbers vanity paths over.
+const PROJECT_REPORT_STATUSES = ['sent', 'closed'];
+
+// The project a public report segment opens, exactly as the viewer resolves
+// it (reports-public loadProjectForReport): a full token matches its row; a
+// vanity prefix must match exactly one.
+async function linkableProjectReport(lookup) {
+  const COLUMNS = ['id', 'customer_id', 'status', 'report_token', 'report_hold_status'];
+  if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...COLUMNS);
+  const rows = await db('projects').where('report_token', 'like', `${lookup.value}%`).limit(2);
+  return rows.length === 1 ? rows[0] : null;
+}
+
+/**
+ * Project report link — the account's newest issued project report (WDO /
+ * specialty; a household shares them like service reports), skipping one on
+ * a payment hold (its page is a pay card until the invoice settles). The
+ * vanity path the report emails use (projectReportPathForProject); the
+ * token is the project's permanent report_token, nothing minted.
+ */
+async function buildProjectReportLink(customerIds) {
+  const PAGE = 15;
+  let project = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = await db('projects')
+      .whereIn('customer_id', customerIds)
+      .whereIn('status', PROJECT_REPORT_STATUSES)
+      .whereNotNull('report_token')
+      .orderByRaw('COALESCE(sent_at, created_at) DESC, id DESC')
+      .offset(offset)
+      .limit(PAGE);
+    project = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;
+    if (project || rows.length < PAGE) break;
+  }
+  if (!project) return { url: null, line: '', reason: 'No project report on this account yet' };
+  const customer = await db('customers').where({ id: project.customer_id }).first('first_name', 'last_name');
+  const path = await require('./project-report-links').projectReportPathForProject(db, project, customer || {});
+  if (!path) return { url: null, line: '', reason: 'No project report on this account yet' };
+  const url = `${publicPortalUrl()}${path}`;
+  const title = String(project.title || '').trim() || 'project';
+  return {
+    url,
+    line: `Here is your ${title} report: ${url}\n\n`,
+    // Immediate sends only — /sms binds the report to the recipient's
+    // account and re-checks the payment hold.
+    immediateOnly: true,
+    projectReport: { id: project.id, title, projectType: project.project_type || null, projectDate: dateOnly(project.project_date) },
+  };
+}
+
 /**
  * Payer statement pay link — FAIL CLOSED on identity: a statement covers
  * the bill-to's whole book and its pay page charges the PAYER's Stripe
@@ -1873,4 +2071,7 @@ module.exports = {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
+  buildReceiptLink,
+  buildPriceChangeNoticeLink,
+  buildProjectReportLink,
 };

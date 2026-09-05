@@ -2143,7 +2143,8 @@ const EMAIL_SEND_CHANNELS = ['email', 'both'];
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
-// card_request | prep_guide | service_report | contract | statement. Same
+// card_request | prep_guide | service_report | contract | statement |
+// receipt | price_change | project_report. Same
 // fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
@@ -2278,6 +2279,13 @@ function composerLinkBuilders() {
     // Handled by statementLinkInsert before any customer resolution (the
     // key here only admits the kind).
     statement: null,
+    // A receipt is the account's, like the pay link (a household shares
+    // its bills); a project report the account's, like a service report.
+    receipt: (ids) => builders.buildReceiptLink(ids),
+    project_report: (ids) => builders.buildProjectReportLink(ids),
+    // A price-change notice names its customer and their price — the
+    // phone owner's own row only. STRICT_OWNER_KINDS below.
+    price_change: (ids, primaryId) => builders.buildPriceChangeNoticeLink(primaryId),
   };
 }
 
@@ -2291,7 +2299,9 @@ function composerLinkBuilders() {
 // ownership re-checked at /sms).
 // Card requests and contract signing links are the same class of bearer
 // (per row, money- or signature-adjacent) and take the same rule.
-const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_guide'];
+// A price-change notice page is the customer's own (first name + their
+// price) and the row the notices lane targeted — same per-row rule.
+const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_guide', 'price_change'];
 // Appointment pages and service reports are account-scoped (any sibling's
 // visit or report) but the TEXT is a customer-specific bearer, so the
 // resolved phone owner rides back for them too: the /sms send then carries
@@ -2299,7 +2309,7 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // typed-in number sends as an unverified conversational lead, whose consent
 // read can miss the customer's notification_prefs entirely when the number
 // is formatted differently on file (GH Codex #3844 r4 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report'];
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first
@@ -2336,7 +2346,7 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'priceChange', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {

@@ -86,6 +86,9 @@ jest.mock('../services/composer-customer-links', () => ({
   buildServiceReportLink: jest.fn(),
   buildContractSigningLink: jest.fn(),
   buildStatementLink: jest.fn(),
+  buildReceiptLink: jest.fn(),
+  buildPriceChangeNoticeLink: jest.fn(),
+  buildProjectReportLink: jest.fn(),
 }));
 jest.mock('../services/prep-guide-sender', () => ({
   isSupportedPestType: () => true,
@@ -312,6 +315,57 @@ describe('POST /admin/communications/customer-link', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toMatchObject({ kind: 'autopay_setup', url: null, autoSecured: true, firstName: 'PersonA' });
+    });
+  });
+
+  test('receipt + project_report: dispatch the whole account id set; the project report rides the owner back (an account-scoped bearer); a receipt does not', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildReceiptLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/receipt/abc', line: 'Here is your receipt for invoice INV-1: https://portal.wavespestcontrol.com/receipt/abc\n\n', receipt: { id: 'inv-1', invoiceNumber: 'INV-1', status: 'paid', total: 85, paidAt: '2026-08-30' } });
+    builders.buildProjectReportLink.mockResolvedValue({ url: 'https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff', line: 'Here is your WDO report: https://portal.wavespestcontrol.com/report/project/persona-ffffffffffff\n\n', immediateOnly: true, projectReport: { id: 'p1', title: 'WDO', projectType: 'wdo', projectDate: '2026-08-10' } });
+    await withServer(async (baseUrl) => {
+      const receipt = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'receipt' });
+      expect(receipt.status).toBe(200);
+      expect(builders.buildReceiptLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      const receiptBody = await receipt.json();
+      expect(receiptBody).toMatchObject({ kind: 'receipt', url: 'portal.wavespestcontrol.com/receipt/abc', receipt: { invoiceNumber: 'INV-1' } });
+      expect(receiptBody.customerId).toBeUndefined();
+      expect(receiptBody.immediateOnly).toBeUndefined();
+
+      // The phone-only resolver's selects are queued per request.
+      wireDb({ customers: soloCustomer() });
+      const report = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'project_report' });
+      expect(report.status).toBe(200);
+      expect(builders.buildProjectReportLink).toHaveBeenCalledWith([CUSTOMER_UUID]);
+      const reportBody = await report.json();
+      expect(reportBody).toMatchObject({ kind: 'project_report', immediateOnly: true, projectReport: { title: 'WDO' }, customerId: CUSTOMER_UUID });
+    });
+  });
+
+  test('price_change: the phone owner\'s own row (strict — 409 on a shared number), rides back, immediate-only', async () => {
+    wireDb({ customers: soloCustomer() });
+    builders.buildPriceChangeNoticeLink.mockResolvedValue({ url: `https://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`, line: 'Details: x\n\n', immediateOnly: true, priceChange: { id: 'n1', effectiveDate: '2099-01-01', currentPrice: '$65', newPrice: '$70', cadenceLabel: 'month', status: 'sent' } });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'price_change' });
+      expect(res.status).toBe(200);
+      expect(builders.buildPriceChangeNoticeLink).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(await res.json()).toMatchObject({ kind: 'price_change', immediateOnly: true, priceChange: { newPrice: '$70' }, customerId: CUSTOMER_UUID });
+    });
+    // Two siblings on the number, no operator pick → 409, nothing built.
+    builders.buildPriceChangeNoticeLink.mockClear();
+    wireDb({
+      customers: makeCustomersBuilder({
+        selectResults: [
+          [{ id: 'aaaa1111-0000-4000-8000-000000000001', account_id: 'acct-1' }, { id: 'aaaa1111-0000-4000-8000-000000000002', account_id: 'acct-1' }],
+          [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+          [{ first_name: 'PersonA' }],
+          [{ id: 'aaaa1111-0000-4000-8000-000000000001' }, { id: 'aaaa1111-0000-4000-8000-000000000002' }],
+        ],
+      }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'price_change' });
+      expect(res.status).toBe(409);
+      expect(builders.buildPriceChangeNoticeLink).not.toHaveBeenCalled();
     });
   });
 

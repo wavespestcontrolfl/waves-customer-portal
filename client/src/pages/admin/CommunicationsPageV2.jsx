@@ -736,6 +736,9 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "service_report", name: "Latest service report link", keywords: "report service report visit summary last recap", dynamic: true },
   { key: "contract", name: "Contract signing link", keywords: "contract sign signature agreement document esign", dynamic: true },
   { key: "statement", name: "Statement pay link", keywords: "statement payer bill-to property manager builder net30 pay", dynamic: true },
+  { key: "receipt", name: "Latest receipt link", keywords: "receipt paid payment record proof bookkeeping refund", dynamic: true },
+  { key: "project_report", name: "Project report link", keywords: "project report wdo termite inspection specialty findings pdf", dynamic: true },
+  { key: "price_change", name: "Price change notice link", keywords: "price change increase rate notice new price effective", dynamic: true },
   {
     key: "portal_login",
     name: "Portal login",
@@ -1228,7 +1231,7 @@ function SmsTab() {
     // A per-row bearer credential (Auto Pay setup, contract signing, prep
     // guide — anything the server minted with an expiresAt — plus the
     // kinds it flags immediateOnly: card request, statement pay, appointment
-    // page, service report) is only
+    // page, service report, project report, price change notice) is only
     // re-checked at delivery on the immediate send; the schedule picker has
     // no upper bound and a draft dispatches without a re-check. Immediate
     // sends only, same rule as review links (the server re-fences).
@@ -1783,6 +1786,12 @@ function SmsTab() {
       d.statement
         ? `Statement pay link added — ${d.statement.number}, $${Number(d.statement.total).toFixed(2)} for ${d.statement.payerName}.`
         : "Statement pay link added.",
+    receipt: (d) => `Receipt link added${d.receipt?.invoiceNumber ? ` — invoice ${d.receipt.invoiceNumber}` : ""}${d.receipt?.paidAt ? `, paid ${d.receipt.paidAt}` : ""}.`,
+    project_report: (d) => `Project report link added${d.projectReport?.title ? ` — ${d.projectReport.title}` : ""}${d.projectReport?.projectDate ? ` (${d.projectReport.projectDate})` : ""}.`,
+    price_change: (d) =>
+      d.priceChange
+        ? `Price change notice link added — ${d.priceChange.currentPrice} → ${d.priceChange.newPrice}/${d.priceChange.cadenceLabel}, effective ${d.priceChange.effectiveDate}.`
+        : "Price change notice link added.",
   };
 
   // Withdrawal is NON-destructive: the pending review row is SHARED — every

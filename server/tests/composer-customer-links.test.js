@@ -55,6 +55,15 @@ jest.mock('../services/prep-guide-sender', () => ({
   settleHeldEnrollment: jest.fn(async () => {}),
 }));
 jest.mock('../services/project-email', () => ({ ensureServicePrepToken: jest.fn() }));
+// The report viewer's own segment parser is real; the vanity path builder
+// (which numbers the customer's reports through the DB) is stubbed.
+jest.mock('../services/project-report-links', () => ({
+  ...jest.requireActual('../services/project-report-links'),
+  projectReportPathForProject: jest.fn(async (_db, project, customer) => `/report/project/${String(customer?.first_name || 'customer').toLowerCase()}-${String(project.report_token).slice(0, 12)}`),
+}));
+jest.mock('../services/price-change-notices', () => ({
+  formatMoney: (cents) => { const n = Number(cents || 0) / 100; return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`; },
+}));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
 // The real predicate: typedReportDelivery set to anything but auto_send is
 // suppressed (internal_only / disabled typed reports 404 publicly).
@@ -123,6 +132,9 @@ const {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
+  buildReceiptLink,
+  buildPriceChangeNoticeLink,
+  buildProjectReportLink,
   markStatementsSent,
   markPrepGuidesSent,
   claimCardRequestSends,
@@ -139,6 +151,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereRaw = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
+  b.orderByRaw = jest.fn(() => b);
   b.offset = jest.fn(() => b);
   b.limit = jest.fn(async () => rows);
   b.select = jest.fn(async () => rows);
@@ -1012,6 +1025,83 @@ describe('buildServiceReportLink', () => {
   });
 });
 
+describe('buildReceiptLink', () => {
+  test('the account\'s most recently settled invoice — permanent /receipt token, raw URL, nothing minted', async () => {
+    mockBuilders = { invoices: chainBuilder({ firstRow: { id: 'inv-1', customer_id: 'c2', token: 'r'.repeat(64), invoice_number: 'INV-1042', status: 'paid', total: '85.00', paid_at: '2026-08-30T15:00:00Z' } }) };
+    const r = await buildReceiptLink(['c1', 'c2']);
+    expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
+    // Settled statuses only: an in-flight ACH has no receipt yet, an open
+    // invoice is the pay link's.
+    expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('status', ['paid', 'prepaid', 'refunded', 'partially_refunded']);
+    expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('token');
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
+    expect(r.line).toBe(`Here is your receipt for invoice INV-1042: ${r.url}\n\n`);
+    expect(r.immediateOnly).toBeUndefined();
+    expect(r.receipt).toEqual({ id: 'inv-1', invoiceNumber: 'INV-1042', status: 'paid', total: 85, paidAt: '2026-08-30' });
+    const { shortenOrPassthrough } = require('../services/short-url');
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+  });
+
+  test('no settled invoice → reason', async () => {
+    mockBuilders = { invoices: chainBuilder({ firstRow: null }) };
+    const r = await buildReceiptLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No paid invoice/);
+  });
+});
+
+describe('buildPriceChangeNoticeLink', () => {
+  const NOTICE = { id: 'n1', notice_token: 'a'.repeat(32), effective_date: '2099-01-01', current_amount_cents: 6500, new_amount_cents: 7000, cadence_label: 'month', status: 'unreachable' };
+
+  test('the phone owner\'s own newest upcoming notice (sent / viewed / unreachable) — immediate-only, permanent token', async () => {
+    mockBuilders = { price_change_notices: chainBuilder({ firstRow: NOTICE }) };
+    const r = await buildPriceChangeNoticeLink('c1');
+    expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ customer_id: 'c1' });
+    expect(mockBuilders.price_change_notices.whereIn).toHaveBeenCalledWith('status', ['sent', 'viewed', 'unreachable']);
+    // Still ahead: effective today (ET) or later.
+    expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith('effective_date', '>=', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`);
+    expect(r.line).toMatch(/^Here are the details of your upcoming price change, effective .*2099: https:\/\/portal/);
+    expect(r.immediateOnly).toBe(true);
+    expect(r.priceChange).toEqual({ id: 'n1', effectiveDate: '2099-01-01', currentPrice: '$65', newPrice: '$70', cadenceLabel: 'month', status: 'unreachable' });
+  });
+
+  test('no upcoming notice → reason', async () => {
+    mockBuilders = { price_change_notices: chainBuilder({ firstRow: null }) };
+    const r = await buildPriceChangeNoticeLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No upcoming price change/);
+  });
+});
+
+describe('buildProjectReportLink', () => {
+  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held' };
+  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null };
+
+  test('the account\'s newest issued report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
+    mockBuilders = {
+      projects: chainBuilder({ rows: [HELD, ISSUED] }),
+      customers: chainBuilder({ firstRow: { first_name: 'Dana', last_name: 'Lee' } }),
+    };
+    const r = await buildProjectReportLink(['c1', 'c2']);
+    expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
+    expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('status', ['sent', 'closed']);
+    expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
+    expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/project/dana-${'f'.repeat(12)}`);
+    expect(r.line).toBe(`Here is your Termite Treatment report: ${r.url}\n\n`);
+    expect(r.immediateOnly).toBe(true);
+    expect(r.projectReport).toEqual({ id: 'p-ok', title: 'Termite Treatment', projectType: 'termite', projectDate: '2026-08-10' });
+  });
+
+  test('no issued report (or only held ones) → reason', async () => {
+    mockBuilders = { projects: chainBuilder({ rows: [HELD] }) };
+    const r = await buildProjectReportLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No project report/);
+  });
+});
+
 describe('buildContractSigningLink', () => {
   const { verifyComposerContractToken } = require('../utils/composer-contract-token');
   const MINTED = /^https:\/\/portal\.wavespestcontrol\.com\/contract\/([A-Za-z0-9_-]{69})$/;
@@ -1144,6 +1234,16 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck(`Here is your latest service report: portal.wavespestcontrol.com/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
     mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rep1', kind: 'service_report', target_url: 'https://portal.wavespestcontrol.com/report/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } }) };
     expect(await immediateOnlyLinkSendCheck('Here is your latest service report: wavespest.co/l/rep1')).toEqual({ present: true, label: 'Service report' });
+  });
+
+  test('a project report link (vanity or full-token form) and a price change notice link are immediate-only; the project form is not mistaken for a service report', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Here is your report: portal.wavespestcontrol.com/report/project/dana-lee-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`)).toEqual({ present: true, label: 'Project report' });
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
+    // An explicit http:// owned link is still a protected link (fence reads presence).
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/price-change/${'a'.repeat(32)}`)).toEqual({ present: true, label: 'Price change notice' });
+    expect(await immediateOnlyLinkSendCheck(`evil.example/price-change/${'a'.repeat(32)}`)).toEqual({ present: false });
   });
 
   test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
@@ -1827,6 +1927,71 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
       wireAccount({ linkCustomer: acct('c9', 'other'), report: { id: 'r1', customer_id: 'c9', structured_notes: null } });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+    });
+
+    describe('project report links resolve as the viewer does and bind to the account', () => {
+      const FULL = 'f'.repeat(32);
+      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', report_token: FULL, report_hold_status: null, ...over });
+      function wireProject({ full = project(), byPrefix = [project()], ...account } = {}) {
+        wireAccount(account);
+        mockBuilders.projects = chainBuilder({ firstRow: full, rows: byPrefix });
+      }
+
+      test('the full-token form resolves by report_token; the vanity form by its 12-hex prefix, exactly one match', async () => {
+        wireProject();
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(mockBuilders.projects.where).toHaveBeenCalledWith({ report_token: FULL });
+        // The service-report seam never sees the project run.
+        expect(mockBuilders.service_records.where).not.toHaveBeenCalled();
+        wireProject();
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana-lee-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(mockBuilders.projects.where).toHaveBeenCalledWith('report_token', 'like', `${FULL.slice(0, 12)}%`);
+        expect(mockBuilders.projects.limit).toHaveBeenCalledWith(2);
+      });
+
+      test('an ambiguous prefix, a vanished project, a payment-held report, or another account\'s report refuses', async () => {
+        wireProject({ byPrefix: [project(), project({ id: 'p2' })] });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        wireProject({ full: null });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        wireProject({ full: project({ report_hold_status: 'held' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);
+        wireProject({ full: project({ customer_id: 'c9' }), linkCustomer: acct('c9', 'other') });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+        // A look-alike host or a non-report segment is not ours.
+        wireProject();
+        expect((await bearerLinkSendCheck(`https://evil.example/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
+        expect((await bearerLinkSendCheck('portal.wavespestcontrol.com/report/project/just-a-slug', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
+      });
+    });
+  });
+
+  describe('price change notice links are bound to the recipient\'s OWN row at the send', () => {
+    const NOTICE_TOKEN = 'a'.repeat(32);
+    const notice = (over = {}) => ({ id: 'n1', customer_id: 'c1', status: 'sent', effective_date: '2099-01-01', ...over });
+    function wireNotice({ row = notice(), owner = { id: 'c1', phone: '+1 (941) 555-0100' } } = {}) {
+      wire({ owner });
+      mockBuilders.price_change_notices = chainBuilder({ firstRow: row });
+    }
+
+    test('a delivered or unreachable notice for a change still ahead, owned by the recipient, passes as a bearer', async () => {
+      wireNotice({ row: notice({ status: 'unreachable' }) });
+      expect(await bearerLinkSendCheck(`Details: portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      expect(mockBuilders.price_change_notices.where).toHaveBeenCalledWith({ notice_token: NOTICE_TOKEN });
+      expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c1' });
+    });
+
+    test('an in-flight (draft / sending) notice, a past change, a vanished token, or another customer\'s notice refuses', async () => {
+      wireNotice({ row: notice({ status: 'sending' }) });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+      wireNotice({ row: notice({ effective_date: '2020-01-01' }) });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+      wireNotice({ row: null });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer upcoming/);
+      wireNotice({ owner: { id: 'c9', phone: '+1 (941) 555-0199' } });
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/different customer/);
+      wireNotice();
+      expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/price-change/${NOTICE_TOKEN}`, '9415550100', { trustedCustomerId: 'c2' })).error).toMatch(/Pick this customer/);
     });
   });
 
