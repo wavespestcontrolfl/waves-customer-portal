@@ -139,6 +139,28 @@ describe("ProtocolPanel independent request failures", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("falls back to Overview when retry removes the selected service protocol", async () => {
+    let retry = false;
+    fetch.mockImplementation((url) => {
+      if (url.includes("/match?")) return retry ? reply({}, 503)
+        : reply({ program: { name: "Fixture pest protocol", notes: [], visits: [] } });
+      if (url.includes("/photos/relevant") && !retry) return reply({}, 503);
+      return reply(fixture(url));
+    });
+    render(<ProtocolPanel service={{ ...service, serviceType: "Pest Control" }} onClose={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("ID guide");
+    fireEvent.click(screen.getByRole("button", { name: /^Protocol/ }));
+    expect(screen.getByText("Fixture pest protocol")).toBeVisible();
+    retry = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry loading" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Service protocol");
+    expect(screen.queryByRole("button", { name: /^Protocol/ })).not.toBeInTheDocument();
+    expect(screen.getByText("Service Overview")).toBeVisible();
+    expect(screen.queryByText("Fixture pest protocol")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Equipment/ }));
+    expect(screen.getByText("Current sprayer")).toBeVisible();
+  });
+
   it("withholds failed mix quantities while retaining the program and equipment", async () => {
     fetch.mockImplementation((url) => url.includes("/lawn-mix")
       ? Promise.reject(new Error("Fixture network failure")) : reply(fixture(url)));

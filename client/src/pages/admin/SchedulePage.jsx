@@ -4686,7 +4686,7 @@ export function ProtocolPanel({ service, onClose }) {
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
   const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
-  const [activeSection, setActiveSection] = useState(
+  const [requestedSection, setActiveSection] = useState(
     isLawn ? "lawn_protocol" : "overview",
   );
 
@@ -4846,6 +4846,10 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
   ];
+
+  const activeSection = SECTIONS.some((section) => section.id === requestedSection)
+    ? requestedSection
+    : "overview";
 
   // Pest pressure stays ordinal but monochrome — peak gets alert-fg because
   // it's a genuine "act now" signal; the rest step down a zinc ramp.
