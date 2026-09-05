@@ -165,7 +165,7 @@ function makeConn(handler) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -232,6 +232,8 @@ function afterSeriesCancelScenario({ recurringOngoing }) {
       if (op === 'insert') { inserted.push(data); return [1]; }
     }
     if (table === 'scheduled_service_addons') { if (op === 'columnInfo') return {}; return []; }
+    // Series-child eligibility read (technician-eligibility.js): the parent's tech is assignable.
+    if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
     if (table === 'recurring_plan_alerts') { if (op === 'first') return null; return [1]; }
     return null;
   };

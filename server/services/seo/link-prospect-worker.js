@@ -81,9 +81,11 @@ function effectiveAutomationPolicy(type, automationPolicy) {
   return automationPolicy;
 }
 
-async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null, preview = false } = {}) {
+async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null, preview = false, followUp = false } = {}) {
   const types = type === 'outreach' ? OUTREACH_TYPES : SIGNUP_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
+  // the §6.4 follow-up lane: a DRAFT lease over sent conversations whose follow-up is due — its own predicate
+  if (followUp) return db.transaction((trx) => claimFollowUps(trx, { limit, preview }));
   const effectivePolicy = effectiveAutomationPolicy(type, automationPolicy);
   // Normalize the optional domain allowlist (lowercase, strip scheme/www) so it
   // matches the SQL-normalized target_domain below.
@@ -311,6 +313,81 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
 }
 
 /**
+ * The follow-up draft lease (plan §6.4 / §7 `mode=draft` on the follow-up lane): a row whose initial pitch went out
+ * (outreach_status 'sent'), whose ONE follow-up is due (follow_up_status none / due, follow_up_due_at reached) and
+ * whose lifecycle is in FOLLOW_UP_STATUSES(path) — `contacted`, plus the Judge-owned placed / live / indexed on a
+ * submit-first path — on a standing path, on a domain the owner has not parked or refused. The lease grants nothing
+ * beyond composing the follow-up: the row's status is never touched; the lease is released by the `drafted` report
+ * (→ follow_up_status 'drafted'), a 'failed' (back to due) or 'skipped' (→ skipped) report, or the stale sweep.
+ * A sent row is outreach-locked (the mover refuses it), so no settlement runs here.
+ */
+async function claimFollowUps(trx, { limit, preview }) {
+  const M = require('./link-outreach-mandate');
+  const now = new Date();
+  const widest = M.FOLLOW_UP_STATUSES_ANY;
+  // the due set is small (one follow-up per conversation, ten days out) — read whole, narrowed below in order
+  const due = await trx('seo_link_prospects')
+    .whereIn('link_type', OUTREACH_TYPES)
+    .whereNull('claimed_at')
+    .where({ outreach_status: 'sent' })
+    .whereIn('follow_up_status', ['none', 'due'])
+    .whereNotNull('follow_up_due_at').where('follow_up_due_at', '<=', now)
+    .whereIn('status', [...widest])
+    // no path_id filter: a placement whose path was DELETED (FK ON DELETE SET NULL) is read so its follow-up can be retired below
+    .orderBy('follow_up_due_at', 'asc')
+    .select('*');
+  if (!due.length) return [];
+  // the owner's registry ruling holds at the chokepoint: a placement on a parked (Watch) or refused (Reject) domain is never leased
+  const blockedDomains = new Set((await trx('seo_link_domains').whereIn('agent_state', nonClaimableDomainStates()).select('id')).map((d) => d.id));
+  const candidates = due.filter((r) => !r.domain_id || !blockedDomains.has(r.domain_id));
+  if (!candidates.length) return [];
+  const { isStandingConfidence } = require('./link-registry');
+  const { lockProspectDomain } = require('./prospect-domain-lock');
+  // a standing path; the retirement reader (followUpRetirement: the gate, the route, the lifecycle) is the rest
+  const standing = (p) => Boolean(p) && !p.superseded_by && isStandingConfidence(p.confidence) && p.agent_completable !== false;
+  if (preview) {
+    // the dry-run reads what the live claim below would lease — the same predicate, no retirement write
+    const paths = await trx('seo_link_acquisition_paths').whereIn('id', [...new Set(candidates.map((r) => r.path_id).filter(Boolean))]).select('id', 'superseded_by', 'confidence', 'agent_completable', 'execution_after_send', 'acquisition_type', 'account_required');
+    const pathById = new Map(paths.map((p) => [p.id, p]));
+    const domains = await trx('seo_link_domains').whereIn('id', [...new Set(candidates.map((r) => r.domain_id).filter(Boolean))]).select('id', 'best_path_id');
+    const domById = new Map(domains.map((d) => [d.id, d]));
+    return candidates.filter((r) => standing(pathById.get(r.path_id)) && !M.followUpRetirement({ row: r, path: pathById.get(r.path_id) || null, domain: domById.get(r.domain_id) || null })).slice(0, limit).map((r) => ({ ...r }));
+  }
+  // EVERY eligibility condition is re-asserted under locks before the lease (the initial claim's guarantee): the
+  // per-domain advisory lock every domain writer takes first (the owner's Reject / Watch, the bridge, the
+  // investigator), then the row FOR UPDATE, then the path FOR UPDATE — and the owner's ruling, the path's standing,
+  // the lifecycle and the follow-up state are read again under them, so a decision that committed between the
+  // candidate read and this lease is honoured (nothing is leased, no draft is spent, against a stop)
+  const out = [];
+  for (const c of candidates) {
+    if (out.length >= limit) break;
+    await lockProspectDomain(trx, c.target_domain);
+    const r = await trx('seo_link_prospects').where({ id: c.id }).forUpdate().first();
+    if (!r || r.claimed_at || r.outreach_status !== 'sent' || !['none', 'due'].includes(r.follow_up_status) || !OUTREACH_TYPES.includes(r.link_type)) continue;
+    const dom = r.domain_id ? await trx('seo_link_domains').where({ id: r.domain_id }).first('id', 'agent_state', 'best_path_id') : null;
+    if (dom && nonClaimableDomainStates().includes(dom.agent_state)) continue;
+    const p = r.path_id ? await trx('seo_link_acquisition_paths').where({ id: r.path_id }).forUpdate().first('id', 'superseded_by', 'confidence', 'revision', 'agent_completable', 'execution_after_send', 'acquisition_type', 'account_required') : null;
+    // a follow-up nothing can ever compose or authorize on its pinned route (followUpRetirement: the path deleted or
+    // superseded during the wait, the domain re-ranked to another path, the placement out of the path's lifecycle) —
+    // nothing else visits a none / due follow-up in that state (followUpPending excludes it from the bridge, the closure
+    // sweep reads sent / skipped only) — RETIRES here (skipped): the conversation completes, the closure sweep releases
+    // the inbox. A path not standing for another reason (a disproof, a human-step ruling) may recover: not leased, kept
+    const gone = M.followUpRetirement({ row: r, path: p, domain: dom });
+    if (gone) {
+      await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
+        .update({ follow_up_status: 'skipped', follow_up_skipped_reason: gone, updated_at: now });
+      logger.info(`[link-worker] follow-up for ${r.id} retired — ${gone}`);
+      continue;
+    }
+    if (!standing(p)) continue;
+    const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent', status: r.status, path_id: r.path_id, link_type: r.link_type }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
+      .update({ claimed_at: now, claimed_by: WORKER, follow_up_status: 'due', leased_path_revision: p.revision == null ? null : Number(p.revision), updated_at: now });
+    if (n) out.push({ ...r, follow_up_status: 'due', claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() });
+  }
+  return out;
+}
+
+/**
  * Map a worker outcome to a DB patch. Pure (no I/O) → unit-testable.
  * Always releases the lease. `placed` never goes straight to `live`.
  * `existingQuality` is the prospect's current quality_signals (object|json|null),
@@ -390,13 +467,6 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   if (outcome === 'placed' && !body.live_url && !body.pending) {
     return { ok: false, code: 'live_url_required', error: 'a placed report requires live_url (or pending:true)' };
   }
-  // A drafted report MUST carry the full draft, else the approval queue surfaces an
-  // unsendable row that fails checkSendPreconditions at send time.
-  if (outcome === 'drafted') {
-    if (!isValidEmail(body.outreach_to_email) || !body.outreach_subject || !body.outreach_body) {
-      return { ok: false, code: 'draft_incomplete', error: 'a drafted report requires a valid outreach_to_email, outreach_subject, and outreach_body' };
-    }
-  }
   const leaseDate = lease_token ? new Date(lease_token) : null;
   if (!leaseDate || Number.isNaN(leaseDate.getTime())) {
     return { ok: false, code: 'lease_required', error: 'valid lease_token required (the claimed_at returned by /claim)' };
@@ -404,6 +474,14 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
 
   const prospect = await db('seo_link_prospects').where({ id: prospect_id }).first();
   if (!prospect) return { ok: false, code: 'not_found', error: 'prospect not found' };
+  // a leased FOLLOW-UP (the §6.4 draft lease: follow_up_status 'due' under a lease on a sent conversation) settles
+  // on its own columns — never the lifecycle, the attempt count or the draft of the initial pitch
+  if (followUpLease(prospect)) return reportFollowUp({ prospect, outcome, leaseDate, body });
+  // A drafted report MUST carry the full draft, else the approval queue surfaces an
+  // unsendable row that fails checkSendPreconditions at send time.
+  if (outcome === 'drafted' && (!isValidEmail(body.outreach_to_email) || !body.outreach_subject || !body.outreach_body)) {
+    return { ok: false, code: 'draft_incomplete', error: 'a drafted report requires a valid outreach_to_email, outreach_subject, and outreach_body' };
+  }
   // Guard the lane: a 'drafted' report on a signup-lane prospect would set
   // outreach_status='drafted' on a row that claim() then skips and the send valve
   // rejects as not_outreach — stranding it. Only outreach prospects can be drafted.
@@ -481,6 +559,90 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   return { ok: true, status: patch.status || prospect.status, attempts };
 }
 
+const followUpLease = (p) => p.follow_up_status === 'due' && p.outreach_status === 'sent';
+// the path the follow-up was leased on is no longer the row's path at that revision (superseded, or revised in place)
+// — read FOR UPDATE in the report's transaction: the investigator's revise / supersede takes the same path lock, so
+// its write orders before or after the report, never between the revision check and the acceptance
+const followUpPathMoved = (row, path) => !path || Boolean(path.superseded_by)
+  || (row.leased_path_revision != null && path.revision != null && Number(path.revision) !== Number(row.leased_path_revision));
+// the follow-up lane's report: drafted → the follow-up parked for the bridge's decision; failed → due again behind
+// every follow-up due now (follow_up_due_at re-stamped: the sweep orders by it, so a batch of drafter failures never
+// holds the head of the queue), `follow_up_attempts` counted and capped at MAX_ATTEMPTS — the initial lane's rule —
+// after which the follow-up is skipped; skipped → skipped for good, with the worker's reason. Any other outcome is
+// not this lane's. A discarded draft (path moved, no longer claimable) is not a drafter failure: due, uncounted.
+const FOLLOW_UP_OUTCOMES = ['drafted', 'failed', 'skipped'];
+// the follow-up report's write (pure): a discarded draft (the route moved, the row no longer claimable) → due, uncounted;
+// a retirement (`gone`) → skipped with the reason; a drafter failure counted and capped; the draft accepted; the
+// worker's own skip
+function followUpReportPatch({ outcome, moved, gone, blocked, row, body, note, release, now }) {
+  if (moved || blocked) return { ...release, follow_up_status: 'due' };
+  if (gone) return { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: gone };
+  if (outcome === 'failed') {
+    const failures = (Number(row.follow_up_attempts) || 0) + 1;
+    return failures >= MAX_ATTEMPTS
+      ? { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: `drafter failed ${failures} times${note ? ` (${note})` : ''}`, follow_up_attempts: failures }
+      : { ...release, follow_up_status: 'due', follow_up_due_at: now, follow_up_attempts: failures };
+  }
+  if (outcome === 'drafted') return { ...release, follow_up_subject: body.outreach_subject, follow_up_body: body.outreach_body, follow_up_status: 'drafted', ...(note ? { notes: row.notes ? `${row.notes}\n${note}` : note } : {}) };
+  return { ...release, follow_up_status: 'skipped', follow_up_skipped_reason: note || 'worker skipped' };
+}
+async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
+  if (!FOLLOW_UP_OUTCOMES.includes(outcome)) return { ok: false, code: 'not_follow_up_outcome', error: `a follow-up lease reports drafted, failed or skipped — not ${outcome}` };
+  const blank = (v) => !String(v || '').trim(); // whitespace is no draft: the review would pass it and the dispatcher send it
+  if (outcome === 'drafted' && (blank(body.outreach_subject) || blank(body.outreach_body))) return { ok: false, code: 'draft_incomplete', error: 'a drafted follow-up requires outreach_subject and outreach_body (the recipient is the thread\'s)' };
+  const now = new Date();
+  const release = { claimed_at: null, claimed_by: null, updated_at: now };
+  const note = body.notes || null;
+  const { lockProspectDomain } = require('./prospect-domain-lock');
+  // ONE transaction under the locks the lease was taken under (the per-domain advisory lock, the row FOR UPDATE,
+  // the path FOR UPDATE — claimFollowUps' order). The draft is bound to the path revision the lease stamped (the
+  // sender's boundToRevision refuses a stale one), so the revision is read and the draft accepted under the same
+  // path lock: a revise / supersede committing between the check and the acceptance cannot slip a stale draft in as
+  // `drafted` — a state nothing could send and the drafter could not reclaim. A path revised or superseded while the
+  // drafter held the lease makes the copy obsolete — the follow-up returns to `due` (re-leased, re-drafted against
+  // the current route) rather than parking a draft nothing can send.
+  const r = await db.transaction(async (trx) => {
+    await lockProspectDomain(trx, prospect.target_domain);
+    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first();
+    if (!row) return { n: 0 };
+    const path = row.path_id ? await trx('seo_link_acquisition_paths').where({ id: row.path_id }).forUpdate().first('id', 'revision', 'superseded_by', 'execution_after_send', 'acquisition_type', 'account_required') : null;
+    // EVERY lease condition re-asserted under the locks before a draft is accepted (as the lease asserted them): the
+    // path at its revision; the lifecycle still in the path-specific follow-up set — a send-first row the verifier
+    // promoted to live while the drafter worked has no follow-up left (followUpPending excludes it, the sender refuses
+    // it), so accepting the copy would strand a `drafted` nothing decides, lists or reclaims: the follow-up RETIRES
+    // (`skipped`); the lane and the owner's domain ruling — a row edited out of outreach or a domain parked / refused
+    // meanwhile returns to `due`, re-leased once it is claimable again
+    const M = require('./link-outreach-mandate');
+    const dom = outcome === 'drafted' && row.domain_id ? await trx('seo_link_domains').where({ id: row.domain_id }).first('agent_state', 'best_path_id') : null;
+    const moved = outcome === 'drafted' && followUpPathMoved(row, path);
+    // …the domain RE-RANKED to another path while the drafter held the lease, or the placement out of the path's
+    // lifecycle (followUpRetirement): a drafted follow-up there would be frozen with no authority and no send attempt
+    // to retire it — it RETIRES here, as the lease and the send do
+    const gone = outcome === 'drafted' && !moved ? M.followUpRetirement({ row, path, domain: dom }) : null;
+    const blocked = outcome === 'drafted' && !moved && !gone && (!OUTREACH_TYPES.includes(row.link_type)
+      || Boolean(dom && nonClaimableDomainStates().includes(dom.agent_state)));
+    const patch = followUpReportPatch({ outcome, moved, gone, blocked, row, body, note, release, now });
+    // the same optimistic concurrency as the initial lane: only THIS lease writes, on the follow-up state it was taken in
+    const n = await trx('seo_link_prospects').where({ id: prospect.id, follow_up_status: 'due', outreach_status: 'sent' }).where('claimed_at', leaseDate).update(patch);
+    return { n, moved, gone, blocked, patch };
+  });
+  if (!r.n) return { ok: false, code: 'stale_lease', error: 'lease expired or reclaimed; re-claim before reporting' };
+  if (r.moved) {
+    logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — its acquisition path moved while drafting`);
+    return { ok: false, code: 'path_moved', error: 'the placement\'s acquisition path changed while drafting; the follow-up was discarded — it is re-leased against the current path' };
+  }
+  if (r.gone) {
+    logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — ${r.gone}; follow-up retired`);
+    return { ok: false, code: 'follow_up_obsolete', error: `${r.gone} while drafting; the draft was discarded and the follow-up retired` };
+  }
+  if (r.blocked) {
+    logger.info(`[link-worker] follow-up report ${prospect.id} outcome=drafted discarded — the row or its domain is no longer claimable; follow-up back to due`);
+    return { ok: false, code: 'not_eligible', error: 'the placement or its domain is no longer claimable (lane edit, owner ruling); the draft was discarded — the follow-up is re-leased once it is' };
+  }
+  logger.info(`[link-worker] follow-up report ${prospect.id} outcome=${outcome}`);
+  return { ok: true, status: prospect.status, follow_up_status: r.patch.follow_up_status };
+}
+
 /**
  * Canonical NAP served with every /claim response so the worker never invents
  * business details on a signup. Citations must match a GBP listing exactly —
@@ -521,7 +683,13 @@ async function sweepExpiredClaims(maxHours = 6) {
       .returning(['id']);
     const ids = (rows || []).map((r) => (r && typeof r === 'object' ? r.id : r)).filter(Boolean);
     if (ids.length) await settleReleasedPlacements(ids, trx); // released AND settled, or neither
-    return ids.length;
+    // a stuck FOLLOW-UP draft lease (§6.4: a sent conversation leased at follow_up_status 'due') is released the same
+    // way — the lifecycle is not `prospect` there and a sent row is never settled (outreach-locked)
+    const followUps = await trx('seo_link_prospects')
+      .whereNotNull('claimed_at').where('claimed_at', '<', cutoff)
+      .where({ follow_up_status: 'due', outreach_status: 'sent' })
+      .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
+    return ids.length + (Number(followUps) || 0);
   });
   if (released) logger.info(`[link-worker] released ${released} stale claim(s)`);
   return { released };
@@ -553,6 +721,7 @@ async function releaseClaims(claims = []) {
 
 module.exports = {
   claim, report, sweepExpiredClaims, releaseClaims, settleReleasedPlacements, mapReportToPatch, businessProfile, isValidEmail,
+  FOLLOW_UP_OUTCOMES,
   effectiveAutomationPolicy,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS, nonClaimableDomainStates,
 };

@@ -274,8 +274,9 @@ handful of already-held appointments.
 - **Completion charge:** `POST /api/admin/dispatch/:serviceId/complete`
   (admin-dispatch.js, after the auto-invoice).
 - **Cancel/no-show triggers** (full paths — Express mounts these under `/api`):
-  `PUT /api/admin/dispatch/:id/status` (no-show + cancel),
-  `PUT /api/admin/schedule/:id/status` (cancel),
+  `PUT /api/admin/dispatch/:id/status` (no-show + cancel — the one staff cancel
+  writer; `PUT /api/admin/schedule/:id/status` refuses `cancelled` with 409
+  `USE_DISPATCH_CANCEL` since #3872),
   `POST /api/admin/schedule/bulk-action` (cancel). These are `adminFetch`
   endpoints (auth required) — a bare `/admin/...` curl hits the SPA/404.
 - **Webhooks:** `setup_intent.succeeded` (card captured) + `payment_intent.succeeded`

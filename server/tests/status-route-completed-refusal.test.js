@@ -4,6 +4,12 @@
  * the service_records row + invoice, and Billing Recovery's leak query keys
  * on service_records — a bare status flip finished the visit as silent
  * unbilled work. Refusal happens before any write.
+ *
+ * admin-schedule additionally refuses { status: 'cancelled' }: the dispatch
+ * status route is the one staff cancel writer (scope + follow-through), and
+ * the schedule route's cancel branch was retired with no live caller.
+ * admin-dispatch keeps accepting it (asserted here so the retirement can't
+ * silently spread to the live writer).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
@@ -112,4 +118,25 @@ describe.each([
     expect(status).toBe(404);
     expect(db.__state.writes).toHaveLength(0);
   });
+});
+
+test("admin-schedule PUT /:id/status refuses 'cancelled' with USE_DISPATCH_CANCEL and zero writes", async () => {
+  const { status, body } = await put('/api/admin/schedule/svc-1/status', { status: 'cancelled' });
+  expect(status).toBe(409);
+  expect(body.code).toBe('USE_DISPATCH_CANCEL');
+  expect(body.error).toMatch(/dispatch status route/i);
+  expect(db.__state.writes).toHaveLength(0);
+});
+
+test("admin-dispatch PUT /:id/status still accepts 'cancelled' (the live cancel writer)", async () => {
+  // This file's db mock is refusal-shaped (no persisted rows, no trx.fn), so
+  // the dispatch cancel cannot complete here and the response status proves
+  // nothing on its own (pre-push hook P1). What the retirement must not
+  // change is observable regardless: the dispatch route is NOT refused
+  // up front and reaches its write transaction — the exact thing the
+  // schedule route above no longer does.
+  const { status, body } = await put('/api/admin/dispatch/svc-1/status', { status: 'cancelled' });
+  expect([404, 409]).not.toContain(status);
+  expect(body.code).toBeUndefined();
+  expect(db.__state.writes.some((w) => w.op === 'transaction')).toBe(true);
 });

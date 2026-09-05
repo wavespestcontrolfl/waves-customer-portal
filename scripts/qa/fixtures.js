@@ -45,8 +45,8 @@ async function seed(db, f) {
     const existing = await trx('customers').where({ phone: f.phone }).first('id');
     if (existing && existing.id !== f.customerId) throw new Error('Fixture phone already in use; use a fresh run or clean up the previous fixtures.');
     await trx('technicians').insert([
-      { id: f.adminId, name: 'QA Admin', email: f.adminEmail, role: 'admin', active: true, password_hash: passwordHash, auth_token_version: 1, must_change_password: false },
-      { id: f.technicianId, name: 'QA Technician', email: f.techEmail, role: 'technician', active: true, password_hash: passwordHash, auth_token_version: 1, must_change_password: false },
+      { id: f.adminId, name: 'QA Admin', email: f.adminEmail, role: 'admin', active: true, employment_status: 'active', field_dispatchable: false, password_hash: passwordHash, auth_token_version: 1, must_change_password: false },
+      { id: f.technicianId, name: 'QA Technician', email: f.techEmail, role: 'technician', active: true, employment_status: 'active', field_dispatchable: true, password_hash: passwordHash, auth_token_version: 1, must_change_password: false },
     ]).onConflict('id').ignore();
     await trx('customers').insert({ id: f.customerId, first_name: 'QA', last_name: 'Customer',
       email: f.customerEmail, phone: f.phone, active: true, pipeline_stage: 'active_customer',

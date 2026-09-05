@@ -688,10 +688,15 @@ app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
-// Standalone technicians list — used by CreateAppointmentModal and other components
+// Standalone technicians list — used by CreateAppointmentModal and other components.
+// Assignable rows only: the modal's picker feeds the save-time eligibility
+// assert, so anyone listed here must be able to take the visit.
 app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, async (req, res, next) => {
   try {
-    const techs = await require('./models/db')('technicians').select('id', 'name', 'role', 'phone', 'active').where({ active: true }).orderBy('name');
+    const techs = await require('./services/technician-eligibility')
+      .applyAssignable(require('./models/db')('technicians'))
+      .select('id', 'name', 'role', 'phone', 'active')
+      .orderBy('name');
     res.json({ technicians: techs });
   } catch (err) { next(err); }
 });
