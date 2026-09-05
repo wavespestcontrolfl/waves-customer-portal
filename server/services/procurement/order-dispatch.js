@@ -174,10 +174,15 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   if (!configured || !gateEnvValue(VENDOR_GATE[key])) return false;
   if (!adapter.loginRequired || typeof adapter.loginConfigured !== 'function') return true;
   // Configured by the vendor row (the SiteOne login + account number): a row
-  // without it, or a lookup that fails, is not auto-orderable — the sweep
-  // bells the office rather than standing down (Codex #3853 r12 P2).
+  // without it is not auto-orderable — the sweep bells the office rather
+  // than standing down (Codex #3853 r12 P2). A lookup that THROWS (the
+  // infrastructure failures vendor-credentials distinguishes from a wrong
+  // key) is NOT "unconfigured": read as such, the sweep would ring "order
+  // manually" while the dispatcher's next lookup may succeed and place the
+  // same order (Codex #3853 r17 P1). It propagates — the sweep records the
+  // product as an error and bells nothing.
   try { return adapter.loginConfigured(await getVendorLoginCredentials(conn, row.id)) === true; }
-  catch (e) { logger.warn(`[order-dispatch] canAutoOrder: credential lookup for ${row.name || row.id} failed (${e.message}) — treated as unconfigured`); return false; }
+  catch (e) { const err = new Error(`canAutoOrder: credential lookup for ${row.name || row.id} failed: ${e.message}`); err.cause = e; throw err; }
 }
 
 // Pack-size count for count-based stock: "100", "100 each", "50 ct", "1 pc".
