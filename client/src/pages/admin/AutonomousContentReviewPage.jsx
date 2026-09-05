@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -7,17 +7,16 @@ import {
   ExternalLink,
   FileText,
   GitPullRequest,
-  Lightbulb,
   Link2,
   RefreshCw,
   RotateCcw,
-  Search,
-  Sparkles,
-  TrendingUp,
-  UploadCloud,
   XCircle,
+  Search,
+  TrendingUp,
 } from "lucide-react";
 import { CardBody, Textarea, cn } from "../../components/ui";
+
+const ACTIVITY_STATUSES = { pending: "Queued", claimed: "Running", pending_review: "Processing / held", done: "Completed", skipped: "Skipped", expired: "Expired" };
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -60,12 +59,12 @@ function formatDate(value) {
   }
 }
 
-function gateTag(summary) {
+function gateTag(summary, qualityGate) {
   if (!summary) return { tone: "neutral", label: "—" };
   // comparison_ok === false means the comparison-table gate failed (named
   // competitors); it previously wasn't checked here, so a failing draft
   // could show "Gate passed".
-  if ((summary.hard_failures || []).length > 0 || summary.quality_ok === false || summary.uniqueness_ok === false || summary.seo_completion_ok === false || summary.comparison_ok === false) {
+  if ((summary.hard_failures || []).length > 0 || (qualityGate?.ok === false || (summary.quality_ok === false && summary.quality_score != null)) || summary.uniqueness_ok === false || summary.seo_completion_ok === false || summary.comparison_ok === false || summary.topic_ok === false) {
     return { tone: "alert", label: "Needs fix" };
   }
   if ((summary.soft_failures || []).length > 0) return { tone: "neutral", label: "Soft flags" };
@@ -96,43 +95,74 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const [linkLoading, setLinkLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [linkDetailLoading, setLinkDetailLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [contentError, setContentError] = useState("");
+  const [decisionError, setDecisionError] = useState("");
+  const [linkError, setLinkError] = useState("");
+  const [impactError, setImpactError] = useState("");
+  const error = { links: linkError, impact: impactError, content: contentError, review: [decisionError, contentError].filter(Boolean).join(" · ") }[view];
   const [reviewNote, setReviewNote] = useState("");
   const [linkReviewNote, setLinkReviewNote] = useState("");
   const [actionPending, setActionPending] = useState("");
   const [linkActionPending, setLinkActionPending] = useState("");
-  const [ideaData, setIdeaData] = useState(null);
-  const [ideaLoading, setIdeaLoading] = useState(true);
-  const [ideaActionPending, setIdeaActionPending] = useState("");
   const [impactData, setImpactData] = useState(null);
   const [impactLoading, setImpactLoading] = useState(true);
   // On phones the list and the detail can't share the screen — tapping a row
   // opens the detail; "Back" returns to the list. Desktop shows both columns.
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
-  const load = async () => {
-    setLoading(true);
-    setError("");
+  const [offset, setOffset] = useState(0);
+  const [status, setStatus] = useState("all");
+  const [detailVersion, setDetailVersion] = useState(0);
+  const listRequest = useRef(0);
+  const listInFlight = useRef(null);
+  const currentLoad = useRef(null);
+  const detailInFlight = useRef(null);
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const actionType = view === "review" ? "other" : "new_supporting_blog";
+
+  const load = useCallback(async (background = false) => {
+    const request = ++listRequest.current;
+    listInFlight.current = request;
+    if (!background) setLoading(true);
+    setContentError("");
     try {
-      const next = await adminFetch("/admin/content/autonomous/review?status=pending_review&limit=50");
+      const next = await adminFetch(`/admin/content/autonomous/review?status=${status}&limit=50&offset=${offset}&actionType=${actionType}`);
+      if (request !== listRequest.current) return;
       setData(next);
-      setSelectedId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
+      if (!detailInFlight.current) setDetailVersion((version) => version + 1);
+      const retained = next.items?.some((item) => item.id === selectedIdRef.current);
+      if (background && !retained) {
+        setSelectedId(null);
+        setDetail(null);
+        setMobileDetailOpen(false);
+      } else {
+        setSelectedId((current) => retained ? current : next.items?.[0]?.id || null);
+      }
     } catch (err) {
-      setError(err.message);
+      if (request !== listRequest.current) return;
+      setContentError(err.message);
+      if (!background) {
+        setData(null);
+        setSelectedId(null);
+        setDetail(null);
+      }
     } finally {
-      setLoading(false);
+      if (listInFlight.current === request) listInFlight.current = null;
+      if (request === listRequest.current) setLoading(false);
     }
-  };
+  }, [offset, status, actionType]);
+  currentLoad.current = load;
 
   const loadLinks = async () => {
     setLinkLoading(true);
-    setError("");
+    setLinkError("");
     try {
       const next = await adminFetch("/admin/content/internal-links?status=all&limit=100");
       setLinkData(next);
       setSelectedLinkId((current) => next.items?.some((item) => item.id === current) ? current : next.items?.[0]?.id || null);
     } catch (err) {
-      setError(err.message);
+      setLinkError(err.message);
     } finally {
       setLinkLoading(false);
     }
@@ -140,46 +170,32 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
 
   const loadImpact = async () => {
     setImpactLoading(true);
-    setError("");
+    setImpactError("");
     try {
       const next = await adminFetch("/admin/content/autonomous/impact?limit=100");
       setImpactData(next);
     } catch (err) {
-      setError(err.message);
+      setImpactError(err.message);
     } finally {
       setImpactLoading(false);
     }
   };
 
-  const loadIdeas = async () => {
-    setIdeaLoading(true);
-    setError("");
-    try {
-      // Blog ideas live in the legacy blog pipeline (blog_posts), separate from
-      // the opportunity queue. Surface idea + draft rows here so the backlog can
-      // be generated + published from the same review surface. Drafts first
-      // (closer to publish), then ideas.
-      const [ideas, drafts] = await Promise.all([
-        adminFetch("/admin/content/blog?status=idea&sort=created_at&order=desc&limit=100"),
-        adminFetch("/admin/content/blog?status=draft&sort=created_at&order=desc&limit=100"),
-      ]);
-      setIdeaData({
-        posts: [...(drafts.posts || []), ...(ideas.posts || [])],
-        counts: ideas.counts || drafts.counts || {},
-      });
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setIdeaLoading(false);
-    }
-  };
-
   useEffect(() => {
-    load();
     loadLinks();
-    loadIdeas();
     loadImpact();
   }, []);
+
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => {
+      if (listInFlight.current === null) void load(true);
+    }, 30000);
+    return () => { clearInterval(timer); listRequest.current += 1; };
+  }, [load]);
+
+  useEffect(() => { setReviewNote(""); }, [selectedId]);
+  useEffect(() => { setLinkReviewNote(""); }, [selectedLinkId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -190,18 +206,25 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
     // leaving A's draft rendered while B is highlighted (decisions were
     // already safe server-side via the run-id 409; this fixes the display).
     let stale = false;
+    const request = { id: selectedId };
+    detailInFlight.current = request;
     setDetail(null);
     setDetailLoading(true);
     adminFetch(`/admin/content/autonomous/review/${selectedId}`)
       .then((next) => {
         if (stale) return;
         setDetail(next.item);
-        setReviewNote("");
       })
-      .catch((err) => { if (!stale) setError(err.message); })
-      .finally(() => { if (!stale) setDetailLoading(false); });
-    return () => { stale = true; };
-  }, [selectedId]);
+      .catch((err) => { if (!stale) setContentError(err.message); })
+      .finally(() => {
+        if (detailInFlight.current === request) detailInFlight.current = null;
+        if (!stale) setDetailLoading(false);
+      });
+    return () => {
+      stale = true;
+      if (detailInFlight.current === request) detailInFlight.current = null;
+    };
+  }, [selectedId, detailVersion]);
 
   useEffect(() => {
     if (!selectedLinkId) {
@@ -215,17 +238,16 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       .then((next) => {
         if (stale) return;
         setLinkDetail(next.item);
-        setLinkReviewNote("");
       })
-      .catch((err) => { if (!stale) setError(err.message); })
+      .catch((err) => { if (!stale) setLinkError(err.message); })
       .finally(() => { if (!stale) setLinkDetailLoading(false); });
     return () => { stale = true; };
   }, [selectedLinkId]);
 
   const submitDecision = async (decision) => {
-    if (!selectedId || actionPending) return;
+    if (view !== "review" || selected?.action_type === "new_supporting_blog" || !selectedId || actionPending) return;
     setActionPending(decision);
-    setError("");
+    setDecisionError("");
     try {
       const next = await adminFetch(`/admin/content/autonomous/review/${selectedId}/decision`, {
         method: "POST",
@@ -233,38 +255,21 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
         // it if a requeue/re-run replaced it since this view loaded.
         body: { decision, note: reviewNote, run_id: selected?.run?.id || null },
       });
+      if (currentLoad.current !== load || selectedIdRef.current !== selectedId) return;
       setDetail(next.item);
       setReviewNote("");
       await load();
     } catch (err) {
-      setError(err.message);
+      setDecisionError(err.message);
     } finally {
       setActionPending("");
-    }
-  };
-
-  const runIdeaAction = async (id, action) => {
-    if (!id || ideaActionPending) return;
-    setIdeaActionPending(`${action}:${id}`);
-    setError("");
-    try {
-      if (action === "generate") {
-        await adminFetch(`/admin/content/blog/${id}/generate`, { method: "POST" });
-      } else if (action === "publish") {
-        await adminFetch(`/admin/content/blog/${id}/publish-astro`, { method: "POST" });
-      }
-      await loadIdeas();
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setIdeaActionPending("");
     }
   };
 
   const submitLinkDecision = async (decision) => {
     if (!selectedLinkId || linkActionPending) return;
     setLinkActionPending(decision);
-    setError("");
+    setLinkError("");
     try {
       const next = await adminFetch(`/admin/content/internal-links/${selectedLinkId}/decision`, {
         method: "POST",
@@ -274,7 +279,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       setLinkReviewNote("");
       await loadLinks();
     } catch (err) {
-      setError(err.message);
+      setLinkError(err.message);
     } finally {
       setLinkActionPending("");
     }
@@ -287,6 +292,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const counts = data?.counts || {};
   const linkCounts = linkData?.counts || {};
   const gateSummary = selected?.run?.gate_summary;
+  const reviewActions = selected?.review_actions || {};
+  const selectedGate = gateTag(gateSummary, selected?.run?.quality_gate_result);
   const hardFailures = gateSummary?.hard_failures || [];
   const softFailures = gateSummary?.soft_failures || [];
   const uniquenessFailures = gateSummary?.uniqueness_failures || [];
@@ -295,17 +302,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
   const seoFindings = seoCompletion?.findings || [];
   const recommendedLinks = seoCompletion?.recommended_links || [];
   const remediation = selected?.run?.remediation;
-  const pendingCount = counts.pending_review || 0;
+  const pendingCount = (counts.pending || 0) + (counts.claimed || 0) + (counts.pending_review || 0);
   const shadowCount = useMemo(() => items.filter((item) => item.run?.shadow_mode).length, [items]);
-  const reviewActions = selected?.review_actions || {};
-  const ideaPosts = ideaData?.posts || [];
-  const ideaCounts = ideaData?.counts || {};
   const impactItems = impactData?.items || [];
   const impactTotals = impactData?.totals || {};
-  const busy = loading || linkLoading || ideaLoading || impactLoading;
+  const busy = loading || linkLoading || impactLoading;
 
-  const refreshAll = () => { load(); loadLinks(); loadIdeas(); loadImpact(); };
-  const changeView = (next) => { setView(next); setMobileDetailOpen(false); };
+  const refreshAll = () => { load(); loadLinks(); loadImpact(); };
+  const changeView = (next) => { setView(next); setMobileDetailOpen(false); setOffset(0); setStatus(next === "review" ? "pending_review" : "all"); setDetail(null); setReviewNote(""); };
   const openContent = (id) => { setSelectedId(id); setMobileDetailOpen(true); };
   const openLink = (id) => { setSelectedLinkId(id); setMobileDetailOpen(true); };
 
@@ -330,14 +334,14 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                 <span className="hidden sm:inline">Refresh</span>
               </button>
             </div>
-            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Content review</h1>
+            <h1 className="mt-3 text-22 font-medium leading-tight tracking-tight sm:text-28">Autonomous blog activity</h1>
             <p className="mt-1.5 max-w-md text-13 text-white/65 sm:text-14">
-              The engine drafts the posts — you approve what goes live. Every named-competitor comparison lands here first.
+              Blog posts are drafted, checked, repaired, and published automatically. Failed checks are retried or skipped with a recorded reason. No approval is needed.
             </p>
             <div className="mt-4 flex gap-1.5 overflow-x-auto">
               <PillTab active={view === "content"} onClick={() => changeView("content")}>Content</PillTab>
+              <PillTab active={view === "review"} onClick={() => changeView("review")}>Other content</PillTab>
               <PillTab active={view === "links"} onClick={() => changeView("links")}>Links</PillTab>
-              <PillTab active={view === "ideas"} onClick={() => changeView("ideas")}>Ideas</PillTab>
               <PillTab active={view === "impact"} onClick={() => changeView("impact")}>Impact</PillTab>
             </div>
           </div>
@@ -358,10 +362,10 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
       )}
 
       {/* ── Content Queue ── */}
-      {view === "content" && (
+      {(view === "content" || view === "review") && (
         <div className="pt-4">
           <KpiRow>
-            <Kpi label="Pending review" value={pendingCount} emphasize={pendingCount > 0} />
+            <Kpi label="In progress" value={pendingCount} emphasize={pendingCount > 0} />
             <Kpi label="Shadow rows" value={shadowCount} />
             <Kpi label="Done" value={counts.done || 0} />
             <Kpi label="Skipped" value={counts.skipped || 0} />
@@ -370,19 +374,31 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] lg:items-start">
             {/* List */}
             <div className={cn(mobileDetailOpen ? "hidden" : "block", "lg:block")}>
-              <ListHeader icon={Search} title="Queue" count={items.length} />
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <label className="text-14 text-zinc-700">Status <select aria-label="Activity status" className="ml-2 rounded border border-zinc-200 p-2" value={status} onChange={(event) => { setStatus(event.target.value); setOffset(0); }}>
+                  <option value="all">All activity</option>
+                  <option value="pending">Queued</option>
+                  <option value="claimed">Running</option>
+                  <option value="pending_review">Processing / held</option>
+                  <option value="done">Completed</option>
+                  <option value="skipped">Skipped</option>
+                  <option value="expired">Expired</option>
+                </select></label>
+                <span className="text-14 text-zinc-500">Updates every 30 seconds</span>
+              </div>
+              <ListHeader icon={Search} title="Activity" count={data?.total || 0} />
               {loading ? (
                 <Empty>Loading…</Empty>
               ) : items.length === 0 ? (
                 <Empty>
                   {data?.unavailable
                     ? "Review queue unavailable — the review tables are missing or the query failed. Check server logs."
-                    : "No pending review rows."}
+                    : "No runs match this filter."}
                 </Empty>
               ) : (
                 <div className="flex flex-col gap-2.5">
                   {items.map((item) => {
-                    const gt = gateTag(item.run?.gate_summary);
+                    const gt = gateTag(item.run?.gate_summary, item.run?.quality_gate_result);
                     const named = isNamedCompetitor(item);
                     const meta = [item.city, item.service, item.bucket].filter(Boolean).join(" · ");
                     return (
@@ -397,6 +413,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                           {named && <Tag tone="forest" className="shrink-0">Named competitor</Tag>}
                         </div>
                         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                          <Tag>{ACTIVITY_STATUSES[item.status] || item.status}</Tag>
                           <Tag>{item.action_type}</Tag>
                           <Tag tone={gt.tone}>{gt.label}</Tag>
                           <span className="text-12 tabular-nums text-zinc-500">Score {item.final_score ?? item.score ?? "—"}</span>
@@ -407,22 +424,27 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                   })}
                 </div>
               )}
+              <div className="mt-3 flex items-center justify-between gap-2 text-14 text-zinc-600">
+                <ActionBtn variant="secondary" disabled={loading || offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>Previous</ActionBtn>
+                <span>{items.length ? offset + 1 : 0}–{items.length ? offset + items.length : 0} of {data?.total || 0}</span>
+                <ActionBtn variant="secondary" disabled={loading || offset + items.length >= (data?.total || 0)} onClick={() => setOffset(offset + 50)}>Next</ActionBtn>
+              </div>
             </div>
 
             {/* Detail */}
             <div className={cn(mobileDetailOpen ? "block" : "hidden", "lg:block lg:sticky lg:top-4")}>
               <Panel>
-                <PanelHeader icon={FileText} title="Review detail" onBack={() => setMobileDetailOpen(false)} />
+                <PanelHeader icon={FileText} title="Run detail" onBack={() => setMobileDetailOpen(false)} />
                 {!selected ? (
-                  <Empty>Select a row to review it.</Empty>
+                  <Empty>Select a run to see its status.</Empty>
                 ) : (
                   <CardBody className={cn("flex flex-col gap-4", detailLoading && "opacity-60")}>
                     <div>
                       <div className="text-16 font-medium leading-snug text-zinc-900">
-                        {selected.draft?.title || selected.target_keyword || "Untitled review"}
+                        {selected.draft?.title || selected.target_keyword || "Untitled run"}
                       </div>
                       <div className="mt-2 flex flex-wrap gap-1.5">
-                        <Tag>{selected.status}</Tag>
+                        <Tag>{selected.status === "pending_review" ? "Processing / held" : selected.status}</Tag>
                         <Tag>{selected.action_type}</Tag>
                         {selected.run?.shadow_mode && <Tag>shadow</Tag>}
                         {isNamedCompetitor(selected) && <Tag tone="forest">Named competitor</Tag>}
@@ -433,7 +455,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                       <Field label="Target" value={selected.target_url || "—"} />
                       <Field label="Keyword" value={selected.target_keyword || "—"} />
                       <Field label="Reason" value={selected.skip_reason || "—"} />
-                      <Field label="Run" value={selected.run?.outcome || "—"} />
+                      <Field label="Run" value={view === "content" && selected.run?.outcome === "completed_pending_review" ? "Automatic processing" : selected.run?.outcome || "—"} />
                     </div>
 
                     {selected.run?.astro_pr_url && <ExternalAnchor href={selected.run.astro_pr_url} label="Open Astro PR" />}
@@ -464,7 +486,7 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                       </Section>
                     )}
 
-                    {selected.status === "pending_review" && (
+                    {view === "review" && selected.action_type !== "new_supporting_blog" && selected.status === "pending_review" && (
                       <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
                         <Textarea
                           value={reviewNote}
@@ -498,8 +520,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                     )}
 
                     <Section
-                      icon={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false && gateSummary?.comparison_ok !== false ? CheckCircle2 : AlertTriangle}
-                      ok={hardFailures.length === 0 && uniquenessFailures.length === 0 && seoCompletion?.passed !== false && gateSummary?.comparison_ok !== false}
+                      icon={selectedGate.tone === "alert" ? AlertTriangle : selectedGate.tone === "green" ? CheckCircle2 : RefreshCw}
+                      ok={selectedGate.tone === "neutral" ? undefined : selectedGate.tone === "green"}
                       title="Gate summary"
                     >
                       <div className="grid gap-1 text-13 text-zinc-600">
@@ -508,6 +530,8 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
                         <div>Soft: {softFailures.length ? softFailures.join(", ") : "none"}</div>
                         <div>Uniqueness: {uniquenessFailures.length ? uniquenessFailures.join(", ") : (gateSummary?.uniqueness_ok === false ? "failed" : "none")}</div>
                         <div>SEO completion: {seoCompletion?.available ? `P0 ${seoCompletion.p0} / P1 ${seoCompletion.p1} / P2 ${seoCompletion.p2}` : "not run"}</div>
+                        <div>Topic targeting: {gateSummary?.topic_ok == null ? "not run" : gateSummary.topic_ok ? "ok" : "failed"}</div>
+                        {(gateSummary?.topic_findings || []).map((finding, i) => <div key={`topic-${i}`} className="text-alert-fg">{finding.code}: {finding.message}</div>)}
                         <div>Comparison: {gateSummary?.comparison_ok == null ? "not run" : gateSummary.comparison_ok ? "ok" : "failed"}</div>
                         {gateSummary?.comparison_ok === false && comparisonFindings.slice(0, 4).map((finding, i) => (
                           <div key={`${finding.code}-${i}`} className="text-[#B42318]">
@@ -693,59 +717,6 @@ export default function AutonomousContentReviewPage({ embedded = false } = {}) {
               </Panel>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* ── Blog Ideas ── */}
-      {view === "ideas" && (
-        <div className="pt-4">
-          <KpiRow cols={3}>
-            <Kpi label="Ideas" value={ideaCounts.idea || 0} emphasize={(ideaCounts.idea || 0) > 0} />
-            <Kpi label="Drafts (ready)" value={ideaCounts.draft || 0} emphasize={(ideaCounts.draft || 0) > 0} />
-            <Kpi label="Published" value={ideaCounts.published || 0} />
-          </KpiRow>
-
-          <ListHeader icon={Lightbulb} title="Blog ideas & drafts" count={ideaPosts.length} />
-          {ideaLoading ? (
-            <Empty>Loading…</Empty>
-          ) : ideaPosts.length === 0 ? (
-            <Empty>No blog ideas or drafts in the backlog.</Empty>
-          ) : (
-            <div className="grid gap-2.5 sm:grid-cols-2">
-              {ideaPosts.map((p) => (
-                <div key={p.id} className="flex flex-col gap-2.5 rounded-2xl border border-zinc-200 bg-white p-3 sm:p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="text-14 font-medium leading-snug text-zinc-900">{p.title || "Untitled"}</div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-12 text-zinc-500">
-                        {p.tag && <Tag>{p.tag}</Tag>}
-                        {p.city && <span>{p.city}</span>}
-                        {p.keyword && <span className="truncate">kw: {p.keyword}</span>}
-                      </div>
-                    </div>
-                    <Tag tone={p.status === "draft" ? "forest" : "neutral"} className="shrink-0">{p.status}</Tag>
-                  </div>
-                  <div className="flex justify-end">
-                    {p.status === "idea" && (
-                      <ActionBtn size="sm" disabled={!!ideaActionPending} onClick={() => runIdeaAction(p.id, "generate")}>
-                        <Sparkles size={14} strokeWidth={2} />
-                        {ideaActionPending === `generate:${p.id}` ? "Working…" : "Generate"}
-                      </ActionBtn>
-                    )}
-                    {p.status === "draft" && (
-                      <ActionBtn size="sm" disabled={!!ideaActionPending} onClick={() => runIdeaAction(p.id, "publish")}>
-                        <UploadCloud size={14} strokeWidth={2} />
-                        {ideaActionPending === `publish:${p.id}` ? "Working…" : "Publish PR"}
-                      </ActionBtn>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-          <p className="mt-3 text-12 leading-relaxed text-zinc-500">
-            Generate writes a full draft (content + meta) via the blog writer; Publish PR opens a review-only Astro PR (Codex + content guardrails run before merge). Ideas come from the blog idea generator, independent of GSC demand.
-          </p>
         </div>
       )}
 
@@ -983,7 +954,7 @@ function Section({ icon: Icon, ok, title, children }) {
   return (
     <div className="border-t border-zinc-200 pt-4">
       <div className="mb-2 flex items-center gap-2">
-        {Icon && <Icon size={15} strokeWidth={2} className={ok ? "text-[#2E7D20]" : "text-[#B42318]"} />}
+        {Icon && <Icon size={15} strokeWidth={2} className={ok === undefined ? "text-zinc-500" : ok ? "text-[#2E7D20]" : "text-[#B42318]"} />}
         <span className="text-12 uppercase tracking-label text-zinc-500">{title}</span>
       </div>
       {children}
