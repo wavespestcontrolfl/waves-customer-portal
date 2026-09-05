@@ -79,26 +79,32 @@ const SECOND_WIN_SQL = secondWinSql('leads');
 // repeat, B → A → O) through live 'duplicate' hops only, bounded and
 // cycle-safe like the ascent; the won row qualifies by the same
 // same-opportunity rule (customer link when both linked, else the root's
-// current phone or email; never through a different estimate). A root
+// current phone or email; never through a different estimate — judged on
+// the scope the win persisted, won_estimate_id, else the repeat's link). A root
 // staff closed themselves (lost, unresponsive) is left as it is — their
 // decision, already excluded from open work. The reverse join is a plain
 // text comparison on the marker key so the expression index on it
 // (20260905000010) serves the lookup.
 const MARKER_TEXT = (extracted) => `${extracted}->>'duplicate_of_lead_id'`;
+// The estimate a won repeat's deal closed: the scope its conversion
+// persisted (extracted_data.won_estimate_id — a deposit on estimate B
+// converts an unlinked repeat), else its own link. A root linked to a
+// different estimate is a different deal and stays counted (pre-push P1).
+const WON_SCOPE_TEXT = (r) => `COALESCE(${r}.extracted_data->>'won_estimate_id', ${r}.estimate_id::text)`;
 const openStatusList = OPEN_LEAD_STATUSES.map((s) => `'${s}'`).join(', ');
 const wonDescendantSql = (t) => `(${t}.status NOT IN (${openStatusList}) OR NOT EXISTS (
   WITH RECURSIVE down AS (
-    SELECT d.id, d.status, d.deleted_at, d.customer_id, d.estimate_id, d.phone, d.email, 1 AS depth
+    SELECT d.id, d.status, d.deleted_at, d.customer_id, ${WON_SCOPE_TEXT('d')} AS won_scope, d.phone, d.email, 1 AS depth
     FROM leads d
     WHERE d.lead_type = 'quote_wizard' AND ${MARKER_TEXT('d.extracted_data')} = ${t}.id::text
     UNION ALL
-    SELECT c.id, c.status, c.deleted_at, c.customer_id, c.estimate_id, c.phone, c.email, down.depth + 1
+    SELECT c.id, c.status, c.deleted_at, c.customer_id, ${WON_SCOPE_TEXT('c')}, c.phone, c.email, down.depth + 1
     FROM down JOIN leads c ON c.lead_type = 'quote_wizard' AND ${MARKER_TEXT('c.extracted_data')} = down.id::text
     WHERE down.status = 'duplicate' AND down.deleted_at IS NULL AND down.depth < 8
   )
   SELECT 1 FROM down
   WHERE down.status = 'won' AND down.deleted_at IS NULL
-    AND NOT (down.estimate_id IS NOT NULL AND ${t}.estimate_id IS NOT NULL AND down.estimate_id <> ${t}.estimate_id)
+    AND NOT (down.won_scope IS NOT NULL AND ${t}.estimate_id IS NOT NULL AND down.won_scope <> ${t}.estimate_id::text)
     AND CASE
       WHEN down.customer_id IS NOT NULL AND ${t}.customer_id IS NOT NULL THEN down.customer_id = ${t}.customer_id
       ELSE (${phoneDigits('down.phone')} <> '' AND ${phoneDigits('down.phone')} = ${phoneDigits(`${t}.phone`)})

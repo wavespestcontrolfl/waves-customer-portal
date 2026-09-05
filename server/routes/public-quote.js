@@ -1971,15 +1971,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // still show — a 'duplicate' label would bury them. The list the
         // property-lookup stage stored counts too (it is carried forward
         // when this stage omitted the optional field, r12 P1).
-        const widerInquiry = additionalProperties.length > 0 || (parseExtracted(prior.extracted_data)?.additional_properties?.length > 0);
+        const priorExtraCount = parseExtracted(prior.extracted_data)?.additional_properties?.length || 0;
+        const widerInquiry = additionalProperties.length > 0 || priorExtraCount > 0;
         const desired = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: prior.id, beforeCreatedAt: prior.created_at });
         // The replace snapshot (quote_wizard rows: each stage supersedes the
         // last) carries forward additional_properties, the declared
         // timeline and a won_estimate_id stamp; the marker is whatever THIS
         // request derived, never the carried one.
+        // ...and the stored extra-property list as read: a concurrent
+        // submission on this token that added properties (status still
+        // 'new', marker still null) made it a wider inquiry, and this claim
+        // must lose rather than label it a duplicate (pre-push P1).
         const rows = await ownRow()
           .where({ status: prior.status })
           .whereRaw("extracted_data->>'duplicate_of_lead_id' IS NOT DISTINCT FROM ?", [stored])
+          .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [priorExtraCount])
           .update({
             ...updateFields,
             status: desired ? 'duplicate' : 'new',

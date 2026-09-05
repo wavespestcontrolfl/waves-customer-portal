@@ -199,12 +199,15 @@ describe('duplicate ancestry follows the token the browser holds', () => {
     expect(block).not.toMatch(/forUpdate/);
     // The stored additional-property list counts as well as the request's
     // (codex r12 P1).
-    expect(block).toMatch(/const widerInquiry = additionalProperties\.length > 0 \|\| \(parseExtracted\(prior\.extracted_data\)\?\.additional_properties\?\.length > 0\);/);
+    expect(block).toMatch(/const priorExtraCount = parseExtracted\(prior\.extracted_data\)\?\.additional_properties\?\.length \|\| 0;\n\s+const widerInquiry = additionalProperties\.length > 0 \|\| priorExtraCount > 0;/);
     expect(block).toMatch(/const desired = widerInquiry \? null : await findPriorOpenWizardLeadId\(db, \{ email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: prior\.id, beforeCreatedAt: prior\.created_at \}\);/);
     // The claim: the status just read (codex r9 P1 — a staff transition in
     // between wins and this public retry claims 0 rows) AND the marker just
     // read, NULL-safe; the typed fields and the derived label land together.
-    expect(block).toMatch(/const rows = await ownRow\(\)\n\s+\.where\(\{ status: prior\.status \}\)\n\s+\.whereRaw\("extracted_data->>'duplicate_of_lead_id' IS NOT DISTINCT FROM \?", \[stored\]\)\n\s+\.update\(\{\n\s+\.\.\.updateFields,\n\s+status: desired \? 'duplicate' : 'new',/);
+    // ...and the stored extra-property list as read: a concurrent
+    // submission that added properties made the row a wider inquiry, and
+    // this claim must lose rather than label it a duplicate (pre-push P1).
+    expect(block).toMatch(/const rows = await ownRow\(\)\n\s+\.where\(\{ status: prior\.status \}\)\n\s+\.whereRaw\("extracted_data->>'duplicate_of_lead_id' IS NOT DISTINCT FROM \?", \[stored\]\)\n\s+\.whereRaw\("COALESCE\(jsonb_array_length\(COALESCE\(extracted_data, '\{\}'::jsonb\)->'additional_properties'\), 0\) = \?", \[priorExtraCount\]\)\n\s+\.update\(\{\n\s+\.\.\.updateFields,\n\s+status: desired \? 'duplicate' : 'new',/);
     expect(block).toMatch(/'won_estimate_id', COALESCE\(extracted_data, '\{\}'::jsonb\)->'won_estimate_id'\)\) \|\| \?::jsonb \|\| \?::jsonb",\n\s+\[extractedData, JSON\.stringify\(desired \? \{ duplicate_of_lead_id: desired \} : \{\}\)\],/);
     // The claimed snapshot never carries the OLD marker forward.
     const claimedRaw = block.slice(block.indexOf('.update({'), block.indexOf('.returning(RETURNING)'));

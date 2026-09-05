@@ -122,7 +122,11 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
     expect(WON_DESCENDANT_SQL).toMatch(/JOIN leads c ON c\.lead_type = 'quote_wizard' AND c\.extracted_data->>'duplicate_of_lead_id' = down\.id::text/);
     expect(WON_DESCENDANT_SQL).toMatch(/WHERE down\.status = 'duplicate' AND down\.deleted_at IS NULL AND down\.depth < 8/);
     expect(WON_DESCENDANT_SQL).toMatch(/WHERE down\.status = 'won' AND down\.deleted_at IS NULL/);
-    expect(WON_DESCENDANT_SQL).toMatch(/AND NOT \(down\.estimate_id IS NOT NULL AND leads\.estimate_id IS NOT NULL AND down\.estimate_id <> leads\.estimate_id\)/);
+    // ...on the scope the win persisted (won_estimate_id, a deposit on
+    // estimate B converting an unlinked repeat), else the repeat's own link:
+    // a root linked to estimate A is a different deal and stays counted.
+    expect(WON_DESCENDANT_SQL).toMatch(/COALESCE\(d\.extracted_data->>'won_estimate_id', d\.estimate_id::text\) AS won_scope/);
+    expect(WON_DESCENDANT_SQL).toMatch(/AND NOT \(down\.won_scope IS NOT NULL AND leads\.estimate_id IS NOT NULL AND down\.won_scope <> leads\.estimate_id::text\)/);
     expect(WON_DESCENDANT_SQL).toMatch(/WHEN down\.customer_id IS NOT NULL AND leads\.customer_id IS NOT NULL THEN down\.customer_id = leads\.customer_id/);
     const adminLeadsSrc = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-leads.js'), 'utf8');
     expect((adminLeadsSrc.match(/leads\.deleted_at IS NULL AND \$\{PROSPECT_SCOPE_SQL\}/g) || []).length).toBe(4);
