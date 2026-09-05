@@ -189,7 +189,7 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     const result = await runner.runNext();
 
     expect(result.outcome).toBe('deferred_gate_retry');
-    expect(result.skip_reason).toBe('gate_fail');
+    expect(result.skip_reason).toBe('auto_publish_gate_fail');
     expect(queue.defer).toHaveBeenCalledWith('opp_agg', expect.any(Date), { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
     const retryWrite = dbMock._updates.find((u) => u.table === 'opportunity_queue');

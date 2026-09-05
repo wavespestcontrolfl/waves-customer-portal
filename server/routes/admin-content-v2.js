@@ -286,6 +286,8 @@ router.get('/autonomous/review', async (req, res, next) => {
     const review = await autonomousReviewQueue.listReviewItems({
       status: req.query.status,
       limit: req.query.limit,
+      offset: req.query.offset,
+      actionType: req.query.actionType === 'new_supporting_blog' ? 'new_supporting_blog' : null,
     });
     res.json(review);
   } catch (err) { next(err); }
@@ -460,6 +462,7 @@ router.get('/internal-links', async (req, res, next) => {
     const review = await internalLinkReviewQueue.listTasks({
       status: req.query.status,
       limit: req.query.limit,
+      offset: req.query.offset,
     });
     res.json(review);
   } catch (err) { next(err); }

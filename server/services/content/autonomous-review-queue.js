@@ -8,18 +8,23 @@ const logger = require('../logger');
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
-const ALLOWED_STATUSES = new Set(['pending_review', 'pending', 'claimed', 'done', 'skipped', 'expired']);
+const ALLOWED_STATUSES = new Set(['all', 'pending_review', 'pending', 'claimed', 'done', 'skipped', 'expired']);
 const ALLOWED_DECISIONS = new Set(['requeue', 'dismiss', 'approve_trust_build', 'approve_named_competitor']);
 
-async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMIT } = {}) {
+async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMIT, offset = 0, actionType = null } = {}) {
   const normalizedStatus = normalizeStatus(status);
   const boundedLimit = normalizeLimit(limit);
+  const boundedOffset = Math.max(0, Number.parseInt(offset, 10) || 0);
 
   try {
-    const counts = await countsByStatus();
-    const opportunities = await db('opportunity_queue')
-      .where('status', normalizedStatus)
+    const counts = await countsByStatus(actionType);
+    const query = db('opportunity_queue');
+    if (actionType) query.where('action_type', actionType);
+    if (normalizedStatus !== 'all') query.where('status', normalizedStatus);
+    const opportunities = await query
       .orderBy('updated_at', 'desc')
+      .orderBy('id', 'desc')
+      .offset(boundedOffset)
       .limit(boundedLimit)
       .select('*');
 
@@ -43,6 +48,8 @@ async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMI
     return {
       status: normalizedStatus,
       limit: boundedLimit,
+      offset: boundedOffset,
+      total: normalizedStatus === 'all' ? Object.values(counts).reduce((sum, n) => sum + n, 0) : counts[normalizedStatus] || 0,
       counts,
       items: opportunities.map((opportunity) => buildReviewItem({
         opportunity,
@@ -145,6 +152,12 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
   const cleanNote = normalizeNote(note);
   const opportunity = await db('opportunity_queue').where('id', opportunityId).first();
   if (!opportunity) return null;
+  if (opportunity.action_type === 'new_supporting_blog') {
+    const err = new Error('Autonomous blogs are managed by the engine; no review decision is required');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
   if (opportunity.status !== 'pending_review') {
     const err = new Error(`Opportunity is ${opportunity.status}, expected pending_review`);
     err.statusCode = 409;
@@ -231,6 +244,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     }
   } else if (normalizedDecision === 'requeue') {
     await db.transaction(async (trx) => {
+      await lockCurrentRun(trx, opportunityId, run, expectedRunId);
       await updatePendingReviewOpportunity(trx, opportunityId, {
         status: 'pending',
         claimed_at: null,
@@ -323,8 +337,10 @@ async function updatePendingReviewOpportunity(trx, opportunityId, updates) {
   return updated;
 }
 
-async function countsByStatus() {
-  const rows = await db('opportunity_queue')
+async function countsByStatus(actionType = null) {
+  const query = db('opportunity_queue');
+  if (actionType) query.where('action_type', actionType);
+  const rows = await query
     .select('status')
     .count('* as count')
     .groupBy('status');
@@ -425,7 +441,7 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
 }
 
 function reviewActions({ opportunity, run }) {
-  const pendingReview = opportunity?.status === 'pending_review';
+  const pendingReview = opportunity?.status === 'pending_review' && opportunity?.action_type !== 'new_supporting_blog';
   return {
     can_requeue: pendingReview,
     can_dismiss: pendingReview,

@@ -108,7 +108,7 @@ describe('claimNext lifetime attempt budget', () => {
     await queue.claimNext({});
 
     const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/attempt_count = attempt_count \+ 1/);
+    expect(sql).toMatch(/attempt_count = CASE WHEN status = 'pending_review' THEN 1 ELSE attempt_count \+ 1 END/);
     expect(sql).toMatch(/attempt_count < \?::int/);
     expect(bindings[1]).toBe(5);
   });
@@ -124,7 +124,7 @@ describe('claimNext lifetime attempt budget', () => {
     expect(bindings[1]).toBe(3);
   });
 
-  test('sweepExhaustedAttempts parks exhausted pendings at REQUEUEABLE pending_review/attempts_exhausted (Codex round 4 — skipped was permanent)', async () => {
+  test('sweepExhaustedAttempts skips blogs and preserves review for other lanes', async () => {
     const q = chain({ updateResult: 2 });
     db.mockImplementation(() => q);
 
@@ -135,11 +135,8 @@ describe('claimNext lifetime attempt budget', () => {
       ['status', 'pending'],
       ['attempt_count', '>=', 5],
     ]));
-    // pending_review, NOT skipped: the review queue only offers requeue
-    // (the attempt_count reset) on pending_review rows, and the miner
-    // keeps skipped sticky — swept-to-skipped rows were dead forever.
+    expect(db.raw).toHaveBeenCalledWith("CASE WHEN action_type = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END");
     expect(q.update).toHaveBeenCalledWith(expect.objectContaining({
-      status: 'pending_review',
       skip_reason: 'attempts_exhausted',
     }));
   });

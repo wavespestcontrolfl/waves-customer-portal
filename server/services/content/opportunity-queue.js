@@ -156,19 +156,29 @@ class OpportunityQueue {
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
-             attempt_count = attempt_count + 1,
+             attempt_count = CASE WHEN status = 'pending_review' THEN 1 ELSE attempt_count + 1 END,
              updated_at = now()
        WHERE id = (
          SELECT id FROM opportunity_queue
-         WHERE status = 'pending'
+         WHERE (status = 'pending' OR (
+           action_type = 'new_supporting_blog' AND status = 'pending_review'
+           AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
+             OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
+           -- Existing approval holds re-enter the SAME guarded draft pipeline.
+           -- Never redraft work with any external publish already in flight.
+           AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
+             WHERE r.opportunity_id = opportunity_queue.id
+               AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
+         ))
            -- Availability window: operator-seeded rows (intercept briefs) may
            -- carry a future available_at; they stay invisible to the claim
            -- until their window opens. NULL = available immediately (every
            -- miner row).
            AND (available_at IS NULL OR available_at <= now())
-           -- Lifetime claim budget — see maxClaimAttempts(). Exhausted rows
-           -- are swept to skipped/attempts_exhausted by the janitor.
-           AND attempt_count < ?::int
+           -- New policy gives a former approval hold one fresh attempt budget.
+           -- New runs cannot enter those approval states, so this resets once.
+           -- Ordinary retries keep the existing lifetime budget.
+           AND (attempt_count < ?::int OR status = 'pending_review')
            -- ::numeric casts are load-bearing: inside a CASE, Postgres types
            -- bare parameters as text (no comparison context), and
            -- integer >= text has no operator — this exact line failed in
@@ -390,31 +400,20 @@ class OpportunityQueue {
   }
 
   /**
-   * Park pending rows that have used up their lifetime claim budget at a
-   * VISIBLE pending_review/attempts_exhausted. claimNext already refuses
-   * them, but without this sweep they'd sit pending forever as invisible
-   * zombies — never claimable, never surfaced.
-   *
-   * pending_review, NOT skipped: the review queue only offers requeue
-   * (which resets attempt_count — the deliberate way back in) on
-   * pending_review rows, and the miner upsert keeps skipped sticky, so an
-   * exhausted row swept to skipped was PERMANENT short of a DB edit or an
-   * operator seeder path. pending_review is equally mine-proof (the
-   * upsert's status CASE preserves it) while keeping the operator flow
-   * alive; skipped stays the shape of an operator DISMISSAL.
-   * Janitor cron task, paired with expireStale().
+   * Finish exhausted blog retries automatically. Other content lanes retain
+   * their existing review/requeue workflow. Paired with expireStale().
    */
   async sweepExhaustedAttempts() {
     const result = await db('opportunity_queue')
       .where('status', 'pending')
       .where('attempt_count', '>=', maxClaimAttempts())
       .update({
-        status: 'pending_review',
+        status: db.raw("CASE WHEN action_type = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END"),
         skip_reason: 'attempts_exhausted',
         completed_at: new Date(),
         updated_at: new Date(),
       });
-    if (result > 0) logger.warn(`[opportunity-queue] parked ${result} opportunit${result === 1 ? 'y' : 'ies'} at pending_review/attempts_exhausted (claimed ${maxClaimAttempts()}+ times without completing; operator requeue resets the budget)`);
+    if (result > 0) logger.warn(`[opportunity-queue] parked ${result} opportunit${result === 1 ? 'y' : 'ies'} with attempts_exhausted (blogs skipped; other lanes available for review)`);
     return result;
   }
 

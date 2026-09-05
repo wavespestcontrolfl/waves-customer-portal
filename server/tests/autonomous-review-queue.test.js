@@ -145,8 +145,8 @@ describe('autonomous-review-queue read model helpers', () => {
     });
     expect(item.draft.title).toBe('Draft');
     expect(item.review_actions).toMatchObject({
-      can_requeue: true,
-      can_dismiss: true,
+      can_requeue: false,
+      can_dismiss: false,
       can_approve_trust_build: false,
     });
   });
@@ -347,6 +347,12 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     const { oppUpdates, run } = mockReplacedRun({ decision: 'approve_trust_build' });
     await expect(run()).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer run replaced/) });
     expect(oppUpdates.find((u) => u.status === 'done')).toBeFalsy(); // opportunity untouched
+  });
+
+  test('requeue rejects a replacement under the row lock', async () => {
+    const { oppUpdates, run } = mockReplacedRun({ decision: 'requeue' });
+    await expect(run()).rejects.toMatchObject({ statusCode: 409 });
+    expect(oppUpdates).toEqual([]);
   });
 
   test('dismiss 409s instead of skipping a replacement the reviewer never saw', async () => {

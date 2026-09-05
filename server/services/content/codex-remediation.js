@@ -88,7 +88,7 @@ async function rawEligibilityBrief(db, briefId) {
 }
 
 function remediationEnabled() {
-  const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION || '').trim().toLowerCase();
+  const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION ?? 'true').trim().toLowerCase();
   return v === 'true' || v === '1' || v === 'on';
 }
 
