@@ -759,7 +759,7 @@ async function getScheduleView(input) {
       route_order: a.route_order,
       customer_id: a.customer_id,
       customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
-      customer_city: a.city,
+      customer_city: effectiveServiceAddress(a, a).city,
       customer_address: formatAddress(effectiveServiceAddress(a, a)),
       customer_phone: a.phone,
       technician: a.tech_name,

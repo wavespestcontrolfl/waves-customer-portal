@@ -596,7 +596,7 @@ export default function DispatchPageV2({
   usePublishIntelligenceBarPageData({
     viewed_date: date,
     appointment_id: ibSelectedService?.id,
-    customer_id: ibSelectedService?.customer_id,
+    customer_id: ibSelectedService?.customer_id ?? ibSelectedService?.customerId,
   });
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);

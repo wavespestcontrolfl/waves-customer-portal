@@ -283,6 +283,20 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(offPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
   });
 
+  test.each(['get_customer_detail', 'query_customers', 'get_schedule_view'])('%s redacts query telemetry', async name => {
+    mockExecuteTool.mockResolvedValue({ address: '200 Test Street' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_pii', name, input: { customer_id: 'fixture-customer' } }],
+      [{ type: 'text', text: '200 Test Street' }],
+    ]);
+    await withServer(async baseUrl => {
+      await postQuery(baseUrl, { prompt: 'show the address', context: 'customers' });
+    });
+    expect(mockDbInsert).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: '[redacted — PII-bearing tools used]', response: '[redacted — PII-bearing tools used]',
+    }));
+  });
+
   test('current ET date refreshes after midnight without reloading the route', async () => {
     jest.useFakeTimers({ doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'performance'] });
     try {

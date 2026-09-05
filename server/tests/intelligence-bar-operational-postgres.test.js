@@ -10,6 +10,7 @@ const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { executeTool } = require('../services/intelligence-bar/tools');
+const { executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const connection = process.env.IB_TEST_DATABASE_URL;
@@ -80,4 +81,22 @@ postgres('Intelligence Bar operational flows on PostgreSQL', () => {
     expect((await mockDb('scheduled_services').where({ id: ids.stop }).first()).property_id).toBe(ids.primary);
     expect(await mockDb('audit_log').where({ resource_id: ids.stop })).toHaveLength(0);
   });
+  test('reads real call transcriptions and keeps tied timestamp pages stable', async () => {
+    const callIds = [randomUUID(), randomUUID()].sort();
+    const created = new Date();
+    await mockDb('call_log').insert(callIds.map(id => ({ id, customer_id: ids.customer, direction: 'inbound',
+      from_phone: '+15555550101', to_phone: '+15555550102', transcription: 'x'.repeat(12001), created_at: created,
+    })));
+    const params = { customer_name: 'Avery Fixture', has_transcript: true, limit: 1 };
+    const first = await executeCommsTool('get_call_log', params);
+    expect(first.error).toBeUndefined();
+    expect(first.calls[0].id).toBe(callIds[1]);
+    const second = await executeCommsTool('get_call_log', { ...params, offset: first.next_offset });
+    expect(second.calls[0].id).toBe(callIds[0]);
+    const detail = await executeCommsTool('get_call_log', { call_id: callIds[0] });
+    expect(detail.calls[0].transcript).toHaveLength(12000);
+    const continuation = await executeCommsTool('get_call_log', { call_id: callIds[0], transcript_offset: detail.calls[0].transcript_next_offset });
+    expect(continuation.calls[0].transcript).toBe('x');
+  });
+
 });

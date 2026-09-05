@@ -95,3 +95,17 @@ this follow-up; its five switch-property tests passed after the broadcast fix.
 CI initially caught a fixture-only date-helper misuse in the new PostgreSQL
 suite. It now passes a Date and converts the result to an ET date string; both
 PostgreSQL tests passed locally after that correction.
+
+## GitHub review remediation
+
+Customer-detail/search/schedule/tech-route reads are now classified as PII-bearing
+for telemetry. Dispatch selection accepts the server's camel-case customerId;
+schedule city uses the effective destination. Call drill-down reads the canonical
+transcription column, and message/call pages use id tie-breakers. The 55 targeted
+read/route tests and all three migrated-PostgreSQL tests passed after these fixes.
+
+Deferred P2: get_customer_detail intentionally does not call ensurePrimaryProperty,
+which INSERTs a property (customer-properties.js:178). A missing primary property
+must be registered through the existing Properties screen before the saved-property
+switch tool can target it. Adding that write to an ungated read would bypass the
+IB confirmation boundary; a future registration action must use a write gate.

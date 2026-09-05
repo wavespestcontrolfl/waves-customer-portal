@@ -198,6 +198,10 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
 // addresses, SMS bodies). Their params and the surrounding prompt/response
 // are redacted from logs and query telemetry per the PII-in-logs rule.
 const PII_TOOL_NAMES = new Set([
+  'get_customer_detail',
+  'query_customers',
+  'get_schedule_view',
+  'get_my_route',
   'create_customer',
   'switch_appointment_property',
   'update_property_access',

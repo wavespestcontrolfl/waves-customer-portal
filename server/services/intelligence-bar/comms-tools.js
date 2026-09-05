@@ -296,7 +296,7 @@ async function getUnansweredThreads(input) {
       'sms_log.created_at', 'sms_log.customer_id', 'sms_log.is_read',
       'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
     )
-    .orderBy('sms_log.created_at', 'desc');
+    .orderBy('sms_log.created_at', 'desc').orderBy('sms_log.id', 'desc');
 
   // For each inbound, check if there's a later outbound to the same number
   const unanswered = [];
@@ -411,7 +411,7 @@ async function searchMessages(input) {
       'sms_log.*',
       'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
     )
-    .orderBy('sms_log.created_at', 'desc');
+    .orderBy('sms_log.created_at', 'desc').orderBy('sms_log.id', 'desc');
 
   if (search) query = query.whereILike('sms_log.message_body', `%${search}%`);
   if (direction) query = query.where('sms_log.direction', direction);
@@ -553,11 +553,11 @@ async function getCallLog(input) {
       'call_log.*',
       'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
     )
-    .orderBy('call_log.created_at', 'desc');
+    .orderBy('call_log.created_at', 'desc').orderBy('call_log.id', 'desc');
 
   if (direction && direction !== 'all') query = query.where('call_log.direction', direction);
   if (has_recording) query = query.whereNotNull('call_log.recording_url').where('call_log.recording_url', '!=', '');
-  if (has_transcript) query = query.whereNotNull('call_log.transcript');
+  if (has_transcript) query = query.whereNotNull('call_log.transcription');
   if (customer_name) {
     query = query.where(function () {
       this.whereILike('customers.first_name', `%${customer_name}%`)
@@ -583,11 +583,11 @@ async function getCallLog(input) {
       status: c.status,
       duration_seconds: c.duration_seconds,
       has_recording: !!(c.recording_url),
-      has_transcript: !!(c.transcript),
-      transcript_excerpt: c.transcript ? c.transcript.substring(0, 200) : null,
+      has_transcript: !!(c.transcription),
+      transcript_excerpt: c.transcription ? c.transcription.substring(0, 200) : null,
       ...(input.call_id ? {
-        transcript: c.transcript ? c.transcript.slice(Math.max(0, input.transcript_offset || 0), Math.max(0, input.transcript_offset || 0) + 12000) : null,
-        transcript_next_offset: c.transcript?.length > Math.max(0, input.transcript_offset || 0) + 12000 ? Math.max(0, input.transcript_offset || 0) + 12000 : null,
+        transcript: c.transcription ? c.transcription.slice(Math.max(0, input.transcript_offset || 0), Math.max(0, input.transcript_offset || 0) + 12000) : null,
+        transcript_next_offset: c.transcription?.length > Math.max(0, input.transcript_offset || 0) + 12000 ? Math.max(0, input.transcript_offset || 0) + 12000 : null,
       } : { transcript_coverage: 'First 200 characters only; use call_id to read the transcript' }),
       sentiment: c.sentiment,
       time: c.created_at,

@@ -46,11 +46,12 @@ test('customer search uses full name, latest health, zero bounds, true counts, a
 });
 
 test('schedule defaults to today ET and reports a stamped destination with coverage', async () => {
-  db.__rows = () => [{ id: 'fixture-stop', address_line1: '100 Test Street', service_address_line1: '200 Test Street', service_address_line2: 'Unit 2' }];
+  db.__rows = () => [{ id: 'fixture-stop', address_line1: '100 Test Street', service_address_line1: '200 Test Street', service_address_line2: 'Unit 2', city: 'Primary City', service_address_city: 'Rental City' }];
   const result = await executeTool('get_schedule_view', {});
   expect(result.error).toBeUndefined();
   expect(db.__queries[0].bindings).toContain(etDateString());
-  expect(result.appointments[0].customer_address).toBe('200 Test Street, Unit 2');
+  expect(result.appointments[0].customer_address).toBe('200 Test Street, Unit 2, Rental City');
+  expect(result.appointments[0].customer_city).toBe('Rental City');
   expect(result).toMatchObject({ has_more: false, returned_count: 1 });
 });
 
@@ -73,7 +74,7 @@ test('SMS history offers older pages instead of labeling a page the full thread'
 });
 
 test('call drill-down returns transcript continuation rather than only the greeting', async () => {
-  db.__rows = () => [{ transcript: 'x'.repeat(12001) }];
+  db.__rows = () => [{ transcription: 'x'.repeat(12001) }];
   const result = await executeCommsTool('get_call_log', { call_id: '00000000-0000-0000-0000-000000000001' });
   expect(result.error).toBeUndefined();
   expect(result.calls[0].transcript).toHaveLength(12000);
