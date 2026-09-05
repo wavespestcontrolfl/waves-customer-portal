@@ -15,8 +15,13 @@ const SOURCE = 'agent_decisions';
 // transition (updated_at — markSuggestionScheduled writes it) or at the
 // send's scheduled_for when that is later, never at the original decision
 // (Codex r3). Sort / page key = that start, so the cursor and rows agree.
-const SCHEDULED_SEND = "(SELECT s.scheduled_for FROM sms_log s WHERE s.status = 'scheduled' AND (s.metadata::jsonb ->> 'agent_decision_id') = agent_decisions.id::text ORDER BY s.scheduled_for DESC LIMIT 1)";
-const ACTIVE_FROM = `CASE WHEN status = 'scheduled' THEN GREATEST(updated_at, COALESCE(${SCHEDULED_SEND}, updated_at)) ELSE created_at END`;
+// `t` = the agent_decisions alias (message-drafts projects the same span
+// onto a suggested draft through its linked decision).
+function activeFrom(t) {
+  const scheduledSend = `(SELECT s.scheduled_for FROM sms_log s WHERE s.status = 'scheduled' AND (s.metadata::jsonb ->> 'agent_decision_id') = ${t}.id::text ORDER BY s.scheduled_for DESC LIMIT 1)`;
+  return `CASE WHEN ${t}.status = 'scheduled' THEN GREATEST(${t}.updated_at, COALESCE(${scheduledSend}, ${t}.updated_at)) ELSE ${t}.created_at END`;
+}
+const ACTIVE_FROM = activeFrom('agent_decisions');
 const START = () => db.raw(`date_trunc('milliseconds', ${ACTIVE_FROM})`);
 const ID = 'id';
 const COLUMNS = () => [
@@ -156,4 +161,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, WORKFLOW_MAP, STATUS_MAP, VERDICT, LIVE_STATUSES, list, get, fromRow };
+module.exports = { SOURCE, WORKFLOW_MAP, STATUS_MAP, VERDICT, LIVE_STATUSES, activeFrom, list, get, fromRow };

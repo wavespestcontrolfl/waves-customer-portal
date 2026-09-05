@@ -9,7 +9,6 @@ const decisions = require('./agent-decisions');
 
 const SOURCE = 'message_drafts';
 const LANE = 'sms_draft';
-const START = () => db.raw("date_trunc('milliseconds', d.created_at)");
 const ID = 'd.id';
 // A suggested draft's owner decision lives on its agent_decisions row
 // (sms-suggest-mode: entity_type message_draft, entity_id = the draft):
@@ -18,6 +17,15 @@ const ID = 'd.id';
 // linked decision says whether the owner still owes anything (Codex r3).
 const DECISION = "FROM agent_decisions ad WHERE ad.entity_type = 'message_draft' AND ad.entity_id = d.id ORDER BY ad.created_at DESC LIMIT 1";
 const DECISION_STATUS = `(SELECT ad.status ${DECISION})`;
+// The decision's active span (agent-decisions.activeFrom: the scheduling
+// transition / the queued send's due time) — a suggested draft whose owner
+// already scheduled it waits on the SEND, from that span, not on the owner.
+const DECISION_ACTIVE = `(SELECT ${decisions.activeFrom('ad')} ${DECISION})`;
+// every live decision state but the owner's own review — projected onto the draft
+const PROJECTED_LIVE = decisions.LIVE_STATUSES.filter((s) => s !== 'pending_review');
+// Sort / page key = the run's startedAt in fromRow: the decision's span while
+// it is projected, else the draft's creation.
+const START = () => db.raw(`date_trunc('milliseconds', COALESCE(CASE WHEN d.status = 'suggested' AND ${DECISION_STATUS} IN (${PROJECTED_LIVE.map(() => '?').join(', ')}) THEN ${DECISION_ACTIVE} END, d.created_at))`, PROJECTED_LIVE);
 const COLUMNS = () => [
   'd.id', 'd.intent', 'd.drafter', 'd.draft_ms', 'd.created_at', 'd.approved_at', 'd.sent_at', 'd.status',
   'd.campaign_type', 'd.purpose', 'd.customer_id', 'd.sms_log_id', 'd.model', 'd.prompt_version',
@@ -25,6 +33,7 @@ const COLUMNS = () => [
   db.raw(`${DECISION_STATUS} AS decision_status`),
   db.raw(`(SELECT ad.human_verdict ${DECISION}) AS decision_verdict`),
   db.raw(`(SELECT COALESCE(ad.reviewed_at, ad.updated_at) ${DECISION}) AS decision_at`),
+  db.raw(`${DECISION_ACTIVE} AS decision_active_from`),
 ];
 
 // message_drafts.status → (lifecycle, result, disposition, verification).
@@ -57,17 +66,26 @@ const TITLE = Object.freeze({
   reply: Object.freeze({ named: (n) => `Reply draft for ${n}`, anon: () => 'Reply draft for inbound text' }),
   proactive: Object.freeze({ named: (n) => `Draft for ${n}`, anon: () => 'Proactive draft' }),
 });
-const APPROVAL = Object.freeze({ waiting_human: 'running', rejected: 'blocked' });
+const APPROVAL = Object.freeze({ waiting_human: 'running', waiting_external: 'running', running: 'running', queued: 'running', rejected: 'blocked' });
 const DRAFTS_LINK = '/admin/agents?tab=drafts';
 
-// The decision that closed a suggested draft: its status / verdict through
-// the decisions adapter's own maps (one vocabulary), else null while it
-// is still live (or the draft has no decision row).
-function closingDecision(d) {
-  if (d.status !== 'suggested' || !d.decision_status || decisions.LIVE_STATUSES.includes(d.decision_status)) return null;
+// A suggested draft's linked decision, projected through the decisions
+// adapter's own maps (one vocabulary): the owner's verdict closes the run;
+// a scheduled / sending decision makes it wait on the send (from the
+// decision's span); null while the owner still owes the review (or the
+// draft has no decision row).
+function decisionState(d) {
+  if (d.status !== 'suggested' || !d.decision_status || d.decision_status === 'pending_review') return null;
   const status = decisions.STATUS_MAP[d.decision_status] || { lifecycle: 'terminal', result: null };
   const verdict = decisions.VERDICT[d.decision_verdict] || {};
-  return { ...status, verification: verdict.verification, disposition: verdict.disposition ?? status.disposition ?? null, at: d.decision_at, label: humanize(d.decision_status) };
+  return {
+    ...status,
+    verification: verdict.verification,
+    disposition: verdict.disposition ?? status.disposition ?? null,
+    at: d.decision_at,
+    startedAt: status.lifecycle === 'terminal' ? d.created_at : d.decision_active_from || d.decision_at,
+    label: humanize(d.decision_status),
+  };
 }
 
 // When the run finished and what the approval step reads, by outcome: the
@@ -81,13 +99,14 @@ function outcomeOf(d, decided, map) {
   };
 }
 
-function approvalDetail(d, approval, label) {
+function approvalDetail(d, decided, approval, label) {
   if (approval !== 'running') return label;
+  if (decided) return label; // scheduled / sending — the owner already acted
   return d.status === 'suggested' ? 'Suggested in the thread' : 'Waiting in Pending Drafts';
 }
 
 function fromRow(d) {
-  const decided = closingDecision(d);
+  const decided = decisionState(d);
   const map = decided || STATUS_MAP[d.status] || UNKNOWN_STATUS;
   const kind = d.campaign_type || d.purpose ? 'proactive' : 'reply';
   const draftMs = d.draft_ms == null ? null : Number(d.draft_ms);
@@ -102,14 +121,14 @@ function fromRow(d) {
     subtitle: [lane, d.drafter ? `drafter ${d.drafter}` : null].filter(Boolean).join(' · ') || null,
     ...map,
     createdAt: d.created_at,
-    startedAt: d.created_at,
+    startedAt: decided ? decided.startedAt : d.created_at,
     finishedAt: outcome.finishedAt,
     lastProgressAt: outcome.lastProgressAt,
     durationMs: draftMs,
     steps: [
       { key: 'inbound', label: kind === 'proactive' ? 'Trigger' : 'Inbound text', status: 'done', detail: null, ms: null, toolName: null },
       { key: 'draft', label: 'Draft reply', status: 'done', detail: modelLabel(d), ms: draftMs, toolName: null },
-      { key: 'approve', label: 'Owner approval', status: approval, detail: approvalDetail(d, approval, outcome.label), ms: null, toolName: null },
+      { key: 'approve', label: 'Owner approval', status: approval, detail: approvalDetail(d, decided, approval, outcome.label), ms: null, toolName: null },
     ],
     link: DRAFTS_LINK,
     entity: { type: 'message_draft', id: d.id },

@@ -119,8 +119,13 @@ describe('adapters project onto the canonical shape', () => {
     expect(messageDrafts.fromRow({ ...base, status: 'rejected' })).toMatchObject({ lifecycle: 'terminal', disposition: 'rejected', verification: 'failed' });
     expect(messageDrafts.fromRow({ ...base, status: 'sent', sent_at: ago(1e3), campaign_type: 'winback' })).toMatchObject({ disposition: 'applied', title: 'Draft for Pat Lee', subtitle: 'winback campaign' });
     // a suggested draft stays 'suggested' after the owner acts (the judge needs it): the linked decision closes the run
-    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human' });
-    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'scheduled' })).toMatchObject({ lifecycle: 'waiting_human' });
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human', startedAt: ago(5e3).toISOString() });
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'pending_review' }).steps[2]).toMatchObject({ status: 'running', detail: 'Suggested in the thread' });
+    // the owner scheduled it: the draft waits on the SEND from the decision's span (its scheduling transition / due time), not on the owner
+    const scheduled = messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'scheduled', decision_at: ago(2e3), decision_active_from: ago(-600e3) });
+    expect(scheduled).toMatchObject({ lifecycle: 'waiting_external', startedAt: ago(-600e3).toISOString(), lastProgressAt: ago(2e3).toISOString(), finishedAt: null });
+    expect(scheduled.steps[2]).toMatchObject({ status: 'running', detail: 'scheduled' });
+    expect(messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'sending', decision_at: ago(1e3), decision_active_from: ago(1e3) })).toMatchObject({ lifecycle: 'running', startedAt: ago(1e3).toISOString() });
     const sentAsIs = messageDrafts.fromRow({ ...base, status: 'suggested', decision_status: 'accepted', decision_verdict: 'accepted', decision_at: ago(1e3) });
     expect(sentAsIs).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied', verification: 'passed', finishedAt: ago(1e3).toISOString(), lastProgressAt: ago(1e3).toISOString() });
     expect(sentAsIs.steps[2]).toMatchObject({ status: 'done', detail: 'accepted' });
