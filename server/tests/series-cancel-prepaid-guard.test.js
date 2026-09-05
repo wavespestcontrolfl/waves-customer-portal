@@ -229,6 +229,16 @@ test("POST /admin/schedule/:id/prepaid refuses a cancelled visit with 409 visit_
   expect(db.__state.writes.filter((w) => w.op === 'update')).toHaveLength(0);
 });
 
+test("POST /admin/schedule/:id/prepaid still stamps a 'rescheduled' visit (a pending reschedule REQUEST parks the same row; hook P1)", async () => {
+  seed();
+  db.__state.rows.find((r) => r.id === 'child-2').status = 'rescheduled';
+  const res = await fetch(`${baseUrl}/api/admin/schedule/child-2/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: 95, method: 'cash' }),
+  });
+  expect(res.status).toBe(200);
+});
+
 test('POST /admin/schedule/:id/prepaid still stamps a live visit', async () => {
   seed();
   const res = await fetch(`${baseUrl}/api/admin/schedule/child-2/prepaid`, {

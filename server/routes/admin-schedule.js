@@ -64,8 +64,14 @@ const {
   stampSeriesPrepaid,
   resolveSeriesParentId,
   buildPrepaidSeriesContext,
-  TERMINAL_STATUSES: PREPAID_TERMINAL_STATUSES,
 } = require('../services/prepaid-series');
+// Single-visit prepaid stamp: refuse only rows that are genuinely over.
+// NOT the series helper's TERMINAL_STATUSES — that set also skips
+// 'rescheduled' for fan-out (a replacement row usually exists), but a
+// customer's pending reschedule REQUEST parks the SAME row as 'rescheduled'
+// without a replacement (routes/schedule.js), and staff must still be able
+// to record its payment (pre-push hook on #3878).
+const PREPAID_STAMP_REFUSED_STATUSES = ['completed', 'cancelled', 'no_show', 'skipped'];
 const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
@@ -10970,7 +10976,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // money for a visit that never runs (Codex #3878 r1 P1 / hook r2).
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
-      .whereNotIn('status', [...PREPAID_TERMINAL_STATUSES])
+      .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
@@ -10981,7 +10987,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
     if (!updated.length) {
       const current = await db('scheduled_services').where({ id: req.params.id }).first('status');
-      if (current && PREPAID_TERMINAL_STATUSES.has(String(current.status || '').toLowerCase())) {
+      if (current && PREPAID_STAMP_REFUSED_STATUSES.includes(String(current.status || '').toLowerCase())) {
         return res.status(409).json({
           error: `This visit is already ${current.status} — it can't be marked prepaid. Refresh and try again.`,
           code: 'visit_terminal',
