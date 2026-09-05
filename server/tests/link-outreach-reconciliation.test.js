@@ -24,3 +24,23 @@ test('same-domain placements are ambiguous; a unique exact source URL disambigua
 test('old evidence does not create ambiguous owner cards',()=>{
   expect(outreachMatch(link({first_seen:'2026-08-09'}),[placement(),placement({id:'other'})])).toEqual({placement:null,ambiguous:[]});
 });
+test('a unique expected publisher page disambiguates unsatisfied sibling placements', () => {
+  const first = placement({ target_url: 'https://publisher.example/elsewhere' });
+  const second = placement({ id: 'second', target_url: 'https://www.publisher.example/Post/' });
+  expect(outreachMatch(link(), [first, second]).placement).toBe(second);
+});
+test.each([
+  ['2026-03-08T04:30:00Z', '2026-03-08'],
+  ['2026-11-01T04:30:00Z', '2026-11-02'],
+])('freshness follows the next ET calendar day across DST (%s)', (outreach_sent_at, first_seen) => {
+  const p = placement({ outreach_sent_at });
+  expect(outreachMatch(link({ first_seen }), [p]).placement).toBe(p);
+  const sentDay = require('../utils/datetime-et').etDateString(new Date(outreach_sent_at));
+  expect(outreachMatch(link({ first_seen: sentDay }), [p]).placement).toBeNull();
+});
+test('a recovery can follow a fresh moved URL while ordinary known profiles stay pinned', () => {
+  const p = placement({ live_url: 'https://publisher.example/old-profile', quality_signals: { lost_recovery: true } });
+  expect(outreachMatch(link(), [p]).placement).toBe(p);
+  expect(outreachMatch(link({ first_seen: '2026-08-09' }), [p]).placement).toBeNull();
+  expect(outreachMatch(link(), [{ ...p, quality_signals: {} }]).placement).toBeNull();
+});

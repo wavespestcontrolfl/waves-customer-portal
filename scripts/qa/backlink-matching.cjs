@@ -44,6 +44,14 @@ stub('models/db', proxy);
       assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 2 });
     }
     console.log('PASS lost/disavowed evidence clears stale markers and empty owner cards');
+    for (const status of ['rejected', 'lost']) {
+      await trx('seo_link_prospects').whereIn('id', [first, second]).update({ status });
+      await V.reconcileOutreach();
+      for (const row of await trx('seo_link_prospects').whereIn('id', [first, second])) assert.equal(row.quality_signals.outreach_match_ambiguous, undefined);
+      await trx('seo_link_prospects').whereIn('id', [first, second]).update({ status: 'contacted' });
+      assert.deepEqual(await V.reconcileOutreach(), { matched: 0, ambiguous: 2 });
+    }
+    console.log('PASS terminal placements lose their stale ambiguity markers');
     await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
     assert.deepEqual(await V.reconcileOutreach({ownerMatch:{prospectId:second,backlinkId:backlink}}),{matched:1,ambiguous:0});
     const chosen = await trx('seo_link_prospects').where({id:second}).first();
@@ -52,5 +60,22 @@ stub('models/db', proxy);
     assert.deepEqual(await V.reconcileOutreach(),{matched:0,ambiguous:0});
     assert.equal((await trx('audit_log').where({resource_id:second,action:'backlink.placement.match'})).length,1);
     console.log('PASS scan → ambiguous owner cards → audited assignment → follow-up retired → replay does not assign sibling');
+    // Recovery retains the historic attribution. A restored link can settle that
+    // same placement, but may never be reassigned to its still-waiting sibling.
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', follow_up_status: 'drafted', quality_signals: { lost_recovery: true } });
+    await trx('seo_backlinks').where({ id: backlink }).update({ first_seen: '2020-01-01' });
+    assert.deepEqual(await V.reconcileOutreach(), { matched: 1, ambiguous: 0 });
+    assert.equal((await trx('seo_link_prospects').where({ id: second }).first()).follow_up_status, 'skipped');
+    assert.equal((await trx('seo_link_prospects').where({ id: first }).first()).status, 'contacted');
+    await trx('seo_link_prospects').where({ id: first }).update({ status: 'rejected' });
+    await trx('seo_link_prospects').where({ id: second }).update({ status: 'contacted', follow_up_status: 'drafted' });
+    await trx('seo_backlinks').where({ id: backlink }).update({ status: 'lost' });
+    const replacement = randomUUID();
+    await trx('seo_backlinks').insert({ id: replacement, source_domain: publisher, source_url: `https://${publisher}/new-resources`, target_url: target, status: 'active', discovery_source: 'dataforseo', first_seen: require(`${root}/server/utils/datetime-et`).etDateString(new Date()) });
+    assert.deepEqual(await V.reconcileOutreach(), { matched: 1, ambiguous: 0 });
+    const restored = await trx('seo_link_prospects').where({ id: second }).first();
+    assert.equal(restored.backlink_id, replacement);
+    assert.equal(restored.follow_up_status, 'skipped');
+    console.log('PASS recovered historical and moved backlinks settle only their own placement and retire follow-ups');
   } finally { await trx.rollback(); }
 })().catch((e) => { console.error(e.message); process.exitCode = 1; }).finally(() => db.destroy());

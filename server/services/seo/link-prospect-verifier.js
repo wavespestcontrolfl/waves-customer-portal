@@ -24,7 +24,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
 
@@ -144,7 +144,7 @@ function comparableFirstSeen(row) {
 function placementFloorEt(submittedAt) {
   const t = Date.parse(submittedAt || '');
   if (Number.isNaN(t)) return null;
-  return etDateString(new Date(t + 24 * 60 * 60 * 1000));
+  return etDateString(addETDays(new Date(t), 1));
 }
 
 // True if this backlink was first seen on/after the placement floor. No floor (no usable
@@ -243,12 +243,12 @@ function outreachMatch(link, placements) {
   try { source = new URL(link.source_url); } catch { return { placement: null, ambiguous: [] }; }
   if (!['http:', 'https:'].includes(source.protocol) || source.username || source.password || comparableDomain(source.hostname) !== comparableDomain(link.source_domain)) return { placement: null, ambiguous: [] };
   const matches = placements.filter((p) => outreachTargetMatches(link, p));
-  const exact = matches.filter((p) => p.live_url && canonicalLinkUrl(p.live_url) === canonicalLinkUrl(link.source_url));
+  const exact = matches.filter((p) => canonicalLinkUrl(p.live_url || p.target_url) === canonicalLinkUrl(link.source_url));
   if (exact.length === 1) return { placement: exact[0], ambiguous: [] };
   if (matches.length !== 1) return { placement: null, ambiguous: matches.filter((p) => { const floor = placementFloorEt(p.outreach_sent_at); return floor && firstSeenOnOrAfter(link, floor); }) };
   const p = matches[0];
   // A different known profile cannot be replaced by a generic domain match.
-  if (p.live_url) return { placement: null, ambiguous: [] };
+  if (p.live_url && !parseQuality(p.quality_signals).lost_recovery) return { placement: null, ambiguous: [] };
   const floor = placementFloorEt(p.outreach_sent_at);
   return { placement: floor && firstSeenOnOrAfter(link, floor) ? p : null, ambiguous: [] };
 }
@@ -269,13 +269,14 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
   for (const domain of domains) {
     const result = await db.transaction(async (trx) => {
       await lockProspectDomain(trx, domain);
-      const placements = await trx('seo_link_prospects')
+      const rows = await trx('seo_link_prospects')
         .whereRaw(`${require('./prospect-domain-lock').TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain])
-        .whereNotIn('status', ['rejected', 'lost']).forUpdate();
+        .forUpdate();
+      const placements = rows.filter((p) => !['rejected', 'lost'].includes(p.status));
       const links = await trx('seo_backlinks').where({ status: 'active' }).where(scanTrackedOnly)
         .whereRaw("lower(regexp_replace(source_domain, '^www\\.', '')) = ?", [domain]).orderBy('id');
       // A queued choice is valid only while the same active evidence still has ambiguous identity.
-      for (const p of placements) {
+      for (const p of rows) {
         const quality = parseQuality(p.quality_signals);
         if (!quality.outreach_match_ambiguous) continue;
         const link = links.find((b) => b.id === quality.outreach_match_ambiguous);
@@ -290,13 +291,13 @@ async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
       for (const link of links) {
         if (ownerMatch && ownerMatch.backlinkId !== link.id) continue;
         // A backlink already attributed to another active placement is not fresh evidence for its sibling.
-        if (placements.some((p) => p.backlink_id === link.id)) continue;
         const match = outreachMatch(link, placements);
         if (ownerMatch) {
           const chosen = placements.find((p) => p.id === ownerMatch.prospectId && outreachTargetMatches(link, p));
           if (!chosen || !outreachAwaitingPlacement(chosen) || parseQuality(chosen.quality_signals).outreach_match_ambiguous !== link.id || !match.ambiguous.some((p) => p.id === chosen.id)) continue;
           match.placement = chosen; match.ambiguous = [];
         }
+        if (placements.some((p) => p.backlink_id === link.id && p.id !== match.placement?.id)) continue;
         const targets = match.ambiguous.filter(outreachAwaitingPlacement);
         for (const p of targets) {
           const quality = parseQuality(p.quality_signals);
