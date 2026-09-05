@@ -80,6 +80,12 @@ describe('/relay-complete', () => {
     expect(res.body).toContain('+19415550002</Number>');
     expect(res.body).not.toMatch(/\?[a-z_]+=/i); // no summary, no id, nothing on any URL
     expect(res.body).not.toContain('<Record');
+    // A Spanish caller: the selection rides the Dial action (the relay leg's own ?lang=es), nothing else.
+    primeDb();
+    const resEs = mockRes();
+    await handlerFor('/relay-complete')({ body: { CallSid: 'CA-t1es', HandoffData: TRANSFER }, query: { lang: 'es' } }, resEs);
+    expect(resEs.body).toContain('action="/api/webhooks/twilio/call-complete?lang=es"');
+    expect(resEs.body.match(/\?[a-z_]+=/gi)).toEqual(['?lang=']);
   });
 
   test('a Twilio RETRY of the transfer callback (ring already claimed ⇒ 0 rows) gets a bare response, never a second staff ring', async () => {
@@ -196,6 +202,13 @@ describe('/call-complete after an unanswered transfer ring', () => {
     await handlerFor('/call-complete')({ body: { CallSid: 'CA-noans2', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res2);
     expect(res2.body).toContain('<Record');
     expect(res2.body).not.toContain('<Connect');
+    // A Spanish caller's unanswered transfer gets SPANISH voicemail (hook P1) — the language rode the Dial action.
+    callLog.first = jest.fn(async () => ({ metadata: { relay_transfer_ring_at: '2026-09-05T00:00:00Z' }, call_outcome: 'ai_transferred' }));
+    const resEs = mockRes();
+    await handlerFor('/call-complete')({ body: { CallSid: 'CA-noans-es', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: { lang: 'es' } }, resEs);
+    expect(resEs.body).toContain('<Record');
+    expect(resEs.body).toMatch(/language="es/);
+    expect(res.body).not.toMatch(/language="es/);
   });
 });
 

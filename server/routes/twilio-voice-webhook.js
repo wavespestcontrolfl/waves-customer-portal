@@ -156,13 +156,15 @@ function connectingAnnouncement(row) {
  * and /call-complete as the action. Shared by /voice and the PR 2A transfer
  * in /relay-complete — one shape, so the screen URLs never diverge.
  */
-function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec) {
+function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec, { language = null } = {}) {
   const dial = twiml.dial({
     record: 'record-from-answer-dual',
     recordingStatusCallback: '/api/webhooks/twilio/recording-status',
     recordingStatusCallbackEvent: 'completed',
     timeout: ringTimeoutSec,
-    action: '/api/webhooks/twilio/call-complete',
+    // A Spanish caller's selection rides the action (the ?lang=es the relay
+    // leg already uses), so an unanswered ring's voicemail stays Spanish.
+    action: /^es/i.test(String(language || '')) ? '/api/webhooks/twilio/call-complete?lang=es' : '/api/webhooks/twilio/call-complete',
     answerOnBridge: true,
   });
   for (const number of forwardNumbers) {
@@ -847,7 +849,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
     appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
     return;
   }
-  appendStaffRingDial(twiml, forwardNumbers, 30);
+  appendStaffRingDial(twiml, forwardNumbers, 30, { language: relayCompleteLanguage(req) });
 }
 
 /** A call_log row that went through a Sandy transfer: the packet, the ring claim, or the outcome. */
@@ -1595,7 +1597,7 @@ router.post('/call-complete', async (req, res) => {
       } catch (agentErr) {
         logger.error(`[call-complete] backstop routing failed; using voicemail: ${agentErr.message}`);
       }
-      if (!handedToAgent) appendVoicemailRecording(twiml);
+      if (!handedToAgent) appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
       return res.type('text/xml').send(twiml.toString());
     }
 
