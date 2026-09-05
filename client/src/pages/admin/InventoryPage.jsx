@@ -478,7 +478,7 @@ export default function InventoryPage() {
       )}
       {tab === "forecast" && <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} />}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
-      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} />}
+      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} canAuthor={isAdminRole} />}
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
       <div
@@ -2771,12 +2771,40 @@ function ProductsTab({
   );
 }
 
-function RestockRequestsTab({ showToast, onUpdate }) {
+// Presigned evidence URLs last 1 h server-side; treat them as stale 5 min early.
+const EVIDENCE_LINK_TTL_MS = 55 * 60 * 1000;
+
+function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
   const [requests, setRequests] = useState([]);
   const [status, setStatus] = useState("active");
   const [loading, setLoading] = useState(true);
   const [receivingId, setReceivingId] = useState("");
   const [receiveDrafts, setReceiveDrafts] = useState({});
+  // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
+  // server presigns for 1 h; the cell drops the links a little before that
+  // and offers Refresh, so a tab left open can always re-request fresh URLs.
+  const [evidence, setEvidence] = useState({});
+  // React does not rerender because time passed: drop each entry AT its
+  // expiry so the cell actually falls back to the Refresh action (Codex
+  // #3853 r20 P2).
+  useEffect(() => {
+    const next = Math.min(...Object.values(evidence).map((e) => e.expiresAt).filter((t) => Number.isFinite(t)));
+    if (!Number.isFinite(next)) return undefined;
+    const timer = setTimeout(() => {
+      setEvidence((e) => Object.fromEntries(Object.entries(e).filter(([, v]) => v.expiresAt > Date.now())));
+    }, Math.max(0, next - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [evidence]);
+  const loadEvidence = async (requestId) => {
+    try {
+      const data = await adminFetch(`/admin/inventory/restock-requests/${requestId}/order-evidence`);
+      const screenshots = data.screenshots || [];
+      setEvidence((e) => ({ ...e, [requestId]: { screenshots, expiresAt: Date.now() + EVIDENCE_LINK_TTL_MS } }));
+      if (!screenshots.length) showToast?.("No screenshots were captured for this order");
+    } catch (e) {
+      showToast?.(`Failed: ${e.message}`);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -2902,7 +2930,7 @@ function RestockRequestsTab({ showToast, onUpdate }) {
                       </div>
                       <div style={{ color: D.muted, fontSize: 12 }}>{request.reason}</div>
                     </td>
-                    <RestockStatusCell request={request} receivingId={receivingId} runAction={runAction} />
+                    <RestockStatusCell request={request} receivingId={receivingId} runAction={runAction} canAuthor={canAuthor} evidence={evidence[request.id]} loadEvidence={loadEvidence} />
                     <RestockActionCell request={request} draft={draft} setReceiveDrafts={setReceiveDrafts} receivingId={receivingId} runAction={runAction} />
                   </tr>
                 );
@@ -2928,10 +2956,18 @@ function autoOrderSummary(order) {
 
 // Restock tab — the request's status pill, its automatic-order outcome and
 // the Mark Ordered action, in one cell.
-function RestockStatusCell({ request, receivingId, runAction }) {
+function RestockStatusCell({ request, receivingId, runAction, canAuthor = false, evidence = null, loadEvidence = null }) {
   const pillColor = request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber;
   const order = request.order;
   const summary = order ? autoOrderSummary(order) : null;
+  // Links show only while their presigned URLs are live; an expired or empty
+  // fetch falls back to the button, and live links keep a Refresh beside them.
+  const liveShots = evidence && evidence.expiresAt > Date.now() ? evidence.screenshots : [];
+  const evidenceButton = (label) => (
+    <button type="button" onClick={() => loadEvidence?.(request.id)} style={{ ...sBtn("transparent", D.muted), padding: "2px 6px", fontSize: 12 }}>
+      {label}
+    </button>
+  );
   return (
     <td style={tdS}>
       <span style={{ padding: "4px 8px", borderRadius: 999, border: `1px solid ${pillColor}`, color: pillColor, fontSize: 11, fontWeight: 700, textTransform: "uppercase" }}>
@@ -2942,6 +2978,21 @@ function RestockStatusCell({ request, receivingId, runAction }) {
           {summary.label}
           {order.status !== "placed" && order.error && (
             <div style={{ color: D.muted, marginTop: 2, maxWidth: 260 }}>{order.error}</div>
+          )}
+          {/* Owner-only: the screenshots show the billing account + totals; the route is requireAdmin. */}
+          {canAuthor && (
+            <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              {liveShots.length ? (
+                <>
+                  {liveShots.map((s) => (
+                    <a key={s.label} href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, textDecoration: "underline" }}>
+                      {s.label} ↗
+                    </a>
+                  ))}
+                  {evidenceButton("Refresh")}
+                </>
+              ) : evidenceButton("Screenshots")}
+            </div>
           )}
         </div>
       )}

@@ -26,6 +26,7 @@
  *     reported, and re-rung by the next run
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: jest.fn(async () => ({ email: 'a@b.c', password: 'x', accountNumber: '123' })) }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({
   vendorPricingFor: jest.fn(async () => mockState.pricing),
@@ -68,7 +69,7 @@ jest.mock('../models/db', () => {
     q.sum = () => q;
     // A vendor_orders update returns 0 rows when the ledger row already left 'placing' (mockState.ledgerSettled).
     // (a status transition, or the cap reservation's amount-only write — the green path's order-facts attach carries external_order_number and still lands).
-    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && typeof row.evidence === 'string') { try { const v = JSON.parse(row.evidence).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } } mockState.updates.push({ table, row, ...(q._raws ? { raws: q._raws } : {}) }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
+    q.update = async (row) => { if (table === 'notifications' && mockState.bellRetireThrows) throw new Error('bell retire lost connection'); if (table === 'vendor_orders' && row.status && mockState.parkThrowsOnce) { mockState.parkThrowsOnce = false; throw new Error('park lost connection'); } if (table === 'vendor_orders' && typeof row.evidence === 'string') { try { const v = JSON.parse(row.evidence).bell?.v; if (v) mockState.currentBellV = v; } catch { /* not a bell write */ } } mockState.updates.push({ table, row, ...(q._raws ? { raws: q._raws } : {}) }); if (table === 'vendor_orders' && mockState.bellStampMiss && row.evidence && !row.status) return 0; return table === 'vendor_orders' && mockState.ledgerSettled && (row.status || (row.amount_cents != null && row.external_order_number === undefined)) ? 0 : 1; };
     q.delete = async () => { mockState.deletes.push(table); return 1; };
     let row;
     const returning = async () => {
@@ -78,7 +79,7 @@ jest.mock('../models/db', () => {
       return [saved];
     };
     q.insert = (r) => { row = r; return { onConflict: () => ({ ignore: () => ({ returning }), merge: () => ({ whereRaw: () => ({ returning }), returning }) }), returning }; };
-    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : []).then(ok, err);
+    q.then = (ok, err) => Promise.resolve(table.startsWith('vendor_orders') ? (q._pendingBells ? mockState.pendingBells : mockState.stale) : (table.startsWith('product_restock_requests') ? (mockState.dispatchable || []) : [])).then(ok, err);
     return q;
   };
   const dbFn = jest.fn((table) => mkChain(String(table)));
@@ -417,6 +418,60 @@ test('definite adapter error → failed + bell', async () => {
   expect(notify).toHaveBeenCalledTimes(1);
 });
 
+test('a run-level failure is scoped to its adapter: that adapter gets no more claims this run (no ledger row), the run still goes red (Codex #3853 r8 P1)', async () => {
+  const err = new Error('siteone bot: DNS unavailable'); err.runLevel = true;
+  const a = mockAdapter({ place: jest.fn(async () => { throw err; }) });
+  mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }];
+  await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } })).rejects.toThrow('DNS unavailable');
+  expect(err.adapterKey).toBe('stickermule');
+  expect(a.place).toHaveBeenCalledTimes(1); // the second request of the dead adapter was never claimed
+  expect(mockState.deletes).toEqual(['vendor_orders']); // exactly one claim, released
+  mockState.dispatchable = null;
+  const ledgerRowsBefore = mockState.ledgerRows.length;
+  expect(await run(mockAdapter(), { deadAdapters: new Set(['stickermule']) })).toMatchObject({ skipped: 'adapter_down' });
+  expect(mockState.ledgerRows).toHaveLength(ledgerRowsBefore); // no claim written for a dead adapter
+});
+
+test('a rejected login parks its request with the bell AND takes the adapter out of the run — the same credential is never resubmitted for the next request (Codex #3853 r21 P1)', async () => {
+  const rejected = new Error('SiteOne rejected the stored login'); rejected.refuse = 'login_rejected'; rejected.adapterDown = true;
+  const a = mockAdapter({ place: jest.fn(async () => { throw rejected; }) });
+  mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }];
+  const r = await dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } }); // not run-level: the run does not go red
+  expect(a.place).toHaveBeenCalledTimes(1); // the second request of the down adapter was never claimed
+  expect(r.results[0]).toMatchObject({ status: 'needs_review', reason: 'login_rejected', adapterDown: 'stickermule' });
+  expect(notify).toHaveBeenCalledTimes(1); // one bell, for the parked request
+  mockState.dispatchable = null;
+});
+
+test('the adapter-down marker survives a park that THROWS: the second request is still not claimed (Codex #3853 r22 P2)', async () => {
+  const rejected = new Error('SiteOne rejected the stored login'); rejected.refuse = 'login_rejected'; rejected.adapterDown = true;
+  const a = mockAdapter({ place: jest.fn(async () => { throw rejected; }) });
+  mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }];
+  mockState.parkThrowsOnce = true; // the first park (the refusal) fails on a transient DB error; settleAfterError's fallback records dispatch_error
+  try {
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } })).rejects.toThrow(/dispatch_error/); // the failed park makes the run red, as any dispatch_error does
+    expect(a.place).toHaveBeenCalledTimes(1); // the second request of the down adapter was never claimed
+  } finally { mockState.dispatchable = null; mockState.parkThrowsOnce = false; }
+});
+
+test('an unscoped run-level error after an adapter-scoped one replaces it and aborts the batch (Codex #3853 r11 P2)', async () => {
+  const dbFn = require('../models/db');
+  const origTransaction = dbFn.transaction;
+  let scopedThrown = false;
+  // The claim transaction of the NEXT request fails batch-wide (no adapterKey) once the first adapter died.
+  dbFn.transaction = async (fn) => { if (scopedThrown) throw new Error('pool exhausted'); return origTransaction(fn); };
+  try {
+    const err = new Error('siteone bot: DNS unavailable'); err.runLevel = true;
+    const a = mockAdapter({ place: jest.fn(async () => { scopedThrown = true; throw err; }) });
+    mockState.dispatchable = [{ id: 'req-1' }, { id: 'req-2' }, { id: 'req-3' }];
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: a, siteone: a } })).rejects.toThrow('pool exhausted');
+    expect(a.place).toHaveBeenCalledTimes(1);
+  } finally {
+    dbFn.transaction = origTransaction;
+    mockState.dispatchable = null;
+  }
+});
+
 test('run-level error releases the claim and propagates', async () => {
   const err = new Error('no browser'); err.runLevel = true;
   await expect(run(mockAdapter({ place: jest.fn(async () => { throw err; }) }))).rejects.toThrow('no browser');
@@ -597,13 +652,17 @@ test('master gate off: the run still re-rings pending bells and recovers stale p
   expect(mockState.updates.find((u) => u.table === 'vendor_orders' && u.row.status).row).toMatchObject({ status: 'needs_review' });
 });
 
+test('canAutoOrder PROPAGATES a throwing credential lookup — an infrastructure failure is not "unconfigured" (no "order manually" bell beside a possible placement; Codex #3853 r17 P1)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  getVendorLoginCredentials.mockRejectedValueOnce(new Error('ECONNRESET'));
+  await expect(dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true } })).rejects.toThrow(/credential lookup for SiteOne failed: ECONNRESET/);
+});
+
 test('canAutoOrder mirrors gates + adapter map + loaded module + vendor active', async () => {
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
   expect(await dispatch.canAutoOrder({ vendor: { id: 'g', name: 'Gemplers', code: 24 } })).toBe(false);
-  // A vendor the registry KNOWS but whose adapter module is not shipped here
-  // (SiteOne, PR 3) must stay bell-and-click even with its gate set — a
-  // silent sweep + a no_adapter dispatch skip would be an unworked request.
-  expect(await dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true } })).toBe(false);
+  // PR 3 ships the SiteOne module: with its gate set the vendor auto-orders.
+  expect(await dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true } })).toBe(true);
   expect(await dispatch.canAutoOrder({ vendor: { ...stickerMule, active: false } })).toBe(false);
   mockState.vendor = { ...stickerMule, active: false };
   expect(await dispatch.canAutoOrder({ vendorId: 'vend-sm' })).toBe(false);
@@ -858,8 +917,9 @@ test('an adapter without a vendor-confirmed pre-submit total never auto-places: 
   expect(ledger.placed_at).toBeUndefined();
 });
 
-test('the real Sticker Mule adapter is history-total + count quantity', () => {
+test('the real Sticker Mule adapter is history-total + count quantity; the real SiteOne adapter is vendor-total + package quantity + login', () => {
   expect(require('../services/procurement/adapters/stickermule')).toMatchObject({ preSubmitTotal: 'history', packagedQuantity: false });
+  expect(require('../services/procurement/adapters/siteone')).toMatchObject({ preSubmitTotal: 'vendor', packagedQuantity: true, loginRequired: true, loginConfigured: expect.any(Function) }); // a loginRequired adapter exports loginConfigured — the dispatcher calls it unconditionally
 });
 
 test('a bell that fails to send is persisted with the park, reported, and re-rung by the next run (r1 P1)', async () => {
@@ -922,6 +982,100 @@ test('the run goes red while a bell is undelivered', async () => {
   mockState.pendingBells = [{ id: 'ledger-9', evidence: { bell: { title: 'Auto-order needs review: x', body: 'y' } }, request_id: 'req-9', product_name: 'x', vendor_name: 'v' }];
   mockState.request = { ...baseRequest(), status: 'ordered' };
   await expect(dispatch.runVendorOrderDispatch({ notify, adapters: { stickermule: mockAdapter(), siteone: mockAdapter() } })).rejects.toThrow(/1 bell\(s\) not delivered.*ledger-9/);
+});
+
+test('a loginRequired adapter places with the vendor row\'s stored login on top of the generic place args', async () => {
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const place = jest.fn(async ({ beforeSubmit, vendorSku, quantity, credentials }) => {
+    expect(vendorSku).toBe('S1-77');
+    expect(quantity).toBe(2);
+    expect(credentials).toMatchObject({ password: 'x', accountNumber: '123' });
+    expect(await beforeSubmit(9900)).toEqual({ ok: true });
+    return { dryRun: true, amountCents: 9900, externalOrderNumber: null, evidence: {} };
+  });
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place });
+  expect(r).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
+  expect(place).toHaveBeenCalledTimes(1);
+});
+
+test('a login-required vendor without its stored login is handed back before any claim — no ledger row, the sweep bell rings, retryable once configured (Codex #3853 r12 P2)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  getVendorLoginCredentials.mockResolvedValueOnce(null);
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const place = jest.fn();
+  // The decrypt's wrong-key fallback must not run inside the claim transaction (r13 P0): a distinct trx sentinel proves the lookup got the POOL connection
+  const dbFn = require('../models/db');
+  const origTransaction = dbFn.transaction;
+  const trxSentinel = Object.assign((t) => dbFn(t), { raw: dbFn.raw });
+  const transaction = jest.fn(async (fn) => fn(trxSentinel));
+  dbFn.transaction = transaction;
+  let r;
+  try { r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: (c) => !!(c && c.password && c.accountNumber), place }); }
+  finally { dbFn.transaction = origTransaction; }
+  expect(r).toMatchObject({ skipped: 'adapter_unconfigured', belled: true });
+  expect(getVendorLoginCredentials).toHaveBeenLastCalledWith(dbFn, 'vend-s1');
+  expect(getVendorLoginCredentials).not.toHaveBeenCalledWith(trxSentinel, expect.anything());
+  // ...and BEFORE the claim transaction opens: the pool floor is 2 and the scheduled path already holds the lease + the transaction (pre-push P1)
+  expect(getVendorLoginCredentials.mock.invocationCallOrder.at(-1)).toBeLessThan(transaction.mock.invocationCallOrder[0]);
+  expect(place).not.toHaveBeenCalled();
+  expect(mockState.ledgerRows).toHaveLength(0);
+  // canAutoOrder makes the same call, so the sweep never stands down its bell for that vendor
+  getVendorLoginCredentials.mockResolvedValueOnce(null);
+  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor })).toBe(false);
+  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor })).toBe(true); // the default mock login is complete
+});
+
+test('a vendor row that changed between the login prefetch and the locked claim is not claimed on the stale login — skipped, no bell, no ledger row (Codex #3853 r15 P1)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true, updated_at: '2026-09-05T00:00:00.000Z' };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  // The password is rotated while the prefetch is reading it: the row the claim locks is newer than the one the login came from.
+  getVendorLoginCredentials.mockImplementationOnce(async () => { mockState.vendor = { ...mockState.vendor, updated_at: '2026-09-05T00:00:01.000Z' }; return { email: 'a@b.c', password: 'old', accountNumber: '123' }; });
+  const place = jest.fn();
+  const r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place });
+  expect(r).toEqual({ requestId: 'req-1', skipped: 'vendor_changed_at_claim' });
+  expect(place).not.toHaveBeenCalled();
+  expect(mockState.ledgerRows).toHaveLength(0);
+  expect(notify).not.toHaveBeenCalled();
+  // Same row version → the claim proceeds on the prefetched login (dry run parks as before)
+  const place2 = jest.fn(async () => ({ dryRun: true, amountCents: 9900, externalOrderNumber: null, evidence: {} }));
+  expect(await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place: place2 })).toMatchObject({ status: 'needs_review', reason: 'dry_run' });
+});
+
+test('a credential lookup that THROWS is run-level: nothing claimed, nothing parked failed, the adapter is dead for the run (pre-push P1)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  getVendorLoginCredentials.mockRejectedValueOnce(new Error('connection reset'));
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const place = jest.fn();
+  await expect(run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place })).rejects.toMatchObject({ runLevel: true, adapterKey: 'siteone', message: expect.stringMatching(/credential lookup failed/) });
+  expect(place).not.toHaveBeenCalled();
+  expect(mockState.ledgerRows).toHaveLength(0); // the lookup precedes the claim: nothing to release
+  expect(mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status)).toHaveLength(0); // never parked
+  expect(notify).not.toHaveBeenCalled();
+});
+
+test('a login-driven adapter already dead this run is skipped adapter_down WITHOUT another credential lookup (Codex #3853 r24 P2)', async () => {
+  const { getVendorLoginCredentials } = require('../services/vendor-credentials');
+  mockState.vendor = { id: 'vend-s1', name: 'SiteOne', code: 1, active: true };
+  mockState.request = { ...baseRequest(), requested_quantity: '256', unit: 'fl_oz', metadata: { vendorId: 'vend-s1' } };
+  mockState.product = talstar;
+  mockState.pricing = { vendor_sku: 'S1-77', quantity: '1 gal' };
+  const calls = getVendorLoginCredentials.mock.calls.length;
+  const place = jest.fn();
+  expect(await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: () => true, place }, { deadAdapters: new Set(['siteone']) })).toMatchObject({ skipped: 'adapter_down' });
+  expect(getVendorLoginCredentials.mock.calls).toHaveLength(calls);
+  expect(place).not.toHaveBeenCalled();
 });
 
 test('a bell notifyAdmin swallowed (null return) is NOT delivered: bellPending, no bellAt stamp, re-rung next run (r2 P1)', async () => {

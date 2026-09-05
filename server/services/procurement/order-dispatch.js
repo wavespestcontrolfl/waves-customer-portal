@@ -90,6 +90,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { startOfETMonth, addETDays } = require('../../utils/datetime-et');
+const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, convertToOz } = require('../product-costing');
 const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
@@ -123,11 +124,8 @@ const ADAPTER_BY_CODE = { 1: 'siteone', 25: 'stickermule' };
 const ADAPTER_BY_NAME = { siteone: 'siteone', 'sticker mule': 'stickermule' };
 const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUTO_ORDER_STICKERMULE' };
 
-// vendors.code → adapter key is registry knowledge; the SiteOne module itself
-// ships in PR 3 — until then a SiteOne vendor has no adapter here and stays
-// bell-and-click (canAutoOrder is false for it).
 function loadAdapters() {
-  return { stickermule: require('./adapters/stickermule') };
+  return { siteone: require('./adapters/siteone'), stickermule: require('./adapters/stickermule') };
 }
 
 function adapterKeyFor(vendor) {
@@ -176,7 +174,18 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
   // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20
   // P2). Unconfigured = not auto-orderable = the sweep bells the office.
   const configured = !!adapter && (typeof adapter.configured !== 'function' || adapter.configured() === true);
-  return configured && gateEnvValue(VENDOR_GATE[key]);
+  if (!configured || !gateEnvValue(VENDOR_GATE[key])) return false;
+  if (!adapter.loginRequired) return true;
+  // Configured by the vendor row (the SiteOne login + account number): a row
+  // without it is not auto-orderable — the sweep bells the office rather
+  // than standing down (Codex #3853 r12 P2). A lookup that THROWS (the
+  // infrastructure failures vendor-credentials distinguishes from a wrong
+  // key) is NOT "unconfigured": read as such, the sweep would ring "order
+  // manually" while the dispatcher's next lookup may succeed and place the
+  // same order (Codex #3853 r17 P1). It propagates — the sweep records the
+  // product as an error and bells nothing.
+  try { return adapter.loginConfigured(await getVendorLoginCredentials(conn, row.id)) === true; }
+  catch (e) { const err = new Error(`canAutoOrder: credential lookup for ${row.name || row.id} failed: ${e.message}`); err.cause = e; throw err; }
 }
 
 // Pack-size count for count-based stock: "100", "100 each", "50 ct", "1 pc".
@@ -672,19 +681,64 @@ function claimIneligibility({ product, request, vendor }) {
  * the claim ({ request, vendor, adapterKey, product, ledger, pricing, order }).
  */
 // The request's vendor must be active, have an adapter, and be gated on.
-async function resolveClaimVendor(trx, { request, registry }) {
+async function resolveClaimVendor(trx, { request, registry, deadAdapters = null, login = null }) {
   const m = meta(request.metadata);
   if (!m.vendorId) return { skipped: 'no_vendor' };
-  const vendor = await trx('vendors').where({ id: m.vendorId }).first('id', 'name', 'code', 'active');
+  // Locked: a vendor edit (password rotation, account change) between the
+  // login prefetch and this claim commits after it, and the version check
+  // below sees the prefetch's row (Codex #3853 r15 P1).
+  const vendor = await trx('vendors').where({ id: m.vendorId }).forUpdate().first('id', 'name', 'code', 'active', 'updated_at');
   const adapterKey = adapterKeyFor(vendor);
   if (!vendor || vendor.active === false || !adapterKey || !registry[adapterKey]) return { skipped: 'no_adapter' };
   if (!gateEnvValue(VENDOR_GATE[adapterKey])) return { skipped: 'vendor_gated' };
+  // An adapter that already failed run-level THIS run (its DNS, browser or
+  // credential store is down) gets no further claims this run — the request
+  // stays open for tomorrow, no ledger row is written (Codex r8 P1).
+  if (deadAdapters && deadAdapters.has(adapterKey)) return { skipped: 'adapter_down' };
   // The same credential check canAutoOrder makes: an adapter without its key
   // must not claim (and retire the manual bell) only to park every request as
   // "no prior order" — hand it back instead (Codex r21 P2).
   const adapter = registry[adapterKey];
   if (typeof adapter.configured === 'function' && adapter.configured() !== true) return { skipped: 'adapter_unconfigured' };
-  return { vendor, adapterKey, m };
+  // A login-driven adapter (the SiteOne bot) is configured by the vendor row,
+  // not env: its stored login is read HERE, before the one-shot ledger claim,
+  // so a missing login hands the request back (retryable once the owner
+  // stores it) instead of parking a claim as no_credentials (Codex #3853 r12
+  // P2). The login was read by prefetchVendorLogin BEFORE this transaction
+  // opened (see there); a login read for another vendor OR an older version
+  // of this row (its password / account changed in between) is not claimed
+  // on — skipped without a bell, the next run re-reads it.
+  if (!adapter.loginRequired) return { vendor, adapterKey, m };
+  if (!login || login.vendorId !== vendor.id || login.version !== rowVersion(vendor)) return { skipped: 'vendor_changed_at_claim' };
+  if (adapter.loginConfigured(login.credentials) !== true) return { skipped: 'adapter_unconfigured' };
+  return { vendor, adapterKey, m, credentials: login.credentials };
+}
+
+// The stored login of a login-driven vendor, read BEFORE the claim
+// transaction opens and on the POOL connection: (1) the decrypt tries the
+// promoted key first and a wrong-key failure would abort a transaction
+// (39000 → 25P02), stranding every row still under the fallback key (Codex
+// #3853 r13 P0); (2) the scheduled path already holds the lease connection
+// plus the claim transaction's, and the pool floor is 2 — a third connection
+// from inside the transaction would wait forever (pre-push P1). A lookup that
+// THROWS is run-level for this adapter: nothing written. Null when the
+// request's vendor needs no login (the claim re-resolves the vendor under
+// lock) — or when the adapter is already dead this run: the claim will skip
+// it adapter_down, and a credential store that IS the failure must not be
+// hit again once per remaining request (Codex #3853 r24 P2).
+const rowVersion = (row) => (row && row.updated_at != null ? new Date(row.updated_at).toISOString() : null);
+
+async function prefetchVendorLogin(conn, requestId, registry, deadAdapters = null) {
+  const request = await conn('product_restock_requests').where({ id: requestId }).first('metadata');
+  const vendorId = request ? meta(request.metadata).vendorId : null;
+  const vendor = vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active', 'updated_at') : null;
+  const adapterKey = adapterKeyFor(vendor);
+  const adapter = adapterKey ? registry[adapterKey] : null;
+  if (!adapter || !adapter.loginRequired || (deadAdapters && deadAdapters.has(adapterKey))) return null;
+  // version = the vendor row's updated_at at read time: the claim re-reads it
+  // under lock and refuses a login read from an older row (Codex #3853 r15 P1).
+  try { return { vendorId: vendor.id, version: rowVersion(vendor), credentials: await getVendorLoginCredentials(conn, vendor.id) }; }
+  catch (e) { const err = new Error(`vendor credential lookup failed: ${e.message}`); err.runLevel = true; err.adapterKey = adapterKey; throw err; }
 }
 
 // Withdraw a request the catalog no longer authorizes — the owner's own
@@ -801,7 +855,7 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   return { ledger, pricing, order };
 }
 
-async function claimRequest(trx, { requestId, registry }) {
+async function claimRequest(trx, { requestId, registry, deadAdapters = null, login = null }) {
   // The product's pricing advisory lock FIRST — the lock every
   // vendor_pricing writer holds to commit — then the request row, then the
   // product row: the sweep's order (auto-reorder.js lockProductPricing), so
@@ -818,9 +872,9 @@ async function claimRequest(trx, { requestId, registry }) {
   const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first();
   if (!request) return { skipped: 'not_found' };
   if (request.status !== 'open' || request.source !== 'auto_reorder') return { skipped: 'not_open_auto_request' };
-  const resolved = await resolveClaimVendor(trx, { request, registry });
+  const resolved = await resolveClaimVendor(trx, { request, registry, deadAdapters, login });
   if (resolved.skipped) return resolved;
-  const { vendor, adapterKey, m } = resolved;
+  const { vendor, adapterKey, m, credentials = null } = resolved;
   const product = await trx('products_catalog').where({ id: request.product_id }).forUpdate().first('id', 'name', 'active', 'auto_reorder_enabled', 'inventory_on_hand', 'low_stock_threshold', 'auto_reorder_vendor_id', 'reorder_quantity', 'inventory_unit');
   if (!product) return { skipped: 'no_product' };
   const ineligible = claimIneligibility({ product, request, vendor });
@@ -836,7 +890,7 @@ async function claimRequest(trx, { requestId, registry }) {
   await retireRequestBell(trx, request.id);
   const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity });
   if (!ledger) return { skipped: 'already_claimed' };
-  return { request, vendor, adapterKey, product, quantity, ledger, pricing, order };
+  return { request, vendor, adapterKey, product, quantity, ledger, pricing, order, credentials };
 }
 
 /**
@@ -888,7 +942,10 @@ async function reservePostSubmitAmount(conn, ledger, cents, env) {
 }
 
 async function parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }) {
-  if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: quoteCents, evidence: err.evidence || null });
+  // A refusal that names the vendor total it was decided on (SiteOne's cap
+  // refusal at the cart or checkout stage) parks with THAT amount — the
+  // ledger must show the binding total, not an earlier quote (Codex #3853 r4 P2).
+  if (err.refuse) return park(conn, { ...ctx, reason: err.refuse, message: err.message, amountCents: err.cents ?? quoteCents, evidence: err.evidence || null });
   // An ambiguous submit (the click happened) parks with the best figure
   // known: the total the adapter had at the click, else the binding quote,
   // else what beforeSubmit reserved on the ledger — else the per-order cap.
@@ -1152,7 +1209,7 @@ async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
 // post-submit detector → record. Every exit is a park, a record, or a
 // run-level throw after releasing the claim.
 async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
-  const { request, vendor, adapterKey, product, ledger, pricing, order } = claim;
+  const { request, vendor, adapterKey, product, ledger, pricing, order, credentials } = claim;
   const adapter = registry[adapterKey];
   const ctx = { ledger, request, product, vendor, adapterKey, notify };
   const releaseClaim = () => conn('vendor_orders').where({ id: ledger.id, status: 'placing' }).delete();
@@ -1169,7 +1226,9 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
       if (binding.parked) return binding.parked;
       quoteCents = binding.quoteCents;
     }
-    const base = { vendorSku, quantity, quoteCents };
+    // `credentials` is the login the claim looked up for a login-driven
+    // adapter (undefined for every other — the claim already decided which).
+    const base = { vendorSku, quantity, quoteCents, credentials };
     // An adapter with no static quote reads the vendor's total at the point of
     // sale and runs the cap reservation through beforeSubmit right before it
     // submits (the binding total is the vendor's, never a local estimate).
@@ -1180,7 +1239,18 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
       if (err.ambiguous) submitted = true;
-      return await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env });
+      // A refusal the adapter marks adapterDown (SiteOne rejected the stored
+      // login) parks THIS request as usual and takes the adapter out of the
+      // run: its remaining requests stay unclaimed instead of resubmitting
+      // the same rejected credential once each (Codex #3853 r21 P1). The
+      // adapter's boolean becomes the key ONCE, here; the marker rides on
+      // the park's failure too (into the outer settlement), so a transient
+      // DB error while parking cannot revive the adapter for the run (r22 P2).
+      if (err.adapterDown) err.adapterDown = adapterKey;
+      let parked;
+      try { parked = await parkForPlaceError(conn, err, { ctx, vendor, quoteCents, env }); }
+      catch (parkErr) { parkErr.adapterDown = err.adapterDown; throw parkErr; }
+      return withAdapterDown(parked, err);
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
@@ -1197,10 +1267,15 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     if (overCap) return overCap;
     return await recordPlaced(conn, { ctx, placed, finalCents, quoteCents });
   } catch (err) {
-    if (err.runLevel) throw err;
-    return settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents, env });
+    // Run-level failures are scoped to THIS adapter for the batch loop: the
+    // other vendors' requests still dispatch (Codex r8 P1).
+    if (err.runLevel) { err.adapterKey = adapterKey; throw err; }
+    return withAdapterDown(await settleAfterError(conn, err, { ctx, vendor, submitted, placed, quoteCents, env }), err);
   }
 }
+// The per-request result carries the adapter-down marker (the adapter key)
+// when the error that settled it did — the batch loop reads it once.
+const withAdapterDown = (result, err) => (err.adapterDown ? { ...result, adapterDown: err.adapterDown } : result);
 
 // A request the sweep left to the dispatcher (its vendor auto-ordered at
 // sweep time) that the claim now finds undispatchable — vendor deactivated
@@ -1246,14 +1321,15 @@ async function bellUndispatchable(conn, requestId, notify) {
   return { belled: true };
 }
 
-async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env } = {}) {
+async function dispatchRestockOrder(requestId, { conn = db, notify = null, adapters = null, now = new Date(), env = process.env, deadAdapters = null } = {}) {
   // The master gate closing between the 6:10 sweep (which stood down its own
   // bell because this lane would order) and the dispatch is the same
   // hand-off as a vendor gate: the request gets the sweep's deduped bell
   // now, not after another silent day (Codex r18 P2).
   if (!gateEnvValue(GATE)) return { requestId, skipped: 'gated', ...(await bellUndispatchable(conn, requestId, notify)) };
   const registry = adapters || loadAdapters();
-  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry }));
+  const login = await prefetchVendorLogin(conn, requestId, registry, deadAdapters);
+  const claim = await conn.transaction((trx) => claimRequest(trx, { requestId, registry, deadAdapters, login }));
   if (claim.skipped) {
     // A lost hand-off bell is reported, not swallowed: the request stays open
     // and unclaimed, so the next run re-rings it — and this run goes red.
@@ -1322,19 +1398,38 @@ async function dispatchPasses({ conn, notify, adapters, now, env }) {
   const seen = new Set();
   const results = [];
   let runLevelError = null;
-  for (let pass = 0; pass < 3 && !runLevelError; pass += 1) {
+  // A run-level failure is scoped to the adapter that raised it (err.adapterKey
+  // — SiteOne's DNS / Chromium / credential store): that adapter gets no more
+  // claims this run, the OTHER vendors' requests still dispatch, and the run
+  // still goes red at the end (Codex #3853 r8 P1). A run-level error with no
+  // adapter (the registry itself) aborts the batch as before.
+  const deadAdapters = new Set();
+  // Rescan before releasing the lease (Codex r3 P2): a request another
+  // replica's sweep raised while a slow vendor order was in flight is
+  // picked up now, not tomorrow. Bounded; a pass that finds nothing new ends.
+  for (let pass = 0; pass < 3 && !(runLevelError && !runLevelError.adapterKey); pass += 1) {
     const rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
     if (!rows.length) break;
     for (const row of rows) {
       seen.add(row.id);
       try {
-        results.push(await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env }));
+        const result = await dispatchRestockOrder(row.id, { conn, notify, adapters, now, env, deadAdapters });
+        results.push(result);
+        // Not a run-level error — the request parked with its bell — but the
+        // adapter is done for this run (a rejected login: Codex #3853 r21 P1).
+        if (result && result.adapterDown) { deadAdapters.add(result.adapterDown); logger.warn(`[order-dispatch] ${result.adapterDown} is down for this run after request ${row.id} (${result.reason}); its remaining requests wait for the next run`); }
       } catch (err) {
-        runLevelError = err;
-        logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`);
-        break;
+        // An unscoped error (the registry, a transaction) is batch-wide and must
+        // not be masked by an earlier adapter-scoped one still held in
+        // runLevelError — the outer loop would see an adapterKey and keep
+        // dispatching (Codex #3853 r11 P2).
+        if (!err.adapterKey) { runLevelError = err; logger.error(`[order-dispatch] run-level failure, batch aborted: ${err.message}`); break; }
+        runLevelError = runLevelError || err;
+        deadAdapters.add(err.adapterKey);
+        logger.error(`[order-dispatch] run-level failure for ${err.adapterKey}, its remaining requests wait for the next run: ${err.message}`);
       }
     }
+    if (runLevelError && !runLevelError.adapterKey) break;
   }
   return { results, seen, runLevelError };
 }

@@ -437,6 +437,16 @@ test('PR 2: when the dispatcher will order from the vendor, the request is raise
   mockState.autoOrder = false;
 });
 
+test('a dispatcher eligibility check that THROWS (credential lookup infrastructure failure) records the product as an error and rings NO "order manually" bell (Codex #3853 r17 P1)', async () => {
+  const { canAutoOrder } = require('../services/procurement/order-dispatch');
+  canAutoOrder.mockRejectedValueOnce(new Error('canAutoOrder: credential lookup for SiteOne failed: ECONNRESET'));
+  mockState.candidates = [lowSign];
+  const notify = jest.fn(async () => ({ id: 'n' }));
+  const r = await runSuppliesAutoReorderSweep({ notify });
+  expect(r.errors).toEqual([expect.objectContaining({ productId: lowSign.id, message: expect.stringContaining('ECONNRESET') })]);
+  expect(notify).not.toHaveBeenCalled();
+});
+
 test('PR 2: the bell decision follows the LOCKED vendor — a switch to a manual vendor mid-sweep still bells', async () => {
   mockState.autoOrder = true;
   mockState.autoOrderVendor = 'vend-gemplers'; // only the scan-time vendor auto-orders
