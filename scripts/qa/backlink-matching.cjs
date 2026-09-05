@@ -23,6 +23,7 @@ stub('models/db', proxy);
   const trx = await db.transaction(); active = trx;
   try {
     await require(`${root}/server/models/migrations/20260830000010_backlink_worker_auth_step1b`).up(trx);
+    await require(`${root}/server/models/migrations/20260905000090_link_execution_leases`).up(trx);
     const V = require(`${root}/server/services/seo/link-prospect-verifier`);
     const Q = require(`${root}/server/services/seo/link-owner-queue`);
     const oid = randomUUID(), opath = randomUUID(), first = randomUUID(), second = randomUUID(), backlink = randomUUID();

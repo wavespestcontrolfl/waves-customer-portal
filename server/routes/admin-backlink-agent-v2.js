@@ -613,7 +613,22 @@ router.patch('/prospects/:id', async (req, res, next) => {
     if ('status' in patch && !PROSPECT_STATUSES.includes(patch.status)) {
       return res.status(400).json({ error: `invalid status; must be one of ${PROSPECT_STATUSES.join(', ')}` });
     }
-    if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no editable fields supplied' });
+    const verdict = req.body.submission_verdict;
+    const negativeVerdict = verdict === 'not_submitted';
+    if (verdict !== undefined) {
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if (!['not_submitted', 'placed'].includes(verdict) || !uuid.test(req.body.submission_attempt_id || '')
+        || Object.keys(patch).some((key) => key !== 'live_url') || (negativeVerdict && 'live_url' in patch)) {
+        return res.status(400).json({ error: 'A submission verdict requires its attempt id and no unrelated board edits' });
+      }
+      if (!negativeVerdict) {
+        let url;
+        try { url = new URL(patch.live_url); } catch { return res.status(400).json({ error: 'A confirmed publisher URL is required' }); }
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return res.status(400).json({ error: 'A valid publisher URL is required' });
+        patch.status = 'placed';
+      }
+    }
+    if (!negativeVerdict && Object.keys(patch).length === 0) return res.status(400).json({ error: 'no editable fields supplied' });
     patch.updated_at = new Date();
     // A status edit that REOPENS a row into active outreach (lost/rejected/
     // placed/live/indexed → prospect/contacted/negotiating) is a board
@@ -686,10 +701,17 @@ router.patch('/prospects/:id', async (req, res, next) => {
         const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key });
         if (taken) return { taken };
       }
+      if (negativeVerdict || ['placed', 'live', 'indexed'].includes(patch.status)) {
+        await lockProspectDomain(trx, current.target_domain);
+        const confirmed = await require('../services/seo/link-execution-authority').reconcileOwnerPlacement(trx, { prospectId: current.id, status: patch.status, attemptId: req.body.submission_attempt_id || null, notSubmitted: negativeVerdict, actorId: req.technician?.id || null });
+        if (!confirmed.ok) return { reconciliationError: confirmed.error };
+        if (negativeVerdict) await require('../services/seo/link-registry').settleRetiredPlacements(trx, { prospectIds: [current.id] });
+      }
       const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
       return { row };
     });
     if (result.missing) return res.status(404).json({ error: 'prospect not found' });
+    if (result.reconciliationError) return res.status(409).json({ error: result.reconciliationError });
     if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
     if (result.readdressed) return res.status(409).json({ error: 'the prospect was re-addressed while you edited it — reload and retry' });
     if (result.inbox) return res.status(409).json({ error: `another placement already has a conversation with this recipient (${result.inbox.status}${result.inbox.outreach_status ? ` / ${result.inbox.outreach_status}` : ''}) — one conversation per inbox`, id: result.inbox.id });
@@ -739,9 +761,11 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
       .orderBy('updated_at', 'desc');
     const Outreach = require('../services/seo/link-prospect-outreach');
     // an open draft, or one the nightly bridge parked for the owner's send (awaiting_owner, PR 3a)
-    const items = await orderByPriority(
-      db('seo_link_prospects').where({ outreach_status: 'drafted' }).whereIn('status', [...Outreach.SENDABLE_STATUSES])
-    );
+    const drafts = await orderByPriority(db('seo_link_prospects').where({ outreach_status: 'drafted' }));
+    const pathIds = [...new Set(drafts.map((p) => p.path_id).filter(Boolean))];
+    const pathById = new Map((pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : []).map((p) => [p.id, p]));
+    // Submit-first placements keep their verified lifecycle while their initial pitch awaits approval.
+    const items = drafts.filter((p) => Outreach.SENDABLE_STATUSES.includes(p.status) || Outreach.lateSend(p, pathById.get(p.path_id)));
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
     // WHATEVER the lifecycle status reads: an ambiguous send holds its recipient's inbox until it is reconciled
@@ -780,8 +804,6 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     // the click's bindings (§3.6b): the hash of the text THIS list displays (the click carries it back; the claim refuses
     // a draft edited since) — and the send's legal context on an attested path (the open communication row's level, the
     // agreement the owner reads before a send that attests to it), shown here as the Owner queue shows it
-    const pathIds = [...new Set(items.map((p) => p.path_id).filter(Boolean))];
-    const pathById = new Map((pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'legal_attestation', 'investigation') : []).map((p) => [p.id, p]));
     const openRows = items.length ? await db('seo_link_placement_authorities').whereIn('prospect_id', items.map((p) => p.id)).where({ dimension: 'communication', instance_kind: '-' }).whereNull('ended_at').whereNull('satisfied_at').select('prospect_id', 'level') : [];
     const levelByProspect = new Map(openRows.map((r) => [r.prospect_id, r.level]));
     for (const p of items) {

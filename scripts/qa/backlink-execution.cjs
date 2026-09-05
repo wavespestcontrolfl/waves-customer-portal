@@ -14,6 +14,7 @@ const stub = (file, value) => { const id = require.resolve(`${root}/server/${fil
 const gates = new Set(['linkAuthority', 'signupRunner', 'outreachDrafter', 'linkProspectOutreach']);
 stub('config/feature-gates', { isEnabled: (k) => gates.has(k) });
 stub('services/logger', { info() {}, warn() {}, error() {} });
+stub('services/seo/signup-evidence', { getEvidenceUrl: async (key, options) => { assert.equal(options.expiresIn, 900); return key ? 'https://synthetic.example/evidence.png' : null; } });
 let active;
 const proxy = (...a) => active(...a);
 proxy.transaction = (...a) => active.transaction(...a);
@@ -46,10 +47,10 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     const p = leases[0];
     assert.equal((await W.report({ prospect_id: p.id, provider: 'deterministic_runner', lease_token: p.lease_token, outcome: 'placed', pending: true })).code, 'submit_not_started');
     gates.delete('linkAuthority');
-    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token }), false);
+    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } }), false);
     gates.add('linkAuthority');
-    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token }), true);
-    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token }), false);
+    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } }), true);
+    assert.equal(await E.beginSubmission(proxy, { prospectId: p.id, leaseToken: p.lease_token, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } }), false);
     assert.equal((await W.report({ prospect_id: p.id, provider: 'hermes', lease_token: p.lease_token, outcome: 'placed', pending: true })).code, 'stale_lease');
     assert.equal((await W.report({ prospect_id: p.id, provider: 'deterministic_runner', lease_token: p.lease_token, outcome: 'placed', pending: true })).ok, true);
     const stored = await trx('seo_link_prospects').where({ id: p.id }).first();
@@ -65,6 +66,29 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     assert.equal(afterDraft.status, 'live'); assert.equal(afterDraft.attempts, 2); assert.equal(afterDraft.outreach_draft_attempts, W.MAX_ATTEMPTS);
     assert.deepEqual(await W.claim({ type: 'outreach', mode: 'draft', provider: 'hermes', domains: [domain] }), []);
     console.log('PASS skipped late pitch preserves live lifecycle and acquisition attempts, then stops reclaiming');
+    assert.equal((await require(`${root}/server/services/seo/link-prospect-outreach`).saveDraft({ prospectId: p.id, to: 'editor@synthetic.example', subject: 'Synthetic late pitch', body: 'Synthetic draft saved for review.' })).ok, true);
+    const savedPitch = await trx('seo_link_prospects').where({ id: p.id }).first();
+    assert.equal(savedPitch.status, 'live'); assert.equal(savedPitch.outreach_status, 'drafted'); assert.equal(savedPitch.outreach_draft_attempts, 0);
+    console.log('PASS exhausted late pitch saves a new draft without sending or changing live placement');
+    // Recipient lookup is outside this synthetic backlink schema; no customer records are queried.
+    require(`${root}/server/services/seo/link-outreach-mandate`).reviewByEmail = async () => new Map();
+    const router = require(`${root}/server/routes/admin-backlink-agent-v2`);
+    const pending = router.stack.find(l => l.route?.path === '/prospects/outreach/pending' && l.route.methods.get).route.stack.at(-1).handle;
+    const pendingIds = async () => {
+      const response = await new Promise((resolve, reject) => pending({}, { json: resolve }, reject));
+      return response.items.map(row => row.id);
+    };
+    for (const status of ['placed', 'live', 'indexed']) {
+      await trx('seo_link_prospects').where({ id: p.id }).update({ status });
+      assert.ok((await pendingIds()).includes(p.id), `${status} late draft must remain available for owner approval`);
+    }
+    await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ execution_after_send: true });
+    assert.equal((await pendingIds()).includes(p.id), false);
+    await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ execution_after_send: false });
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'rejected' });
+    assert.equal((await pendingIds()).includes(p.id), false);
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live' });
+    console.log('PASS late draft approval queue includes placed/live/indexed submit-first rows and excludes send-first/terminal rows');
     const rejectedLease = new Date(), rejectedAttempt = randomUUID();
     await trx('seo_link_prospects').where({ id: p.id }).update({ claimed_at: rejectedLease, lease_mode: 'acquire', leased_provider: 'deterministic_runner' });
     await trx('seo_link_attempts').insert({ id: rejectedAttempt, prospect_id: p.id, path_id: pathId, provider: 'deterministic_runner', action: 'submit', outcome: 'submitting', lease_token: rejectedLease.toISOString(), detail: { authority_id: 'synthetic-authority' } });
@@ -84,7 +108,24 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     console.log('PASS held submit preserves screenshot/reason/authority on the original attempt and releases lease stamps');
     const authority = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution', instance_kind: '-' }).first();
     await trx('seo_link_placement_authorities').where({ id: authority.id }).update({ satisfied_at: null, satisfied_reason: null });
-    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id } });
+    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...heldAttempt.detail, authority_id: authority.id, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
+    await require(`${root}/server/models/migrations/20260419000005_audit_log`).up(trx);
+    const edit = router.stack.find(l => l.route?.path === '/prospects/:id' && l.route.methods.patch).route.stack.at(-1).handle;
+    const queue = await require(`${root}/server/services/seo/link-owner-queue`).listOwnerQueue(proxy);
+    assert.equal(queue.cards.find((card) => card.placement.id === p.id).submission_ambiguity.evidence_url, 'https://synthetic.example/evidence.png');
+    const confirm = (overrides = {}) => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { submission_attempt_id: rejectedAttempt, submission_verdict: 'placed', live_url: `https://${domain}/confirmed`, ...overrides } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
+    await assert.rejects(confirm({ submission_attempt_id: randomUUID() }), /409/);
+    await assert.rejects(confirm({ live_url: 'javascript:alert(1)' }), /400/);
+    assert.equal((await confirm()).prospect.status, 'placed');
+    assert.equal((await trx('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'placed');
+    const recoveredCitation = await trx('seo_link_prospects').where({ id: p.id }).first();
+    assert.equal(recoveredCitation.quality_signals.cited_homepage, true);
+    assert.equal(recoveredCitation.quality_signals.location, p.location_key);
+    assert.equal(require(`${root}/server/services/seo/link-prospect-verifier`)._test.expectedTargetUrl(recoveredCitation), 'https://wavespestcontrol.com');
+    assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_reason, 'placed');
+    await assert.rejects(confirm(), /409/);
+    assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 1);
+    console.log('PASS existing owner board edit atomically resolves the hold and execution authority with one audit record');
     for (const releaseMode of ['runner', 'releaseClaims', 'sweep']) {
       const did = randomUUID(), oldPath = randomUUID(), newPath = randomUUID(), pid = randomUUID(), attemptId = randomUUID();
       const oldLease = new Date(Date.now() - 9 * 3600000), host = `synthetic-${did}.example`;
@@ -100,6 +141,20 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       assert.equal((await trx('seo_link_attempts').where({ id: attemptId }).first()).outcome, 'submit_ambiguous');
     }
     console.log('PASS runner/releaseClaims/expired sweep keep ambiguous submissions pinned to their original path');
+    // The same reviewed attempt cannot be used to release a later retry's hold.
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'prospect', automation_policy: 'skip', outreach_status: 'none', outreach_sent_at: null, follow_up_status: 'none', follow_up_due_at: null });
+    const [heldNow] = await trx('seo_link_attempts').insert({ prospect_id: p.id, path_id: pathId, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', detail: { authority_id: authority.id, error_code: 'submit_rejected' } }).returning('*');
+    const negative = body => new Promise((resolve, reject) => edit({ params: { id: p.id }, body }, { code: 200, status(code) { this.code = code; return this; }, json(body) { resolve({ code: this.code, body }); } }, reject));
+    const verdict = { submission_verdict: 'not_submitted', submission_attempt_id: heldNow.id };
+    await trx('seo_link_prospects').where({ id: p.id }).update({ attempts: 3 });
+    assert.equal((await negative(verdict)).code, 200);
+    assert.equal((await trx('seo_link_prospects').where({ id: p.id }).first()).attempts, 3);
+    assert.equal((await trx('seo_link_prospects').where({ id: p.id }).first()).automation_policy, null);
+    assert.equal((await negative(verdict)).code, 409);
+    assert.equal((await trx('seo_link_attempts').where({ id: heldNow.id }).first()).outcome, 'slot_released');
+    assert.equal((await trx('audit_log').where({ action: 'backlink.submission.not_submitted', resource_id: p.id })).length, 1);
+    console.log('PASS negative owner verdict is audited and stale/replayed verdicts refuse');
+
     // Pre-submit failures release capacity while retaining a real investigator-visible failure.
     const failureLease = new Date(), failureId = randomUUID();
     const currentPlacement = await trx('seo_link_prospects').where({ id: p.id }).first();

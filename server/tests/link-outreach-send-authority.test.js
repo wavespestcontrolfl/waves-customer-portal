@@ -1699,7 +1699,7 @@ test.each(['slot_reserved', 'submitting'])('a follow-up cannot clear an acquisit
   expect(authority).toBeTruthy();
   expect(await E.reserveSlot(s.db, lease, storedPath(s.db), authority, lease.lease_token, now)).toBeTruthy();
   const attempt = s.db._tables.seo_link_attempts.find(a => a.prospect_id === lease.id);
-  if (outcome === 'submitting') expect(await require('../services/seo/link-execution-authority').beginSubmission(s.db, { prospectId: lease.id, leaseToken: lease.lease_token })).toBe(true);
+  if (outcome === 'submitting') expect(await require('../services/seo/link-execution-authority').beginSubmission(s.db, { prospectId: lease.id, leaseToken: lease.lease_token, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } })).toBe(true);
   expect(attempt.outcome).toBe(outcome);
   expect(await Outreach.sendOutreach({ prospectId: lease.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'acquisition_in_progress' });
   expect(gmail.sendMessage).not.toHaveBeenCalled();
