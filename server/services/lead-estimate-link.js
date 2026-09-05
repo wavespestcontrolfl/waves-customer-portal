@@ -789,8 +789,11 @@ async function acceptWizardNamedLead(database, { dataLeadId, estimate, estimateI
   // estimate since its run is that deal's lead (a link to THIS estimate
   // would have been the FK branch above), and converting it here would
   // write this acceptance's customer and value hints onto it (codex #3834
-  // r29 P1).
-  if (named.status === 'duplicate' && !named.deleted_at && !named.estimate_id && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
+  // r29 P1). ...and only a row the SERVER filed as a repeat — one carrying
+  // the duplicate marker: a 'duplicate' row staff closed by hand carries
+  // none and is a deliberate closure, never reopened by its old estimate
+  // (the customer-link resolver's r13 rule; pre-push P1 on 67dd818).
+  if (named.status === 'duplicate' && duplicateMarkerOf(named) && !named.deleted_at && !named.estimate_id && !creditedOnOriginal) await convert(named, DUPLICATE_LEAD_CLAIM);
 }
 
 // Status sets the accept path's conditional stamps claim against (see

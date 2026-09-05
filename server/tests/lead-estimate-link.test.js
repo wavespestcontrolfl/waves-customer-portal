@@ -563,6 +563,17 @@ describe('lead-estimate link service', () => {
     expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
   });
 
+  test('a named duplicate row with NO server marker (staff closed it by hand) is a deliberate closure: its old wizard estimate accepting reopens nothing (pre-push P1 on 67dd818)', async () => {
+    const database = makeAcceptDb({
+      linked: [],
+      estimate: { id: 'estimate-2h', estimate_data: { lead_id: 'lead-hand' } },
+      leadsById: { 'lead-hand': { id: 'lead-hand', status: 'duplicate', customer_id: 'customer-1', estimate_id: null, extracted_data: {} } },
+    });
+    await markLinkedLeadEstimateAccepted({ estimateId: 'estimate-2h', customerId: 'customer-1', database });
+    expect(leadAttribution.markConverted).not.toHaveBeenCalled();
+    expect(database._updates).toEqual([]);
+  });
+
   test('an indirectly resolved original whose contact does not match the estimate is never converted', async () => {
     const database = makeAcceptDb({
       linked: [],
