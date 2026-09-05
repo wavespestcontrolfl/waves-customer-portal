@@ -125,8 +125,21 @@ async function settleRepeatFunnelRow(database, leadId, { customerId = null, esti
   // terminal, carrying revenue attribution) IS the deal's row: nothing
   // settles beside it, and a row the sync completes UNDER this transaction
   // rolls the root's advance back rather than being deleted (pre-push P0).
+  // Both leads are locked under their claims for the WHOLE transaction, so
+  // nothing below judges a row that a concurrent admin edit can change
+  // between the advance and the drop: the root as validated (identity +
+  // status, not deleted — a staff edit to it waits for the commit, and a
+  // claim that no longer holds settles nothing, codex #3834 r35 P1), and the
+  // repeat still WON — a lost transition landing between the conversion's
+  // commit and this settlement must not book its root or rebuild its row
+  // (r35 P1). Both are SELECT ... FOR UPDATE, so a writer on either lead
+  // blocks until this commits instead of racing it.
   const KEEP_OWN_ROW = Symbol('keep-own-row');
   return database.transaction(async (trx) => {
+    const stillWon = await trx('leads').where({ id: repeat.id, status: 'won' }).whereNull('deleted_at').forUpdate().first('id');
+    if (!stillWon) return null;
+    const rootHeld = await trx('leads').where({ id: root.id, ...onlyIfLead }).whereNull('deleted_at').forUpdate().first('id');
+    if (!rootHeld) return repeat;
     const own = await trx('ad_service_attribution').where({ lead_id: repeat.id }).first('funnel_stage');
     if (own && own.funnel_stage === 'completed') return null;
     const bridged = await bridgeLeadFunnelStage(root.id, 'won', trx, { onlyIfLead });

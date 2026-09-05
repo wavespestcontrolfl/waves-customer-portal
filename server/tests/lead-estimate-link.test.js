@@ -1348,19 +1348,29 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     // sits at. Deletes on that table are recorded on `database._deleted`; the
     // settled-root read's lead claim (whereExists) is recorded on
     // `database._claims`, and `rootChanged` makes that claim fail (codex r30).
+    // `leadsNow`: lead id → the row the settlement's LOCKED claim reads
+    // (SELECT ... FOR UPDATE) sees, when it differs from the row the
+    // settlement read first — a staff edit landing between the two (r35).
     const dbOf = (rows, funnelRows = {}, opts = {}) => {
-      const { rootChanged = false } = opts;
+      const { rootChanged = false, leadsNow = {} } = opts;
       const deleted = [];
       const claims = [];
       const updated = [];
+      const locks = [];
       const database = (table) => ({
         where: (a, b) => {
           const q = {
             whereNull: (c) => { q._null = c; return q; },
+            forUpdate: () => { q._lock = true; locks.push({ table, where: a }); return q; },
             update: async (patch) => { updated.push({ table, where: a, whereNull: q._null, claimed: !!q._claimed, patch }); return 1; },
-            first: async () => (table === 'ad_service_attribution'
-              ? (a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id] } : null)
-              : rows[typeof a === 'string' ? b : a.id] || null),
+            first: async () => {
+              if (table === 'ad_service_attribution') return a.lead_id in funnelRows && !(q._claimed && rootChanged) ? { id: `asa-${a.lead_id}`, funnel_stage: funnelRows[a.lead_id] } : null;
+              const id = typeof a === 'string' ? b : a.id;
+              const row = (q._lock && leadsNow[id]) || rows[id] || null;
+              // An object clause beyond the id is a claim: every key must match the row AS IT IS NOW.
+              if (!row || typeof a === 'string') return row;
+              return Object.entries(a).every(([k, v]) => (row[k] ?? null) === (v ?? null)) && !(q._null === 'deleted_at' && row.deleted_at) ? row : null;
+            },
             whereExists: (fn) => {
               const sub = {};
               const bld = { select: () => bld, from: (t) => { sub.from = t; return bld; }, whereRaw: (r) => { sub.whereRaw = r; return bld; }, where: (c) => { sub.where = c; return bld; }, whereNull: (c) => { sub.whereNull = c; return bld; } };
@@ -1378,6 +1388,7 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       database._deleted = deleted;
       database._claims = claims;
       database._updated = updated;
+      database._locks = locks;
       return database;
     };
     const ROOT_CLAIM = { onlyIfLead: { customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'contacted' } };
@@ -1434,6 +1445,39 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
       // "<>", which no NULL row satisfies, so the drop would hit 0 rows and
       // the settlement would read that as a completed row and roll back.
       expect(database._deleted).toEqual([{ table: 'ad_service_attribution', where: { lead_id: 'rep' }, not: "funnel_stage IS DISTINCT FROM 'completed'" }]);
+    });
+
+    test('the settlement locks BOTH leads under their claims for the whole transaction — the repeat still won, the root as validated (codex r35 P1)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead' });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(database._locks).toEqual([
+        { table: 'leads', where: { id: 'rep', status: 'won' } },
+        { table: 'leads', where: { id: 'root', ...ROOT_CLAIM.onlyIfLead } },
+      ]);
+    });
+
+    test('a repeat that is no longer won when the settlement runs (a lost transition landed after the conversion committed) settles NOTHING — no root advance, no drop, no rebuild (codex r35 P1)', async () => {
+      const rows = { rep: repeat('rep'), root: { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null } };
+      const database = dbOf(rows, { root: 'lead', rep: 'lead' }, { leadsNow: { rep: { ...repeat('rep'), status: 'lost' } } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBeNull();
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(database._deleted).toEqual([]);
+      expect(database._updated).toEqual([]);
+    });
+
+    test.each([
+      ['re-assigned to another customer', { customer_id: 'c-OTHER' }],
+      ['closed by staff', { status: 'lost' }],
+      ['linked to another estimate', { estimate_id: 'e-other' }],
+      ['soft-deleted', { deleted_at: '2026-09-05T00:00:00Z' }],
+    ])('a root %s between the settlement\'s read and its locked claim is not ours: the repeat carries its own row and the root\'s funnel is untouched (codex r35 P1)', async (_label, change) => {
+      const root = { id: 'root', status: 'contacted', customer_id: 'c1', phone: '9415550142', estimate_id: null };
+      const rows = { rep: repeat('rep'), root };
+      const database = dbOf(rows, { root: 'lead' }, { leadsNow: { root: { ...root, ...change } } });
+      await expect(settleRepeatFunnelRow(database, 'rep', { customerId: 'c1' })).resolves.toBe(rows.rep);
+      expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+      expect(database._deleted).toEqual([]);
     });
 
     test('a root row ALREADY at booked (a replayed conversion: the monotonic bridge updates 0 rows) is settled — the repeat is not rebuilt into a second row (codex r28 P1)', async () => {

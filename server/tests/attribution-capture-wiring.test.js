@@ -287,9 +287,11 @@ describe('lead-funnel-bridge call sites', () => {
     expect(src).toMatch(/bridgeLeadFunnelStage\(lead\.id, new_status\)/);
     expect(src).toMatch(/bridgeLeadsFunnelStage\(ids, new_status\)/);
     // A won through either tool is the shared settlement (codex #3834 r34 P1).
-    expect(src).toMatch(/new_status === 'won'\n\s+\? await leadAttribution\.settleWonFunnelRow\(lead\.id, lead\.customer_id \|\| null\)/);
-    expect(src).toMatch(/new_status === 'won' \? await settleBulkWon\(rows\) : await bridgeLeadsFunnelStage\(ids, new_status\)/);
-    expect(src).toMatch(/const settled = await leadAttribution\.settleWonFunnelRow\(row\.id, row\.customer_id \|\| null\)/);
+    expect(src).toMatch(/new_status === 'won'\n\s+\? await leadAttribution\.settleWonFunnelRow\(lead\.id, updatedRows\[0\]\.customer_id \|\| null\)/);
+    expect(src).toMatch(/new_status === 'won' \? await settleBulkWon\(ids\) : await bridgeLeadsFunnelStage\(ids, new_status\)/);
+    // The bulk won keeps the set bridge and settles only wizard repeats (codex r35 P2).
+    expect(src).toMatch(/const funnel = await bridgeLeadsFunnelStage\(ids, 'won'\)/);
+    expect(src).toMatch(/for \(const row of repeats\) await leadAttribution\.settleWonFunnelRow\(row\.id, row\.customer_id \|\| null\)/);
   });
 
   test('the bridge isolates transactional callers behind a savepoint', () => {
