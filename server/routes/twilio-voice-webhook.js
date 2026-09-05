@@ -1598,9 +1598,14 @@ router.post('/call-complete', async (req, res) => {
             if (handoffKind === 'relay') {
               logger.info(`[call-complete] AI backstop relay (${decision.reason}) for ${maskSid(CallSid)}`);
               // Handed to the agent — correct the voicemail outcome stamped above
-              // (the final outcome resolves when the relay session ends).
+              // (the final outcome resolves when the relay session ends), and
+              // the STATUS: the row carries the unanswered staff dial's
+              // 'no-answer' / 'busy', but the parent call is live again with
+              // Sandy — a terminal status here would read as a closed call
+              // to the transfer packet's fence (PR 2A). /call-status stamps
+              // completed on the real hangup.
               await db('call_log').where('twilio_call_sid', CallSid)
-                .update({ answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
+                .update({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
                 .catch(() => {});
               // CallSid binds the upgrade token to THIS call (relay-protocol).
               // Profile stamped before the relay opens — same reason as /voice.

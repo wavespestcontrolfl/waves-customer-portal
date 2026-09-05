@@ -11,6 +11,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/voice-agent/relay-server', () => ({ isRelayAttached: jest.fn(() => true) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/call-recording-processor', () => ({ recoverRecordingForCall: jest.fn() }));
+jest.mock('../services/call-routing-config', () => ({ getCallRoutingConfig: jest.fn(async () => ({ agentEndpoint: '' })) }));
+jest.mock('../services/voice-route-decision', () => ({ decideVoiceRoute: jest.fn(() => ({ action: 'agent', reason: 'test' })) }));
 
 const db = require('../models/db');
 const voiceRouter = require('../routes/twilio-voice-webhook');
@@ -212,6 +214,26 @@ describe('/call-complete after an unanswered transfer ring', () => {
     expect(resEs.body).toContain('<Record');
     expect(resEs.body).toMatch(/language="es/);
     expect(res.body).not.toMatch(/language="es/);
+  });
+});
+
+describe('/call-complete AI backstop → Sandy → transfer (codex hook r21)', () => {
+  test('the backstop marks the parent call in-progress when it hands the unanswered dial to Sandy, so the transfer packet fence accepts the row', async () => {
+    process.env.PUBLIC_PORTAL_URL = 'https://portal.wavespestcontrol.com';
+    process.env.VOICE_RELAY_WS_SECRET = 'test-secret';
+    const { getCallRoutingConfig } = require('../services/call-routing-config');
+    getCallRoutingConfig.mockResolvedValueOnce({ agentEndpoint: 'wss://portal.wavespestcontrol.com/ws/voice-agent' });
+    const callLog = { update: jest.fn(async () => 1), where: jest.fn(() => callLog), whereRaw: jest.fn(() => callLog), select: jest.fn(() => callLog), first: jest.fn(async () => ({ metadata: {}, call_outcome: null })) };
+    const other = { update: jest.fn(async () => 1), where: jest.fn(() => other), whereRaw: jest.fn(() => other), first: jest.fn(async () => null), select: jest.fn(() => other), insert: jest.fn(async () => [1]) };
+    db.mockImplementation((table) => (table === 'call_log' ? callLog : other));
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const res = mockRes();
+    await handlerFor('/call-complete')({ body: { CallSid: 'CA-backstop', DialCallStatus: 'no-answer', DialCallDuration: '0' }, query: {} }, res);
+    expect(res.body).toContain('ConversationRelay');
+    expect(callLog.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null }));
+    // The packet write's status fence lets a live (in-progress) call through and refuses a closed one.
+    const fence = "(status IS NULL OR status NOT IN ('completed', 'failed', 'busy', 'no-answer', 'canceled'))";
+    expect(fence).not.toMatch(/in-progress/);
   });
 });
 
