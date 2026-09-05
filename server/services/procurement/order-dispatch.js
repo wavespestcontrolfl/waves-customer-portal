@@ -323,6 +323,23 @@ async function assertManualActionAllowed(trx, requestId, action) {
   return { landedAfterReceive: !!meta(row.evidence).landedAfterReceive };
 }
 
+// A manual transition the guard admitted (mark ordered / cancel / receive)
+// resolves whatever the request's ledger bell asked for — a pre-submit
+// park's "order manually", a post-submit park's "receive or revoke" — so
+// the delivered, unread bell is retired in the same transaction; another
+// admin must not follow it into a duplicate purchase (Codex r28 P2). The
+// revoke CLI retires the same keys on a revoke.
+// The persisted copy (evidence.bell / bellAt) goes too, as the revoke CLI
+// strips it: a delivery in flight (park / re-ring) that lands afterwards
+// fails deliverBell's version check instead of resurrecting the
+// instruction (hook P1).
+async function settleRequestLedgerBells(trx, requestId) {
+  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id');
+  if (!row) return;
+  await retireLedgerBells(trx, row.id);
+  await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
+}
+
 // Unlocked read for a pre-check (the IB tool's confirmation card); the
 // locked guard above is what a receive transaction relies on.
 async function landedAfterReceiveFor(conn, requestId) {
@@ -520,6 +537,11 @@ async function reringPendingBells({ conn = db, notify = null } = {}) {
     // reads a bare ? as a binding placeholder (hook r27 P1).
     .whereRaw("prr.status <> 'cancelled'")
     .whereRaw(RECEIVED_SETTLES_SQL)
+    // A pre-submit park's bell ("order manually") is re-rung only while the
+    // request is still open: staff who ordered by hand and marked it ordered
+    // must not be told again (hook r27 P1). Dispatched rows (placed_at set)
+    // carry reconciliation bells, re-rung in any live state.
+    .whereRaw("(vo.placed_at IS NOT NULL OR prr.status = 'open')")
     .whereRaw("jsonb_exists(vo.evidence, 'bell')")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
     .select('vo.id', 'vo.evidence', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name');
@@ -1199,6 +1221,11 @@ const HANDOFF_SKIPS = new Set(['no_adapter', 'vendor_gated', 'adapter_unconfigur
 async function bellUndispatchable(conn, requestId, notify) {
   const request = await conn('product_restock_requests').where({ id: requestId }).first();
   if (!request || request.status !== 'open' || request.source !== 'auto_reorder') return { requestClosed: true };
+  // An automatic order already out for the product (this request's own
+  // ambiguous / stale park, or a late order on a received sibling): the
+  // ledger bell says do-not-reorder; a gate closed since must not hand the
+  // office an "order manually" bell beside it (hook r27 P0/P1).
+  if (await findLiveAutoOrder(conn, request.product_id)) return { autoOrderLive: true };
   const product = await conn('products_catalog').where({ id: request.product_id }).first('id', 'name', 'inventory_unit', 'inventory_on_hand');
   if (!product) return { bellLost: true };
   // notifyAdmin resolves null when it could not persist the row: a null
@@ -1365,6 +1392,7 @@ async function runVendorOrderDispatch({ conn = db, notify = null, adapters = nul
 
 module.exports = {
   RECEIVED_SETTLES_SQL,
+  settleRequestLedgerBells,
   findLiveAutoOrder,
   landedAfterReceiveFor,
   settleLandedAfterReceive,
