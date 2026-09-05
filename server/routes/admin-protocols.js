@@ -2545,7 +2545,11 @@ router.get('/job-card/:serviceId', async (req, res, next) => {
     if (!card) return res.status(404).json({ error: 'Service not found' });
     if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
     res.json(card);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // A safety-data outage (preferences) fails the card instead of rendering it incomplete.
+    if (err.statusCode === 503) return res.status(503).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/protocols/programs — WaveGuard lawn + service-line protocols

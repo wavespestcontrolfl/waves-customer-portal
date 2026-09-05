@@ -4785,7 +4785,7 @@ function JobCardSprayCheck({ sprayCheck, products, D }) {
             {f.shortForecast ? `, ${f.shortForecast.toLowerCase()}` : ""}
           </div>
         ) : (
-          <div style={{ color: D.muted }}>{sprayCheck.coordsSource === "none" ? "No property pin on file — no forecast, every product unknown." : "No forecast right now."}</div>
+          <div style={{ color: D.muted }}>{sprayCheck.window === "not_today" ? "Judged on the visit day — open the card that morning." : sprayCheck.coordsSource === "none" ? "No property pin on file — no forecast, every product unknown." : "No forecast right now."}</div>
         )}
         {products.length > 0 && (
           <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
@@ -4982,7 +4982,7 @@ function JobCardTank({ tank, serviceId, D }) {
     >
       <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
         {tank && !tank.calibrated && (
-          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Amounts are withheld until the rig is recalibrated.</div>
+          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld until the rig is recalibrated; per-gallon dilutions still mix.</div>
         )}
         <div style={{ display: "flex", gap: 8 }}>
           <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>

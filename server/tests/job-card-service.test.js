@@ -60,6 +60,12 @@ describe('validateParagraph', () => {
   const grounding = 'Pets: dog, property gate code on file, tap to show. Last visit 2026-08-12: Chinch bugs east side.';
   const codes = [{ label: 'Property gate', code: '4545#' }];
 
+  test('a grounded number moved to another fact is rejected; rephrased in place it passes (PR r3 P2)', () => {
+    const lawn = 'Pets: dog. First visit on record. Irrigation Mon/Thu, 20 min, 1.2" rain in the last 7 days.';
+    expect(jobCard.validateParagraph('There are 20 dogs. Irrigation runs Mon and Thu.', lawn, [])).toBe('ungrounded_number');
+    expect(jobCard.validateParagraph('One dog on site. Irrigation runs Mon and Thu for 20 min, with 1.2" of rain over the last 7 days.', lawn, [])).toBeNull();
+  });
+
   test('accepts a faithful 1–3 sentence rewrite', () => {
     expect(jobCard.validateParagraph('There is a dog and a gate code on file you can show. Last visit on 2026-08-12 found chinch bugs on the east side.', grounding, codes)).toBeNull();
   });
@@ -158,107 +164,112 @@ describe('buildSprayCheck', () => {
   });
 
   test('limits inside the 4 h window → ok; the 5th hour does not count', () => {
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10, rain_free_hours: 2 }], hourly, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10, rain_free_hours: 2 }], hourly, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'ok', reason: null });
     expect(out.forecast).toMatchObject({ windMph: 5, rainPct: 10 });
   });
 
   test('temperature and wind breaches hold with both reasons', () => {
     const hot = hourly.map((h, i) => (i === 2 ? { ...h, temperatureF: 95, windMph: 12 } : h));
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: hot, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: hot, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'over 90°F, wind over 10 mph' });
     expect(out.hold).toBe(true);
   });
 
   test('rain is judged only inside the product\'s rain-free hours', () => {
     const wet = hourly.map((h, i) => (i === 3 ? { ...h, rainChance: 60 } : h));
-    const short = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 2 }], hourly: wet, now });
+    const short = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 2 }], hourly: wet, now });
     expect(short.verdicts[0].verdict).toBe('ok');
-    const long = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 4 }], hourly: wet, now });
+    const long = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 4 }], hourly: wet, now });
     expect(long.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'rain likely inside 4 h' });
   });
 
   test('rain-free interval longer than the forecast coverage → unknown, never ok', () => {
     // Four clean hours cannot vouch for a six-hour interval.
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly: hourly.slice(0, 4), now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 6 }], hourly: hourly.slice(0, 4), now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 6 h forecast' });
   });
 
   test('rain past the 4 h spray window still holds a long rain-free interval', () => {
     const six = [...hourly, hour(5, { rainChance: 5 })];
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly: six, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 6 }], hourly: six, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'rain likely inside 6 h' });
   });
 
   test('a null measurement inside the window is unknown, not a pass', () => {
     const gappy = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : h));
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: gappy, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: gappy, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
     // A breach on the other limit still wins over the gap.
     const windy = gappy.map((h, i) => (i === 2 ? { ...h, windMph: 25 } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: windy, now }).verdicts[0].verdict).toBe('hold');
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: windy, now }).verdicts[0].verdict).toBe('hold');
   });
 
   test('a known breach wins over a missing reading on the same limit (Codex r1 P1)', () => {
     const mixed = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : i === 2 ? { ...h, temperatureF: 95 } : h));
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: mixed, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90 }], hourly: mixed, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'over 90°F' });
   });
 
   test('temperature / wind need the whole 4 h window present to pass', () => {
     const oneHour = [hour(0)];
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: oneHour, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: oneHour, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature / wind forecast' });
     // A breach inside the one hour still holds.
     const hotHour = [hour(0, { temperatureF: 99 })];
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: hotHour, now }).verdicts[0].verdict).toBe('hold');
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90 }], hourly: hotHour, now }).verdicts[0].verdict).toBe('hold');
   });
 
   test('coverage is continuous timestamps, not a row count (Codex r2 P1)', () => {
     // 09:30 start with rows at 09:00–12:00 covers only through 13:00.
     const late = new Date(now.getTime() + 30 * 60000);
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90, max_wind_mph: 10 }], hourly: hourly.slice(0, 4), now: late });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90, max_wind_mph: 10 }], hourly: hourly.slice(0, 4), now: late });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature / wind forecast' });
     // An interior gap with both boundary hours present never passes.
     const gap = [hour(0), hour(1), hour(3)];
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 4 }], hourly: gap, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 4 h forecast' });
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 4 }], hourly: gap, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No rain 4 h forecast' });
     // The fifth row closes a 09:30 window.
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', max_wind_mph: 10 }], hourly: hourly.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_wind_mph: 10 }], hourly: hourly.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
   });
 
   test('rainfast_minutes is the canonical interval; rain_free_hours only fills a gap (Codex r5 P1)', () => {
     // Minutes only: 120 min = 2 h, the hour-5 rain is outside it.
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rainfast_minutes: 120 }], hourly, now }).verdicts[0].verdict).toBe('ok');
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rainfast_minutes: 120 }], hourly, now }).verdicts[0].verdict).toBe('ok');
     // Conflicting values: minutes win over a stale 6 h legacy value.
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rainfast_minutes: 120, rain_free_hours: 6 }], hourly, now }).verdicts[0].verdict).toBe('ok');
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rainfast_minutes: 120, rain_free_hours: 6 }], hourly, now }).verdicts[0].verdict).toBe('ok');
     // Legacy hours alone still judge (6 h reaches the hour-5 rain).
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 6 }], hourly, now }).verdicts[0]).toMatchObject({ verdict: 'hold', reason: 'rain likely inside 6 h' });
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 6 }], hourly, now }).verdicts[0]).toMatchObject({ verdict: 'hold', reason: 'rain likely inside 6 h' });
   });
 
   test('min_temp_f is a lower bound: cold hour holds, missing coverage is unknown once (Codex r7 P1)', () => {
     const cold = hourly.map((h, i) => (i === 2 ? { ...h, temperatureF: 45 } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', min_temp_f: 50 }], hourly: cold, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'under 50°F' });
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', min_temp_f: 50, max_temp_f: 90 }], hourly, now }).verdicts[0].verdict).toBe('ok');
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', min_temp_f: 50 }], hourly: cold, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'hold', reason: 'under 50°F' });
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', min_temp_f: 50, max_temp_f: 90 }], hourly, now }).verdicts[0].verdict).toBe('ok');
     const gappy = hourly.map((h, i) => (i === 1 ? { ...h, temperatureF: null } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', min_temp_f: 50, max_temp_f: 90 }], hourly: gappy, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', min_temp_f: 50, max_temp_f: 90 }], hourly: gappy, now }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No temperature forecast' });
   });
 
   test('a zero rain-free interval is no rain limit at all, even at a half-hour start (Codex r14 P1)', () => {
     const late = new Date(now.getTime() + 30 * 60000);
     const wetNow = hourly.map((h, i) => (i === 0 ? { ...h, rainChance: 90 } : h));
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 0 }], hourly: wetNow, now: late }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No limit on file' });
-    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', rain_free_hours: 0, max_wind_mph: 10 }], hourly: wetNow.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 0 }], hourly: wetNow, now: late }).verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No limit on file' });
+    expect(jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', rain_free_hours: 0, max_wind_mph: 10 }], hourly: wetNow.slice(0, 5).map((h) => ({ ...h, windMph: 5 })), now: late }).verdicts[0].verdict).toBe('ok');
   });
 
   test('the forecast headline keeps unmeasured wind / rain null, never 0 (PR r1 P2)', () => {
     const noWind = hourly.map((h) => ({ ...h, windMph: null, rainChance: null }));
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_wind_mph: 10 }], hourly: noWind, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_wind_mph: 10 }], hourly: noWind, now });
     expect(out.forecast).toMatchObject({ windMph: null, rainPct: null });
     expect(out.verdicts[0].verdict).toBe('unknown');
   });
 
+  test('unverified label limits are never judged (PR r3 P1)', () => {
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly, now });
+    expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'Label limits not yet verified' });
+  });
+
   test('no forecast → unknown with reason', () => {
-    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', max_temp_f: 90 }], hourly: null, now });
+    const out = jobCard.buildSprayCheck({ products: [{ id: 'p1', label_verified_at: '2026-07-12', max_temp_f: 90 }], hourly: null, now });
     expect(out.verdicts[0]).toEqual({ productId: 'p1', verdict: 'unknown', reason: 'No forecast' });
     expect(out.forecast).toBeNull();
   });
@@ -357,6 +368,17 @@ describe('lineMeta hints keep the secondary line\'s role (pre-push P1)', () => {
   });
 });
 
+describe('serviceDayInstant (PR r3 P2)', () => {
+  test('a future visit is judged at noon ET on its day; today is now', () => {
+    const now = new Date('2026-09-04T18:00:00Z');
+    expect(jobCard._test.serviceDayInstant('2026-09-10', now).toISOString()).toBe('2026-09-10T16:00:00.000Z');
+    // Today, past noon ET → now; a morning open is judged at noon.
+    expect(jobCard._test.serviceDayInstant('2026-09-04', now)).toBe(now);
+    expect(jobCard._test.serviceDayInstant('2026-09-04', new Date('2026-09-04T12:00:00Z')).toISOString()).toBe('2026-09-04T16:00:00.000Z');
+    expect(jobCard._test.serviceDayInstant('2026-08-01', now)).toBe(now);
+  });
+});
+
 describe('order quantity (PR r1 P2)', () => {
   const { orderFor } = jobCard._test;
   test('shortage wins, then one pack in the inventory unit, then 1', () => {
@@ -381,6 +403,13 @@ describe('loadLastVisit picks the most severe finding, not the alphabetically la
     expect(await jobCard._test.loadLastVisit(dbh, 'c1', 'lawn')).toEqual({ unavailable: true });
     expect(jobCard.buildTemplateParagraph({ ...baseFacts(), lastVisit: { unavailable: true } })).toContain('Visit history unavailable right now');
     expect(jobCard.buildTemplateParagraph({ ...baseFacts(), lastVisit: { unavailable: true } })).not.toContain('First visit');
+  });
+
+  test('history is strictly before the card\'s visit date (PR r3 P2)', async () => {
+    const seen = [];
+    const dbh = (table) => { const chain = {}; for (const m of ['orderBy', 'select']) chain[m] = () => chain; chain.modify = (fn) => { fn(chain); return chain; }; chain.where = (...a) => { seen.push(a); return chain; }; chain.first = () => ({ catch: async () => null }); return chain; };
+    await jobCard._test.loadLastVisit(dbh, 'c1', 'lawn', '2026-09-04');
+    expect(seen).toContainEqual(['sr.service_date', '<', '2026-09-04']);
   });
 
   test('critical beats medium and low', async () => {

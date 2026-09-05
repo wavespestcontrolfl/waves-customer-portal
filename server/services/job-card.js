@@ -158,9 +158,12 @@ async function loadRain7d(dbh, customer) {
   return getAreaRainfall(customer.lawn_water_area_id, since, today, dbh);
 }
 
-async function loadLastVisit(dbh, customerId, serviceLine) {
+async function loadLastVisit(dbh, customerId, serviceLine, beforeDate = null) {
   const record = await dbh('service_records as sr')
     .where({ 'sr.customer_id': customerId, 'sr.status': 'completed' })
+    // History means BEFORE this visit — never the visit's own record or a
+    // later one when an older appointment's card is opened.
+    .modify((qb) => { if (beforeDate) qb.where('sr.service_date', '<', beforeDate); })
     .modify((qb) => { if (serviceLine) qb.where('sr.service_line', serviceLine); })
     .orderBy('sr.service_date', 'desc')
     .orderBy('sr.started_at', 'desc')
@@ -228,6 +231,14 @@ async function loadCallsSince(dbh, customerId, sinceDate) {
  * Everything the card needs about the visit, customer and property. Raw
  * access codes are returned under `access.codes` only.
  */
+function unavailable(message, cause) {
+  const err = new Error(message);
+  err.statusCode = 503;
+  err.isOperational = true;
+  err.cause = cause;
+  return err;
+}
+
 async function loadJobCardFacts(serviceId, dbh = db) {
   const svc = await dbh('scheduled_services as ss')
     .join('customers as c', 'ss.customer_id', 'c.id')
@@ -248,8 +259,10 @@ async function loadJobCardFacts(serviceId, dbh = db) {
 
   const serviceLine = detectServiceLine(svc.service_type);
   const [prefs, lastVisit, issues] = await Promise.all([
-    dbh('property_preferences').where({ customer_id: svc.customer_id }).first().catch(() => null),
-    loadLastVisit(dbh, svc.customer_id, serviceLine),
+    // A failed preferences read is NOT an empty safety profile: the card
+    // fails (503) rather than render without sensitivities, pet plan, codes.
+    dbh('property_preferences').where({ customer_id: svc.customer_id }).first().catch((err) => { throw unavailable('Property preferences unavailable', err); }),
+    loadLastVisit(dbh, svc.customer_id, serviceLine, etCalendarDayOf(svc.scheduled_date)),
     loadOpenIssues(dbh, svc.customer_id),
   ]);
   const [calls, rain7d] = await Promise.all([
@@ -371,10 +384,11 @@ function validateParagraph(text, grounding, codes = [], critical = []) {
   for (const { code } of codes) {
     if (code && lower.includes(String(code).toLowerCase())) return 'code_leak';
   }
-  const groundedNumbers = new Set((grounding.match(/\d+(?:[.,]\d+)?/g) || []));
-  for (const num of body.match(/\d+(?:[.,]\d+)?/g) || []) {
-    if (!groundedNumbers.has(num)) return 'ungrounded_number';
-  }
+  // Every numeric token must come from the grounding AND keep its clause:
+  // a content word within three words of it in the output must sit within
+  // three words of the same token in the grounding (a "20" moved from
+  // "runs 20 min" to "20 dogs" is an invented fact, not a rephrase).
+  if (numbersOutOfContext(body, grounding)) return 'ungrounded_number';
   // A rewrite that drops a safety-critical fact is not a rewrite.
   for (const fact of critical) {
     if (fact && !lower.includes(String(fact).toLowerCase())) return 'critical_fact_dropped';
@@ -393,6 +407,40 @@ function criticalFacts(facts) {
   if (facts.petsSecured) out.push(facts.petsSecured);
   for (const issue of facts.issues || []) if (issue.urgent && issue.text) out.push(issue.text);
   return out;
+}
+
+const CONTEXT_STOPWORDS = new Set(['a', 'an', 'the', 'on', 'of', 'and', 'is', 'are', 'in', 'at', 'to', 'with', 'for', 'has', 'have', 'was', 'were', 'from', 'by', 'that', 'this', 'it', 'its', 'or', 'as', 'be', 'about', 'per', 'last', 'next']);
+function contextWords(text) {
+  return String(text || '').toLowerCase().split(/\s+/).map((w) => w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean);
+}
+function neighbours(words, i) {
+  return words.slice(Math.max(0, i - 3), i).concat(words.slice(i + 1, i + 4)).filter((w) => !/\d/.test(w) && !CONTEXT_STOPWORDS.has(w));
+}
+// Neighbours never cross a sentence: "20 dogs. Irrigation …" must not
+// borrow "irrigation" from the next sentence.
+function sentenceWords(text) {
+  return String(text || '').split(/(?<=[.!?])\s+/).map(contextWords).filter((w) => w.length);
+}
+function numbersOutOfContext(body, grounding) {
+  const src = sentenceWords(grounding);
+  for (const out of sentenceWords(body)) {
+    for (let i = 0; i < out.length; i += 1) {
+      if (!/\d/.test(out[i])) continue;
+      const mine = neighbours(out, i);
+      let seen = false;
+      let bound = false;
+      for (const s of src) {
+        for (let j = 0; j < s.length; j += 1) {
+          if (s[j] !== out[i]) continue;
+          seen = true;
+          const theirs = neighbours(s, j);
+          if (!mine.length || !theirs.length || mine.some((w) => theirs.includes(w))) bound = true;
+        }
+      }
+      if (!seen || !bound) return true;
+    }
+  }
+  return false;
 }
 
 function groundingHash(template) {
@@ -530,6 +578,8 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
     const limits = productLimits(product);
     const hasLimits = [limits.minTempF, limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
     if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: 'No limit on file' };
+    // The catalog contract: unverified label values are not judged against.
+    if (!product.label_verified_at) return { productId: product.id, verdict: 'unknown', reason: 'Label limits not yet verified' };
     if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
     const reasons = [];
     const missing = [];
@@ -582,7 +632,7 @@ const PRODUCT_COLUMNS = [
   'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_required', 'reentry_text',
   'customer_safety_summary', 'pet_kid_guidance_text', 'service_report_summary',
   'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
-  'best_price_amount_cached', 'best_price_updated_at',
+  'best_price_amount_cached', 'best_price_updated_at', 'label_verified_at',
 ];
 
 async function loadCatalog(dbh = db) {
@@ -629,6 +679,13 @@ const TANK_BLOCK_REASON = {
 
 async function loadRigCalibrations(dbh, rig) {
   return getActiveCalibrations(dbh, { equipmentSystemId: rig?.equipmentSystemId || null, calibrationId: rig?.calibrationId || null });
+}
+
+// The instant a calibration must still be valid at: the later of now and
+// noon ET on the service day.
+function serviceDayInstant(serviceDate, now = new Date()) {
+  const noon = serviceDate ? parseETDateTime(`${serviceDate}T12:00`) : null;
+  return noon && noon.getTime() > now.getTime() ? noon : now;
 }
 
 function tankFromCalibrations(rows, now = new Date()) {
@@ -900,13 +957,18 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
 
+  // The spray check is a same-day call: a visit on another day is judged
+  // on that day (the next 4 h of weather say nothing about tomorrow), and
+  // the rig must still be in calibration ON the service day.
+  const isToday = facts.scheduledDate === etDateString(now);
+  const serviceInstant = serviceDayInstant(facts.scheduledDate, now);
   const [paragraph, catalog, calibrations, hourly] = await Promise.all([
     paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
     loadRigCalibrations(dbh, facts.rig),
-    facts.coords.lat != null ? (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null) : Promise.resolve(null),
+    isToday && facts.coords.lat != null ? (deps.getHourly || getHourlyRainOutlook)(facts.coords.lat, facts.coords.lng).catch(() => null) : Promise.resolve(null),
   ]);
-  const tank = tankFromCalibrations(calibrations, now);
+  const tank = tankFromCalibrations(calibrations, serviceInstant);
   const { visit, lines, blocks } = await resolveVisitProducts({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   const sprayCheck = buildSprayCheck({ products, hourly, now });
@@ -920,7 +982,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date() }
     serviceLine: facts.serviceLine,
     strip: { ...facts.strip, access: facts.access },
     paragraph,
-    sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source },
+    sprayCheck: { ...sprayCheck, coordsSource: facts.coords.source, window: isToday ? 'today' : 'not_today' },
     tank,
     products: cards,
     planBlocks: blocks,
@@ -941,7 +1003,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
-  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), now);
+  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now));
   // A lawn visit's plan governs the search too: its blocks withhold the dose
   // exactly as they withhold the card's amounts, and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
@@ -1030,5 +1092,5 @@ module.exports = {
   resolveVisitProducts,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate },
+  _test: { accessCodes, petLine, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, criticalFacts, linesFromProtocolText, linesFromLineMeta, orderFor, perGallonRate, numbersOutOfContext, serviceDayInstant },
 };
