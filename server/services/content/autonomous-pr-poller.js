@@ -356,7 +356,7 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   // GATE_AFFILIATE_LINKS was unset (exact 'true', same call-time read as
   // content-guardrails).
   if (process.env.GATE_AFFILIATE_LINKS !== 'true') {
-    return { ok: false, reason: 'head carries <AffiliateLink> but GATE_AFFILIATE_LINKS is not "true" — the affiliate lane is dark; auto-merge withheld' };
+    return { ok: false, paused: true, reason: 'head carries <AffiliateLink> but GATE_AFFILIATE_LINKS is not "true" — the affiliate lane is dark; auto-merge withheld' };
   }
   // Owner approval is no longer required for autonomous blogs. Current-head
   // pinning, Codex review, and the live registry contract authorize the merge.
@@ -1579,7 +1579,7 @@ async function maybeAutoMerge(run, pr) {
         const aff = await affiliateBeltVerdict(run, topic.content, pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
-          withheld = { pending: true, reason: `affiliate_contract_blocked: ${aff.reason}` };
+          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}` };
           return null;
         }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
@@ -1625,7 +1625,7 @@ async function maybeAutoMerge(run, pr) {
         const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
-          withheld = { pending: true, reason: `affiliate_contract_blocked: ${aff.reason}` };
+          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}` };
           return null;
         }
         if (!(await queueRowStillParkedLocked(run, trx))) {
@@ -1744,7 +1744,7 @@ async function pollRun(run, { allowMerge = true } = {}) {
     if (verdict.pending && !verdict.transient && pendingReasonKey(verdict.reason) === run.poll_pending_reason
       && run.action_type === 'new_supporting_blog' && Number.isFinite(blockedSince)
       && Date.now() - blockedSince >= 48 * 60 * 60 * 1000
-      && run.poll_pending_reason && !['daily_publish_cap_reached', 'auto_merge_disabled', 'awaiting_human_merge'].includes(run.poll_pending_reason)) {
+      && run.poll_pending_reason && !PENDING_ANNOTATION_EXPECTED.has(run.poll_pending_reason)) {
       const retired = await db.transaction(async (trx) => {
         if (!(await queueRowStillParkedLocked(run, trx))) return false;
         const current = await gh.getPr(prNumber);
@@ -1783,6 +1783,9 @@ async function pollRun(run, { allowMerge = true } = {}) {
 // (codex_review_pending, pr_not_found, …) gets a generous day.
 const PENDING_ANNOTATION_EXPECTED = new Set([
   'auto_merge_disabled',
+  'spoke_blog_network_disabled',
+  'named_competitor_autopublish_revoked',
+  'affiliate_autopublish_disabled',
   'awaiting_human_merge',
   'awaiting_human_merge_metadata_lane',
   'daily_publish_cap_reached',
@@ -1862,6 +1865,7 @@ async function trackPendingReason(run, result) {
 async function pollPending() {
   let rows;
   try {
+    await require('./opportunity-queue').reconcilePublishedClaims();
     rows = await db('autonomous_runs')
       .where('outcome', PENDING_OUTCOME)
       .whereIn('skip_reason', PENDING_SKIP_REASONS)

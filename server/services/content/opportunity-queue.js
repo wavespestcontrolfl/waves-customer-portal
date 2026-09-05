@@ -123,12 +123,12 @@ class OpportunityQueue {
         // listicle_family blog-floor ride), so previews show exactly what
         // the runner would claim.
         q = q.whereRaw(
-          `score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND action_type = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END`,
+          `score >= CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' OR (bucket = 'listicle_family' AND ${effectiveActionSql} = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND ${effectiveActionSql} = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN ${effectiveActionSql} = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END`,
           [blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore],
         );
       }
       if (bucket) q = q.where('bucket', bucket);
-      if (actionType) q = q.where('action_type', actionType);
+      if (actionType) q = q.whereRaw(`${effectiveActionSql} = ?`, [actionType]);
       const rows = await q.select('*');
       return rows.map(parseRow);
     } catch (err) {
@@ -156,7 +156,7 @@ class OpportunityQueue {
     // appended a `notes` audit string, but opportunity_queue has no
     // `notes` column (the migration in #1021 only defines status /
     // skip_reason / timestamps). Audit lives in the logger instead.
-    const whereActionType = actionType ? `AND action_type = ?` : '';
+    const whereActionType = actionType ? `AND ${effectiveActionSql} = ?` : '';
     // excludeIds lets the daily batch skip opportunities that already failed
     // this run. A failed runNext() releases its claim back to 'pending', so
     // without this the highest-scored failing row would just be re-claimed
@@ -199,7 +199,7 @@ class OpportunityQueue {
            -- link_boost companion DERIVED from a ctr_rewrite parent rides
            -- it too — the companion inherits the parent's score, so a
            -- separate floor would strand it persisted-but-unclaimable.
-           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND action_type = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
+           AND score >= CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' OR (bucket = 'listicle_family' AND ${effectiveActionSql} = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND ${effectiveActionSql} = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN ${effectiveActionSql} = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}
@@ -404,11 +404,32 @@ class OpportunityQueue {
     return result;
   }
 
+  // Repair only bookkeeping failures with durable final-run evidence. Never
+  // reclaim/redraft an external publish or overwrite a newer lifecycle.
+  async reconcilePublishedClaims() {
+    await db.raw(`UPDATE opportunity_queue q
+      SET status = CASE WHEN r.outcome = 'completed_published' THEN 'done' ELSE 'pending_review' END,
+          skip_reason = CASE WHEN r.outcome = 'completed_published' THEN NULL ELSE 'astro_pr_pending_merge' END,
+          completed_at = CASE WHEN r.outcome = 'completed_published' THEN now() ELSE NULL END,
+          updated_at = now()
+      FROM autonomous_runs r
+      WHERE q.status = 'pending_review'
+        AND r.id = (SELECT latest.id FROM autonomous_runs latest
+          WHERE latest.opportunity_id = q.id ORDER BY latest.claimed_at DESC, latest.id DESC LIMIT 1)
+        AND r.action_type = 'new_supporting_blog'
+        AND ((q.skip_reason = 'astro_pr_queue_transition_failed'
+          AND r.outcome = 'completed_pending_review' AND r.skip_reason = 'astro_pr_pending_merge'
+          AND r.astro_pr_url IS NOT NULL)
+        OR (q.skip_reason = 'published_queue_complete_failed'
+          AND r.outcome = 'completed_published' AND r.published_url IS NOT NULL))`);
+  }
+
   /**
    * Finish exhausted retries and legacy unpublished blog holds automatically. Other content lanes retain
    * their existing review/requeue workflow. Paired with expireStale().
    */
   async sweepExhaustedAttempts() {
+    await this.reconcilePublishedClaims();
     const result = await db('opportunity_queue')
       .whereRaw(`(status = 'pending' AND attempt_count >= ?) OR (
         ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'

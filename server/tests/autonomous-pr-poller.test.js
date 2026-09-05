@@ -207,7 +207,8 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
   });
   // markPrTerminal's atomic upsert — record it like a normal
   // codex_remediation_state update so stamp assertions read one shape.
-  db.raw = jest.fn(async (sql, params) => {
+  db.raw = jest.fn(async (sql, params = []) => {
+    if (sql.startsWith('UPDATE opportunity_queue q')) return { rowCount: 0 };
     updates.push({ table: 'codex_remediation_state', filters: { pr_number: params[0] }, updates: { status: params[1] } });
     return { rowCount: 1 };
   });
@@ -748,6 +749,21 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   function openPr() {
     return { number: 42, state: 'open', merged: false, merged_at: null, title: 'Blog: Test Post', head: { ref: 'content/autonomous-test', sha: 'headsha1' } };
   }
+
+  test('an affiliate gate disabled for 49 hours pauses without retiring', async () => {
+    process.env.GATE_AFFILIATE_LINKS = 'false';
+    setupDb({ pending: [makeRun({ poll_pending_reason: 'affiliate_autopublish_disabled', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValueOnce({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValueOnce({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValueOnce('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test\n---\n<AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>' });
+    const result = await poller.pollPending();
+    expect(result.results[0].reason).toBe('affiliate_autopublish_disabled');
+    expect(gh.closePr).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
 
   test('a blog blocked for 48 hours is retired automatically without merging', async () => {
     const run = makeRun({ poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(Date.now() - 49 * 3600000) });
@@ -1568,9 +1584,9 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     });
   });
 
-  test('governed run: pinned head but a kill switch is OFF → withheld (revoke works on open PRs)', async () => {
+  test('governed run: a kill switch OFF for 49 hours pauses without retiring', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
+    setupDb({ pending: [makeRun({ brief_id: 'brief-1', poll_pending_reason: 'named_competitor_autopublish_revoked', poll_pending_since: new Date(Date.now() - 49 * 3600000) })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
     greenMergePath();
 
     const fg = require('../config/feature-gates');
@@ -1581,6 +1597,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
     expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(gh.closePr).not.toHaveBeenCalled();
   });
 
   test('HUMAN-APPROVED head merges without eligibility while it matches; a later push is withheld (PR r1+r7)', async () => {
