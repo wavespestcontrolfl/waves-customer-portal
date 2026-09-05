@@ -88,13 +88,37 @@ describe('adapters project onto the canonical shape', () => {
     expect(messageDrafts.fromRow({ ...base, status: 'sent', sent_at: ago(1e3), campaign_type: 'winback' })).toMatchObject({ disposition: 'applied', title: 'Draft for Pat Lee', subtitle: 'winback campaign' });
   });
 
-  test('agent_decisions: verdict → verification + disposition, lane from workflow, safety flags step', () => {
-    const base = { id: 'x', workflow: 'sms_suggest', detected_intent: 'book', confidence: 0.82, mode: 'suggest', created_at: ago(3e3) };
-    expect(agentDecisions.fromRow({ ...base, status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human', laneId: 'sms_draft', area: 'sms', subtitle: 'suggest mode · confidence 82 %', workflowId: 'sms_suggest' });
+  test('agent_decisions: the producers\' workflows map to lanes / the SMS area, every written status is mapped, unknown ones surface', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    // workflow ids: each producer's WORKFLOW constant
+    const producers = ['services/sms-suggest-mode.js', 'services/sms-auto-send.js', 'services/reschedule-intent-flagger.js', 'services/completion-comms-guard.js', 'services/contact-correction.js', 'services/estimate-conversion-agent.js'];
+    const workflows = new Set();
+    for (const f of producers) for (const m of read(f).matchAll(/const [A-Z_]*WORKFLOW = '([a-z_]+)'/g)) workflows.add(m[1]);
+    expect(workflows.size).toBeGreaterThanOrEqual(6);
+    for (const w of workflows) expect(agentDecisions.WORKFLOW_MAP).toHaveProperty(w);
+    // statuses: sms-auto-send's lifecycle constants + the literals the other producers write on agent_decisions rows
+    const statuses = new Set(['pending_review', 'scheduled', 'superseded', 'expired', 'ignored', 'shadow', 'reviewed', 'auto_resolved', 'auto_applied']);
+    for (const m of read('services/sms-auto-send.js').matchAll(/const (?:CLAIM|SENT|FAILED)_STATUS = '([a-z_]+)'/g)) statuses.add(m[1]);
+    expect(statuses.size).toBeGreaterThanOrEqual(12);
+    for (const st of statuses) expect(agentDecisions.STATUS_MAP).toHaveProperty(st);
+    expect(agentDecisions.LIVE_STATUSES).toEqual(expect.arrayContaining(['pending_review', 'sending', 'scheduled']));
+
+    const base = { id: 'x', workflow: 'sms_house_voice_suggest', detected_intent: 'book', confidence: 0.82, mode: 'suggest', created_at: ago(3e3) };
+    expect(agentDecisions.fromRow({ ...base, status: 'pending_review' })).toMatchObject({ lifecycle: 'waiting_human', laneId: 'sms_suggest', area: 'sms', subtitle: 'suggest mode · confidence 82 %', workflowId: 'sms_house_voice_suggest' });
     const reviewed = agentDecisions.fromRow({ ...base, status: 'reviewed', human_verdict: 'corrected', reviewed_at: ago(1e3), safety_flags: ['pricing_claim'] });
     expect(reviewed).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', verification: 'warning', disposition: 'applied' });
     expect(reviewed.steps.map((s) => s.key)).toEqual(['decide', 'safety', 'review']);
-    expect(agentDecisions.fromRow({ ...base, workflow: 'referral_reward', status: 'match' })).toMatchObject({ laneId: null, area: 'office', lifecycle: 'terminal', disposition: null });
+    // auto-send: in flight, sent, failed
+    expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'sending' })).toMatchObject({ lifecycle: 'running', laneId: 'sms_draft', area: 'sms' });
+    expect(agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_sent' })).toMatchObject({ lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' });
+    const failed = agentDecisions.fromRow({ ...base, workflow: 'sms_house_voice_auto_send', status: 'auto_send_failed' });
+    expect(failed).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'provider' });
+    expect(runIndex.bucketsOf({ ...failed, health: 'healthy', attention: null })).toMatchObject({ failed: true, attention: true, done: false });
+    // a deterministic guard keeps the SMS area with no lane; a business workflow is office; an unknown status surfaces
+    expect(agentDecisions.fromRow({ ...base, workflow: 'comms_guards', status: 'auto_resolved' })).toMatchObject({ laneId: null, area: 'sms', disposition: 'no_action' });
+    expect(agentDecisions.fromRow({ ...base, workflow: 'referral_reward', status: 'match' })).toMatchObject({ laneId: null, area: 'office', lifecycle: 'terminal', result: null });
   });
 
   test('call_log: processing_status → lifecycle with the processor heartbeat as the run heartbeat', () => {

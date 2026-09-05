@@ -17,22 +17,48 @@ const COLUMNS = [
   'human_verdict', 'reviewed_at', 'created_at', 'updated_at',
 ];
 
-// Only the decision statuses with a lifecycle meaning; a workflow-specific
-// status (match / conflict / …) is a terminal decision with no disposition.
+// agent_decisions.status → lifecycle. The vocabulary is the producers' own
+// (sms-suggest-mode, sms-auto-send, admin-communications, the reschedule
+// flagger / watcher, contact-correction, reply-training-capture;
+// tests/agent-control-run-index drift-checks the constants they export).
 const STATUS_MAP = Object.freeze({
   pending_review: { lifecycle: 'waiting_human', disposition: 'drafted' },
-  scheduled: { lifecycle: 'waiting_external' },
+  pending: { lifecycle: 'queued' },
+  scheduled: { lifecycle: 'waiting_external' }, // send scheduled (admin-communications / suggest mode)
+  sending: { lifecycle: 'running' }, // sms-auto-send CLAIM_STATUS
+  initiated: { lifecycle: 'running' },
   active: { lifecycle: 'running' },
+  auto_sent: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // sms-auto-send SENT_STATUS
+  auto_send_failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'provider' }, // sms-auto-send FAILED_STATUS
+  failed: { lifecycle: 'terminal', result: 'errored', failureClass: 'provider' },
+  auto_applied: { lifecycle: 'terminal', result: 'succeeded', disposition: 'applied' }, // contact-correction
+  auto_resolved: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' }, // reschedule-intent-watcher
   reviewed: { lifecycle: 'terminal', result: 'succeeded' },
   superseded: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
   expired: { lifecycle: 'terminal', result: 'canceled', disposition: 'no_action' },
   ignored: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
   shadow: { lifecycle: 'terminal', result: 'succeeded', disposition: 'no_action' },
 });
+// A status this map does not know is NOT a success: terminal with no
+// result, which the index buckets as failed / attention so it surfaces.
+const UNKNOWN_STATUS = Object.freeze({ lifecycle: 'terminal', result: null });
+// The statuses the index treats as live (derived, so it agrees with the map).
+const LIVE_STATUSES = Object.freeze(Object.entries(STATUS_MAP).filter(([, m]) => m.lifecycle !== 'terminal').map(([k]) => k));
 
-// Which switchboard lane made this decision: the message drafter's two
-// modes are lanes; the rest are business workflows without a model lane.
-const WORKFLOW_LANE = Object.freeze({ sms_suggest: 'sms_draft', sms_auto: 'sms_draft', sms_shadow_judge: 'sms_shadow_judge' });
+// Which switchboard lane made this decision, and its product area — keyed
+// by the workflow id each producer writes (its WORKFLOW constant). A
+// deterministic workflow (comms_guards) has no model lane but still lives
+// in the SMS area.
+const WORKFLOW_MAP = Object.freeze({
+  sms_house_voice_suggest: { laneId: 'sms_suggest', area: 'sms' }, // sms-suggest-mode SUGGEST_WORKFLOW
+  sms_house_voice_auto_send: { laneId: 'sms_draft', area: 'sms' }, // sms-auto-send AUTOSEND_WORKFLOW (sends the drafter's draft)
+  comms_guards: { laneId: null, area: 'sms' }, // reschedule-intent-flagger / completion-comms-guard
+  contact_correction: { laneId: 'contact_correction', area: null }, // contact-correction
+  estimate_conversion_sms: { laneId: 'estimate_followup', area: null }, // estimate-conversion-agent
+  service_scheduling_sms: { laneId: 'estimate_followup', area: null },
+  customer_sms_triage: { laneId: 'estimate_followup', area: null },
+});
+const NO_WORKFLOW = Object.freeze({ laneId: null, area: null });
 
 const NO_VERDICT = Object.freeze({ verification: 'unjudged', disposition: null });
 const VERDICT = Object.freeze({
@@ -49,7 +75,8 @@ function flagNames(flags) {
 }
 
 function fromRow(d) {
-  const map = STATUS_MAP[d.status] || { lifecycle: 'terminal', result: 'succeeded' };
+  const map = STATUS_MAP[d.status] || UNKNOWN_STATUS;
+  const lane = WORKFLOW_MAP[d.workflow] || NO_WORKFLOW;
   const verdict = VERDICT[d.human_verdict] || NO_VERDICT;
   const flags = flagNames(d.safety_flags);
   const workflow = d.workflow || d.agent_name;
@@ -59,7 +86,8 @@ function fromRow(d) {
   return canonicalRun({
     source: SOURCE,
     id: d.id,
-    laneId: WORKFLOW_LANE[d.workflow] || null,
+    laneId: lane.laneId,
+    area: lane.area,
     workflowId: workflow || 'decision',
     title: [humanize(workflow), humanize(d.detected_intent)].filter(Boolean).join(' · ') || 'Decision',
     subtitle: [d.mode ? `${d.mode} mode` : null, confidence].filter(Boolean).join(' · ') || null,
@@ -85,7 +113,7 @@ async function list({ from, cursor = null, limit = 200 } = {}) {
     const rows = await keyset(notMirrored(db('agent_decisions')
       .select(COLUMNS)
       .where((q) => {
-        q.whereIn('status', ['pending_review', 'scheduled', 'active']);
+        q.whereIn('status', LIVE_STATUSES);
         q.orWhere(START, '>=', from);
       }), { source: SOURCE, idColumn: 'agent_decisions.id' }), { start: START, id: ID, cursor, limit });
     return { runs: rows.map(fromRow), unavailable: false };
@@ -105,4 +133,4 @@ async function get(id) {
   }
 }
 
-module.exports = { SOURCE, WORKFLOW_LANE, list, get, fromRow };
+module.exports = { SOURCE, WORKFLOW_MAP, STATUS_MAP, LIVE_STATUSES, list, get, fromRow };
