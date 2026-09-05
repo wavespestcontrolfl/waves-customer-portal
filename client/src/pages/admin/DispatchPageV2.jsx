@@ -973,7 +973,7 @@ export default function DispatchPageV2({
 
   function shiftDate(dir) {
     if (viewMode === "day") setDate(addDaysISO(date, dir));
-    else if (viewMode === "week") setDate(addDaysISO(date, dir * 7));
+    else if (viewMode === "week" || viewMode === "5day") setDate(addDaysISO(date, dir * 7));
     else setDate(addMonthsISO(date, dir));
   }
 
@@ -1122,18 +1122,19 @@ export default function DispatchPageV2({
     (rainProbability != null && rainProbability > 50) ||
     (windSpeed != null && windSpeed > 15);
 
+  const sprayStatus = sprayHold ? "HOLD"
+    : rainProbability == null || windSpeed == null ? "UNKNOWN" : "GO";
+
   const dateHeader =
     viewMode === "day"
       ? formatDateDisplay(date)
-      : viewMode === "week"
+      : isMultiDayView
         ? (() => {
-            // TimeGridDays renders a Mon→Sun week containing the selected
-            // date, so the header must label that same span — not
-            // selected → selected + 6, which drifts as soon as the user
-            // picks any non-Monday.
+            // Match the grid’s Monday→Friday or Monday→Sunday span,
+            // including when the selected date is not a Monday.
             const monday = etStartOfWeek(date);
-            const sunday = addDaysISO(monday, 6);
-            return `${formatETDate(dateAtNoonUTC(monday), { month: "short", day: "numeric" })} – ${formatETDate(dateAtNoonUTC(sunday), { month: "short", day: "numeric", year: "numeric" })}`;
+            const lastDay = addDaysISO(monday, expectedDayCount - 1);
+            return `${formatETDate(dateAtNoonUTC(monday), { month: "short", day: "numeric" })} – ${formatETDate(dateAtNoonUTC(lastDay), { month: "short", day: "numeric", year: "numeric" })}`;
           })()
         : formatETDate(dateAtNoonUTC(date), { month: "long", year: "numeric" });
 
@@ -1661,7 +1662,7 @@ export default function DispatchPageV2({
                   {weatherIcon}
                 </span>{" "}
                 <span className="u-nums font-medium text-zinc-900">
-                  {weatherTemp ?? 82}°F
+                  {weatherTemp == null ? "Weather unavailable" : `${weatherTemp}°F`}
                 </span>
                 {windSpeed != null && (
                   <>
@@ -1690,7 +1691,7 @@ export default function DispatchPageV2({
                     sprayHold ? "text-alert-fg" : "text-zinc-900",
                   )}
                 >
-                  SPRAY: {sprayHold ? "HOLD" : "GO"}
+                  SPRAY: {sprayStatus}
                 </span>
                 {/* Per-zone rain chips — only zones at ≥40% render. */}
                 {zoneRainAlerts.map(([zone, chance]) => (

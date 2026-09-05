@@ -12,6 +12,7 @@ const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
+const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -131,7 +132,7 @@ Only returns active customers with prior service history in that category.`,
         date: { type: 'string', description: 'YYYY-MM-DD (single day; defaults to today ET)' },
         date_from: { type: 'string', description: 'YYYY-MM-DD start of range' },
         date_to: { type: 'string', description: 'YYYY-MM-DD end of range' },
-        technician_name: { type: 'string', description: 'Filter by tech name (e.g. Adam, Jose, Jacob)' },
+        technician_name: { type: 'string', description: 'Filter by technician name (as shown on the schedule)' },
         city: { type: 'string', description: 'Filter by customer city/zone' },
       },
     },
@@ -384,10 +385,10 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
-      case 'create_appointment': return await createAppointment(input);
+      case 'create_appointment': return await createAppointment(input, actionContext);
       case 'get_recent_completions': return await getRecentCompletions(input);
-      case 'reschedule_appointment': return await rescheduleAppointment(input);
-      case 'cancel_appointment': return await cancelAppointment(input);
+      case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
+      case 'cancel_appointment': return await cancelAppointment(input, actionContext);
       case 'draft_sms': return await draftSms(input);
       default:
         return { error: `Unknown tool: ${toolName}` };
@@ -1980,9 +1981,7 @@ async function getRecentCompletions(input = {}) {
 // string is persisted in tool-health telemetry, so it carries no typed name;
 // the candidates array holds the detail and only reaches the operator.
 async function resolveTechnicianByName(name) {
-  const matches = await db('technicians')
-    .whereILike('name', `%${name}%`)
-    .where('active', true)
+  const matches = await applyAssignable(db('technicians').whereILike('technicians.name', `%${name}%`))
     .limit(2);
   if (matches.length > 1) {
     return {
@@ -1994,7 +1993,7 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
-async function createAppointment(input) {
+async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
   const dateStr = validScheduleDate(scheduled_date);
@@ -2045,8 +2044,8 @@ async function createAppointment(input) {
   if (input.technician_id) {
     // Same active bar as name resolution — a model-provided id, or a tech
     // deactivated during the confirmation window, must not take new visits.
-    const tech = await db('technicians').where('id', input.technician_id).where('active', true).first();
-    if (!tech) return { error: 'Technician not found or no longer active' };
+    const tech = await resolveActiveTechnicianById(input.technician_id);
+    if (!tech) return { error: 'Technician not found or no longer assignable' };
     technician_id = tech.id;
     resolvedTechnicianName = tech.name;
   } else if (technician_name) {
@@ -2117,6 +2116,9 @@ async function createAppointment(input) {
       err.customerNoLongerLive = true;
       throw err;
     }
+    // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
+    // ran before this transaction opened.
+    await assertAssignableTechnician(technician_id, { conn: trx });
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —
@@ -2201,6 +2203,19 @@ async function createAppointment(input) {
     throw err;
   }
 
+  // Tech-facing "new visit" card (tech-visit-notifications.js): this writer
+  // inserts the assigned row itself, bypassing assignDispatchJob, so it tells
+  // the tech itself. Queued FIRST after commit, before the awaited redemption
+  // and reminder steps, so a reassignment seconds after creation cannot
+  // overtake it in the visit's notice queue. Best-effort, never awaited;
+  // gate-dark; silent when the operator IS the tech.
+  if (technician_id) {
+    void require('../tech-visit-notifications').notifyTechVisitChange({
+      visitId: appointment.id, kind: 'assigned', technicianId: technician_id, actorId: actionContext.technicianId || null,
+      snapshot: { date: dateStr, windowStart: win.start || null, windowEnd: windowEnd || null },
+    });
+  }
+
   // Card-confirmed bookings are approved credit-free (W0B): skip ONLY the
   // immediate redemption so this Confirm can never mint credit — an offer
   // created after the card is applied by the hourly sweep, the documented
@@ -2278,7 +2293,7 @@ async function createAppointment(input) {
 }
 
 
-async function rescheduleAppointment(input) {
+async function rescheduleAppointment(input, actionContext = {}) {
   const { appointment_id, new_date, new_time_window, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
@@ -2435,6 +2450,9 @@ async function rescheduleAppointment(input) {
   // schedule conflicts): the move commits and the tool result carries a
   // warning.
   let updatedRows = 0;
+  // The technician on the COMMITTED row (the CAS does not pin technician_id,
+  // so the pre-read `appt` may name a tech who was swapped out meanwhile).
+  let committedTechId = null;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
@@ -2458,7 +2476,7 @@ async function rescheduleAppointment(input) {
       // would strand its siblings and parent at the old stop. Throws an
       // operational 409 the executor surfaces as the tool error.
       await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
-      updatedRows = await applyTrackLifecycleCas(
+      const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
           .where('status', String(appt.status))
@@ -2516,10 +2534,25 @@ async function rescheduleAppointment(input) {
           ...(wasLive ? { status: 'confirmed' } : {}),
           ...liveReset,
           updated_at: new Date(),
-        });
+        })
+        .returning(['id', 'technician_id']);
+      updatedRows = committed.length;
+      committedTechId = committed[0]?.technician_id || null;
   });
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
+  }
+  // Tech-facing notice (tech-visit-notifications.js): this writer moves the
+  // row itself, so it tells the holder itself. Post-commit, best-effort,
+  // never awaited; the operator's own move stays silent.
+  if (committedTechId) {
+    void require('../tech-visit-notifications').notifyVisitRescheduled({
+      visitId: appt.id,
+      technicianId: committedTechId,
+      actorId: actionContext.technicianId || null,
+      previous: { date: observedDate, windowStart: appt.window_start, windowEnd: appt.window_end },
+      snapshot: { date: dateStr, windowStart: newStart, windowEnd: newWindowEnd },
+    });
   }
 
   // Rebooker-parity side effects of the live → confirmed flip above:
@@ -2608,7 +2641,7 @@ async function rescheduleAppointment(input) {
 }
 
 
-async function cancelAppointment(input) {
+async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
@@ -2701,7 +2734,10 @@ async function cancelAppointment(input) {
         jobId: appointment_id,
         fromStatus: appt.status,
         toStatus: 'cancelled',
-        transitionedBy: null,
+        // The acting staff row: audit attribution on the history row, and
+        // the actor the tech-facing cancel notice (job-status.js) keeps
+        // silent for — an operator cancelling their own visit gets no card.
+        transitionedBy: actionContext.technicianId || null,
         notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
         trx,
       });
@@ -2930,7 +2966,7 @@ async function searchFieldIntelligence(input) {
 // proposal-time pinning so a model-provided uuid still yields a NAMED tech
 // on the confirmation card.
 async function resolveActiveTechnicianById(id) {
-  return db('technicians').where('id', id).where('active', true).first();
+  return applyAssignable(db('technicians').where('technicians.id', id)).first();
 }
 
 module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS };

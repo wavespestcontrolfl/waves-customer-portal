@@ -18,7 +18,7 @@
  * because their inline navy fill is what the estimate walker normalizes to an
  * accent anyway, and the accent rules force readable navy-on-gold text.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const DEFAULT_CHIPS = ['Tomorrow morning', 'This weekend', 'Next week afternoon'];
 
@@ -26,7 +26,7 @@ export default function WavesAIScheduleSearch({
   theme,
   title = 'Search by date or time',
   subtitle = 'Tell Waves AI when works — we’ll show what’s open.',
-  placeholder = 'e.g. “anything next Tuesday afternoon”',
+  placeholder = 'Anything next Tuesday afternoon',
   chips = DEFAULT_CHIPS,
   showEyebrow = true,
   onSearch,
@@ -45,6 +45,30 @@ export default function WavesAIScheduleSearch({
   const [query, setQuery] = useState('');
   const [summary, setSummary] = useState('');
   const [asking, setAsking] = useState(false);
+  // Drift the quick-pick strip slowly leftward only when it overflows (phones);
+  // paused while a finger or pointer is on it, off under reduced-motion (CSS).
+  const stripRef = useRef(null);
+  const [drift, setDrift] = useState(false);
+  // Keyboard focus anywhere in the strip ends the drift for good: a focused
+  // chip must stay inside the clipped strip, and a plain scrollable strip
+  // lets the browser scroll each focused choice into view (GH Codex P1).
+  const [keyboard, setKeyboard] = useState(false);
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const kids = [...el.children].slice(0, chips.length);
+      const setWidth = kids.reduce((w, k) => w + k.offsetWidth, 0) + 8 * chips.length;
+      el.style.setProperty('--chip-shift', `-${setWidth}px`);
+      // Reduced motion: no drift, so the overflowing set stays a plain
+      // scrollable strip instead of a clipped one (GH Codex pre-push P1).
+      const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      setDrift(!reduced && !keyboard && setWidth > el.clientWidth - 36);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [chips, drift, keyboard]);
 
   const run = async (prompt) => {
     const q = String(prompt ?? query).trim();
@@ -69,7 +93,7 @@ export default function WavesAIScheduleSearch({
       <div>
         {showEyebrow ? (
           <div data-gt="eyebrow" style={{
-            fontSize: 12, color: t.muted, letterSpacing: '0.12em',
+            fontSize: 14, color: t.muted, letterSpacing: '0.12em',
             textTransform: 'uppercase', fontWeight: 700, marginBottom: 4,
           }}>
             Waves AI
@@ -90,8 +114,8 @@ export default function WavesAIScheduleSearch({
           aria-label="Search for a service date or time"
           maxLength={500}
           style={{
-            width: '100%', minHeight: 46, border: `1px solid ${t.border}`,
-            borderRadius: 10, padding: '12px 14px', fontSize: 15,
+            width: '100%', minHeight: 48, border: `1px solid ${t.border}`,
+            borderRadius: 10, padding: '12px 14px', fontSize: 16,
             color: t.text, background: t.inputBg, outline: 'none', boxSizing: 'border-box',
           }}
         />
@@ -100,8 +124,8 @@ export default function WavesAIScheduleSearch({
           data-glass-accent=""
           disabled={asking || !query.trim()}
           style={{
-            minHeight: 46, border: 0, borderRadius: 10, padding: '0 20px',
-            background: t.accent, color: t.accentText, fontSize: 15, fontWeight: 800,
+            minHeight: 48, border: 0, borderRadius: 10, padding: '0 20px',
+            background: t.accent, color: t.accentText, fontSize: 16, fontWeight: 700,
             cursor: asking || !query.trim() ? 'not-allowed' : 'pointer',
             opacity: asking || !query.trim() ? 0.8 : 1,
           }}
@@ -110,18 +134,37 @@ export default function WavesAIScheduleSearch({
         </button>
       </form>
 
+      {/* One-line quick-pick strip: never wraps, scrolls sideways on phones
+          (bleeds to the card edge so a cut-off chip signals "more"). */}
       {chips && chips.length > 0 ? (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }} aria-label="Example searches">
-          {chips.map((chip) => (
+        <div
+          ref={stripRef}
+          aria-label="Example searches"
+          // Keyboard-initiated focus only (:focus-visible is set for Tab, not
+          // for a pointer press) — a mousedown on a drifting duplicate must not
+          // re-render the strip before its click lands (GH Codex P1).
+          onFocus={(e) => { if (typeof e.target.matches === 'function' && e.target.matches(':focus-visible')) setKeyboard(true); }}
+          className={drift ? 'waves-chip-strip waves-chip-strip--drift' : 'waves-chip-strip'}
+          style={{
+            display: 'flex', flexWrap: 'nowrap', gap: 8, overflowX: drift ? 'hidden' : 'auto',
+            margin: '0 -20px', padding: '2px 20px', scrollbarWidth: 'none',
+            WebkitOverflowScrolling: 'touch',
+          }}
+        >
+          {(drift ? [...chips, ...chips] : chips).map((chip, i) => (
             <button
-              key={chip}
+              key={`${chip}-${i}`}
+              aria-hidden={i >= chips.length ? 'true' : undefined}
+              tabIndex={i >= chips.length ? -1 : undefined}
               type="button"
-              data-glass-accent=""
+              data-glass="chip"
+              data-glass-pill=""
               disabled={asking}
               onClick={() => { setQuery(chip); run(chip); }}
               style={{
-                border: 0, background: t.accent, color: t.accentText,
-                borderRadius: 999, padding: '8px 14px', fontSize: 14, fontWeight: 700,
+                flex: '0 0 auto', whiteSpace: 'nowrap', minHeight: 40,
+                border: `1px solid ${t.border}`, background: t.inputBg, color: t.text,
+                borderRadius: 999, padding: '0 14px', fontSize: 14, fontWeight: 600,
                 cursor: asking ? 'not-allowed' : 'pointer', opacity: asking ? 0.8 : 1,
               }}
             >

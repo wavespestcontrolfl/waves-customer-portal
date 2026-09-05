@@ -35,7 +35,7 @@ import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBa
 // - V1/V2 panel reuse: CustomerHealthSection (V1 export) renders
 //   inside V2. Watch for V1 styling leaking through — should be
 //   reskinned eventually but for now stylistic drift is the risk.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useId } from "react";
 import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
@@ -479,6 +479,7 @@ function QuickAddModalV2({
   initialValues = null,
   title = "Add customer",
 }) {
+  const formId = useId();
   const [form, setForm] = useState(() =>
     normalizeQuickAddInitialValues(initialValues),
   );
@@ -664,8 +665,9 @@ function QuickAddModalV2({
             {" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>First name *</label>{" "}
+              <label htmlFor={`${formId}-firstName`} className={LABEL_CLS}>First name *</label>{" "}
               <input
+                id={`${formId}-firstName`}
                 value={form.firstName}
                 onChange={(e) => set("firstName", e.target.value)}
                 className={INPUT_CLS}
@@ -674,8 +676,9 @@ function QuickAddModalV2({
             </div>{" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>Last name</label>{" "}
+              <label htmlFor={`${formId}-lastName`} className={LABEL_CLS}>Last name</label>{" "}
               <input
+                id={`${formId}-lastName`}
                 value={form.lastName}
                 onChange={(e) => set("lastName", e.target.value)}
                 className={INPUT_CLS}
@@ -686,8 +689,9 @@ function QuickAddModalV2({
             {" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>Phone *</label>{" "}
+              <label htmlFor={`${formId}-phone`} className={LABEL_CLS}>Phone *</label>{" "}
               <input
+                id={`${formId}-phone`}
                 value={form.phone}
                 onChange={(e) => set("phone", e.target.value)}
                 className={INPUT_CLS}
@@ -697,9 +701,10 @@ function QuickAddModalV2({
             </div>{" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>Email</label>{" "}
+              <label htmlFor={`${formId}-email`} className={LABEL_CLS}>Email</label>{" "}
               <input
                 type="email"
+                id={`${formId}-email`}
                 value={form.email}
                 onChange={(e) => set("email", e.target.value)}
                 className={INPUT_CLS}
@@ -708,8 +713,9 @@ function QuickAddModalV2({
           </div>{" "}
           <div>
             {" "}
-            <label className={LABEL_CLS}>Address</label>{" "}
+            <label htmlFor={`${formId}-address`} className={LABEL_CLS}>Address</label>{" "}
             <AddressAutocomplete
+              id={`${formId}-address`}
               value={form.address}
               onChange={(value) => set("address", value)}
               onSelect={(parts) => {
@@ -728,8 +734,9 @@ function QuickAddModalV2({
             />{" "}
           </div>{" "}
           <div>
-            <label className={LABEL_CLS}>Address line 2</label>
+            <label htmlFor={`${formId}-addressLine2`} className={LABEL_CLS}>Address line 2</label>
             <input
+              id={`${formId}-addressLine2`}
               value={form.addressLine2}
               onChange={(e) => set("addressLine2", e.target.value)}
               className={INPUT_CLS}
@@ -741,8 +748,9 @@ function QuickAddModalV2({
             {" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>City</label>{" "}
+              <label htmlFor={`${formId}-city`} className={LABEL_CLS}>City</label>{" "}
               <input
+                id={`${formId}-city`}
                 value={form.city}
                 onChange={(e) => set("city", e.target.value)}
                 className={INPUT_CLS}
@@ -750,8 +758,9 @@ function QuickAddModalV2({
             </div>{" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>State</label>{" "}
+              <label htmlFor={`${formId}-state`} className={LABEL_CLS}>State</label>{" "}
               <input
+                id={`${formId}-state`}
                 value={form.state}
                 onChange={(e) =>
                   set("state", e.target.value.toUpperCase().slice(0, 2))
@@ -761,8 +770,9 @@ function QuickAddModalV2({
             </div>{" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>ZIP</label>{" "}
+              <label htmlFor={`${formId}-zip`} className={LABEL_CLS}>ZIP</label>{" "}
               <input
+                id={`${formId}-zip`}
                 value={form.zip}
                 onChange={(e) => set("zip", e.target.value)}
                 className={INPUT_CLS}
@@ -772,8 +782,9 @@ function QuickAddModalV2({
           </div>{" "}
           <div>
             {" "}
-            <label className={LABEL_CLS}>Property label</label>{" "}
+            <label htmlFor={`${formId}-profileLabel`} className={LABEL_CLS}>Property label</label>{" "}
             <select
+              id={`${formId}-profileLabel`}
               value={form.profileLabel}
               onChange={(e) => set("profileLabel", e.target.value)}
               className={cn(INPUT_CLS, "cursor-pointer")}
@@ -786,6 +797,7 @@ function QuickAddModalV2({
             </select>
             {form.profileLabel === "__custom__" && (
               <input
+                aria-label="Custom property label"
                 value={form.customProfileLabel}
                 onChange={(e) => set("customProfileLabel", e.target.value)}
                 className={cn(INPUT_CLS, "mt-2")}
@@ -797,8 +809,9 @@ function QuickAddModalV2({
             {" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>Lead source</label>{" "}
+              <label htmlFor={`${formId}-leadSource`} className={LABEL_CLS}>Lead source</label>{" "}
               <select
+                id={`${formId}-leadSource`}
                 value={form.leadSource}
                 onChange={(e) => set("leadSource", e.target.value)}
                 className={cn(INPUT_CLS, "cursor-pointer")}
@@ -812,8 +825,9 @@ function QuickAddModalV2({
             </div>{" "}
             <div>
               {" "}
-              <label className={LABEL_CLS}>Pipeline stage</label>{" "}
+              <label htmlFor={`${formId}-pipelineStage`} className={LABEL_CLS}>Pipeline stage</label>{" "}
               <select
+                id={`${formId}-pipelineStage`}
                 value={form.pipelineStage}
                 onChange={(e) => set("pipelineStage", e.target.value)}
                 className={cn(INPUT_CLS, "cursor-pointer")}
@@ -828,10 +842,11 @@ function QuickAddModalV2({
           </div>{" "}
           <div>
             {" "}
-            <label className={LABEL_CLS}>Tags</label>{" "}
+            <label htmlFor={`${formId}-tags`} className={LABEL_CLS}>Tags</label>{" "}
             <div className="flex gap-2">
               {" "}
               <select
+                id={`${formId}-tags`}
                 value=""
                 onChange={(e) => addTag(e.target.value)}
                 className={cn(INPUT_CLS, "cursor-pointer flex-1")}
@@ -845,6 +860,7 @@ function QuickAddModalV2({
                 ))}
               </select>{" "}
               <input
+                aria-label="Custom tag"
                 value={form.customTag}
                 onChange={(e) => set("customTag", e.target.value)}
                 onKeyDown={(e) => {
@@ -876,9 +892,10 @@ function QuickAddModalV2({
           </div>{" "}
           <div>
             {" "}
-            <label className={LABEL_CLS}>Notes</label>{" "}
+            <label htmlFor={`${formId}-notes`} className={LABEL_CLS}>Notes</label>{" "}
             <textarea
               rows={3}
+              id={`${formId}-notes`}
               value={form.notes}
               onChange={(e) => set("notes", e.target.value)}
               className={cn(INPUT_CLS, "h-auto py-2 resize-y")}

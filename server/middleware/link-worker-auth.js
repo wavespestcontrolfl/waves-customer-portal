@@ -50,6 +50,7 @@ const SWEEP_PROBABILITY = 0.04;
 // The vendor credential exists so the price/login workers can migrate off the
 // shared bearer BEFORE HERMES_SERVICE_TOKEN is retired (§14 step 1b).
 const KEY_RECORDS = {
+  hermes_commitments: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES_COMMITMENTS', endpoints: ['commitments_read'] },
   hermes: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES', endpoints: ['claim', 'report'] },
   hermes_vendor: { provider: 'hermes', secretEnv: 'LINK_WORKER_SECRET_HERMES_VENDOR', endpoints: ['vendor_price', 'vendor_login'] },
   // The external agent watchdog (docs/hermes/waves-agent-watchdog-skill.md):

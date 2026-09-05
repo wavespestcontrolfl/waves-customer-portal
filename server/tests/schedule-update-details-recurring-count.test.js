@@ -73,8 +73,8 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
       if (name === 'where' && typeof args[0] === 'function') {
         const nested = [];
         const sub = {};
-        for (const m of ['where', 'orWhere', 'whereIn', 'orWhereIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'whereNot']) {
-          sub[m] = (...a) => { nested.push([m, ...a]); return sub; };
+        for (const m of ['where', 'orWhere', 'whereIn', 'orWhereIn', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull', 'whereNot', 'andWhere']) {
+          sub[m] = (...a) => { if (typeof a[0] === 'function') a[0].call(sub, sub); nested.push([m, ...a]); return sub; };
         }
         args[0].call(sub, sub);
         calls.push(['whereFn', nested]);
@@ -83,7 +83,7 @@ function makeConn(handler, { hasCardHoldTable = true } = {}) {
       }
       return b;
     };
-    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit']) {
+    for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'orWhereIn', 'whereNot', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'leftJoin', 'whereRaw', 'forUpdate', 'forShare']) {
       b[m] = record(m);
     }
     b.first = (...args) => {
@@ -182,6 +182,9 @@ function scenario({
       if (op === 'columnInfo') return {};
       return [];
     }
+    // The guard now confirms the linked term's paid coverage is still live
+    // through coveredTermsAsOf (Codex #3878 r1 P2): 'term-1' is covered.
+    if (String(table).startsWith('annual_prepay_terms')) return [{ id: 'term-1' }];
     if (table === 'estimate_card_holds') {
       if (op === 'await') {
         return cardHoldVisitIds.map((id) => ({ scheduled_service_id: id }));
@@ -206,6 +209,8 @@ function scenario({
       return weeklyDaysOff ? { value: weeklyDaysOff } : null;
     }
     if (table === 'schedule_blackout_dates') return [];
+    // assignableRecurringTemplateTechnicianId fences the template tech on the trx.
+    if (table === 'technicians') return op === 'first' ? { id: 'tech-1', employment_status: 'active', field_dispatchable: true } : [];
     return null;
   };
   return { conn: makeConn(handler, { hasCardHoldTable }), inserted, parent, live };

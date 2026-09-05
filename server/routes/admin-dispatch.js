@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { applyAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
@@ -3629,85 +3630,173 @@ router.put('/:serviceId/status', async (req, res, next) => {
       const cancellableStatuses = ['pending', 'confirmed', 'rescheduled'];
       const terminalStatuses = ['completed', 'skipped', 'cancelled'];
       const { transitionJobStatus } = require('../services/job-status');
+      // An UNPAID payment_pending annual term is invisible to the in-trx
+      // coverage guard (coveredTermsAsOf excludes it and its standalone
+      // prepay invoice carries no scheduled_service_id), yet its public
+      // invoice stays payable — a payment landing AFTER this cancel runs
+      // syncTermForInvoicePayment and re-seeds coverage for the visits just
+      // cancelled. Same refusal the Cancel plan engine applies before its
+      // wind-down (admin-cancellation.js), scoped to this visit's service
+      // family; an unreadable family means whole-account (fail closed).
+      // (Codex #3878 r3 P1.)
+      {
+        const { findPendingPrepayInvoice } = require('../services/admin-cancellation');
+        const { familyOfServiceRow } = require('../services/cancellation-processor');
+        const family = familyOfServiceRow({ service_type: svc.service_type });
+        const pending = await findPendingPrepayInvoice(svc.customer_id, family ? [family] : null);
+        if (pending) {
+          const { term, invoice } = pending;
+          return res.status(409).json({
+            error: `Can't cancel ${scope === 'series' ? 'this plan' : 'the rest of this plan'}: an unpaid annual-prepay invoice (${invoice.invoice_number || invoice.id}${term.plan_label ? `, ${term.plan_label}` : ''}) is still payable and would re-activate coverage if paid after this cancellation. Void it from the invoice tools first.`,
+            code: 'pending_prepay_invoice',
+          });
+        }
+      }
+
       let targets = [];
       let ongoingStopped = 0;
+      // Set INSIDE the transaction when a target is already paid for; the
+      // trx is rolled back by the throw and the 409 is answered after it.
+      let billingCovered = null;
       // Shared claim token for every target's trx claim — declared out
       // here because the post-commit series handler needs it too.
       const seriesClaimToken = require('../services/job-status').nextClaimTs();
-      await db.transaction(async (trx) => {
-        // Serialize with the per-parent series-maintenance advisory lock
-        // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting
-        // the cancel set (codex P0: completion hook recreated cancelled
-        // future visits). A concurrent completion's auto-extend either
-        // commits before the select below — so its fresh row lands in the
-        // cancel set — or blocks on this lock until our commit and then
-        // sees recurring_ongoing=false in its in-lock re-checks and no-ops.
-        // Without the lock, maintenance could interleave between the row
-        // cancels and the flag clear and re-extend (re-bill) the cadence
-        // the customer just cancelled.
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-          ['recurring-series-maintenance', String(parentId)],
-        );
+      try {
+        await db.transaction(async (trx) => {
+          // Serialize with the per-parent series-maintenance advisory lock
+          // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting
+          // the cancel set (codex P0: completion hook recreated cancelled
+          // future visits). A concurrent completion's auto-extend either
+          // commits before the select below — so its fresh row lands in the
+          // cancel set — or blocks on this lock until our commit and then
+          // sees recurring_ongoing=false in its in-lock re-checks and no-ops.
+          // Without the lock, maintenance could interleave between the row
+          // cancels and the flag clear and re-extend (re-bill) the cadence
+          // the customer just cancelled.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['recurring-series-maintenance', String(parentId)],
+          );
 
-        const targetQuery = trx('scheduled_services')
-          .where(function () {
-            this.where('id', parentId).orWhere('recurring_parent_id', parentId);
-          })
-          .where(function () {
-            this.whereIn('status', cancellableStatuses)
-              .orWhere(function () {
-                this.where('id', svc.id).whereNotIn('status', terminalStatuses);
-              });
-          });
-        if (scope === 'following') {
-          targetQuery.where('scheduled_date', '>=', svc.scheduled_date);
-        }
-        targets = await targetQuery
-          .orderBy('scheduled_date', 'asc')
-          .select('id', 'status', 'customer_id', 'service_type');
-        if (!targets.length) return; // nothing written — 409 after commit
+          // ONE lock order with the series prepaid stamp (Codex #3878 r3 P2 /
+          // r4 P2): stampSeriesPrepaid locks the family's LIVE rows (its
+          // TERMINAL_STATUSES excluded) in scheduled_date order. This branch
+          // locks only cancellable targets below but its family-wide
+          // recurring_ongoing clear later touches en_route / on_site
+          // siblings too — so take the identical live-family lock set, in
+          // the identical order, FIRST. Terminal rows are never locked by
+          // either path.
+          {
+            const { TERMINAL_STATUSES: PREPAID_SKIP } = require('../services/prepaid-series');
+            await trx('scheduled_services')
+              .where(function () {
+                this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+              })
+              .whereNotIn('status', [...PREPAID_SKIP])
+              // Identical three-column order to fetchSeriesRows — a date tie
+              // alone would let the two paths take siblings in opposite order.
+              .orderBy(['scheduled_date', 'window_start', 'id'])
+              .forUpdate()
+              .select('id');
+          }
 
-        for (const target of targets) {
-          await transitionJobStatus({
-            jobId: target.id,
-            fromStatus: target.status,
-            toStatus,
-            transitionedBy: req.technicianId,
-            lat,
-            lng,
-            notes,
-            trx,
-            // Caller-owned: the series branch below runs its own awaited
-            // per-visit handleCancellation (notify-or-suppress per the
-            // request flag) plus one combined notice — the hook must stand
-            // down entirely, not race those claims.
-            notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
-            cancelNoticeToken: seriesClaimToken,
-          });
-        }
-
-        // Stop the plan ATOMICALLY with the row cancels: both 'following'
-        // and 'series' cancel the remainder of the series, so a parent left
-        // flagged recurring_ongoing would let a later completion of an
-        // earlier retained visit re-extend — and re-bill — the cancelled
-        // cadence. Cleared series-wide (parent + children carry the flag)
-        // in the SAME transaction, under the maintenance lock above.
-        // Single-occurrence cancels (scope 'this_only') never enter this
-        // branch and leave the flag intact. The per-row cancellation reason
-        // is already stamped by transitionJobStatus (notes →
-        // job_status_history); the activity_log line below records the
-        // plan stop.
-        const cols = await trx('scheduled_services').columnInfo().catch(() => ({}));
-        if (cols.recurring_ongoing) {
-          ongoingStopped = await trx('scheduled_services')
+          const targetQuery = trx('scheduled_services')
             .where(function () {
               this.where('id', parentId).orWhere('recurring_parent_id', parentId);
             })
-            .where('recurring_ongoing', true)
-            .update({ recurring_ongoing: false, updated_at: new Date() });
-        }
-      });
+            .where(function () {
+              this.whereIn('status', cancellableStatuses)
+                .orWhere(function () {
+                  this.where('id', svc.id).whereNotIn('status', terminalStatuses);
+                });
+            });
+          if (scope === 'following') {
+            targetQuery.where('scheduled_date', '>=', svc.scheduled_date);
+          }
+          // FOR UPDATE: the coverage read below and the per-row transitions
+          // must see one consistent row state. A prepaid writer (single-visit
+          // /:id/prepaid, stampSeriesPrepaid) updates prepaid_amount without
+          // touching status, so the transition's status-only CAS would not
+          // notice a payment that landed between this select and the
+          // transition (Codex #3878 r1 P1). Row locks make the writer wait
+          // for this commit (its own status filter then sees 'cancelled') or
+          // make this select wait for the writer's commit and read the stamp.
+          targets = await targetQuery
+            .orderBy('scheduled_date', 'asc')
+            .forUpdate()
+            .select('id', 'status', 'customer_id', 'service_type', 'scheduled_date', 'annual_prepay_term_id', 'prepaid_amount');
+          if (!targets.length) return; // nothing written — 409 after commit
+
+          // Money already taken for a target (annual prepay term, hand-
+          // collected prepayment, an invoice holding money) refuses the WHOLE cancel — the same contract
+          // as the plan-length trim (findBillingCoveredVisits, admin-schedule):
+          // a series cancel that silently dropped paid visits would leave
+          // money taken for visits that never happen, with no refund or
+          // coverage decision recorded. The Cancel plan flow on the customer
+          // profile owns that decision (end at term / refund). Read in-lock,
+          // before any row is written; fee holds are NOT a refusal reason here
+          // because this route runs the fee rails with a waiver control.
+          {
+            const { findBillingCoveredVisits } = require('./admin-schedule');
+            const covered = await findBillingCoveredVisits(trx, targets, { feeRails: false });
+            if (covered.size > 0) {
+              const [firstId, reason] = [...covered.entries()][0];
+              const first = targets.find((t) => t.id === firstId);
+              billingCovered = { count: covered.size, reason, firstDate: serviceDateOnly(first?.scheduled_date) };
+              throw new Error('BILLING_COVERED_VISIT');
+            }
+          }
+
+          for (const target of targets) {
+            await transitionJobStatus({
+              jobId: target.id,
+              fromStatus: target.status,
+              toStatus,
+              transitionedBy: req.technicianId,
+              lat,
+              lng,
+              notes,
+              trx,
+              // Caller-owned: the series branch below runs its own awaited
+              // per-visit handleCancellation (notify-or-suppress per the
+              // request flag) plus one combined notice — the hook must stand
+              // down entirely, not race those claims.
+              notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
+              cancelNoticeToken: seriesClaimToken,
+            });
+          }
+
+          // Stop the plan ATOMICALLY with the row cancels: both 'following'
+          // and 'series' cancel the remainder of the series, so a parent left
+          // flagged recurring_ongoing would let a later completion of an
+          // earlier retained visit re-extend — and re-bill — the cancelled
+          // cadence. Cleared series-wide (parent + children carry the flag)
+          // in the SAME transaction, under the maintenance lock above.
+          // Single-occurrence cancels (scope 'this_only') never enter this
+          // branch and leave the flag intact. The per-row cancellation reason
+          // is already stamped by transitionJobStatus (notes →
+          // job_status_history); the activity_log line below records the
+          // plan stop.
+          const cols = await trx('scheduled_services').columnInfo().catch(() => ({}));
+          if (cols.recurring_ongoing) {
+            ongoingStopped = await trx('scheduled_services')
+              .where(function () {
+                this.where('id', parentId).orWhere('recurring_parent_id', parentId);
+              })
+              .where('recurring_ongoing', true)
+              .update({ recurring_ongoing: false, updated_at: new Date() });
+          }
+        });
+      } catch (err) {
+        if (!billingCovered) throw err;
+        return res.status(409).json({
+          error: `Can't cancel ${scope === 'series' ? 'this plan' : 'the rest of this plan'}: the ${billingCovered.firstDate || 'later'} visit is ${billingCovered.reason}`
+            + (billingCovered.count > 1 ? ` (${billingCovered.count} visits are)` : '')
+            + '. Use Cancel plan on the customer profile (it settles the prepaid term), or handle the billing first.',
+          code: 'BILLING_COVERED_VISIT',
+          coveredCount: billingCovered.count,
+        });
+      }
 
       if (!targets.length) return res.status(409).json({ error: 'No cancellable appointments found in this series' });
 
@@ -3802,6 +3891,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // proof, and passing skipCardRequest for an unowned confirm permanently
     // suppressed the card funnel (customer_confirmed stamps, no retry rail).
     let fieldConfirmVerified = false;
+    // The transition's committed payload — the voice-confirm card below
+    // must name the holder as WRITTEN, not as read.
+    let transition = null;
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -3870,7 +3962,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // (customer:job_update, dispatch:job_update, dispatch:alert_resolved)
         // chain on trx.executionPromise — fire post-commit, suppressed
         // on rollback.
-        await transitionJobStatus({
+        transition = await transitionJobStatus({
           jobId: svc.id,
           fromStatus,
           toStatus,
@@ -3914,6 +4006,25 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // (Voice-agent bookings share this lifecycle via
     // OFFICE_REVIEW_PENDING_SOURCE_ACTIONS: office confirm is what arms
     // reminders for them too.)
+    // A voice-agent booking is inserted SILENT (relay-booking.js: a pending
+    // office-review row is not yet real); the office confirm is when it
+    // becomes a visit on the tech's route, and no assignment write follows —
+    // so the "new visit" card fires here, post-commit. Call-created
+    // office-review rows were announced at insert (call-proc) and stay quiet.
+    // Recipient and schedule come from the COMMITTED row the transition
+    // returned (codex r9 P1): the status CAS pins only the status, so a
+    // reassignment that lands between this route's `svc` read and the
+    // transition confirms the NEW holder's row — the earlier read would
+    // name a technician the write-time guard then drops, leaving the real
+    // holder with no card at all.
+    const confirmedRow = transition?.adminPayload || null;
+    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
+      });
+    }
     if (isOfficeReviewConfirm) {
       const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
       // A technician token alone is NOT a field confirm — only the
@@ -4483,6 +4594,8 @@ const {
   validateSpecialtyAreas,
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
+
+const { LAWN_STRUCTURED_OBSERVATIONS } = require('../../shared/lawn-condition-findings');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -5469,7 +5582,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // with the dynamic actions its older client offered.
     const explicitSpecialtyLane = Boolean(specialtyServiceKey({ serviceKey: completionProfile?.serviceKey }));
     const allowedStructuredObservations = new Set(
-      observationsForSpecialtyService(resolvedSpecialtyServiceKey),
+      reportServiceLine === 'lawn' && !typedFindingsType
+        ? LAWN_STRUCTURED_OBSERVATIONS
+        : observationsForSpecialtyService(resolvedSpecialtyServiceKey),
     );
     // New clients separate controlled dropdown values from free text. For an
     // older specialty client that lacks that field, recover only exact values
@@ -14078,6 +14193,69 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 });
 
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
+// Whether this recap must consume the kit: a first completion always; a
+// priorCompleted recap only when it is the RETRY of the completing recap —
+// the durable completion_supplies_owed marker the transition wrote is still
+// set (submitRecap commits the status before the consumption call, so a
+// process death in between must not lose the kit). Never record age.
+async function recapSuppliesOwed(result) {
+  if (result.priorCompleted !== true) return true;
+  if (!result.recordId) return false;
+  try {
+    const rec = await db('service_records').where({ id: result.recordId }).first('field_flags');
+    const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
+    return flags.completion_supplies_owed === true;
+  } catch (err) {
+    // A failed read establishes nothing: consuming anyway would deduct
+    // today's kit for a HISTORICAL completion edited now — one completed
+    // before consumption existed has no movement, so the at-most-once index
+    // cannot stop it (hook r27 P1). Fail CLOSED: the durable marker (if
+    // set) stays for the next recap of this record; the miss is error-level
+    // so it is never silent.
+    logger.error(`[dispatch] recap supplies-owed read failed for record ${result.recordId} — settlement deferred, marker kept: ${err.message}`);
+    return false;
+  }
+}
+
+// The consume itself (same hook as /:serviceId/complete, same at-most-once
+// index) plus the job-cost recalc a kit movement's cost_used warrants
+// (idempotent UPSERT, fire-and-forget — GH codex r4 P2).
+async function consumeRecapSupplies(serviceId, result) {
+  const { consumeCompletionSupplies } = require('../services/supplies-consumption');
+  const svcRow = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'technician_id', 'service_type');
+  const consumption = await consumeCompletionSupplies(db, {
+    scheduledServiceId: serviceId,
+    serviceRecordId: result.recordId || null,
+    customerId: svcRow?.customer_id || null,
+    technicianId: svcRow?.technician_id || null,
+    isIncompleteVisit: false,
+    visitPerformed: result.priorNonPerformed !== true,
+    serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+    serviceType: svcRow?.service_type || null,
+  });
+  if (consumption?.consumed?.length) {
+    const JobCosting = require('../services/job-costing');
+    void JobCosting.calculateJobCost(serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+  }
+  return consumption;
+}
+
+// Recap consumable settlement: consume when owed, then clear the owed marker
+// — unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell
+// means staff adjust by hand, so a retry must not deduct the same kit again
+// on top of their correction; only a miss nobody was told about keeps the
+// marker so the next retry re-runs the at-most-once consume (pre-push P1).
+// Never throws: the recap response never waits on a supplies write.
+async function settleRecapSupplies(serviceId, result) {
+  if (!(await recapSuppliesOwed(result))) return;
+  try {
+    const consumption = await consumeRecapSupplies(serviceId, result);
+    // A hand-off bell that did not land, or an obsolete one that could not be retired (Codex r30 P1): the marker stays for the next retry.
+    const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed');
+    if (result.recordId && !handoffLost) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
+  } catch (err) { logger.error(`[dispatch] recap supplies consumption failed: ${err.message}`); }
+}
+
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
@@ -14115,40 +14293,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
-    // Yard-sign kit consumption — the recap is the second production
-    // completion path for pest visits (GH codex r2 P1); same hook as
-    // /:serviceId/complete, same at-most-once index, never throws. A recap
-    // re-closing a NOT-performed visit (submitRecap's priorNonPerformed —
-    // the same verdict that blocks referral credit and the card charge)
-    // consumes nothing, matching the original closeout (GH codex r3 P2). A
-    // recap EDIT of a visit that was already completed (priorCompleted) is
-    // not a new visit — no kit was left, nothing is consumed (GH codex r4
-    // P2); the at-most-once index still covers a retry of the completing
-    // recap itself.
-    if (result.priorCompleted !== true) {
-      try {
-        const { consumeCompletionSupplies } = require('../services/supplies-consumption');
-        const svcRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('customer_id', 'technician_id', 'service_type');
-        const consumption = await consumeCompletionSupplies(db, {
-          scheduledServiceId: req.params.serviceId,
-          serviceRecordId: result.recordId || null,
-          customerId: svcRow?.customer_id || null,
-          technicianId: svcRow?.technician_id || null,
-          isIncompleteVisit: false,
-          visitPerformed: result.priorNonPerformed !== true,
-          serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
-          serviceType: svcRow?.service_type || null,
-        });
-        // The recap path has no job-costing kickoff of its own; a kit
-        // movement carries cost_used, so recalc (idempotent UPSERT,
-        // fire-and-forget) whenever something was actually consumed (GH
-        // codex r4 P2).
-        if (consumption?.consumed?.length) {
-          const JobCosting = require('../services/job-costing');
-          void JobCosting.calculateJobCost(req.params.serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
-        }
-      } catch (e) { logger.error(`[dispatch] recap supplies consumption failed: ${e.message}`); }
-    }
+    await settleRecapSupplies(req.params.serviceId, result);
     res.json(result);
   } catch (err) { next(err); }
 });
@@ -14376,6 +14521,19 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
           err.code = 'VISIT_OWNER_CHANGED';
           throw err;
         }
+        // Follow-up bookings inherit the source visit's tech (or an admin
+        // override). Assert on the writing trx: an inherited tech who has
+        // since been offboarded/de-listed lands the follow-up unassigned; an
+        // explicit override that is not assignable is a 422.
+        if (insertData.technician_id) {
+          try {
+            await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+          } catch (eligErr) {
+            if (eligErr.code !== 'TECH_NOT_ASSIGNABLE' || technicianOverride) throw eligErr;
+            logger.warn(`[dispatch] follow-up inherits technician ${insertData.technician_id} who is not assignable; booking unassigned`);
+            insertData.technician_id = null;
+          }
+        }
         const inserted = await trx('scheduled_services').insert(insertData).returning('*');
         // Visit groups (visit-group-scope.md §2): stamp at scheduling —
         // gate-checked + best-effort + self-refusing inside maybeGroupRow
@@ -14411,6 +14569,17 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     // committed and permanently skip reminder registration on the retry
     // (codex P2 r6).
     logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile?.findingsType || 'untyped'}) for ${date}`);
+    // Tech-facing "new visit" card (tech-visit-notifications.js): this
+    // writer inserts the assigned row itself, bypassing assignDispatchJob.
+    // Queued FIRST after commit (before the awaited alert resolution and
+    // reminder registration); silent when the booker IS the tech; only a
+    // FRESH booking — the alreadyScheduled returns above announced nothing.
+    if (appointment.technician_id) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: req.technicianId || null,
+        snapshot: { date: appointment.scheduled_date, windowStart: appointment.window_start || null, windowEnd: appointment.window_end || null },
+      });
+    }
     await resolveOpenFollowupAlerts();
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).
@@ -15843,7 +16012,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // rewinds the tracker lifecycle and frees the tech. Terminal states
     // (completed / cancelled / skipped) still 409. The customer-SMS
     // self-serve path (reschedule-sms.js) does NOT get this override.
-    const rescheduleOptions = { allowLive: true };
+    const rescheduleOptions = { allowLive: true, actorId: req.technicianId || null };
     const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
     if (hasTechnicianId) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
@@ -16156,7 +16325,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         GROUP BY technician_id
       ) today_agg ON today_agg.technician_id = t.id
       WHERE t.role IN ('admin','technician')
-        AND t.active = TRUE
+        AND t.employment_status = 'active'
+        -- Board columns are drop targets: only field-dispatchable staff
+        -- (technician-eligibility.js). Prospective placeholders and
+        -- office-only admins never get a column.
+        AND t.field_dispatchable = TRUE
         AND ts.location_updated_at >= NOW() - INTERVAL '24 hours'
       ORDER BY t.name
       `,
@@ -16629,9 +16802,10 @@ router.post('/alerts/resolve-all', requireAdmin, async (req, res, next) => {
 // pinged today.
 router.get('/technicians', requireAdmin, async (req, res, next) => {
   try {
-    const techs = await db('technicians')
-      .where({ active: true })
-      .select('id', 'name', 'role')
+    // Assignment target list: assignable techs only (prospective placeholders
+    // and office-only accounts never appear as drop targets).
+    const techs = await applyAssignable(db('technicians'))
+      .select('technicians.id', 'technicians.name', 'technicians.role')
       .orderBy('name', 'asc');
     res.json({ technicians: techs });
   } catch (err) {

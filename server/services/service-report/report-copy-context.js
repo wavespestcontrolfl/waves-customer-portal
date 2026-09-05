@@ -17,7 +17,8 @@ const { detectServiceLine } = require('./service-line-configs');
 const { etDateString } = require('../../utils/datetime-et');
 const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
-const { lawnScoreValue, resolveStressDamage, loadLinkedLawnAssessment } = require('./report-data');
+const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
+const { loadLinkedLawnAssessment } = require('./report-data');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();

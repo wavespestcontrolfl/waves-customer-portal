@@ -63,7 +63,7 @@ describe('frozen enum literals == services/seo/link-registry.js', () => {
     ['EXPECTED_PERSISTENCE'], ['RENEWAL_PERIODS'], ['PATH_LINK_TYPES'], ['ATTEMPT_PROVIDERS'], ['ATTEMPT_ACTIONS'], ['ATTEMPT_OUTCOMES'],
     ['AUTHORITY_DIMENSIONS'],
   ])('%s', (name) => {
-    expect(literal(name)).toEqual([...R[name]]);
+    expect(literal(name)).toEqual([...R[name]].filter((value) => name !== 'ATTEMPT_OUTCOMES' || value !== 'slot_released')); // execution migration owns the new outcome
   });
   test('AUTHORITY_LEVELS: the step-1 literal is a prefix of the service enum (step 4a appended OWNER_INPUT_REQUIRED and swapped the CHECK)', () => {
     const step1 = literal('AUTHORITY_LEVELS');

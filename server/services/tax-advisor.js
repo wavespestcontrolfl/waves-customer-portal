@@ -36,6 +36,7 @@ class TaxAdvisor {
     const taxRates = await this.getCurrentTaxRates();
     const exemptions = await this.getExemptionStatus();
     const procurement = await this.getProcurementSummary();
+    const staff = await this.getStaffSummary();
 
     const analysisData = {
       snapshot,
@@ -79,7 +80,7 @@ BUSINESS CONTEXT:
 - Equipment: Ford Transit van, spray systems, dethatcher, topdresser, injection equipment
 - Primary supplier: SiteOne Landscape Supply (Branch #238 Lakewood Ranch)
 - Has a Florida Annual Resale Certificate for product purchases used in taxable services
-- Employees: owner + technician (Adam Benetti)
+- Employees: ${staff}
 - Software stack: Stripe (payments/invoicing), Twilio (SMS), Railway (hosting), various SaaS
 
 YOUR WEEKLY TASKS:
@@ -198,6 +199,26 @@ Please search for current FL and federal tax changes, then provide your analysis
   }
 
   // ── Data Gathering Methods ─────────────────────────────────
+
+  // Live headcount for the prompt, classified from each active row's PAYROLL
+  // profile (technicians.employment_type: 'w2' | '1099' | null), never from
+  // login state alone — employment_status says who may sign in; an active
+  // admin login or an unclassified row is not a W-2 employee. Prospective
+  // placeholders and offboarded rows are excluded up front.
+  async getStaffSummary() {
+    try {
+      const rows = await db('technicians').where({ employment_status: 'active' }).select('employment_type');
+      const w2 = rows.filter((r) => r.employment_type === 'w2').length;
+      const contractors = rows.filter((r) => r.employment_type === '1099').length;
+      const unclassified = rows.length - w2 - contractors;
+      return `${w2} W-2 employee${w2 === 1 ? '' : 's'}, ${contractors} 1099 contractor${contractors === 1 ? '' : 's'}, `
+        + `${unclassified} active staff login${unclassified === 1 ? '' : 's'} with no payroll classification `
+        + '(owner-operator/admin or not yet set — not counted as employees); classification comes from the payroll profile, not login status';
+    } catch (err) {
+      logger.warn(`[tax-advisor] staff count failed: ${err.message}`);
+      return 'owner-operator plus staff (live payroll classification unavailable)';
+    }
+  }
 
   async gatherFinancialSnapshot() {
     try {

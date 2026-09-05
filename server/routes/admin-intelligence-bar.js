@@ -66,6 +66,7 @@ const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
 const logger = require('../services/logger');
+const { applyAssignable } = require('../services/technician-eligibility');
 const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
@@ -1392,7 +1393,7 @@ SCHEDULE-SPECIFIC CAPABILITIES:
 
 ROUTE OPTIMIZATION:
 When the operator says "optimize routes" or "optimize", run optimize_all_routes for the current date.
-When they say "optimize Adam's route", run optimize_tech_route.
+When they name one technician ("optimize <name>'s route"), run optimize_tech_route.
 After optimization, report miles saved and the new stop order.
 
 ZONE INTELLIGENCE:
@@ -2041,6 +2042,22 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   return executeTool(toolName, input, actionContext);
 }
 
+// Field technicians who can take an assignment right now (active AND
+// field-dispatchable — technician-eligibility.js is the one definition).
+async function liveTeamPrompt() {
+  try {
+    const techs = await applyAssignable(db('technicians')).orderBy('name').select('name');
+    const names = techs.map((t) => t.name).filter(Boolean);
+    return '\n\nTEAM (live roster):\n'
+      + `- Field technicians who can take assignments: ${names.length ? names.join(', ') : 'none currently dispatchable'}\n`
+      + '- Office: Virginia (office manager)\n'
+      + '- Refer to technicians by the name shown here; never assume anyone else is on the schedule.';
+  } catch (err) {
+    logger.warn(`[intelligence-bar] live roster read failed: ${err.message}`);
+    return '';
+  }
+}
+
 const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
 
 BUSINESS CONTEXT:
@@ -2149,6 +2166,13 @@ router.post('/query', async (req, res, next) => {
     // separately cacheable.
     if (context !== 'tech' && context !== 'agent_estimate' && req.techRole === 'admin') {
       systemPrompt += '\n\n' + INFRA_PROMPT;
+    }
+    // The roster is read live so a hire or offboarding never leaves the model
+    // naming someone who is not on the schedule. Appended after the static
+    // blocks so the cacheable prefix is unchanged; the tech context keeps its
+    // isolated prompt.
+    if (context !== 'tech') {
+      systemPrompt += await liveTeamPrompt();
     }
     if (context === 'agent_estimate') {
       systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
@@ -3177,4 +3201,5 @@ module.exports = router;
 // Exposed for the write-gate contract test — keeps the test's
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
+module.exports.liveTeamPrompt = liveTeamPrompt;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));

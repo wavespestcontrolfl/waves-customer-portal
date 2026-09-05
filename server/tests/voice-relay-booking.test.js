@@ -205,7 +205,13 @@ function primeDb({
     ignore: jest.fn(() => triageTrx),
     returning: jest.fn(() => Promise.resolve(reviewCardTaken ? [] : [{ id: 'triage-9' }])),
   };
-  trxBuilders = { scheduled_services: ssTrx, triage_items: triageTrx };
+  // Save-time eligibility read (technician-eligibility.js): the offered
+  // tech is assignable unless a test overrides trxBuilders.technicians.
+  const techTrx = {
+    first: jest.fn(() => Promise.resolve({ id: 't-1', name: 'Tech One', employment_status: 'active', field_dispatchable: true })),
+  };
+  techTrx.where = jest.fn(() => techTrx);
+  trxBuilders = { scheduled_services: ssTrx, triage_items: triageTrx, technicians: techTrx };
   trx = (table) => trxBuilders[table];
   trx.raw = jest.fn((sql) => sql);
   db.transaction.mockImplementation(async (cb) => cb(trx));

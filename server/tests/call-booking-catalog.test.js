@@ -1428,6 +1428,11 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
     // Tracking columns land on the same per-child trx.
     expect(log.updates).toHaveLength(2);
     expect(log.updates[0].where).toEqual({ id: 'child-1' });
+    // The acting staff row rides into each child's transition (history + the child's tech cancel card).
+    transitionJobStatus.mockClear();
+    const withActor = fakeConn({ children: [{ id: 'child-3' }] });
+    await cancelCallFollowUpsForParentCancel({ conn: withActor.conn, parentServiceId: 'svc-parent', actorId: 'staff-1' });
+    expect(transitionJobStatus.mock.calls[0][0]).toMatchObject({ jobId: 'child-3', transitionedBy: 'staff-1' });
     expect(log.updates[0].payload).toMatchObject({
       track_state: 'cancelled',
       cancellation_reason: 'parent_call_booking_cancelled',

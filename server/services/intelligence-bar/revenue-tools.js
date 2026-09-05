@@ -77,7 +77,7 @@ Use for: "what's our ad ROAS?", "which marketing channel has the best ROI?", "ho
   {
     name: 'get_tech_revenue_performance',
     description: `Revenue performance by technician: services completed, hours worked, revenue generated, RPMH (revenue per man-hour), and margin %.
-Use for: "who's the most efficient tech?", "compare Adam vs Jose revenue", "tech RPMH rankings"`,
+Use for: "who's the most efficient tech?", "compare two techs' revenue", "tech RPMH rankings"`,
     input_schema: {
       type: 'object',
       properties: {

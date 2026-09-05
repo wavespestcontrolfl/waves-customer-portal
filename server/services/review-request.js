@@ -17,6 +17,27 @@ const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
+
+// Neutral technician labels for customer copy when no name resolves — never a
+// person's name (Field Team Program: the visiting tech is whoever the row says).
+// The SMS form is 9 characters so every {tech}-bearing template stays inside
+// one GSM-7 segment at its documented worst case (12-char first name + the
+// 43-char shortened link); email has no segment budget.
+const TECH_FALLBACK = "Your technician";
+const TECH_FALLBACK_SMS = "Your tech";
+
+// First name from the technician row when an ask carries technician_id but no
+// tech_name (override callers, legacy rows). Null when unknown.
+async function technicianFirstName(technicianId) {
+  if (!technicianId) return null;
+  try {
+    const row = await db("technicians").where({ id: technicianId }).first("name");
+    return firstNameFrom(row?.name) || null;
+  } catch (err) {
+    logger.warn(`[review-request] technician name lookup failed: ${err.message}`);
+    return null;
+  }
+}
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
@@ -260,6 +281,48 @@ const ASK_CAP_WINDOW_DAYS = 180;
 // {{intro_paragraph}} default when no personalized draft verified. Keep in
 // lockstep with the seed copy in
 // migrations/20260806000001_review_email_intro_paragraph.js.
+// Same span as the review cooldown ("received a review request in the last
+// 30 days"): an inline row texted inside it is the one an Email-only Quick
+// Link would otherwise be refused for.
+const INLINE_EMAIL_RETRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+// One retry for a bookkeeping write that IS a send-once guard or the
+// delivery record: a lost stamp leaves a delivered ask invisible to the
+// gates or the analytics for good. Returns whether a write landed; the
+// second failure is an error, never a shrug.
+// A 4xx from SendGrid is a DEFINITE rejection — not accepted, safe to retry
+// after a fix — where a 5xx / network failure MAY have been accepted (r16 P2).
+// The semantics live with the transport (sendgrid-mail.js).
+const isDefiniteProviderRejection = (err) => require("./sendgrid-mail").isDefiniteRejection(err);
+
+// Inline rows past the point where another solicitation would be a second
+// ask: the customer already answered (or the row was stopped). `opened`
+// stays eligible for the owed email leg (r16 P2); these do not (r17 P2).
+const INLINE_RETRY_TERMINAL_STATUSES = ["completed", "stopped", "suppressed", "failed", "rated"];
+// A NON-PROMOTER draft score (/rate/:token/score stores score + category with
+// no submitted_at) is a response too — the cadence stops on it
+// (_runSequenceStep "responded"), so the owed email leg must not follow
+// it either (GH Codex #3856 r19 P2).
+function notNonPromoterDraft(q) {
+  return q.whereNull("score").orWhere({ category: "promoter" });
+}
+
+async function stampWithRetry(makeQuery, label) {
+  try {
+    await makeQuery();
+    return true;
+  } catch (firstErr) {
+    logger.warn(`[review] ${label} failed, retrying once: ${firstErr.message}`);
+    try {
+      await makeQuery();
+      return true;
+    } catch (err) {
+      logger.error(`[review] ${label} LOST after retry: ${err.message}`);
+      return false;
+    }
+  }
+}
+
 const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. If your recent service hit the mark, would you take 15 seconds to share a quick review?";
 
 /**
@@ -1870,6 +1933,240 @@ const ReviewService = {
     return { url, requestId: request.id, token: request.token };
   },
 
+  /**
+   * Composer "Both" channel (owner ruling 2026-09-03): after the operator's
+   * text carrying an inline ask has REALLY sent, email the same ask — same
+   * row, same token, same link — so the customer gets it on both channels
+   * and the cap/cooldown count ONE ask (getDeliveredAskStats counts rows,
+   * not channels). Never mints a row and never touches `status` (the SMS
+   * leg owns it); on a real send it stamps `sent_at` once. Consent is the
+   * email half of sendOutreachTouch's rules: no prefs row, review_request
+   * off, or email_enabled off refuses; a prefs read failure fails CLOSED.
+   * Returns { sent, reason } — never throws.
+   */
+  /**
+   * The most recent composer-texted BOTH ask whose email leg is still owed
+   * (status 'sent', sms_sent_at within the 30-day cooldown, sent_at null,
+   * email_leg_owed_at set). Quick Links → Email after a Both whose email
+   * leg failed lands here: the cooldown would refuse a fresh ask, so the
+   * caller re-attempts the SAME row's email copy instead — idempotent per
+   * row (GH Codex #3856 r7). email_leg_owed_at is the persisted evidence
+   * the ask requested an email leg — a Text-only composer ask or a
+   * completion-SMS ask never matches — and it is cleared once the email
+   * MAY have reached the provider, so an uncertain leg is never re-sent
+   * blindly (r8 P1/P2).
+   */
+  async findInlineAwaitingEmail(customerId) {
+    if (!customerId) return null;
+    const since = new Date(Date.now() - INLINE_EMAIL_RETRY_WINDOW_MS);
+    // Anchored on the claim stamp (email_leg_owed_at = claimed_at of the
+    // Both claim): present on every candidate, set seconds before the text.
+    // Candidates are the TEXTED rows (sms_sent_at — whatever lifecycle
+    // status the customer's opening / rating moved them to since; r16 P2)
+    // plus stranded claims still in 'sending'.
+    const row = await db("review_requests")
+      .where({ customer_id: customerId, triggered_by: "auto_inline" })
+      .where((q) => q.whereNotNull("sms_sent_at").orWhere({ status: "sending" }))
+      .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
+      .whereNull("submitted_at")
+      .whereNull("rated_at")
+      .whereNull("redirected_at")
+      .where(notNonPromoterDraft)
+      .whereNull("sent_at")
+      .whereNotNull("email_leg_owed_at")
+      .where("email_leg_owed_at", ">=", since)
+      .orderBy("email_leg_owed_at", "desc")
+      .first("id", "status", "token", "customer_id", "claimed_at", "sms_sent_at");
+    if (!row) return null;
+    if (row.sms_sent_at) return { id: row.id };
+    // A stranded claim: the text left but both delivered-stamp attempts
+    // failed, and the composer sent the operator here to email it. Only
+    // PROOF the text reached the customer lets the email ride on this row
+    // (repairing the stamp, as claimInlineForSend does); no proof = not this
+    // row, and the caller's gated ask decides (GH Codex #3856 r10 P2).
+    const evidence = await this._inlineSendEvidence(row);
+    // Provider unreachable = UNKNOWN, not "not this row": the caller fails
+    // closed (409, try again) rather than minting a fresh ask beside a
+    // stranded row that could still retry once the provider is back (r14 P2).
+    if (evidence.unavailable) throw new Error(`inline send evidence unavailable (requestId=${row.id})`);
+    if (!evidence.found) return null;
+    await this.markInlineDelivered(row.id);
+    return { id: row.id };
+  },
+
+  /**
+   * Live eligibility for the inline email leg: the terminal guards
+   * sendGatedAsk applies (a Both row can be retried days after its text
+   * went — the customer may have reviewed or been removed since; r8 P2)
+   * plus the email half of sendOutreachTouch's consent (no prefs row = no
+   * recorded email consent = no email, fail closed; a prefs read failure
+   * fails closed too). Returns { customer, contact } or { reason }.
+   */
+  async _inlineEmailRecipient(request) {
+    const customer = await db("customers").where({ id: request.customer_id }).first();
+    if (!customer || customer.deleted_at) return { reason: "no_customer" };
+    if (customer.has_left_google_review) return { reason: "already_reviewed" };
+    const { getServiceContact } = require("./customer-contact");
+    const contact = getServiceContact(customer);
+    if (!contact.email) return { reason: "no_email" };
+    let prefs;
+    try {
+      prefs = await db("notification_prefs").where({ customer_id: customer.id }).first();
+    } catch {
+      return { reason: "prefs_unavailable" };
+    }
+    if (!prefs || prefs.review_request === false || prefs.email_enabled === false) return { reason: "email_off" };
+    return { customer, contact };
+  },
+
+  /**
+   * The dispatch claim for the inline email leg, run INSIDE the library's
+   * onQueued hook — durably, while the email still cannot have gone out.
+   * Conditional (whereNotNull): a sibling attempt that finds the leg already
+   * cleared, or a failed write, returns false and the library aborts the
+   * provider call (r9/r10 P2). True = this attempt owns the dispatch.
+   */
+  async _claimInlineEmailDispatch(requestId) {
+    let cleared;
+    try {
+      // The final pre-provider claim re-applies the terminal predicates
+      // (the customer may have answered, been stopped, reviewed or been
+      // removed since the recipient check) so it fails closed (pre-push
+      // Codex P1 on bd85be714).
+      cleared = await db("review_requests")
+        .where({ id: requestId })
+        .whereNotNull("email_leg_owed_at")
+        .whereNotIn("status", INLINE_RETRY_TERMINAL_STATUSES)
+        .whereNull("submitted_at")
+        .whereNull("rated_at")
+        .whereNull("redirected_at")
+        .where(notNonPromoterDraft)
+        .whereExists(function eligibleCustomer() {
+          this.select(db.raw("1")).from("customers")
+            .whereRaw("customers.id = review_requests.customer_id")
+            .whereNull("customers.deleted_at")
+            .whereRaw("COALESCE(customers.has_left_google_review, false) = false");
+        })
+        // Consent as of THIS write, not the recipient read: an opt-out that
+        // lands while the library resolves the template would otherwise
+        // still be emailed — this claim is the last fence before the
+        // provider. Same predicate as _inlineEmailRecipient (a prefs row
+        // must exist; review_request / email_enabled not false) so the two
+        // never disagree (GH Codex #3856 r23 P1).
+        .whereExists(function emailConsent() {
+          this.select(db.raw("1")).from("notification_prefs")
+            .whereRaw("notification_prefs.customer_id = review_requests.customer_id")
+            .whereRaw("COALESCE(notification_prefs.review_request, true) = true")
+            .whereRaw("COALESCE(notification_prefs.email_enabled, true) = true");
+        })
+        // The Both analytics stamp (channel 'both', sent_at — the cooldown
+        // and follow-up anchor) rides on this same durable pre-dispatch
+        // write: stamped after the send it could be lost while the owed
+        // marker was already gone, leaving the row dated by its text alone —
+        // processFollowups would text a second solicitation and the cooldown
+        // would expire right after the email (GH Codex #3856 r22 P2). A
+        // definite provider rejection reverts all three together below.
+        .update({ email_leg_owed_at: null, channel: "both", sent_at: db.raw("COALESCE(sent_at, ?)", [new Date()]) });
+    } catch (e) {
+      logger.warn(`[review] inline email owed clear failed pre-dispatch (requestId=${requestId}): ${e.message}`);
+      return false;
+    }
+    if (!cleared) logger.warn(`[review] inline email leg no longer owed at dispatch (requestId=${requestId})`);
+    return !!cleared;
+  },
+
+  async sendInlineEmailCopy(requestId) {
+    if (!requestId) return { sent: false, reason: "no_request" };
+    let request = null;
+    // onQueued fires immediately before the provider call: a throw after it
+    // MAY have reached SendGrid (the library's post-dispatch bookkeeping
+    // carries no marker), so it is uncertain — never "try again" (r8 P2).
+    // The owed-leg marker is cleared INSIDE onQueued, durably, while the
+    // email still cannot have gone out; a failed clear aborts the provider
+    // call, so no later Quick Links click can ever re-send an email the
+    // provider may hold (r9 P2).
+    let dispatched = false;
+    try {
+      request = await db("review_requests").where({ id: requestId }).first();
+      if (!request) return { sent: false, reason: "no_request" };
+      const who = await this._inlineEmailRecipient(request);
+      if (who.reason) return { sent: false, reason: who.reason };
+      const { customer, contact } = who;
+      const reviewUrl = await buildReviewUrl(request, customer.id);
+      const EmailLib = require("./email-template-library");
+      const result = await EmailLib.sendTemplate({
+        templateKey: "review_request_email",
+        to: contact.email,
+        payload: {
+          first_name: firstNameFrom(contact.name) || customer.first_name || "",
+          review_url: reviewUrl,
+          // The technician createInline persisted on the row; resolved from
+          // technician_id when the name is missing, neutral otherwise.
+          tech_name: request.tech_name || (await technicianFirstName(request.technician_id)) || TECH_FALLBACK,
+          intro_paragraph: GENERIC_EMAIL_INTRO,
+        },
+        recipientType: "customer",
+        recipientId: customer.id,
+        // Per ATTEMPT, not per row: the durable once-only guard is the owed
+        // marker (cleared conditionally in onQueued below — a sibling attempt
+        // that lost that race aborts before the provider), so a row-stable key
+        // is not needed for dedupe, and it would let one blocked attempt (a
+        // suppressed or stale address) dedupe every later retry as terminal
+        // after staff correct the contact (GH Codex #3856 r10 P2).
+        idempotencyKey: `review_touch:${request.id}:email:${Date.now().toString(36)}`,
+        suppressionGroupKey: "service_operational",
+        categories: ["review_request"],
+        // Provider rejections can echo the recipient address — keep the raw
+        // SendGrid body out of the transport log (AGENTS.md: no email
+        // addresses in logs); the sanitized catch below is the only log.
+        suppressProviderErrorLog: true,
+        onQueued: async () => {
+          dispatched = await this._claimInlineEmailDispatch(request.id);
+          return dispatched;
+        },
+      });
+      // Aborted at the dispatch boundary (owed clear failed): nothing reached
+      // the provider and the leg is still owed — a plain, retryable failure.
+      if (result?.aborted) return { sent: false, reason: "email_send_failed" };
+      // A definitive not-sent (suppression, no active template) is decided
+      // BEFORE the library inserts its queued row and fires onQueued, so the
+      // owed leg is still set and the operator's next retry finds this row;
+      // after onQueued the provider call either succeeds or throws (the
+      // uncertain path below) — there is no post-dispatch sent:false.
+      if (!result?.sent) return { sent: false, reason: result?.reason || "email_blocked" };
+      // channel 'both' + sent_at were stamped in the dispatch claim (the
+      // outreach analytics count the row as an email touch, channel IN
+      // ('email','both'), and the cooldown / follow-up clock runs from it).
+      return { sent: true };
+    } catch (err) {
+      logger.error(`[review] inline email copy failed (requestId=${requestId} errType=${err?.name || "Error"} dispatched=${dispatched})`);
+      if (!dispatched) return { sent: false, reason: "email_send_failed" };
+      if (isDefiniteProviderRejection(err)) {
+        // Definitely NOT accepted: hand the owed leg back (its original
+        // stamp keeps the retry window) so a corrected address can retry
+        // on the same row — the text's cooldown would refuse a fresh ask.
+        const restored = await stampWithRetry(
+          () => db("review_requests").where({ id: requestId }).whereNull("email_leg_owed_at").update({
+            email_leg_owed_at: request?.email_leg_owed_at || new Date(),
+            // The claim's analytics stamp comes back with the owed leg: no
+            // email went out, so the row is texted-only again.
+            channel: request?.channel || "sms",
+            sent_at: request?.sent_at || null,
+          }),
+          `inline email owed restore after a provider rejection (requestId=${requestId})`,
+        );
+        // Restore lost = this row can no longer be retried from Quick Links
+        // and the text's cooldown refuses a fresh ask: say so instead of
+        // "try again" (r17 P2).
+        return { sent: false, reason: restored ? "email_send_failed" : "email_retry_lost" };
+      }
+      // The provider may hold this email. The owed leg was already cleared
+      // before dispatch, so the Quick Links retry path cannot re-send it —
+      // the operator checks the email log instead.
+      return { sent: false, reason: "email_uncertain" };
+    }
+  },
+
   async markInlineDelivered(requestId, claimToken = null) {
     if (!requestId) return;
     let q = db("review_requests")
@@ -1909,29 +2206,18 @@ const ReviewService = {
    * createInline keeps reusing it so no second token mints around the
    * block). Re-texting a solicitation is the one unacceptable outcome.
    */
-  async claimInlineForSend(requestId) {
-    if (!requestId) return false;
-    // The claim stamp doubles as the FENCE token: mark/release only act
-    // while claimed_at still equals the token the caller was handed, so a
-    // holder superseded by a later reclaim can neither mark nor release the
-    // replacement claim (inlineClaimStillHeld re-checks it pre-provider).
-    const token = new Date();
-    const claimed = await db("review_requests")
-      .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
-      .whereNull("sms_sent_at")
-      .update({ status: "sending", claimed_at: token });
-    if (claimed > 0) return token;
-
-    // Not pending — a stale abandoned claim is the only other claimable
-    // state, and only after reconciling it against the outbound log.
-    const staleBefore = new Date(Date.now() - INLINE_CLAIM_STALE_MS);
-    const row = await db("review_requests")
-      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
-      .whereNull("sms_sent_at")
-      .where("claimed_at", "<", staleBefore)
-      .first("id", "token", "customer_id", "claimed_at");
-    if (!row) return false;
-
+  // emailRequested: the composer asked for Both — the email half of THIS
+  // ask is owed (email_leg_owed_at) and Quick Links → Email may re-attempt
+  // it on the same row; every other claim clears the marker so a Text-only
+  // ask on a previously-Both row can never be emailed (GH Codex #3856 r8 P1).
+  /**
+   * Did a claimed inline ask REALLY reach the customer? Shared by the stale-
+   * claim reconcile (claimInlineForSend) and the Quick Links email retry on a
+   * stranded claim (findInlineAwaitingEmail). Returns { found } — proof the
+   * text left (local log or provider) — or { unavailable: true } when the
+   * provider cannot answer (unknown is not "not sent").
+   */
+  async _inlineSendEvidence(row) {
     // Any outbound sms_log row carrying this ask's link (long token or its
     // short URL) is proof the ask reached the provider — excluding
     // in-flight/reservation ('sending') and failure rows, which are not
@@ -1954,11 +2240,7 @@ const ReviewService = {
         .whereNotIn("status", ["sending", "failed", "undelivered", "blocked", "canceled"])
         .where("message_body", "like", `%${frag}%`)
         .first("id");
-      if (evidence) {
-        // The ask went out — repair the missing stamp.
-        await this.markInlineDelivered(requestId);
-        return false;
-      }
+      if (evidence) return { found: true };
     }
 
     // No local evidence is NOT proof of no send (twilio.js swallows a
@@ -1977,18 +2259,48 @@ const ReviewService = {
         sentAfter: row.claimed_at,
         bodyFragment: frag,
       });
-      if (provider.unavailable) return false;
-      if (provider.found) {
-        await this.markInlineDelivered(requestId);
-        return false;
-      }
+      if (provider.unavailable) return { unavailable: true };
+      if (provider.found) return { found: true };
     }
+    return { found: false };
+  },
+
+  async claimInlineForSend(requestId, { emailRequested = false } = {}) {
+    if (!requestId) return false;
+    // The claim stamp doubles as the FENCE token: mark/release only act
+    // while claimed_at still equals the token the caller was handed, so a
+    // holder superseded by a later reclaim can neither mark nor release the
+    // replacement claim (inlineClaimStillHeld re-checks it pre-provider).
+    const token = new Date();
+    const claimed = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
+      .whereNull("sms_sent_at")
+      .update({ status: "sending", claimed_at: token, email_leg_owed_at: emailRequested ? token : null });
+    if (claimed > 0) return token;
+
+    // Not pending — a stale abandoned claim is the only other claimable
+    // state, and only after reconciling it against the outbound log.
+    const staleBefore = new Date(Date.now() - INLINE_CLAIM_STALE_MS);
+    const row = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("claimed_at", "<", staleBefore)
+      .first("id", "token", "customer_id", "claimed_at");
+    if (!row) return false;
+
+    const evidence = await this._inlineSendEvidence(row);
+    if (evidence.found) {
+      // The ask went out — repair the missing stamp.
+      await this.markInlineDelivered(requestId);
+      return false;
+    }
+    if (evidence.unavailable) return false;
     const reclaimToken = new Date();
     const reclaimed = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
       .whereNull("sms_sent_at")
       .where("claimed_at", "<", staleBefore)
-      .update({ claimed_at: reclaimToken });
+      .update({ claimed_at: reclaimToken, email_leg_owed_at: emailRequested ? reclaimToken : null });
     return reclaimed > 0 ? reclaimToken : false;
   },
 
@@ -2371,7 +2683,11 @@ const ReviewService = {
     // would get a stale follow-up.
     const followupsClosed = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
-      .where("sms_sent_at", "<", cutoff)
+      // A texted ask only (email-only asks never get the text follow-up),
+      // aged from the LATER channel: a Both email retried after the text
+      // must not leave the row instantly follow-up eligible (r17 P2).
+      .whereNotNull("sms_sent_at")
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
       .where({ followup_sent: false })
       .whereExists(function () {
         this.select(1)
@@ -2386,7 +2702,11 @@ const ReviewService = {
 
     const nonPromoterDrafts = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
-      .where("sms_sent_at", "<", cutoff)
+      // A texted ask only (email-only asks never get the text follow-up),
+      // aged from the LATER channel: a Both email retried after the text
+      // must not leave the row instantly follow-up eligible (r17 P2).
+      .whereNotNull("sms_sent_at")
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
       .where({ followup_sent: false })
       .whereNull("rated_at")
       .where("score", "<", 8)
@@ -2396,7 +2716,7 @@ const ReviewService = {
           .whereRaw("customers.id = review_requests.customer_id")
           .whereNotNull("customers.deleted_at");
       })
-      .orderBy("sms_sent_at", "asc")
+      .orderByRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) ASC")
       .limit(20);
 
     let internalFollowups = 0;
@@ -2452,7 +2772,11 @@ const ReviewService = {
 
     const eligible = await db("review_requests")
       .whereIn("status", ["sent", "opened"])
-      .where("sms_sent_at", "<", cutoff)
+      // A texted ask only (email-only asks never get the text follow-up),
+      // aged from the LATER channel: a Both email retried after the text
+      // must not leave the row instantly follow-up eligible (r17 P2).
+      .whereNotNull("sms_sent_at")
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
       .where({ followup_sent: false })
       .whereNull("rated_at")
       // Draft score taps are durable but not final. Do not send the
@@ -2465,7 +2789,7 @@ const ReviewService = {
           .whereRaw("customers.id = review_requests.customer_id")
           .whereNotNull("customers.deleted_at");
       })
-      .orderBy("sms_sent_at", "asc")
+      .orderByRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) ASC")
       .limit(20);
 
     let sent = 0;
@@ -2641,6 +2965,10 @@ const ReviewService = {
     // template-less send to friendly_ask — the satisfaction fold needs the
     // canonical body incl. its {reservice_line} clause (codex #3285 r5b).
     canonicalTemplate = false,
+    // Quick Links Email-only (owner ruling 2026-09-03): the operator chose
+    // the channel, so an unavailable channel is a refusal, never a swap to
+    // the other one. Default false keeps the cadence's cross-channel fallback.
+    strictChannel = false,
   }) {
     if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
@@ -2791,9 +3119,13 @@ const ReviewService = {
     let intended = noLinkSend ? "sms" : channel === "email" ? "email" : "sms";
     if (!noLinkSend && prefChannel === "email") intended = "email";
 
-    let actualChannel = intended;
-    if (actualChannel === "sms" && !allowSms) actualChannel = allowEmail ? "email" : null;
-    if (actualChannel === "email" && !allowEmail) actualChannel = allowSms ? "sms" : null;
+    // The intended channel when allowed; else the other one unless the
+    // operator chose the channel (strictChannel — Quick Links Email-only,
+    // owner ruling 2026-09-03: an unavailable channel is a refusal, never a
+    // swap); else nothing.
+    const allowed = { sms: allowSms, email: allowEmail };
+    const other = { sms: "email", email: "sms" }[intended];
+    const actualChannel = allowed[intended] ? intended : (!strictChannel && allowed[other] ? other : null);
     if (!actualChannel) {
       const optedOut = reviewBlocked || (intended === "email" ? emailBlocked : smsBlocked);
       return { ok: false, reason: optedOut ? "opted_out" : "no_contact", blocked: optedOut, terminal: true };
@@ -2971,7 +3303,7 @@ const ReviewService = {
       // First name only (codex #3235 r2 P2): a full technician name blows the
       // one-segment budget on the {tech}-bearing templates, and the customer
       // knows the tech by first name anyway.
-      tech: firstNameFrom(techName) || "Adam",
+      tech: firstNameFrom(techName) || (await technicianFirstName(technicianId)) || TECH_FALLBACK_SMS,
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };
@@ -3135,9 +3467,44 @@ const ReviewService = {
     return { ok: false, retryable: true, channel, requestId: request.id, code: result?.code };
   },
 
+  /**
+   * The outcome of an outreach email whose send THREW. There is NO standalone
+   * email retry driver — processScheduled only re-sends SMS — so:
+   *  • after dispatch, one-off → SendGrid MAY hold it, and "try again" would
+   *    mint a fresh row (a fresh idempotency key) on top of it: count it as
+   *    the ask (the cooldown stamp, retried once — it IS the duplicate guard,
+   *    r11 P2) and tell the operator to check the email log (r9 P2);
+   *  • sequence touch → the cron re-runs this step under its step-stable
+   *    idempotency key: mark 'failed', report retryable;
+   *  • one-off before dispatch → nothing would ever retry it: mark 'failed',
+   *    report a hard failure so the caller never says "queued".
+   */
+  async _outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err }) {
+    // A definite 4xx rejection after dispatch is a plain failure, never an
+    // ask — no cooldown stamp for an email nobody received (r16 P2).
+    if (dispatched && !isDefiniteProviderRejection(err) && manageRetryVia !== "sequence") {
+      const stamped = await stampWithRetry(
+        () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }),
+        `uncertain outreach email cooldown stamp (requestId=${request.id})`,
+      );
+      // No stamp = no cooldown guard in the DB: the row is an unscheduled
+      // pending ask the gates cannot see, so the OPERATOR is the guard — a
+      // distinct reason says so ("do not send it again"; r13 P2).
+      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: stamped ? "email_uncertain" : "email_uncertain_unrecorded" };
+    }
+    await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+    if (manageRetryVia === "sequence") {
+      return { ok: false, retryable: true, channel: "email", requestId: request.id };
+    }
+    return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_send_failed" };
+  },
+
   async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia, introParagraph = null }) {
     // Same split as SMS (audit P1): only the SEND is in the retry-on-throw path.
     let result;
+    // onQueued fires immediately before the provider call — a throw after it
+    // MAY have reached SendGrid (GH Codex #3856 r9 P2).
+    let dispatched = false;
     try {
       const EmailLib = require("./email-template-library");
       result = await EmailLib.sendTemplate({
@@ -3146,7 +3513,7 @@ const ReviewService = {
         payload: {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
-          tech_name: techName || "Adam",
+          tech_name: techName || (await technicianFirstName(request?.technician_id)) || TECH_FALLBACK,
           // The template's opening paragraph is {{intro_paragraph}} — the
           // personalized draft when one verified, else the canonical generic
           // copy. Always supplied: a missing variable renders an empty
@@ -3165,38 +3532,40 @@ const ReviewService = {
             : `review_touch:${request.id}`,
         suppressionGroupKey: "service_operational",
         categories: ["review_request"],
+        // Provider rejections can echo the recipient address — keep the raw
+        // SendGrid body out of the transport log; the sanitized catch below
+        // (request id + error class) is the only log.
+        suppressProviderErrorLog: true,
+        onQueued: () => { dispatched = true; },
       });
     } catch (err) {
-      logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
-      // There is NO standalone email retry driver — processScheduled only
-      // re-sends SMS (it excludes channel='email'). So:
-      //  • sequence touch → the sequence cron re-runs this step; mark 'failed'
-      //    and report retryable so _runSequenceStep reschedules next_run_at.
-      //  • one-off (cron) → nothing would ever retry it; mark 'failed' and report
-      //    a hard failure so the caller doesn't tell the operator it's "queued".
-      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
-      if (manageRetryVia === "sequence") {
-        return { ok: false, retryable: true, channel: "email", requestId: request.id };
-      }
-      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_send_failed" };
+      logger.error(`[review] outreach email send threw (requestId=${request.id} errType=${err?.name || "Error"} dispatched=${dispatched})`);
+      return this._outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err });
     }
 
     // Send returned — bookkeeping failures here must NOT requeue (the email
     // library already deduped/sent). Report based on the result.
+    if (result && result.sent) {
+      const stamped = await stampWithRetry(
+        () => db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() }),
+        `outreach email sent stamp (requestId=${request.id})`,
+      );
+      if (stamped || manageRetryVia === "sequence") return { ok: true, sent: true, channel: "email", requestId: request.id };
+      // The email WENT, but the one-off row is still an unscheduled pending
+      // ask — invisible to checkUnscheduledAskGates — so reporting "sent"
+      // would invite a second click and a duplicate. Terminal, and the
+      // operator is told it went and not to resend (GH Codex #3856 r12 P2).
+      // A sequence step keeps its step-stable idempotency key, so it stays ok.
+      return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_sent_unrecorded" };
+    }
     try {
-      if (result && result.sent) {
-        await db("review_requests").where({ id: request.id }).update({ status: "sent", sent_at: new Date() });
-        return { ok: true, sent: true, channel: "email", requestId: request.id };
-      }
       await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
       return { ok: false, blocked: true, terminal: true, channel: "email", requestId: request.id, reason: result?.reason || "email_blocked" };
     } catch (bookErr) {
-      logger.error(`[review] post-send email bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`);
-      // Only a SENT result avoids retry. A not-sent result keeps retryability so
-      // the cadence step isn't stopped over a bookkeeping blip.
-      return result?.sent
-        ? { ok: true, sent: true, channel: "email", requestId: request.id }
-        : { ok: false, retryable: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
+      logger.error(`[review] post-send email bookkeeping failed (requestId=${request.id} errType=${bookErr?.name || "Error"})`);
+      // A not-sent result keeps retryability so the cadence step isn't
+      // stopped over a bookkeeping blip.
+      return { ok: false, retryable: true, channel: "email", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 
@@ -3319,6 +3688,7 @@ const ReviewService = {
     manageRetryVia = "cron",
     skipLegacyFollowup = false,
     canonicalTemplate = false,
+    strictChannel = false,
   }) {
     const customer = customerArg
       || (customerId ? await db("customers").where({ id: customerId }).first() : null);
@@ -3394,6 +3764,7 @@ const ReviewService = {
         manageRetryVia,
         skipLegacyFollowup,
         canonicalTemplate,
+        strictChannel,
       });
 
       if (touch.ok && touch.sent) {
@@ -3681,13 +4052,24 @@ const ReviewService = {
     let svcType = serviceType;
     let tName = techName;
     if (!svcType || !tName) {
+      // scheduled_services has no tech_name column — the name comes from the
+      // technician row the visit points at (the old read always fell through
+      // to a hardcoded owner name). When the caller names the visit
+      // (scheduledServiceId — the record-less completion path), THAT row is
+      // the source; the customer-wide latest completed visit is only for an
+      // unscoped manual enrollment, so a same-day sibling or a later visit can
+      // never lend its technician to this ask.
       const lastSvc = await db("scheduled_services")
-        .where({ customer_id: customerId, status: "completed" })
-        .orderBy("scheduled_date", "desc")
+        .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+        .where(scheduledServiceId
+          ? { "scheduled_services.id": scheduledServiceId }
+          : { "scheduled_services.customer_id": customerId, "scheduled_services.status": "completed" })
+        .orderBy("scheduled_services.scheduled_date", "desc")
+        .select("scheduled_services.service_type", "technicians.name as tech_name")
         .first()
         .catch(() => null);
       svcType = svcType || lastSvc?.service_type || null;
-      tName = tName || lastSvc?.tech_name || "Adam";
+      tName = tName || lastSvc?.tech_name || null;
     }
     // resolveLocation() routes city → zip → geo first — nearest_location_id
     // (pure straight-line geography, the signal that mis-routed downtown
@@ -4661,7 +5043,9 @@ const ReviewService = {
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
       .whereRaw(ASK_TOUCH_SQL)
       .select("template_key", "sequence_id", "sms_sent_at", "sent_at")
-      .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
+      // The LATER channel: a Both row whose email leg was retried on day 29
+      // restarts the cooldown from the email, not the text (r13 P2).
+      .orderByRaw("GREATEST(sms_sent_at, sent_at) DESC")
       .limit(200);
     const exempt = new Set(exemptSequenceIds);
     const counted = rows.filter((r) => !(
@@ -4670,7 +5054,7 @@ const ReviewService = {
     ));
     const windowStartMs = Date.now() - ASK_CAP_WINDOW_DAYS * 86400000;
     const times = counted
-      .map((r) => new Date(r.sms_sent_at || r.sent_at).getTime())
+      .map((r) => Math.max(...[r.sms_sent_at, r.sent_at].filter(Boolean).map((v) => new Date(v).getTime())))
       .filter((t) => Number.isFinite(t));
     return {
       count: times.filter((t) => t >= windowStartMs).length,
@@ -4693,8 +5077,8 @@ const ReviewService = {
       .groupBy("customer_id")
       .select(
         "customer_id",
-        db.raw("COUNT(*) FILTER (WHERE COALESCE(sms_sent_at, sent_at) >= ?) AS count", [windowStart]),
-        db.raw("MAX(COALESCE(sms_sent_at, sent_at)) AS last_at"),
+        db.raw("COUNT(*) FILTER (WHERE GREATEST(sms_sent_at, sent_at) >= ?) AS count", [windowStart]),
+        db.raw("MAX(GREATEST(sms_sent_at, sent_at)) AS last_at"),
       );
     const map = {};
     rows.forEach((r) => {
@@ -4758,7 +5142,7 @@ const ReviewService = {
         db.raw(`COUNT(*) FILTER (WHERE ${RATED_SQL}) AS rated`),
         db.raw(`COUNT(*) FILTER (WHERE ${PROMOTER_SQL}) AS promoters`),
         db.raw(`COUNT(*) FILTER (WHERE ${REVIEWED_SQL}) AS reviewed`),
-        db.raw("COUNT(*) FILTER (WHERE channel = 'email') AS email_touches"),
+        db.raw("COUNT(*) FILTER (WHERE channel IN ('email', 'both')) AS email_touches"),
       );
 
     const breakdown = (col) =>

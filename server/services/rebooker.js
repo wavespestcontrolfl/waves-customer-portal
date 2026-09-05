@@ -2,6 +2,25 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
+
+// A caller-chosen slot technician who became ineligible between availability
+// and this commit is a "pick another slot" outcome for the customer, not an
+// internal 422 naming staff: translate it to the route's SLOT_TAKEN recovery
+// (reschedule-public refreshes availability on that code).
+async function assertAssignableSlotTechnician(technicianId, trx) {
+  try {
+    await assertAssignableTechnician(technicianId, { conn: trx });
+  } catch (err) {
+    if (err.code !== NOT_ASSIGNABLE) throw err;
+    throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+      statusCode: 409,
+      status: 409,
+      isOperational: true,
+      code: 'SLOT_TAKEN',
+    });
+  }
+}
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
@@ -1174,6 +1193,8 @@ class SmartRebooker {
     // advisory at any setting.
     const overlapAdvisory = options.overlapAdvisory === true;
     let overlapWarned = false;
+    // The technician on the COMMITTED row (RETURNING off the CAS write).
+    let committedTechId = null;
 
     // Deadlock victim retry (codex #3609 r26 P2): the solo-visit recheck
     // takes the row's stop lock AFTER this transaction's tech-day lock,
@@ -1392,8 +1413,30 @@ class SmartRebooker {
         }
       }
 
-      const updated = await applyTrackLifecycleCas(
+      // Save-time eligibility for a tech change (422 TECH_NOT_ASSIGNABLE) on
+      // the same trx that writes it — a slot offered before the tech went
+      // prospective/inactive/office-only cannot land here.
+      if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
+        await assertAssignableSlotTechnician(updates.technician_id, trx);
+      }
+      // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
+      // re-reads the receiving tech's capabilities here; the unit mover runs the
+      // matching options.memberGuard for grouped members). Refuses before the
+      // first write; nothing to undo.
+      if (typeof options.moveGuard === 'function') {
+        await options.moveGuard({ trx, technicianId: keptTechId, service });
+      }
+      // A tech CHANGE pins the observed prior technician in the CAS: the
+      // pre-read is unlocked, and a dispatch reassignment A→B landing
+      // between read and write would otherwise let this move commit and
+      // name A as the "from" tech in the notice while B, the real holder,
+      // hears nothing. A raced reassignment misses and surfaces the
+      // concurrent-change 409 like every other CAS field.
+      const techChangeRequested = Object.prototype.hasOwnProperty.call(updates, 'technician_id')
+        && (updates.technician_id || null) !== (service.technician_id || null);
+      const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
+          .where(techChangeRequested ? { technician_id: service.technician_id ?? null } : {})
           // The full observed tracker/lifecycle snapshot is in the CAS (see
           // applyTrackLifecycleCas): the lifecycleRewound decision above
           // came from the outer read, and tracker writers advance state and
@@ -1427,7 +1470,12 @@ class SmartRebooker {
         .update({
           ...updates,
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
-        });
+        })
+        // The technician on the COMMITTED row: a same-tech move's notice goes
+        // to whoever actually holds the visit now, not the unlocked pre-read.
+        .returning(['id', 'technician_id']);
+      const updated = committedRows.length;
+      committedTechId = committedRows[0]?.technician_id || null;
       if (updated === 0) {
         if (membershipFenced) {
           const now = await trx('scheduled_services').where({ id: serviceId }).first('visit_id');
@@ -1463,6 +1511,50 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
     });
+
+    // Tech-facing notice (tech-visit-notifications.js), post-commit,
+    // best-effort and NOT awaited (push delivery stays off the caller's
+    // response path): a tech change tells both techs; a same-tech
+    // date/window move tells the holder. options.actorId is the acting staff row when a
+    // staff surface made the move (so their own move stays silent); system
+    // callers are named by initiatedBy. options.suppressTechNotice: the unit
+    // mover's member moves — the canonical assignment right after sends the
+    // pair, so no intermediate "visit moved" card.
+    if (options.suppressTechNotice !== true) try {
+      const techNotices = require('./tech-visit-notifications');
+      const noticeActor = options.actorId || initiatedBy || null;
+      // A tech change pinned the prior tech in the CAS (so `service` names
+      // the real "from"); a same-tech move reads the holder off the
+      // committed row.
+      const priorTechId = service.technician_id || null;
+      const noticeTechChanged = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        && (options.technicianId || null) !== priorTechId;
+      if (noticeTechChanged) {
+        void techNotices.notifyAssignmentChange({
+          visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
+          snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
+        });
+      } else if (committedTechId) {
+        const priorDay = service.scheduled_date instanceof Date
+          ? service.scheduled_date.toISOString().slice(0, 10)
+          : String(service.scheduled_date).slice(0, 10);
+        const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+        const slotChanged = priorDay !== newDateStr
+          || hhmm(updates.window_start) !== hhmm(service.window_start)
+          || hhmm(updates.window_end) !== hhmm(service.window_end);
+        if (slotChanged) {
+          void techNotices.notifyVisitRescheduled({
+            visitId: serviceId,
+            technicianId: committedTechId,
+            actorId: noticeActor,
+            previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
+            snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
+          });
+        }
+      }
+    } catch (noticeErr) {
+      logger.warn(`[rebooker] tech notice failed for ${serviceId} (move already committed): ${noticeErr.message}`);
+    }
 
     // Live override post-commit cleanup:
     //   1. The tech's tech_status row still points at this job
@@ -1500,6 +1592,9 @@ class SmartRebooker {
         parentServiceId: serviceId,
         fromDate: originalDate,
         toDate: newDateStr,
+        // Same actor and suppression as the parent's own notice above.
+        noticeActorId: options.actorId || initiatedBy || null,
+        suppressTechNotice: options.suppressTechNotice === true,
       });
       if (shifted > 0) {
         logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
@@ -1559,9 +1654,11 @@ class SmartRebooker {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       // previousStatus: the status the CAS matched — the row's real
       // pre-move state, for callers that restore it (auto-dispatch).
-      return { success: true, originalDate, newDate, previousStatus: service.status, warnings: [slotOverlapWarning(newDateStr)] };
+      return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId, warnings: [slotOverlapWarning(newDateStr)] };
     }
-    return { success: true, originalDate, newDate, previousStatus: service.status };
+    // technicianId: the holder on the COMMITTED row — a caller that suppressed
+    // the per-move tech notice (options.suppressTechNotice) tells them itself.
+    return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId };
   }
 
   // Reschedule the dropped occurrence AND every future sibling in the
@@ -2290,6 +2387,7 @@ class SmartRebooker {
             : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
         ));
         if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+          await assertAssignableSlotTechnician(options.technicianId || null, trx);
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the
           // single-reschedule path above).
@@ -2585,6 +2683,8 @@ class SmartRebooker {
         fromDate: dateOnly(service.scheduled_date),
         toDate: seriesDateStr,
         occupancyHeld: true,
+        // Series-scope moves carry no tech notices in this PR (fan-out).
+        suppressTechNotice: true,
         // The exact rows rung 1 was taken for — a child that changed since
         // is judged against THIS set and skipped, never re-planned onto an
         // unlocked day (codex r12 P1).

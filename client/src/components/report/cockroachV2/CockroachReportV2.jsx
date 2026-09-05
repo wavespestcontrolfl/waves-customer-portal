@@ -6,6 +6,7 @@
 // out, it does not compose copy.
 import { COLORS } from '../../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../../theme-customer';
+import Icon from '../../Icon';
 
 const TEXT = 'var(--text)';
 const MUTED = 'var(--muted)';
@@ -49,7 +50,7 @@ const chip = {
   color: COLORS.glassNavy,
   borderRadius: 999,
   padding: '4px 10px',
-  fontSize: 13,
+  fontSize: 14,
   fontWeight: 600,
 };
 
@@ -120,7 +121,7 @@ export function CockroachWhereFound({ locations = [], evidence = [], conditions 
       ) : null}
       {evidence.length ? (
         <div style={{ marginTop: locations.length ? 12 : 0 }}>
-          <div style={{ ...eyebrow, fontSize: 13, marginBottom: 6 }}>Evidence observed</div>
+          <div style={{ ...eyebrow, fontSize: 14, marginBottom: 6 }}>Evidence observed</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {evidence.map((e) => <span key={e} style={chip}>{e}</span>)}
           </div>
@@ -128,7 +129,7 @@ export function CockroachWhereFound({ locations = [], evidence = [], conditions 
       ) : null}
       {conditions.length ? (
         <div style={{ marginTop: 12 }}>
-          <div style={{ ...eyebrow, fontSize: 13, marginBottom: 6 }}>Conditions that attract roaches</div>
+          <div style={{ ...eyebrow, fontSize: 14, marginBottom: 6 }}>Conditions that attract roaches</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
             {conditions.map((c) => <span key={c} style={chip}>{c}</span>)}
           </div>
@@ -147,17 +148,17 @@ export function CockroachWorkDone({ work = [] }) {
       <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 10 }}>
         {work.map((w) => (
           <li key={w.key || w.title} style={{ display: 'grid', gridTemplateColumns: '26px 1fr', gap: 10, alignItems: 'start' }}>
-            <span aria-hidden="true" style={{ width: 26, height: 26, borderRadius: 8, background: 'rgba(4, 57, 94, 0.08)', display: 'grid', placeItems: 'center', fontSize: 13, fontWeight: 800, color: COLORS.glassNavy }}>
+            <span aria-hidden="true" style={{ width: 26, height: 26, borderRadius: 8, background: 'rgba(4, 57, 94, 0.08)', display: 'grid', placeItems: 'center', fontSize: 14, fontWeight: 700, color: COLORS.glassNavy }}>
               {String(w.short || w.title || '?').charAt(0).toUpperCase()}
             </span>
             <div>
               <div style={{ fontSize: 15, fontWeight: 700, color: TEXT }}>{w.title}</div>
-              {w.detail ? <div style={{ fontSize: 13.5, color: MUTED, marginTop: 2 }}>{w.detail}</div> : null}
+              {w.detail ? <div style={{ fontSize: 14, color: MUTED, marginTop: 2 }}>{w.detail}</div> : null}
             </div>
           </li>
         ))}
       </ul>
-      <p style={{ margin: '12px 0 0', fontSize: 13.5, color: MUTED }}>Product names, EPA registrations and re-entry guidance are listed under Products applied below.</p>
+      <p style={{ margin: '12px 0 0', fontSize: 14, color: MUTED }}>Product names, EPA registrations and re-entry guidance are listed under Products applied below.</p>
     </section>
   );
 }
@@ -173,7 +174,7 @@ export function CockroachHowToHelp({ help = null }) {
         <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'grid', gap: 8 }}>
           {items.map((item) => (
             <li key={item.key || item.text} style={{ display: 'grid', gridTemplateColumns: '20px 1fr', gap: 10, fontSize: 15, lineHeight: 1.5, color: TEXT }}>
-              <span aria-hidden="true" style={{ color: '#1f7a4d', fontWeight: 800 }}>✓</span>
+              <span aria-hidden="true" style={{ color: '#1f7a4d', display: 'inline-flex' }}><Icon name="check" size={16} strokeWidth={2.5} /></span>
               <span>{item.text}</span>
             </li>
           ))}
@@ -203,7 +204,7 @@ export function CockroachProgram({ whatsNext = null, nextVisitLabel = null }) {
           <h3 style={{ margin: 0, fontSize: 17, lineHeight: 1.3, color: TEXT }}>{whatsNext.title}</h3>
         </div>
         {whatsNext.badge ? (
-          <span style={{ background: complete ? 'rgba(4, 57, 94, 0.10)' : COLORS.glassNavy, color: complete ? COLORS.glassNavy : '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 13, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto', marginTop: 2 }}>
+          <span style={{ background: complete ? 'rgba(4, 57, 94, 0.10)' : COLORS.glassNavy, color: complete ? COLORS.glassNavy : '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto', marginTop: 2 }}>
             {whatsNext.badge}
           </span>
         ) : null}

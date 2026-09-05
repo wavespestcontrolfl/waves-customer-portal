@@ -85,7 +85,7 @@ const OFFICE_HOURS_TIMEOUT_MS = 2000;
 // the outcome is unknown and NOT to retry.
 const TOOL_TIMEOUT_MS = 3000;
 const WRITE_TOOL_TIMEOUT_MS = 8000;
-const WRITE_TOOLS = new Set(['capture_lead', 'request_booking', 'request_reservice']);
+const WRITE_TOOLS = new Set(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office']);
 const TOOL_TIMEOUT_TEXT =
   'Could not look that up right now. Do not guess — tell the caller a Waves team member will follow up with the details.';
 const WRITE_TOOL_TIMEOUT_TEXT =
@@ -330,16 +330,56 @@ function bookingPromptAddendum() {
  * Phase-1 SYSTEM_PROMPT byte-for-byte (gate off ⇒ no behavior change).
  * The booking addendum appears only while GATE_VOICE_AI_BOOKING is ALSO on.
  */
-function buildBasePrompt(contextEnabled, language = null) {
+// PR 2A (GATE_VOICE_RELAY_TRANSFER). Office open ⇒ the transfer rules;
+// closed/unknown ⇒ the callback rules. Gate off ⇒ neither (byte-identical).
+function transferPromptAddendum(officeOpen) {
+  if (officeOpen === true) {
+    return [
+      '',
+      'TRANSFER TO A PERSON (transfer_to_office):',
+      '- The office is open right now. Transfer when the caller asks for a person, after two',
+      '  misunderstandings, for refund, cancellation, medical-exposure, legal, or property-damage',
+      '  topics, or when a tool has failed twice.',
+      '- Say ONE short line first ("Let me get someone for you"), then call transfer_to_office',
+      '  with a summary of at most twenty words. Once it returns, your part of the call is over:',
+      '  say nothing further and call no more tools.',
+    ].join('\n');
+  }
+  if (officeOpen === false) {
+    return [
+      '',
+      'WHEN THEY ASK FOR A PERSON (office closed):',
+      '- The office is closed right now, so you cannot transfer the call. Say so plainly, state',
+      '  when the office reopens ONLY from the latest CLOCK DATA (never guess), and offer a',
+      '  callback: take their details with capture_lead and say a Waves team member will call',
+      '  them back. Use lead_quality "hot" if it is a genuine emergency.',
+    ].join('\n');
+  }
+  // Unknown (the hours lookup failed or timed out): transfers stay off, but
+  // Sandy must not claim the office is closed or name a reopening time
+  // (codex r5 P2 — the clock block says the same when hours are unknown).
+  return [
+    '',
+    'WHEN THEY ASK FOR A PERSON (office hours unknown):',
+    '- You cannot transfer the call right now. Do NOT say the office is open or closed and do',
+    '  NOT state a reopening time. Offer a callback instead: take their details with',
+    '  capture_lead and say a Waves team member will call them back as soon as possible.',
+    '  Use lead_quality "hot" if it is a genuine emergency.',
+  ].join('\n');
+}
+
+function buildBasePrompt(contextEnabled, language = null, { officeOpen = null } = {}) {
   // Spanish session (GATE_VOICE_SPANISH_MENU — the caller pressed 2): the
   // language addendum is appended LAST so it governs everything above it.
   // No/English language ⇒ byte-identical to before.
   const { isSpanish, LANGUAGE_ADDENDUM_ES } = require('./relay-language');
+  const { isTransferGateOn } = require('./relay-transfer');
+  const transferSuffix = isTransferGateOn() ? '\n' + transferPromptAddendum(officeOpen) : '';
   const langSuffix = isSpanish(language) ? '\n' + LANGUAGE_ADDENDUM_ES : '';
-  if (!contextEnabled) return SYSTEM_PROMPT + langSuffix;
+  if (!contextEnabled) return SYSTEM_PROMPT + transferSuffix + langSuffix;
   const base = SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
   const { isBookingEnabled } = require('./relay-booking');
-  return (isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base) + langSuffix;
+  return (isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base) + transferSuffix + langSuffix;
 }
 
 // ── Voice profile (brand-voice Loop 2) ─────────────────────────────────────
@@ -486,6 +526,10 @@ class RelayConversation {
     this._interruptFollowupTimer = null;
     // PR 1B: the barge-in the NEXT caller message is annotated with (gate on).
     this._pendingInterruptNote = null;
+    // PR 2A: every tool call's outcome (name + ok) for the handoff packet;
+    // the one-per-call transfer latch.
+    this._toolOutcomes = [];
+    this._transferRequested = false;
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -632,6 +676,11 @@ class RelayConversation {
       // contact-slot match is a shared number and does not speak for the
       // account holder.
       this._contextReady.then(() => { void this._persistLanguagePreference(); }).catch(() => {});
+    }
+    // Office hours feed the clock block (context gate) AND the transfer rule
+    // (PR 2A gate) — loaded when either is on, so GATE_VOICE_RELAY_TRANSFER
+    // works without the unrelated account-context gate (codex r1 P1).
+    if (isContextEnabled() || require('./relay-transfer').isTransferGateOn()) {
       const { loadOfficeHours } = require('./relay-context');
       this._officeHoursReady = loadOfficeHours()
         .then((hours) => { this._officeHours = hours; })
@@ -1391,7 +1440,74 @@ class RelayConversation {
       // estimate). Recorded as owed commitments at close.
       notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },
       markReserviceFiled: () => { this._reserviceFiled = true; },
+      // ── PR 2A transfer ─────────────────────────────────────────────────
+      transferRequested: () => this._transferRequested,
+      markTransferRequested: () => { this._transferRequested = true; },
+      // The socket may close while the tool awaits its write (codex r3 P1):
+      // a closed session cannot send the end frame, so the tool undoes a
+      // stamp it can no longer act on.
+      sessionEnded: () => this.ended === true,
+      say: (text) => { this.say(text); },
+      // The relay leg ends with reason 'transfer'; /relay-complete rings the office.
+      // The end frame carries this socket's claim owner: /relay-complete
+      // rings staff only when the row's owner is still this nonce (or the
+      // row is unclaimed), so a superseded socket's transfer frame matches
+      // 0 rows — the one-session boundary holds at the callback (hook P1).
+      // Returns whether the end frame was SENT (codex r5 P1): a socket that
+      // went CLOSING between the ended check and this send, or a send that
+      // threw, means no /relay-complete transfer callback will ever come —
+      // the tool reverts the stamp and answers accordingly. An endSession
+      // that reports nothing (older callers) counts as sent.
+      endForTransfer: () => {
+        if (this._ending) return false;
+        let sent = false;
+        try {
+          if (this._endSession) {
+            const r = this._endSession({ reason: 'transfer', captured: this.leadCaptured, owner: this.sessionKey || null });
+            sent = r !== false;
+          }
+        } catch (e) {
+          logger.error(`[voice-relay] endSession (transfer) failed callSid=${this.callSid}: ${e.message}`);
+        }
+        if (sent) this._ending = true;
+        return sent;
+      },
+      // SERVER state for the handoff packet — never the model's claims.
+      handoffFacts: () => ({
+        verificationTier: convo._callerVerified === true
+          ? ((convo._callerContext && convo._callerContext.tier === 'full') ? 'full' : 'redacted')
+          : 'unverified',
+        // The carrier's word (STIR/SHAKEN A) rides beside the tier: an ANI
+        // match alone is spoofable, and the card must not call it verified.
+        callerAttested: !!(convo._callerContext && convo._callerContext.attested === true),
+        from: this.from || null,
+        language: this.language || null,
+        factsCollected: { ...(convo._estimateFields || {}) },
+        tools: this._toolOutcomes.slice(),
+        commitments: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict === true, expectation: v.expectation || null })),
+        turnCount: this._userTurns.length,
+      }),
+      // The owner-fenced packet write (same fence as end()'s reconcile).
+      writeHandoff: (packet) => {
+        const { writeHandoffPacket } = require('./relay-transfer');
+        return writeHandoffPacket(db, { callSid: this.callSid, packet, fence: (q) => this._fenceOwner(q), terminal: RELAY_TERMINAL_OUTCOMES });
+      },
+      // The undo for a timed-out write that landed after the tool aborted.
+      revertHandoff: (attempt) => {
+        const { revertHandoffPacket } = require('./relay-transfer');
+        return revertHandoffPacket(db, { callSid: this.callSid, attempt, fence: (q) => this._fenceOwner(q) });
+      },
     };
+  }
+
+  /** The claim-owner fence every close-time write rides (PR 2A: shared with the handoff packet). */
+  _fenceOwner(q) {
+    return this.sessionKey
+      ? q.whereRaw(
+        "((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)",
+        [this.sessionKey],
+      )
+      : q;
   }
 
   /**
@@ -1479,7 +1595,11 @@ class RelayConversation {
     //      cache on every single turn — it now rides the user turn below.
     if (!this._systemBlocks) {
       const callerBlock = (contextEnabled && this._callerContext?.block) || '';
-      const bareBase = buildBasePrompt(contextEnabled, this.language);
+      // PR 2A: the office state at freeze time decides the transfer tool and
+      // its prompt rules for the whole call (the prompt and tool list are
+      // frozen per session — cache-prefix stability).
+      const officeOpen = toolCtx.officeOpenNow();
+      const bareBase = buildBasePrompt(contextEnabled, this.language, { officeOpen });
       const basePrompt = bareBase + (callerBlock ? `\n\n${callerBlock}` : '');
       const profileText = getVoiceProfileTextNonBlocking();
       this._systemBlocks = [{
@@ -1489,7 +1609,7 @@ class RelayConversation {
       }];
       // Frozen with the system prompt: tools render BEFORE system, so a tool
       // list that changed mid-call (a gate flipped) would invalidate everything.
-      this._tools = activeTools();
+      this._tools = activeTools({ officeOpen });
       // Version stamps: the prompt WITHOUT the per-caller block (so two calls
       // on the same prompt hash alike), the caller block on its own, and the
       // tool schemas the model saw. Hashes only — nothing is stored twice.
@@ -1648,10 +1768,28 @@ class RelayConversation {
           // carry the caller's contact details and belongs in the lead row.
           this._recordTurn('tool', block.name);
           const toolStartAt = now();
+          toolCtx.toolFailed = false; // set by executeTool's catch (an operational failure answered with a string)
           const out = await this._executeToolBounded(block.name, block.input, toolCtx);
           stat.toolMs += now() - toolStartAt;
           stat.toolCount += 1;
+          // ok = the tool answered without failing (a timeout / in-flight
+          // refusal / caught failure is not a success — the handoff card
+          // must not tell staff a failed lookup succeeded, codex r1 P2).
+          const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
+          this._toolOutcomes.push({ name: block.name, ok: !sentinel && toolCtx.toolFailed !== true });
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
+          // A transfer (or any end) inside this round ends the SESSION: no
+          // further tool in the same response may run — a booking or capture
+          // after the handoff would be a write absent from the packet — and
+          // no further model round starts (codex r2 P2). The skipped blocks
+          // still get a tool_result so the history stays well-formed.
+          if (this._ending || this.ended) {
+            logger.info(`[voice-relay] session ending mid-round callSid=${this.callSid} — remaining tools skipped, no further model round`);
+            const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
+            results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the call is ending.' })));
+            this.messages.push({ role: 'user', content: results });
+            return;
+          }
         }
         this.messages.push({ role: 'user', content: results });
         continue; // let the model respond to the tool result
@@ -1797,12 +1935,7 @@ class RelayConversation {
         // NULL owner allowed: an unverified session (claim never won — the
         // row is unclaimed) still owns its own honest reconcile; only a
         // FOREIGN owner means the record belongs to a replacement.
-        const fenceOwner = (q) => (this.sessionKey
-          ? q.whereRaw(
-            "((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)",
-            [this.sessionKey],
-          )
-          : q);
+        const fenceOwner = (q) => this._fenceOwner(q);
         fenceOwner(reconcileQuery);
         const updated = await reconcileQuery
           .update({
@@ -1826,9 +1959,55 @@ class RelayConversation {
         // the recording processor.
         let salvaged = 0;
         if (transcriptUpdate && !updated) {
-          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).where('call_outcome', 'relay_failed'))
-            .update({ ...transcriptUpdate, updated_at: new Date() });
+          // ai_transferred (PR 2A) likewise: the outcome is the transfer's,
+          // the AI segment's transcript is still this session's to write.
+          // The transcript ALSO rides metadata.relay_transcript: a transfer's
+          // staff/voicemail recording later REPLACES the transcript columns
+          // (recording-status swap), and the processor rebuilds the AI segment
+          // from this copy (codex r1 P1).
+          // …but ONLY while the columns are still Sandy's (hook P1): a close
+          // that lands after the staff recording was processed must not
+          // replace the recording's transcript — that row takes the
+          // metadata-only stash below instead.
+          const { TRANSCRIPTION_PROVIDER: RELAY_PROVIDER } = require('./relay-transcript');
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid)
+            .whereIn('call_outcome', ['relay_failed', 'ai_transferred'])
+            .whereRaw("(call_outcome = 'relay_failed' OR transcription_provider IS NULL OR transcription_provider = ?)", [RELAY_PROVIDER]))
+            .update({
+              ...transcriptUpdate,
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                relay_transcript: { text: transcriptUpdate.transcription, metadata: JSON.parse(transcriptUpdate.transcription_metadata) },
+              })]),
+              updated_at: new Date(),
+            });
           if (salvaged) logger.info(`[voice-relay] transcript kept on a relay_failed row callSid=${maskSid(this.callSid)} turns=${this._transcript.length}`);
+        }
+        // Voicemail WON the close race (no staff numbers / an unconfirmed
+        // ring stamped it before this close), or the recording was already
+        // processed onto the transferred row: the recording's transcript
+        // owns the columns, but the AI segment still rides
+        // metadata.relay_transcript on the transfer-marked row (hook P1).
+        if (transcriptUpdate && !updated && !salvaged && this._transferRequested === true) {
+          // …and when the processor already wrote the RECORDED leg alone
+          // (it read the row before this stash existed), the AI segment is
+          // prepended to that transcript in the same statement — the shape
+          // the processor's own composite has (codex r6 P1). A composite or
+          // an empty column is left alone; a composite has no structured form.
+          const RECORDED_ONLY = "(transcription IS NOT NULL AND transcription <> '' AND transcription NOT LIKE '[AI segment]%' AND transcription_provider IS DISTINCT FROM 'conversation_relay')";
+          const aiSegment = `[AI segment]\n${transcriptUpdate.transcription}`;
+          salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['voicemail', 'ai_transferred']).whereRaw("(metadata->'relay_handoff') IS NOT NULL"))
+            .update({
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                relay_transcript: { text: transcriptUpdate.transcription, metadata: JSON.parse(transcriptUpdate.transcription_metadata) },
+              })]),
+              transcription: db.raw(
+                `CASE WHEN ${RECORDED_ONLY} THEN ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]\\n' || transcription ELSE transcription END`,
+                [aiSegment],
+              ),
+              transcript_structured: db.raw(`CASE WHEN ${RECORDED_ONLY} THEN NULL ELSE transcript_structured END`),
+              updated_at: new Date(),
+            });
+          if (salvaged) logger.info(`[voice-relay] AI segment stashed on a voicemail-after-transfer row callSid=${maskSid(this.callSid)}`);
         }
         if (transcriptUpdate && !updated && !salvaged) {
           logger.error(
@@ -1851,7 +2030,12 @@ class RelayConversation {
         // estimate — become owed commitments the office works from the
         // same queue as human calls. Read from the SCRUBBED transcript the
         // reconcile just wrote, never the raw turns. Best-effort, gated.
-        if (updated && transcriptUpdate?.transcription) {
+        // A transferred row's transcript lands through the salvage leg
+        // (ai_transferred is terminal); Sandy's pre-transfer promises must
+        // reach the Owed queue from there too (codex r2 P2) — only the
+        // transfer's salvage, never a relay_failed row's or the sandbox's.
+        const transferSalvaged = salvaged > 0 && this._transferRequested === true && this.sandbox !== true;
+        if ((updated || transferSalvaged) && transcriptUpdate?.transcription) {
           try {
             const { isEnabled } = require('../../config/feature-gates');
             if (isEnabled('callCommitments')) {
