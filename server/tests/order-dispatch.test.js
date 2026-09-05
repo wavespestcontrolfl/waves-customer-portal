@@ -828,13 +828,16 @@ test('a login-required vendor without its stored login is handed back before any
   const dbFn = require('../models/db');
   const origTransaction = dbFn.transaction;
   const trxSentinel = Object.assign((t) => dbFn(t), { raw: dbFn.raw });
-  dbFn.transaction = async (fn) => fn(trxSentinel);
+  const transaction = jest.fn(async (fn) => fn(trxSentinel));
+  dbFn.transaction = transaction;
   let r;
   try { r = await run({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: (c) => !!(c && c.password && c.accountNumber), place }); }
   finally { dbFn.transaction = origTransaction; }
   expect(r).toMatchObject({ skipped: 'adapter_unconfigured', belled: true });
   expect(getVendorLoginCredentials).toHaveBeenLastCalledWith(dbFn, 'vend-s1');
   expect(getVendorLoginCredentials).not.toHaveBeenCalledWith(trxSentinel, expect.anything());
+  // ...and BEFORE the claim transaction opens: the pool floor is 2 and the scheduled path already holds the lease + the transaction (pre-push P1)
+  expect(getVendorLoginCredentials.mock.invocationCallOrder.at(-1)).toBeLessThan(transaction.mock.invocationCallOrder[0]);
   expect(place).not.toHaveBeenCalled();
   expect(mockState.ledgerRows).toHaveLength(0);
   // canAutoOrder makes the same call, so the sweep never stands down its bell for that vendor
