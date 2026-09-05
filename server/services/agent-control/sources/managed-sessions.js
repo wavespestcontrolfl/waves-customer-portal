@@ -10,7 +10,13 @@ const { canonicalRun, humanize, keyset, notMirrored, isMissingSchema } = require
 const { classifyFailure } = require('../taxonomy');
 
 const SOURCE = 'managed_sessions';
-const START = db.raw("date_trunc('milliseconds', created_at)");
+// recordSessionUsage inserts AFTER the runner finishes: created_at is the
+// recording time (= the finish); the start is that minus latency_ms (the
+// wall time since the runner's startedAt). Sort / page on the same
+// projected start so the cursor and the rows agree. A session the
+// assistant re-records per turn keeps its first turn's created_at and its
+// longest turn's latency — an approximation, stated in the subtitle.
+const START = db.raw("date_trunc('milliseconds', created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0))");
 const ID = 'provider_ref';
 const COLUMNS = [
   'id', 'lane_id', 'workflow_id', 'provider_ref', 'ok', 'error_code', 'error_class', 'served_model', 'requested_model',
@@ -21,6 +27,8 @@ const COLUMNS = [
 function fromRow(s) {
   const turns = Number(s.turns || 0);
   const errored = s.ok === false;
+  // the row lands when the session is billed: start = that minus its latency
+  const startedAt = new Date(new Date(s.created_at).getTime() - Number(s.latency_ms || 0));
   return canonicalRun({
     source: SOURCE,
     id: s.provider_ref,
@@ -33,9 +41,9 @@ function fromRow(s) {
     result: errored ? 'errored' : 'succeeded',
     failureClass: errored ? s.error_class || classifyFailure(s.error_code || 'error') : null,
     errorCode: errored ? s.error_code : null,
-    createdAt: s.created_at,
-    startedAt: s.created_at,
-    finishedAt: s.latency_ms == null ? s.created_at : new Date(new Date(s.created_at).getTime() + Number(s.latency_ms)),
+    createdAt: startedAt,
+    startedAt,
+    finishedAt: s.created_at,
     durationMs: s.latency_ms == null ? null : Number(s.latency_ms),
     stepsDone: turns,
     stepsTotal: turns,

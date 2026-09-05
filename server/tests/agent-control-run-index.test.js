@@ -159,9 +159,11 @@ describe('adapters project onto the canonical shape', () => {
   });
 
   test('managed_sessions: a session row is a finished run keyed by its provider ref; turns are the steps', () => {
+    // the row is written when the session is billed: created_at is the finish, start = finish − latency
     const ok = managedSessions.fromRow({ provider_ref: 'sess_1', lane_id: 'agent_bi', ok: true, served_model: 'claude-x', latency_ms: 5000, created_at: ago(9e3), turns: 3 });
     expect(ok).toMatchObject({ key: 'managed_sessions:sess_1', lifecycle: 'terminal', result: 'succeeded', durationMs: 5000, stepsDone: 3, subtitle: 'claude-x · 3 turns', area: 'agents' });
-    expect(ok.finishedAt).toBe(ago(4e3).toISOString());
+    expect(ok.finishedAt).toBe(ago(9e3).toISOString());
+    expect(ok.startedAt).toBe(ago(14e3).toISOString());
     expect(managedSessions.fromRow({ provider_ref: 's2', lane_id: 'agent_bi', ok: false, error_code: 'anthropic_529', created_at: ago(1e3) })).toMatchObject({ result: 'errored', failureClass: 'provider', errorCode: 'anthropic_529' });
   });
 
@@ -329,6 +331,23 @@ describe('getRun', () => {
     expect(d.calls).toHaveLength(1);
     expect(d.legacy).toEqual({ source: 'call_log', id: 'c1' });
     expect(d.trace).toEqual({ id: null, calls: 1 });
+  });
+
+  test('opening a canonical run by its own id folds in the legacy row it mirrors (steps, session calls)', async () => {
+    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: 'r7', sourceSystem: 'managed_sessions', sourceRunId: 'sess_9', laneId: 'agent_bi', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [], artifacts: [], events: [], workItem: null });
+    const legacyGet = jest.spyOn(managedSessions, 'get').mockResolvedValue({ run: canonicalRun({ source: 'managed_sessions', id: 'sess_9', laneId: 'agent_bi', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), steps: [{ key: 'turn_1', status: 'done' }] }) });
+    fixtures.llm_dispatch_log = [{ id: 1, row_kind: 'session_turn' }];
+    const d = await runIndex.getRun('agent_runs', 'r7', { now: NOW });
+    expect(legacyGet).toHaveBeenCalledWith('sess_9');
+    expect(d.run.key).toBe('agent_runs:r7');
+    expect(d.steps).toEqual([{ key: 'turn_1', status: 'done' }]);
+    expect(d.calls).toHaveLength(1);
+    expect(d.legacy).toEqual({ source: 'managed_sessions', id: 'sess_9' });
+    // a canonical run whose source system is not a ledger here (an S5 lane writing directly) has no legacy fold
+    jest.spyOn(agentRuns, 'get').mockResolvedValue({ run: canonicalRun({ source: 'agent_runs', id: 'r8', sourceSystem: 'cron', sourceRunId: 'tick-1', workflowId: 'nightly', lifecycle: 'terminal', result: 'succeeded', createdAt: ago(1e3), canonical: true }), attempts: [], artifacts: [], events: [], workItem: null });
+    const e = await runIndex.getRun('agent_runs', 'r8', { now: NOW });
+    expect(e.legacy).toBeNull();
+    expect(e.steps).toEqual([]);
   });
 
   test('unknown source → 400; unknown id → null; a legacy row without a mirror is returned as-is', async () => {

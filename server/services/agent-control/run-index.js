@@ -245,15 +245,26 @@ async function loadCalls({ canonicalId = null, sessionId = null }) {
 
 const NO_CANONICAL = Object.freeze({ attempts: [], artifacts: [], events: [], workItem: null });
 
+// Both doors lead to the same pair: a legacy id finds its canonical mirror
+// (findMirror); a canonical id finds the legacy row it mirrors by its
+// source_system + source_run_id, when that system is a ledger read here.
+async function resolveSides(reader, id) {
+  if (reader === agentRuns) {
+    const canonical = await agentRuns.get(id);
+    const legacyReader = canonical ? SOURCES.get(canonical.run.sourceSystem) : null;
+    const legacy = legacyReader && legacyReader !== agentRuns ? await legacyReader.get(canonical.run.sourceRunId) : null;
+    return { canonical, legacy, legacySource: legacy ? legacyReader : null };
+  }
+  const legacy = await reader.get(id);
+  const canonicalId = legacy ? await agentRuns.findMirror(reader.SOURCE, id) : null;
+  return { canonical: canonicalId ? await agentRuns.get(canonicalId) : null, legacy, legacySource: legacy ? reader : null };
+}
+
 async function getRun(source, id, { now = new Date() } = {}) {
   const reader = SOURCES.get(String(source));
   if (!reader) throw badRequest(`unknown source: ${source}`);
   if (!id) throw badRequest('missing id');
-
-  const legacy = reader === agentRuns ? null : await reader.get(id);
-  if (reader !== agentRuns && !legacy) return null;
-  const canonicalId = reader === agentRuns ? id : await agentRuns.findMirror(reader.SOURCE, id);
-  const canonical = canonicalId ? await agentRuns.get(canonicalId) : null;
+  const { canonical, legacy, legacySource } = await resolveSides(reader, id);
   if (!canonical && !legacy) return null;
 
   const primary = canonical || legacy;
@@ -261,7 +272,7 @@ async function getRun(source, id, { now = new Date() } = {}) {
   const steps = primary.run.steps.length ? primary.run.steps : secondary.run.steps;
   const run = annotate({ ...primary.run, steps, stepsDone: steps.filter((s) => s.status === 'done').length, stepsTotal: steps.length }, now);
   const detail = canonical || NO_CANONICAL;
-  const calls = await loadCalls({ canonicalId: canonical ? canonical.run.id : null, sessionId: reader === managedSessions ? id : null });
+  const calls = await loadCalls({ canonicalId: canonical ? canonical.run.id : null, sessionId: legacySource === managedSessions ? legacy.run.id : null });
   return {
     run,
     workItem: detail.workItem,
@@ -273,7 +284,7 @@ async function getRun(source, id, { now = new Date() } = {}) {
     humanReviews: [],
     events: detail.events,
     trace: { id: run.traceId, calls: calls.length },
-    legacy: legacy && canonical ? { source: reader.SOURCE, id: String(id) } : null,
+    legacy: legacy && canonical ? { source: legacySource.SOURCE, id: legacy.run.id } : null,
   };
 }
 
