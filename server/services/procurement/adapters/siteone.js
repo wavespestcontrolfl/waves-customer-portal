@@ -105,7 +105,7 @@ const SELECTORS = Object.freeze({
   // at the click (Codex #3876 r7 P1); their SKU / quantity nodes reuse the
   // cart-line child selectors.
   checkoutLine: '.checkout .cart-item, .checkout .entry-item, .checkout .cart-entry, .order-summary .cart-item, .order-summary .entry-item, .order-summary .item, .checkout-order-summary .item, [data-test="checkout-line"]',
-  billToAccount: 'input[type="radio"][value*="account"], input[type="radio"][value*="ACCOUNT"], label:has-text("Bill to account")',
+  billToAccount: 'input[type="radio"][value*="account" i], label:has-text("Bill to account")', // case-insensitive: value="billToAccount" is the account tender too (Codex #3876 r24 P2)
   // Only the fallback for an UNNAMED radio: a named one is counted in its own
   // group (Codex #3876 r16 P2 — an opaque value="12345" is a valid tender).
   // Identity readings are SCOPED to the checkout's own billing / shipping
@@ -660,7 +660,16 @@ async function verifyCheckoutLines(page, { vendorSku, qty, evidence, upload }) {
 // Read STRICTLY (Codex #3876 r19 P2): a candidate whose visibility cannot
 // be read (it detached mid-enumeration) is not "hidden" — the reading is
 // unresolved, `count: null`, and every caller refuses on it.
-async function readExactlyOne(page, selector, { same } = {}) {
+// `nested: true`: the identity readings have no parsed value — shown matches
+// are one reading when every text is CONTAINED in the longest (a wrapper
+// around its child), innermost returned; unrelated texts stay ambiguous
+// (Codex #3876 r24 P2).
+const NESTED = (texts) => {
+  const norm = texts.map((t) => String(t).replace(/\s+/g, ' ').trim().toLowerCase());
+  const longest = norm.reduce((a, b) => (b.length > a.length ? b : a), '');
+  return norm.every((t) => t && longest.includes(t)) ? longest : null;
+};
+async function readExactlyOne(page, selector, { same, nested = false } = {}) {
   let all;
   let shown;
   try { ({ all, shown } = await matches(page, selector, { strict: true })); }
@@ -670,8 +679,9 @@ async function readExactlyOne(page, selector, { same } = {}) {
   // reading (the innermost text wins).
   const pick = async ({ all, shown }) => {
     if (shown.length <= 1) return { target: shown[0] || (all.length === 1 ? all[0] : null) };
-    const texts = same ? await Promise.all(shown.map((el) => el.textContent().then((t) => String(t || ''), () => null))) : [];
-    const values = new Set(texts.map((t) => (t == null ? null : same(t))));
+    const texts = same || nested ? await Promise.all(shown.map((el) => el.textContent().then((t) => String(t || ''), () => null))) : [];
+    if (texts.some((t) => t == null)) return { ambiguous: shown.length };
+    const values = new Set(nested ? [NESTED(texts)] : texts.map(same));
     if (values.size !== 1 || values.has(null)) return { ambiguous: shown.length };
     return { target: shown[texts.reduce((best, t, i) => (t.length < texts[best].length ? i : best), 0)] };
   };
@@ -824,7 +834,7 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
   const refuse = async (reason, message) => { await shot(page, 'checkout', evidence, upload); throw new RefusedError(reason, message, evidence); };
   // Both readings must be VISIBLE (pre-push P0): a single hidden responsive
   // or stale node carrying the approved values is not what the checkout shows.
-  const account = await readExactlyOne(page, SELECTORS.checkoutAccount);
+  const account = await readExactlyOne(page, SELECTORS.checkoutAccount, { nested: true });
   if (account.count == null) await refuse('account_unverified', 'the billing-account readings at checkout could not be enumerated, or changed while being read — not verified');
   if (account.count > 1) await refuse('account_ambiguous', `${account.count} billing-account readings at checkout — cannot tell which the order bills`);
   const accountText = normalizeText(account.text);
@@ -837,7 +847,7 @@ async function verifyCheckoutIdentity(page, { credentials, shipToTokens, evidenc
   // rule still holds — "12345 - 01" is subaccount 1234501, never 12345.
   const accountRuns = digitRuns(accountText.replace(/(\d)\s*[-./]\s*(?=\d)/g, '$1'));
   if (!wantDigits || accountRuns.length !== 1 || accountRuns[0] !== wantDigits) { evidence.checkoutAccount = accountText.slice(0, 60); await refuse('account_mismatch', `checkout bills account "${accountText.slice(0, 40)}", not the vendor row's ${credentials.accountNumber}`); }
-  const shipTo = await readExactlyOne(page, SELECTORS.checkoutShipTo);
+  const shipTo = await readExactlyOne(page, SELECTORS.checkoutShipTo, { nested: true });
   if (shipTo.count == null) await refuse('ship_to_unverified', 'the ship-to readings at checkout could not be enumerated, or changed while being read — not verified');
   if (shipTo.count > 1) await refuse('ship_to_ambiguous', `${shipTo.count} ship-to readings at checkout — cannot tell which the order ships to`);
   const shipToText = normalizeText(shipTo.text);

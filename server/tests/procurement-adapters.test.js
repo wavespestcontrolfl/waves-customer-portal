@@ -343,6 +343,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // first() = the clicked radio when it took (visible); an extra checked radio elsewhere is a hidden duplicate
       // The group count (name="tender") is what a named radio is judged by; an unnamed radio has no countable group (r18 P1)
       if (sel === 'input[type="radio"][name="tender"]:checked') return el({ count: (isChecked() ? 1 : 0) + (st.extraCheckedAccounts || 0) });
+      // identityTexts: { checkoutAccount | checkoutShipTo: [texts] } — N visible readings, each its own text (nested wrapper + child = one reading; unrelated = ambiguous) (r24 P2)
+      if (st.identityTexts && st.identityTexts[Object.keys(S).find((k) => S[k] === sel)]) { const arr = st.identityTexts[Object.keys(S).find((k) => S[k] === sel)]; return el({ count: arr.length, nth: (i) => el({ count: 1, visible: true, text: arr[i] }) }); }
       // hiddenAfterReread: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — after the re-enumeration the node is swapped for a HIDDEN one carrying the same text (r23 P2)
       if (st.hiddenAfterReread && sel === S[st.hiddenAfterReread]) return el({ count: 1, get visible() { return (st.hrReads || 0) < 2; }, text: { checkoutAccount: 'Account # 12345', checkoutShipTo: 'Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', checkoutTotal: 'Order total $99.00' }[st.hiddenAfterReread], onRead: () => { st.hrReads = (st.hrReads || 0) + 1; } });
       // replacesAfterRead: 'checkoutAccount' | 'checkoutShipTo' | 'checkoutTotal' — the node is replaced in place after its text is read: same count, same visibility, a different value on the re-read (r22 P2)
@@ -433,7 +435,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['account_unverified', { accountText: '' }],
     ['ship_to_mismatch', { shipToText: 'Ship to: 9 Other Rd, Venice, FL 34285' }],
     ['ship_to_unverified', { shipToText: null }],
-    ['account_ambiguous', { accountCount: 2 }],
+    ['account_ambiguous', { identityTexts: { checkoutAccount: ['Account # 12345', 'Account # 99999'] } }], // two unrelated readings
+    ['ship_to_ambiguous', { identityTexts: { checkoutShipTo: ['Ship to: 123 Example Ave, Bradenton, FL 34205', 'Ship to: 9 Other Rd, Venice, FL 34285'] } }],
     ['account_mismatch', { accountText: 'Account # 12345 - 01' }], // spaced separator = subaccount 1234501, never 12345 (r19 P2)
     ['account_mismatch', { accountText: 'Account # 12345 Branch 01' }], // a short subaccount component is part of the account (r21 P2)
     ['account_unverified', { appendsMidRead: 'checkoutAccount' }], // a node appended mid-read = the reading changed (r21 P2)
@@ -455,7 +458,6 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     ['checkout_total_ambiguous', { totalTexts: ['Order total $99.00', 'Subtotal $49.00 · Total $99.00'] }], // an unparsable sibling is not the same figure
     ['checkout_total_hidden', { totalVisible: false }],
     ['no_checkout_total', { totalCount: 0 }],
-    ['ship_to_ambiguous', { shipToCount: 3 }],
     ['account_unverified', { accountCount: 0 }],
   ])('checkout %s → refused, no place-order click, cart cleaned (pre-push P0)', async (reason, patch) => {
     const { st, deps } = fakeSiteOne(patch);
@@ -861,6 +863,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(bad.st.trialDone).toBeUndefined();
     const same = fakeSiteOne({ cartRowQtyTwoVisibleSame: true });
     await expect(s1.place(args(), same.deps)).rejects.toMatchObject(NOT_SHIPPED);
+  });
+
+  test('nested identity markup (a wrapper around the account / ship-to child) is ONE reading — the innermost text; a mixed-case account radio value is the account tender (r24 P2)', async () => {
+    const nested = fakeSiteOne({ identityTexts: { checkoutAccount: ['Account # 12345', '12345'], checkoutShipTo: ['Ship to: Waves Pest Control, 123 Example Ave, Bradenton, FL 34205', 'Waves Pest Control, 123 Example Ave, Bradenton, FL 34205'] } });
+    await expect(s1.place(args(), nested.deps)).rejects.toMatchObject(NOT_SHIPPED);
+    expect(nested.st.trialDone).toBe(true);
+    expect(S.billToAccount).toMatch(/\[value\*="account" i\]/);
+    expect(S.billToAccount).not.toMatch(/ACCOUNT/);
   });
 
   test('a checkout row replaced AFTER the scan by a different visible row (same count, same visibility mask) is churn — the rows are read again and must match (r20 P2)', async () => {
