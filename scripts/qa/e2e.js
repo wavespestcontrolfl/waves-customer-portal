@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-/* global document */
+/* global document, localStorage */
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -183,7 +183,12 @@ async function main() {
       assert.ok(record?.report_view_token);
       const data = await json(await page.request.get(`${baseUrl}/api/reports/${record.report_view_token}/data`));
       assert.ok(!JSON.stringify(data).includes('QA-PRIVATE-'));
+      await page.evaluate(() => localStorage.clear());
+      const renderedReport = page.waitForResponse((response) => response.url().endsWith(`/api/reports/${record.report_view_token}/data`));
       await page.goto(`${baseUrl}/report/${record.report_view_token}`);
+      const publicReport = await json(await renderedReport);
+      assert.ok(!publicReport.staffViewer, 'Render the customer report without a staff session');
+      assert.ok(!JSON.stringify(publicReport).includes('QA-PRIVATE-'));
       await page.getByRole('heading', { name: /Hi QA/i }).waitFor();
       await page.screenshot({ path: path.join(artifactDir, 'report.png'), fullPage: true });
     });

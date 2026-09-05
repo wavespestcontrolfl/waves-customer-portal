@@ -2,8 +2,11 @@
 // The Insert Link sheet's search is a plain AND-match over name, url,
 // keywords, and group label; grouping keeps the fixed group order and drops
 // empty groups. These are the behaviors the composer relies on.
-import { describe, expect, it } from "vitest";
-import { buildLinkGroups, linkMatchesQuery } from "./InsertLinkSheet";
+import React from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import "@testing-library/jest-dom/vitest";
+import InsertLinkSheet, { buildLinkGroups, linkMatchesQuery } from "./InsertLinkSheet";
 
 const LINKS = [
   { key: "reschedule", category: "customer", name: "Reschedule link", url: "", keywords: "appointment move visit", dynamic: true },
@@ -50,5 +53,38 @@ describe("buildLinkGroups", () => {
 
   it("no matches yields no groups", () => {
     expect(buildLinkGroups(LINKS, "zebra", "all")).toEqual([]);
+  });
+});
+
+describe("InsertLinkSheet channel chooser", () => {
+  afterEach(() => cleanup());
+
+  const rows = [
+    { key: "review_request", category: "customer", name: "Review request", url: "", keywords: "rate", dynamic: true, channels: true },
+    { key: "referral", category: "customer", name: "Referral link", url: "", keywords: "refer", dynamic: true },
+  ];
+
+  it("is titled Quick Links and a plain row picks immediately", () => {
+    const onPick = vi.fn();
+    render(<InsertLinkSheet open onClose={() => {}} links={rows} onPick={onPick} />);
+    expect(screen.getByText("Quick Links")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Referral link/ }));
+    expect(onPick).toHaveBeenCalledWith(rows[1]);
+  });
+
+  it("a channels row opens Text / Email / Both and passes the choice to onPick", () => {
+    const onPick = vi.fn();
+    render(<InsertLinkSheet open onClose={() => {}} links={rows} onPick={onPick} />);
+    const row = screen.getByRole("button", { name: /Review request/ });
+    expect(screen.queryByRole("group", { name: /Send Review request by/ })).not.toBeInTheDocument();
+    fireEvent.click(row);
+    expect(onPick).not.toHaveBeenCalled();
+    expect(row).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(screen.getByRole("button", { name: /^Email/ }));
+    expect(onPick).toHaveBeenCalledWith(rows[0], "email");
+    fireEvent.click(screen.getByRole("button", { name: /^Both/ }));
+    expect(onPick).toHaveBeenLastCalledWith(rows[0], "both");
+    fireEvent.click(screen.getByRole("button", { name: /^Text/ }));
+    expect(onPick).toHaveBeenLastCalledWith(rows[0], "sms");
   });
 });

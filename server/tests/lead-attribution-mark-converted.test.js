@@ -12,6 +12,10 @@ jest.mock('../models/db', () => {
       where: (...a) => { mockCalls.push([table, 'where', ...a]); return q; },
       whereNull: (...a) => { mockCalls.push([table, 'whereNull', ...a]); return q; },
       whereIn: (...a) => { mockCalls.push([table, 'whereIn', ...a]); return q; },
+      whereNot: (...a) => { mockCalls.push([table, 'whereNot', ...a]); return q; },
+      orWhereIn: (...a) => { mockCalls.push([table, 'orWhereIn', ...a]); return q; },
+      select: (...a) => { mockCalls.push([table, 'select', ...a]); return q; },
+      whereNotExists: (sub) => { mockCalls.push([table, 'whereNotExists', sub]); return q; },
       update: async (patch) => { mockCalls.push([table, 'update', patch]); return mockUpdateRows; },
       insert: async (row) => { mockCalls.push([table, 'insert', row]); return [row]; },
       first: async () => mockFirstRow,
@@ -61,6 +65,16 @@ describe('markConverted claims', () => {
     expect(settleRepeatFunnelRow).toHaveBeenCalledWith(db, 'lead-rep', { customerId: 'c1', estimateId: 'e-B' });
   });
 
+  test('an estimate-scoped conversion persists that scope on the won row (extracted_data.won_estimate_id, never the estimate_id FK) so a replay without an estimate settles the same way; an unscoped conversion writes no extracted_data (codex r37 P1)', async () => {
+    await markConverted('lead-rep', { customerId: 'c1', estimateId: 'e-B' });
+    const patch = mockCalls.find((c) => c[1] === 'update')[2];
+    expect(patch.extracted_data).toEqual({ __raw: expect.stringContaining("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb") });
+    expect(patch).not.toHaveProperty('estimate_id');
+    mockCalls.length = 0;
+    await markConverted('lead-rep', { customerId: 'c1' });
+    expect(mockCalls.find((c) => c[1] === 'update')[2]).not.toHaveProperty('extracted_data');
+  });
+
   test('a settled win (the root took it) or a non-repeat with no funnel row stamps nothing — an inbound call on the Ads bridge number keeps its slot for the delayed paid-call bridge (codex r24 P1, r27 P2)', async () => {
     mockRepeatRow = null; // settleRepeatFunnelRow: root bridged, or not a quote_wizard row with a marker
     await markConverted('lead-call', { customerId: 'c1' });
@@ -105,6 +119,32 @@ describe('markConverted claims', () => {
       ['leads', 'where', identity],
     ]);
     expect(mockCalls.find((c) => c[1] === 'update')[2]).toEqual(expect.objectContaining({ status: 'won', customer_id: 'c1' }));
+  });
+
+  test('onlyIfSoleLinkedRow makes the status write conditional on NO other live row of that estimate being open or won — in the same statement (codex #3883 r1 P1)', async () => {
+    const ok = await markConverted('lead-dup', { customerId: 'c1', onlyIfStatusIn: ['duplicate'], onlyIfIdentity: { customer_id: 'c1' }, onlyIfSoleLinkedRow: 'estimate-1', estimateId: 'estimate-1' });
+    expect(ok).toBe(true);
+    const outer = claimCalls().filter((c) => c[1] !== 'select');
+    expect(outer.slice(0, 4)).toEqual([
+      ['leads', 'where', 'id', 'lead-dup'],
+      ['leads', 'whereNull', 'deleted_at'],
+      ['leads', 'whereIn', 'status', ['duplicate']],
+      ['leads', 'where', { customer_id: 'c1' }],
+    ]);
+    // The subquery: other rows of this estimate, live, won or open.
+    const sub = claimCalls().slice(claimCalls().findIndex((c) => c[1] === 'select') + 1);
+    expect(sub.slice(0, 3)).toEqual([
+      ['leads', 'where', 'estimate_id', 'estimate-1'],
+      ['leads', 'whereNot', 'id', 'lead-dup'],
+      ['leads', 'whereNull', 'deleted_at'],
+    ]);
+    const grouped = sub[3];
+    expect(grouped[1]).toBe('where');
+    const inner = [];
+    const g = { where: (...a) => { inner.push(['where', ...a]); return g; }, orWhereIn: (...a) => { inner.push(['orWhereIn', ...a]); return g; } };
+    grouped[2](g);
+    expect(inner).toEqual([['where', 'status', 'won'], ['orWhereIn', 'status', ['new', 'contacted', 'estimate_sent', 'estimate_viewed']]]);
+    expect(sub[4][1]).toBe('whereNotExists');
   });
 
   test('a lost claim (0 rows) converts nothing — no bridge, no settling, no funnel row, no activity', async () => {

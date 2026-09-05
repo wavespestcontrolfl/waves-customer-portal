@@ -4,8 +4,17 @@ Context for Claude Code sessions working on the waves-customer-portal monorepo.
 
 ## Dev Workflow
 
-- Implementation sessions: follow `docs/development.md`; run `worktree:setup` then `dev:doctor` before starting the managed app. Frontend-only work uses `dev:managed-client`. Audits do not need a server.
-- Monitor build output; fix errors immediately before continuing other work
+- Start the app only when the authorized task needs runtime verification.
+  Read-only audits and explanations do not require startup.
+- Before startup, verify the selected checkout, command hooks, database
+  environment, and integration side effects without printing credentials.
+  Follow `docs/development.md`: run `worktree:setup` and the relevant
+  `dev:doctor` preflight before managed startup. Frontend-only verification
+  uses `dev:managed-client` (or standalone `dev:client`). Full startup
+  requires a verified dedicated dev/preview database and isolated integrations.
+  Managed `dev` checks readiness without migrating; `dev:migrate` is explicit.
+- Diagnose task-relevant startup failures. Report unrelated failures and
+  continue independent authorized work; do not expand the task to fix them.
 
 ## Project Overview
 
@@ -35,15 +44,15 @@ Three interfaces:
 
 1. **Only touch what you're asked to touch.** If the task is "add a tool to the Intelligence Bar," don't refactor the route file, don't update the UI theme, don't reorganize imports in unrelated files.
 2. **Don't add features that weren't requested.** No "while I'm here, I also improved..."
-3. **Don't guess at business logic.** WaveGuard tier thresholds, taxability rules, pricing brackets — ask.
+3. **Don't guess at business logic.** Retrieve applicable owner-approved decisions and authoritative contracts first, preserving their scope. Ask when the decision is missing, conflicting, or would change; do not ask the owner to repeat an applicable decision.
 4. **Match the file's existing style.** Don't mix `D` palette with `components/ui` primitives in the same component.
 5. **Don't delete or rename existing files** without explicit instruction. Don't move files between directories.
 6. **Test your SQL.** Every Intelligence Bar tool runs Knex queries against PostgreSQL. Wrap uncertain tables/columns in try/catch — don't crash a tool module on one bad query.
 7. **Keep the Intelligence Bar pattern.** Tool modules export `TOOLS` + `executeTool`; wire 6 lines into the route file. Don't invent a new architecture. See `server/services/intelligence-bar/README.md` for the template.
 8. **Stripe is the payment processor. Square is fully phased out.** Do not reference Square in new code.
 9. **All automation and site infra is native.** Do not reference Zapier, Make, Elementor, NitroPack, RankMath, or any external automation/CMS tool in new code.
-10. **Plan first for non-trivial work.** For anything beyond a small, well-specified change, present a plan and get sign-off before writing code (use Plan mode). A misunderstanding caught at the plan stage costs minutes; caught after the code is written, it costs the rework.
-11. **When a mistake is caught, record the rule.** Run `/lesson` (or follow `.claude/commands/lesson.md`) so the correction lands in AGENTS.md, the matching skill, or here — in the same PR as the fix. Rules belong in skills or AGENTS.md by default; this file stays lean.
+10. **Plan first for non-trivial work.** For anything beyond a small, well-specified change, present a plan and get sign-off before writing code. An already-approved plan does not need another sign-off for unchanged implementation steps. Reconfirm a material change in effect, environment, scope, or risk. Investigation and proposal-only work may proceed within their authorized scope.
+11. **When a mistake is caught, diagnose the cause.** Follow `/lesson` or `.claude/commands/lesson.md` to strengthen the existing rule, skill, regression check, or environment fix. Preserve task scope: proposal-only work returns proposed edits; authorized fixes include any necessary correction in the same change. Do not add permanent prose for temporary status or an already-clear rule.
 12. **Never send or trigger customer-facing communications** (SMS, email, calls) — the owner sends all. Before any prod action, check for comm side effects (editing/completing/rescheduling `scheduled_services` rows can fire confirmation/reminder SMS) and route around them.
 13. **Never test on real customers' live records.** "No durable writes" is not the safety bar (e.g. slot holds block real bookings). Use the staff draft-preview paths or owner-created test records; read-only DB inspection is fine.
 14. **Hands-off + exception-based by default.** Deterministic green checks auto-apply with an audit trail and no bell; only exceptions park and surface; every lane keeps an env kill switch + one-click revoke. Where a human decision is genuinely required, use the email-reply approval pattern — a tokenized email to contact@ answered by replying "approved"/"not approved", fail-closed, at-most-once (current in-repo exemplar: the newsletter proof flow in `server/services/newsletter-proof.js`; a generalized module is in flight on PR #3024) — never a park-on-portal-visit queue. Never extend email-approval to customer comms, money movement, or gate flips.

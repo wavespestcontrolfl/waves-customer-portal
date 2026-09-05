@@ -147,9 +147,17 @@ deliberate POST form submission (scanner-safe, mirrors confirm), answer/
 reaction keys validated against the server-side config allowlists
 (newsletter-quiz.js / newsletter-feedback.js), 30 req/min per IP, always
 returns 200 so it can't probe which tokens/answers are real),
-`/api/public/prep/:token` (read-only, 32-hex token format gate,
+`/api/public/prep/:token` (32-hex token format gate,
 60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-filters email-only blocks, server-side interpolation, generic 404),
+filters email-only blocks, server-side interpolation, generic 404; the
+ONLY writes are its own view analytics, all after a successful render —
+for a scheduled-service token the visit's `prep_view_count` /
+`prep_first_viewed_at` stamp is fenced on the rendered template key (a
+miss = the key moved, so the page re-resolves and renders the new guide),
+which pairs with the manual prep sender's re-key / release fence on those
+view columns so an opened page never changes guide or 404s behind the
+customer; the `prep_guide_views` log row follows; response shape
+unchanged),
 `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
 action-bar Download parity with service reports; same 32-hex token format
 gate, same 60 req/min limiter, same privacy headers, generic 404; payload
