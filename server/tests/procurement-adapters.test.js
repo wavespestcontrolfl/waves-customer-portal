@@ -247,7 +247,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     // checkoutRowSwapAtClick: reading the row's SKU is the moment SiteOne replaces the row with a substitute product (S1-99 × same qty):
     // a re-resolving locator then reads the substitute's quantity beside the old SKU; the old row's handle is detached instead (r11 P1)
     const swapping = (l) => st.checkoutRowSwapAtClick && st.atClick && l.sku === 'S1-77';
-    const line = (l) => el({ count: 1, get visible() { return !(swapping(l) && st.rowSwapped); }, detachedWhen: () => swapping(l) && st.rowSwapped, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: swapping(l) && st.rowSwapped ? 'S1-99' : l.sku, onRead: () => { if (swapping(l)) st.rowSwapped = true; } }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
+    // l.detachedDuringScan: this row's visibility read throws (it detached between the count and the scan) (r13 P1)
+    const line = (l) => el({ count: 1, isVisibleThrows: !!l.detachedDuringScan, get visible() { return !(swapping(l) && st.rowSwapped); }, detachedWhen: () => swapping(l) && st.rowSwapped, sub: (sub) => sub === S.cartLineSku ? child(st.cartSkuInAttribute ? { text: 'Remove', attrs: { 'data-product-code': l.sku } } : { text: swapping(l) && st.rowSwapped ? 'S1-99' : l.sku, onRead: () => { if (swapping(l)) st.rowSwapped = true; } }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
     const resolve = (sel) => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
@@ -280,7 +281,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       if (sel === S.qtyInput) return st.productControlsHiddenFirst ? hiddenCopy(qtyInput) : qtyInput;
       if (sel === S.addToCart) return st.productControlsHiddenFirst ? hiddenCopy(addToCart) : addToCart;
       // The checkout order summary mirrors the cart unless checkoutLines overrides it, or checkoutLinesAtClick once the Place Order stage has begun (r7 P1)
-      if (sel === S.checkoutLine) { const ls = st.checkoutLines || (st.checkoutLinesAtClick && st.atClick ? st.checkoutLinesAtClick : st.cart); return el({ count: ls.length, nth: (i) => line(ls[i]) }); }
+      // checkoutLineAppearsAtClick: a second row appears between the scan's count and the re-count (r13 P1)
+      if (sel === S.checkoutLine) { const ls = st.checkoutLines || (st.checkoutLinesAtClick && st.atClick ? st.checkoutLinesAtClick : st.cart); st.lineCounts = (st.lineCounts || 0) + 1; const grow = st.checkoutLineAppearsAtClick && st.atClick && st.lineCounts % 2 === 0 ? 1 : 0; return el({ count: ls.length + grow, nth: (i) => (i < ls.length ? line(ls[i]) : line({ sku: 'S1-99', qty: 1 })) }); }
       // cartLinesResponsive: every cart line is rendered twice — a hidden mobile copy after the visible row
       if (sel === S.cartLine) return st.cartLinesResponsive
         ? el({ count: st.cart.length * 2, nth: (i) => (i % 2 ? el({ count: 1, visible: false }) : line(st.cart[i / 2])) })
@@ -946,6 +948,18 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     const { st, deps } = fakeSiteOne({ billLabelAndRadio: true, labelForId: 'payment:account' });
     await expect(s1.place(args(), deps)).resolves.toMatchObject({ externalOrderNumber: 'SO-778899' });
     expect(st.placeClicked).toBe(1);
+  });
+
+  test('a checkout row that detaches DURING the line scan fails the proof closed — the briefly-present extra line is never dropped to make the cart look exact (r13 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutLinesAtClick: [{ sku: 'S1-77', qty: 2 }, { sku: 'S1-99', qty: 1, detachedDuringScan: true }] });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
+    expect(st.placeClicked || 0).toBe(0);
+  });
+
+  test('a row count that differs after the scan from before it is churn — refused, no click (r13 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ checkoutLineAppearsAtClick: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'checkout_lines_mismatch' });
+    expect(st.placeClicked || 0).toBe(0);
   });
 
   test('a pre-click reference node that CHANGES to the confirmation after the click is read (r3 P2)', async () => {

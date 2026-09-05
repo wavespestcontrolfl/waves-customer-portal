@@ -255,8 +255,16 @@ async function shownChild(rowHandle, selector) {
   return null;
 }
 
+// Returns null when the rows CHURNED while being read: a row whose
+// visibility cannot be read (detached mid-scan), or a row count that differs
+// after the scan from before it. A summary that briefly held the expected
+// line plus one that vanished during the scan would otherwise read as
+// exactly [SKU × qty] (Codex #3876 r13 P1) — null fails every proof closed.
 async function cartLines(page, lineSelector = SELECTORS.cartLine) {
-  const { shown } = await matches(page, lineSelector);
+  let all;
+  let shown;
+  try { ({ all, shown } = await matches(page, lineSelector, { strict: true })); }
+  catch { return null; }
   const out = [];
   for (const line of shown) {
     const row = await line.elementHandle({ timeout: 1500 }).catch(() => null);
@@ -278,6 +286,8 @@ async function cartLines(page, lineSelector = SELECTORS.cartLine) {
     const qty = Number(String(qtyText ?? '').replace(/[^\d.]/g, ''));
     out.push({ sku, qty: !stillShown || qtyText == null || qtyText === '' ? NaN : qty });
   }
+  const after = await page.locator(lineSelector).count().catch(() => -1);
+  if (after !== all.length) return null;
   return out;
 }
 
@@ -551,9 +561,9 @@ async function addProductToCart(page, { vendorSku, qty, evidence, upload }) {
 // The cart must be exactly [this SKU × qty packages] — one line, the right
 // code, the right count — before its total means anything. Returns the cart
 // total in cents (the dry-run stop / cap screen; the checkout total binds).
-const linesExact = (lines, vendorSku, qty) => lines.length === 1 && normalizeSku(lines[0].sku) === normalizeSku(vendorSku) && lines[0].qty === qty;
-const describeLines = (lines) => (lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty');
-const linesEvidence = (lines) => lines.map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
+const linesExact = (lines, vendorSku, qty) => !!lines && lines.length === 1 && normalizeSku(lines[0].sku) === normalizeSku(vendorSku) && lines[0].qty === qty;
+const describeLines = (lines) => (!lines ? 'rows changed while being read' : lines.length ? lines.map((l) => `${l.sku || '?'} × ${Number.isFinite(l.qty) ? l.qty : '?'}`).join(', ') : 'empty');
+const linesEvidence = (lines) => (lines || []).map((l) => ({ sku: l.sku.slice(0, 60), qty: Number.isFinite(l.qty) ? l.qty : null }));
 
 async function verifyCartAndReadTotal(page, { vendorSku, qty, evidence, upload }) {
   await gotoCart(page);
