@@ -235,12 +235,14 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       waitFor: async () => {},
       locator: (sub) => (spec.sub ? spec.sub(sub) : el()),
     });
-    const line = (l) => el({ count: 1, visible: true, sub: (sub) => sub === S.cartLineSku ? el({ count: 1, text: l.sku }) : sub === S.cartLineQty ? el({ count: 1, value: l.qty }) : el() });
+    // cartRowChildrenHiddenFirst: inside a visible row, a hidden stale SKU / quantity copy precedes the shown one (r20 P2)
+    const child = (spec) => (st.cartRowChildrenHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, text: 'STALE-9', value: 9 }) : el({ count: 1, visible: true, ...spec })) }) : el({ count: 1, visible: true, ...spec }));
+    const line = (l) => el({ count: 1, visible: true, sub: (sub) => sub === S.cartLineSku ? child({ text: l.sku }) : sub === S.cartLineQty ? child({ value: l.qty }) : el() });
     const resolve = (sel) => {
       // loginPassHiddenAfterLogin: a hidden responsive duplicate of the password input survives a successful sign-in
       // The visible password field's own form carries the real submit control (formSubmitCount: 0 = none → Enter submits);
       // a document-wide loginSubmit read is what a hidden responsive login form ahead of the visible one would poison.
-      const submit = el({ count: 1, visible: true, onClick: () => { if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
+      const submit = el({ count: 1, visible: true, onClick: () => { st.loginSubmits = (st.loginSubmits || 0) + 1; if (st.loginRejects) return; st.loggedIn = true; st.url = 'https://www.siteone.com/en/'; } });
       // Models Playwright's descendant matching from the form: a selector that itself starts with `form` would
       // look for a NESTED form and miss the button (r18 P1) — only a form-relative control selector resolves it.
       const loginForm = el({ count: 1, sub: (sub) => (sub === S.loginSubmit && !/^\s*form\b/.test(sub) ? (st.formSubmitCount === 0 ? el() : submit) : el()) });
@@ -252,7 +254,8 @@ describe('siteone bot cart + tender rules (fake page)', () => {
       // productLinkHiddenFirst: a hidden responsive copy of the result link precedes the visible one
       const hitLink = el({ count: 1, visible: true, onClick: () => { st.hitClicked = (st.hitClicked || 0) + 1; } });
       if (sel === S.productLink) return st.productLinkHiddenFirst ? el({ count: 2, nth: (i) => (i === 0 ? el({ count: 1, visible: false, onClick: () => { st.hiddenControlClicked = (st.hiddenControlClicked || 0) + 1; } }) : hitLink) }) : hitLink;
-      if (sel === S.productSku) return el({ count: 1, visible: true, text: 'SKU: S1-77' });
+      // productSkuInAttribute: the matched node carries the code in data-product-code and shows unrelated text
+      if (sel === S.productSku) return st.productSkuInAttribute ? el({ count: 1, visible: true, text: 'Add to list', attrs: { 'data-product-code': 'S1-77' } }) : el({ count: 1, visible: true, text: 'SKU: S1-77' });
       if (sel === S.unavailable) return el();
       // productControlsHiddenFirst: hidden desktop/mobile copies of the quantity + Add to Cart controls precede the visible ones
       const qtyInput = el({ count: 1, visible: true, onFill: (v) => { st.qty = Number(v); } });
@@ -610,6 +613,24 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
     expect(st.hitClicked).toBe(1);
     expect(st.hiddenControlClicked || 0).toBe(0);
+  });
+
+  test('a definitive login rejection is submitted ONCE — no retry with the same credential (vendor lockout; r20 P1)', async () => {
+    const { st, deps } = fakeSiteOne({ loginRejects: true });
+    await expect(s1.place(args(), deps)).rejects.toMatchObject({ refuse: 'login_rejected' });
+    expect(st.loginSubmits).toBe(1);
+  });
+
+  test('inside a visible cart row the SHOWN SKU / quantity node is read, not a hidden stale copy (r20 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ cartRowChildrenHiddenFirst: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.addClicked).toBe(1);
+  });
+
+  test('a SKU node matched by data-product-code is read from the attribute, not its button text (r20 P2)', async () => {
+    const { st, deps } = fakeSiteOne({ productSkuInAttribute: true });
+    expect(await s1.place(args({ dryRun: true }), deps)).toMatchObject({ dryRun: true, amountCents: 9900 });
+    expect(st.addClicked).toBe(1);
   });
 
   test('a transient login navigation failure is one attempt of three, not a terminal failure (r4 P2)', async () => {
