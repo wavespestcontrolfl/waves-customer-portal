@@ -301,6 +301,7 @@ function annualPrepayCadencePrefix(cadence) {
 function normalizeAnnualPrepayLabelKey(value) {
   return String(value || "")
     .toLowerCase()
+    .replace(/\bevery\s*(?:(?:2|3|4|6|12)\s*months?|6\s*weeks?)\b/g, " ")
     .replace(/\b(every|monthly|bimonthly|bi-monthly|quarterly|triannual|semiannual|semi-annual|annual|yearly|six|weeks?|days?)\b/g, " ")
     .replace(/[^a-z0-9]+/g, "")
     .trim();

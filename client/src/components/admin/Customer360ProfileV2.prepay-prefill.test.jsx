@@ -210,6 +210,31 @@ describe.each([['Record', AnnualPrepayModal], ['Invoice', AnnualPrepayInvoiceMod
     expect(plan).toHaveValue('__custom__');
   });
 
+  it.each([
+    ['Every 2 months', 'bimonthly', 6],
+    ['Every 4 months', 'triannual', 3],
+    ['Every 6 weeks', 'every_6_weeks', 9],
+  ])('recognizes %s without dropping service identity or schedule guards', async (prefix, cadence, visits) => {
+    render(<Modal customer={{ ...BASE_CUSTOMER, serviceTypes: 'Pest Control' }} activeTerm={null} />);
+    const plan = screen.getByRole('combobox', { name: 'Service plan' });
+    const covered = screen.getByRole('combobox', { name: 'Service covered' });
+    fireEvent.change(covered, { target: { value: `${prefix} Pest Control` } });
+    expect(plan).toHaveValue('Pest Control');
+    expect(screen.getByRole('combobox', { name: 'Cadence' })).toHaveValue(cadence);
+    expect(screen.getByRole('spinbutton', { name: 'Applications covered' })).toHaveValue(visits);
+    await waitFor(() => expect(within(plan).getByRole('option', { name: 'Commercial Pest Control' })).toBeInTheDocument());
+    fireEvent.change(covered, { target: { value: `${prefix} Commercial Pest Control` } });
+    expect(plan).toHaveValue('Commercial Pest Control');
+    fireEvent.change(covered, { target: { value: `${prefix} Pest 2 Control` } });
+    expect(plan).toHaveValue('__custom__');
+
+    const suggestion = { ...SUGGESTION, serviceLabel: 'Pest Control', coverageCadence: cadence, coverageVisitCount: visits };
+    expect(estimateSuggestionMatchesService(suggestion, `${prefix} Pest Control`, cadence, visits)).toBe(true);
+    expect(estimateSuggestionMatchesService(suggestion, `${prefix} Pest Control`, 'monthly', visits)).toBe(false);
+    expect(estimateSuggestionMatchesService(suggestion, `${prefix} Pest Control`, cadence, visits + 1)).toBe(false);
+    expect(estimateSuggestionMatchesService(suggestion, `${prefix} Commercial Pest Control`, cadence, visits)).toBe(false);
+  });
+
   it('keeps manual service entry available when the catalog fails', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
     render(<Modal customer={BASE_CUSTOMER} activeTerm={null} />);
