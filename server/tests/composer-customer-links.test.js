@@ -54,7 +54,18 @@ jest.mock('../services/prep-guide-sender', () => ({
   nextUpcomingVisit: jest.fn(),
   settleHeldEnrollment: jest.fn(async () => {}),
 }));
-jest.mock('../services/project-email', () => ({ ensureServicePrepToken: jest.fn() }));
+jest.mock('../services/project-email', () => ({
+  ensureServicePrepToken: jest.fn(),
+  // The email path's scrubbed customer-facing title (fee cues + recorded
+  // amounts) — the composer must go through it, never the raw column.
+  projectTitle: jest.fn((project) => `[safe] ${project.title}`),
+}));
+// The report viewer's own segment parser is real; the vanity path builder
+// (which numbers the customer's reports through the DB) is stubbed.
+jest.mock('../services/project-report-links', () => ({
+  ...jest.requireActual('../services/project-report-links'),
+  projectReportPathForProject: jest.fn(async (_db, project, customer) => `/report/project/${String(customer?.first_name || 'customer').toLowerCase()}-${String(project.report_token).slice(0, 12)}`),
+}));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
 // The real predicate: typedReportDelivery set to anything but auto_send is
 // suppressed (internal_only / disabled typed reports 404 publicly).
@@ -123,11 +134,14 @@ const {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
+  buildProjectReportLink,
   markStatementsSent,
   markPrepGuidesSent,
   claimCardRequestSends,
   releaseCardRequestSends,
   markCardRequestSends,
+  claimProjectReportSends,
+  releaseProjectReportSends,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -139,9 +153,12 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereRaw = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderBy = jest.fn(() => b);
+  b.orderByRaw = jest.fn(() => b);
   b.offset = jest.fn(() => b);
   b.limit = jest.fn(async () => rows);
-  b.select = jest.fn(async () => rows);
+  // Chainable and awaitable, as knex's is (`.select(cols).where(…)` and a
+  // terminal `await q.select('id')` both work).
+  b.select = jest.fn(() => Object.assign(Promise.resolve(rows), b));
   b.first = jest.fn(async () => firstRow);
   b.update = jest.fn(async () => 1);
   return b;
@@ -1012,6 +1029,57 @@ describe('buildServiceReportLink', () => {
   });
 });
 
+describe('buildProjectReportLink', () => {
+  const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z' };
+  const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z' };
+
+  test('the account\'s newest issued report, skipping one on a payment hold; the viewer\'s vanity path, nothing minted', async () => {
+    mockBuilders = {
+      projects: chainBuilder({ rows: [HELD, ISSUED], firstRow: ISSUED }),
+      customers: chainBuilder({ firstRow: { first_name: 'Dana', last_name: 'Lee' } }),
+    };
+    const r = await buildProjectReportLink(['c1', 'c2']);
+    // The scan carries eligibility columns only — projects holds multi-MB
+    // blobs (wdo_signature …); the chosen project's title fields are loaded
+    // once (r16 P2).
+    expect(mockBuilders.projects.select).toHaveBeenCalledWith('id', 'customer_id', 'report_hold_status');
+    expect(mockBuilders.projects.first).toHaveBeenCalledWith('id', 'customer_id', 'title', 'project_type', 'project_date', 'report_token', 'findings', 'wdo_sent_filings');
+    expect(mockBuilders.projects.where).toHaveBeenCalledWith({ id: 'p-ok' });
+    expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
+    expect(mockBuilders.projects.whereIn).toHaveBeenCalledWith('status', ['sent', 'closed']);
+    // Delivery evidence too: completing a visit closes a project and mints
+    // its token even when the report was never sent (GH Codex #3893 r3 P1)
+    // — sent_at, the send stamp. The report email is the delivery and the
+    // composer text is an operator re-share, the service report's own bar
+    // (owner ruling, r17) — no per-leg SMS evidence. A migrated
+    // 'legacy_sent' row stays out (owner ruling): its delivery_status is its
+    // only issuance record and the send claim must never overwrite it.
+    expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('sent_at');
+    expect(mockBuilders.projects.whereRaw).toHaveBeenCalledWith("delivery_status IS DISTINCT FROM 'legacy_sent'");
+    expect(mockBuilders.projects.whereNotNull).toHaveBeenCalledWith('report_token');
+    // Newest issued first; ties by creation (id is a random UUID, not
+    // chronological — r8 P2).
+    expect(mockBuilders.projects.orderByRaw).toHaveBeenCalledWith('sent_at DESC, created_at DESC, id DESC');
+    expect(mockBuilders.customers.where).toHaveBeenCalledWith({ id: 'c2' });
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/report/project/dana-${'f'.repeat(12)}`);
+    // The title rides the email path's type-gated fee scrub (projectTitle),
+    // in the line and in the toast payload alike (GH Codex #3893 r4 P1).
+    const { projectTitle } = require('../services/project-email');
+    expect(projectTitle).toHaveBeenCalledWith(ISSUED);
+    expect(r.line).toBe(`Here is your [safe] Termite Treatment report: ${r.url}\n\n`);
+    expect(r.immediateOnly).toBe(true);
+    expect(r.projectReport).toEqual({ id: 'p-ok', title: '[safe] Termite Treatment', projectType: 'termite', projectDate: '2026-08-10' });
+  });
+
+  test('no issued report (or only held ones) → reason, nothing else loaded', async () => {
+    mockBuilders = { projects: chainBuilder({ rows: [HELD] }) };
+    const r = await buildProjectReportLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No project report/);
+    expect(mockBuilders.projects.first).not.toHaveBeenCalled();
+  });
+});
+
 describe('buildContractSigningLink', () => {
   const { verifyComposerContractToken } = require('../utils/composer-contract-token');
   const MINTED = /^https:\/\/portal\.wavespestcontrol\.com\/contract\/([A-Za-z0-9_-]{69})$/;
@@ -1144,6 +1212,18 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     expect(await immediateOnlyLinkSendCheck(`Here is your latest service report: portal.wavespestcontrol.com/report/${'b'.repeat(32)}`)).toEqual({ present: true, label: 'Service report' });
     mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rep1', kind: 'service_report', target_url: 'https://portal.wavespestcontrol.com/report/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } }) };
     expect(await immediateOnlyLinkSendCheck('Here is your latest service report: wavespest.co/l/rep1')).toEqual({ present: true, label: 'Service report' });
+  });
+
+  test('a project report link (vanity or full-token form) is immediate-only; the project form is not mistaken for a service report', async () => {
+    mockBuilders = { short_codes: chainBuilder({ firstRow: null }) };
+    expect(await immediateOnlyLinkSendCheck(`Here is your report: portal.wavespestcontrol.com/report/project/dana-lee-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`)).toEqual({ present: true, label: 'Project report' });
+    // The viewer ignores the slug — a working vanity URL with `_` / `.` in
+    // it is the same report and is fenced the same (r5 P1).
+    expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana_lee.jr-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });
+    // An explicit http:// owned link is still a protected link (fence reads presence).
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`)).toEqual({ present: true, label: 'Project report' });
+    expect(await immediateOnlyLinkSendCheck(`evil.example/report/project/${'f'.repeat(32)}`)).toEqual({ present: false });
   });
 
   test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
@@ -1828,6 +1908,74 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       wireAccount({ linkCustomer: acct('c9', 'other'), report: { id: 'r1', customer_id: 'c9', structured_notes: null } });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
     });
+
+    describe('project report links resolve as the viewer does and bind to the account', () => {
+      const FULL = 'f'.repeat(32);
+      const project = (over = {}) => ({ id: 'p1', customer_id: 'c1', status: 'closed', sent_at: '2026-08-11T12:00:00Z', report_token: FULL, report_hold_status: null, ...over });
+      function wireProject({ full = project(), byPrefix = [project()], ...account } = {}) {
+        wireAccount(account);
+        mockBuilders.projects = chainBuilder({ firstRow: full, rows: byPrefix });
+      }
+
+      // The verified report rides back for the send flow's delivery claim
+      // (claimProjectReportSends), keyed to the delivery state seen (r11 P1).
+      const OK = (deliveryStatus = null) => ({ ok: true, projectReports: [{ id: 'p1', deliveryStatus }] });
+
+      test('the full-token form resolves by report_token; the vanity form by its 12-hex prefix, exactly one match', async () => {
+        wireProject();
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
+        expect(mockBuilders.projects.where).toHaveBeenCalledWith({ report_token: FULL });
+        // Eligibility columns only, never `*` (r16 P2).
+        const LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
+        expect(mockBuilders.projects.first).toHaveBeenCalledWith(...LINK_COLUMNS);
+        // The service-report seam never sees the project run.
+        expect(mockBuilders.service_records.where).not.toHaveBeenCalled();
+        wireProject();
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana-lee-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/dana_lee.jr-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK());
+        expect(mockBuilders.projects.where).toHaveBeenCalledWith('report_token', 'like', `${FULL.slice(0, 12)}%`);
+        expect(mockBuilders.projects.select).toHaveBeenCalledWith(LINK_COLUMNS);
+        expect(mockBuilders.projects.limit).toHaveBeenCalledWith(2);
+        // The verified delivery state rides back for the claim.
+        wireProject({ full: project({ delivery_status: 'sent' }) });
+        expect(await bearerLinkSendCheck(`Report: portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK('sent'));
+      });
+
+      test('an ambiguous prefix, a vanished project, a payment-held report, or another account\'s report refuses', async () => {
+        wireProject({ byPrefix: [project(), project({ id: 'p2' })] });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana-${FULL.slice(0, 12)}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        wireProject({ full: null });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        // A tokened but unissued (draft) project — a /send that failed after
+        // stamping the token — is not a report to text (GH Codex #3893 r1 P1).
+        wireProject({ full: project({ status: 'draft' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        // Closed by a visit completion but never sent (report_not_sent) —
+        // the token exists, the report was not issued (GH Codex #3893 r3 P1).
+        wireProject({ full: project({ sent_at: null }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        // Issued by EMAIL only is still issued — the report email is the
+        // delivery and the text is an operator re-share, the service
+        // report's own bar (owner ruling, r17).
+        wireProject({ full: project({ delivery_status: 'partial', delivery_channels: { email: { ok: true }, sms: { ok: false, error: 'no phone on file' } } }) });
+        expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual(OK('partial'));
+        // A migrated 'legacy_sent' delivery stays out (owner ruling) —
+        // with or without a sent_at — so the send claim never overwrites
+        // the only record that it was issued.
+        wireProject({ full: project({ sent_at: null, delivery_status: 'legacy_sent' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        wireProject({ full: project({ delivery_status: 'legacy_sent' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
+        wireProject({ full: project({ report_hold_status: 'held' }) });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/payment hold/);
+        wireProject({ full: project({ customer_id: 'c9' }), linkCustomer: acct('c9', 'other') });
+        expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/project/${FULL}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+        // A look-alike host or a non-report segment is not ours.
+        wireProject();
+        expect((await bearerLinkSendCheck(`https://evil.example/report/project/${FULL}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
+        expect((await bearerLinkSendCheck('portal.wavespestcontrol.com/report/project/just-a-slug', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
+      });
+    });
   });
 
   test('markPrepGuidesSent writes the tagger\'s replay-guard marker (sms_outbound + "<pest> prep info sent") per verified prep page (GH Codex #3844 r8 P2)', async () => {
@@ -1890,6 +2038,68 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
     await markStatementsSent([31, 52]);
     expect(markStatementSent).toHaveBeenCalledWith(31);
     expect(markStatementSent).toHaveBeenCalledWith(52);
+  });
+
+  describe('project report send claim (the project send flow\'s own delivery claim, taken by the composer send — GH Codex #3893 r10 + r11 P1)', () => {
+    beforeEach(() => { mockDb.fn = { now: () => 'NOW()' }; });
+    const claimUpdate = (projects) => projects.update.mock.calls;
+
+    test('claim: the flow\'s conditional UPDATE keyed to the delivery state the seam saw — a stamped state, none, or a STALE claim it may take over', async () => {
+      const projects = chainBuilder();
+      mockBuilders = { projects };
+      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: null }, { id: 'p3', deliveryStatus: 'sending' }]);
+      expect(r.ok).toBe(true);
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p1' });
+      expect(projects.where).toHaveBeenCalledWith({ delivery_status: 'sent' });
+      expect(projects.whereNull).toHaveBeenCalledWith('delivery_status');
+      expect(projects.whereRaw).toHaveBeenCalledWith("delivery_status = 'sending' AND updated_at < now() - interval '10 minutes'");
+      expect(claimUpdate(projects)).toHaveLength(3);
+      expect(claimUpdate(projects)[0][0]).toEqual({ delivery_status: 'sending', delivery_claim_token: expect.stringMatching(/^[a-f0-9]{24}$/), updated_at: 'NOW()' });
+      // The hand-back target: the state seen, or 'failed' for a stale claim
+      // taken over — the flow's own normalization of a crashed send.
+      expect(r.claim.projects.map((p) => p.previousStatus)).toEqual(['sent', null, 'failed']);
+      expect(new Set(r.claim.projects.map((p) => p.token)).size).toBe(3);
+    });
+
+    test('claim: the same report linked twice (vanity + full form, a repeated URL) is ONE claim, not a self-competing second one (pre-push Codex P1)', async () => {
+      const projects = chainBuilder();
+      mockBuilders = { projects };
+      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: 'closed' }]);
+      expect(r.ok).toBe(true);
+      expect(claimUpdate(projects)).toHaveLength(2);
+      expect(r.claim.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    });
+
+    test('claim lost (the flow is sending right now, or the state moved): every claim this call won is handed back, token-guarded, and the send refuses', async () => {
+      const projects = chainBuilder();
+      projects.update.mockResolvedValueOnce(1).mockResolvedValueOnce(0);
+      mockBuilders = { projects };
+      const r = await claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: 'closed' }]);
+      expect(r.ok).toBe(false);
+      expect(r.error).toMatch(/being re-sent right now/);
+      const token = claimUpdate(projects)[0][0].delivery_claim_token;
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p1', delivery_status: 'sending', delivery_claim_token: token });
+      expect(claimUpdate(projects)[2][0]).toEqual({ delivery_status: 'sent', delivery_claim_token: null, updated_at: 'NOW()' });
+    });
+
+    test('claim: an UPDATE that throws hands back the claims already won before the error surfaces', async () => {
+      const projects = chainBuilder();
+      projects.update.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('connection reset'));
+      mockBuilders = { projects };
+      await expect(claimProjectReportSends([{ id: 'p1', deliveryStatus: 'sent' }, { id: 'p2', deliveryStatus: 'sent' }])).rejects.toThrow('connection reset');
+      expect(claimUpdate(projects)).toHaveLength(3);
+      expect(claimUpdate(projects)[2][0]).toMatchObject({ delivery_status: 'sent', delivery_claim_token: null });
+    });
+
+    test('release: restores the delivery state this claim replaced, only where the row still carries this claim', async () => {
+      const projects = chainBuilder();
+      mockBuilders = { projects };
+      await releaseProjectReportSends({ projects: [{ id: 'p1', token: 't1', previousStatus: 'partial' }, { id: 'p3', token: 't3', previousStatus: 'failed' }] });
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p1', delivery_status: 'sending', delivery_claim_token: 't1' });
+      expect(projects.update).toHaveBeenCalledWith({ delivery_status: 'partial', delivery_claim_token: null, updated_at: 'NOW()' });
+      expect(projects.where).toHaveBeenCalledWith({ id: 'p3', delivery_status: 'sending', delivery_claim_token: 't3' });
+      expect(projects.update).toHaveBeenCalledWith({ delivery_status: 'failed', delivery_claim_token: null, updated_at: 'NOW()' });
+    });
   });
 
   describe('card request send claim (the service\'s own one-text mechanics, run by the composer send)', () => {
