@@ -454,8 +454,8 @@ html[data-glass-theme] [data-glass].glass-reveal-in {
 html[data-glass-theme] [data-glass] { border-radius: 12px !important; }
 html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
 html[data-glass-theme] button:not([data-glass-pill]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
-html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px; }
-html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px; }
+html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
+html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
 html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
 html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::placeholder { font-size: 14px !important; font-weight: 400 !important; color: #64748B !important; opacity: 1; }
 

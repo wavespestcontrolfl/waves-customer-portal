@@ -492,14 +492,19 @@
 @media (prefers-reduced-transparency: reduce) {
   [data-glass-theme] .gc-freq-btn,
   [data-glass-theme] .gc-freq-btn:hover,
-  [data-glass-theme] .gc-slot-priority {
+  [data-glass-theme] .gc-slot-priority,
+  [data-glass-theme] .gc-tech-chip,
+  [data-glass-theme] .gc-proof,
+  [data-glass-theme] .gc-mbb {
     background: rgba(255, 255, 255, 0.93) !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
   }
   [data-glass-theme] .gc-freq-btn[data-active],
   [data-glass-theme] .gc-freq-btn[data-active]:hover,
-  [data-glass-theme] .gc-scarcity {
+  [data-glass-theme] .gc-scarcity,
+  [data-glass-theme] .gc-section-cta,
+  [data-glass-theme] .gc-section-cta:hover {
     background: #F4B014 !important;
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
@@ -508,12 +513,17 @@
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   [data-glass-theme] .gc-freq-btn,
   [data-glass-theme] .gc-freq-btn:hover,
-  [data-glass-theme] .gc-slot-priority {
+  [data-glass-theme] .gc-slot-priority,
+  [data-glass-theme] .gc-tech-chip,
+  [data-glass-theme] .gc-proof,
+  [data-glass-theme] .gc-mbb {
     background: rgba(255, 255, 255, 0.93) !important;
   }
   [data-glass-theme] .gc-freq-btn[data-active],
   [data-glass-theme] .gc-freq-btn[data-active]:hover,
-  [data-glass-theme] .gc-scarcity {
+  [data-glass-theme] .gc-scarcity,
+  [data-glass-theme] .gc-section-cta,
+  [data-glass-theme] .gc-section-cta:hover {
     background: #F4B014 !important;
   }
 }
