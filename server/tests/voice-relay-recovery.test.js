@@ -557,7 +557,7 @@ describe('the conversation side', () => {
     const convo = resumedConvo({ callSid: 'CA-lookups' });
     await convo._resumeReady;
     expect(convo._resume.lookupsUsed).toBe(3);
-    expect(convo._lookupsUsed).toBe(3);
+    expect(convo._priorLookupsUsed).toBe(3);
     expect(convo._buildToolCtx().consumeLookup()).toBe(false); // the budget is exhausted for THIS call
   });
 
@@ -656,6 +656,21 @@ describe('the conversation side', () => {
     expect(ctx.consumeLookup()).toBe(false);
     expect(ctx.resolveLookupRef('C1-1')).toBe('customer-1');
     expect(ctx.rememberLookup({ id: 'customer-1' })).toBe('C1-1');
+  });
+
+  test('a delayed resume read preserves locally consumed lookups and does not spend while history is unknown', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const convo = resumedConvo();
+    await convo._resumeReady;
+    const ctx = convo._buildToolCtx();
+    expect(ctx.consumeLookup()).toBe(false); // no prior segment yet
+    // A previously consumed local lookup must survive later hydration.
+    convo._lookupsUsed = 1;
+    convo._applyResumeState({ callerTurns: [], segmentsText: 'Caller: earlier', lookupsUsed: 2 });
+    expect(ctx.consumeLookup()).toBe(false);
+    convo._applyResumeState({ callerTurns: [], segmentsText: 'Caller: earlier', lookupsUsed: 2 });
+    expect(convo._lookupsUsed + convo._priorLookupsUsed).toBe(3); // reload is idempotent
   });
 
   test('a late earlier lookup map cannot alias a reference already issued on this leg', async () => {
