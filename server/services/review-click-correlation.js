@@ -107,7 +107,7 @@ function describeClickOffset(offsetMs) {
  *   addressLine2: string|null, city: string|null, state: string|null,
  *   zip: string|null, clickedAt: string, clickOffsetMs: number,
  *   clickOffsetLabel: string, clickedBeforeReview: boolean,
- *   locationMatch: boolean|null, locationConflict: boolean, alreadyFlagged: boolean,
+ *   locationMatch: boolean|null, alreadyFlagged: boolean,
  *   nameMatch: boolean
  * }>>} surname matches first, then nearest-click-first; [] on missing/invalid review timestamp or any
  * query error (suggestions are best-effort and must never break a caller).
@@ -224,12 +224,6 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       return Math.abs(a.clickOffsetMs) < Math.abs(b.clickOffsetMs);
     };
     const byCustomer = new Map();
-    // Customers with a pair STAMPED for a different location. That pair is
-    // skipped below, but its existence is anti-evidence the surname rung
-    // must see: a newer post-migration tap at another location must not
-    // leave an older, untrusted first-click pair looking clean (GH codex r1
-    // P1).
-    const conflicting = new Set();
     for (const row of clicks) {
       if (row.google_review_clicked !== true) continue;
       // BOTH observed timestamps are candidate clicks, each judged ONLY
@@ -254,10 +248,7 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       for (const { ts, loc, trusted } of pairs) {
         if (!ts || seenTs.has(String(ts))) continue;
         seenTs.add(String(ts));
-        if (reviewLocationId && loc && loc !== reviewLocationId) {
-          conflicting.add(row.customer_id);
-          continue;
-        }
+        if (reviewLocationId && loc && loc !== reviewLocationId) continue;
         const clickedAt = new Date(ts);
         if (Number.isNaN(clickedAt.getTime())) continue;
         // The OR window admits the ROW when either timestamp qualifies —
@@ -301,12 +292,12 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
         // active=true, so a null-active link would be unconfirmable. An
         // archived customer is likewise unconfirmable (GH codex r6 P1).
         customerActive: row.active === true && !row.deleted_at,
-        // Another of this customer's pairs is stamped for a DIFFERENT
-        // location — see `conflicting` above.
-        locationConflict: conflicting.has(row.customer_id),
         // The reviewer's display-name surname equals this customer's
-        // COMPLETE last name (owner ruling 2026-09-03: the matcher weighs
-        // the last name; GH codex r1 P1: whole surname, not the final token).
+        // COMPLETE last name (owner ruling 2026-09-03; GH codex r1 P1: whole
+        // surname, not the final token). SUGGESTION ranking only: the
+        // click_name auto-link rung lives on feat/review-autolink-surname-rung
+        // (#3822 split, 2026-09-05) — a wrong rank is a human's to ignore, a
+        // wrong auto-link suppresses a customer's review asks.
         nameMatch: surnames.includes(normalizeName(row.last_name)),
       });
     const all = [...byCustomer.values()].map(toCandidate);
@@ -323,21 +314,6 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
       // of the window — sole-clicker can't be asserted over a partial read.
       _meta.scanTruncated = clicks.length >= SCAN_LIMIT;
       _meta.allCandidates = all;
-      // The location filter above drops a clicker whose EVERY pair is
-      // stamped for another GBP, and the pair loop skips an elsewhere pair
-      // whose row was admitted by an unstamped or out-of-window first pair
-      // (GH codex r2 P1) — right for suggestions and for the
-      // location-gated rungs, but the surname rung must know that a second
-      // same-surname customer tapped ANY location's link in the window
-      // (pre-push r4 P1): two "Northgate" clickers = a human decides, no
-      // matter which form each landed on. The matched customer's OWN
-      // other-location rows count too — a second review_requests row
-      // stamped elsewhere is the "any pair" conflict the main scan cannot
-      // see (pre-push r5 P1). Auto-link path only.
-      // Only when the surname rung can act (GATE_REVIEW_CLICK_AUTOLINK_SURNAME
-      // via `_meta.surnameRung`) — dark, the scan would be a wasted query.
-      _meta.surnameClickerElsewhere = Boolean(_meta.surnameRung && reviewLocationId && surnames.length)
-        && await surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames });
     }
 
     // A customer already linked to a synced review is attributed — excluded
@@ -355,61 +331,22 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT, _
   }
 }
 
-/**
- * Whether any customer with the reviewer's surname holds a review-request
- * row with a pair — first OR latest, each judged with its own timestamp —
- * clicked in the window and stamped for a different location. The main
- * scan cannot count such a pair when the row's other pair is stamped
- * elsewhere too, is unstamped, or falls outside the window (pre-push r4/r5
- * P1, GH codex r2 P1: a legacy row with a NULL first location and a newer
- * tap stamped elsewhere). A competing customer is ambiguity; the matched
- * customer's own row is a conflicting pair. True on a truncated scan (the
- * window can't be proven clean). The pair predicate repeats JS-side, as in
- * the main scan. Archived customers count (GH codex r6 P1), as in the main
- * scan. Unstamped latest taps are the MAIN scan's job — its location
- * filter admits them for every rung (GH codex r7/r8 P1).
- */
-async function surnameClickerElsewhere({ conn, reviewLocationId, windowStart, windowEnd, surnames }) {
-  const rows = await conn('review_requests as rr')
-    .join('customers as c', 'rr.customer_id', 'c.id')
-    .whereNotNull('rr.redirected_at')
-    .where('rr.google_review_clicked', true)
-    .whereRaw(
-      '((rr.google_location IS NOT NULL AND rr.google_location != ? AND rr.redirected_at >= ? AND rr.redirected_at <= ?) OR (rr.last_google_location IS NOT NULL AND rr.last_google_location != ? AND rr.last_redirected_at >= ? AND rr.last_redirected_at <= ?))',
-      [reviewLocationId, windowStart, windowEnd, reviewLocationId, windowStart, windowEnd],
-    )
-    .limit(SCAN_LIMIT)
-    .select('rr.customer_id', 'rr.redirected_at', 'rr.last_redirected_at', 'rr.google_location', 'rr.last_google_location', 'rr.google_review_clicked', 'c.last_name');
-  if (rows.length >= SCAN_LIMIT) return true;
-  const elsewhereInWindow = (ts, loc) => {
-    const at = ts ? new Date(ts) : null;
-    return Boolean(loc) && loc !== reviewLocationId
-      && Boolean(at) && !Number.isNaN(at.getTime()) && at >= windowStart && at <= windowEnd;
-  };
-  return rows.some((row) => row.google_review_clicked === true
-    && surnames.includes(normalizeName(row.last_name))
-    && (elsewhereInWindow(row.redirected_at, row.google_location)
-      || elsewhereInWindow(row.last_redirected_at, row.last_google_location)));
-}
-
-// ── Confident auto-link (GATE_REVIEW_CLICK_AUTOLINK; the click_name rung also
-// needs GATE_REVIEW_CLICK_AUTOLINK_SURNAME) ──────────────────────────────────
+// ── Confident auto-link (GATE_REVIEW_CLICK_AUTOLINK) ────────────────────────
 //
 // The suggestion list above tolerates ambiguity because a person reads it.
 // Auto-linking tolerates none: a wrong link suppresses that customer's future
 // review asks and can enroll them in a thank-you sequence. So the bar is
-// deliberately higher than "nearest click". Three rungs, each on its own
+// deliberately higher than "nearest click". Two rungs, each on its own
 // enough (owner rulings 2026-09-03), all requiring an active, unflagged
 // customer whose click landed BEFORE the review within a tight window
-// (people tap the link, then write — prod evidence: 45s, 2min and ~3h gaps):
+// (people tap the link, then write — prod evidence: 45s, 2min and ~3h gaps).
+// The surname rung (click_name: a lone same-surname clicker, legacy pairs
+// admitted) is carved out to feat/review-autolink-surname-rung — its
+// ambiguity semantics were still converging after nine review rounds
+// (#3822 split, 2026-09-05); here the surname only ranks suggestions:
 //   sole_click — EXACTLY ONE clicker in the whole 72h window (even a
 //     location-unstamped second clicker means a human decides) AND a
 //     post-migration location pair that MATCHES the review's;
-//   click_name — exactly one in-window clicker whose complete last name
-//     ends the reviewer's display name — counted across EVERY location's
-//     link, not just this GBP's. The surname is the corroboration the
-//     post-migration stamp stands in for, so a legacy pair qualifies; any
-//     of the customer's pairs stamped with a DIFFERENT location refuses;
 //   click_near — the nearest click is within minutes of the review, its
 //     pair is trusted and location-matched, and every other clicker in the
 //     window (linked ones included) is hours away or after the review.
@@ -423,23 +360,17 @@ const AUTO_LINK_FAR_MS = 6 * 3600 * 1000;
  *
  * @param {{review_created_at?: string|Date, location_id?: string}} review
  * @param {{conn?: object}} [options]
- * @returns {Promise<{customerId: string, clickedAt: string, clickOffsetMs: number, clickOffsetLabel: string, rung: 'sole_click'|'click_name'|'click_near', evidence: string, locationTrusted: boolean}|null>}
+ * @returns {Promise<{customerId: string, clickedAt: string, clickOffsetMs: number, clickOffsetLabel: string, rung: 'sole_click'|'click_near', evidence: string}|null>}
  *   null on any ambiguity or error — auto-link must fail toward the manual
  *   queue, never toward a guess. `evidence` is the admin-readable audit cue
- *   stating ONLY what the rung checked (GH codex r2 P2); `locationTrusted`
- *   is whether the click's location was observed with its timestamp and
- *   matches the review's — false for a legacy click_name pair, which could
- *   have landed on any location's form (GH codex r2 P1).
+ *   stating ONLY what the rung checked (GH codex r2 P2). Every match holds
+ *   a trusted pair stamped for the review's own location.
  */
 async function findConfidentClickMatch(review, { conn = db } = {}) {
   try {
     // SCAN_LIMIT bounds the underlying query; a limit above it returns every
-    // deduped candidate, which the rungs below need. The surname rung ships
-    // DARK on its own gate (#3822 r6: its ambiguity semantics were still
-    // converging) — off, click_name never links and the inverse-location
-    // scan it alone needs is skipped.
-    const { isEnabled } = require('../config/feature-gates');
-    const meta = { surnameRung: isEnabled('reviewClickAutoLinkSurname') };
+    // deduped candidate, which the rungs below need.
+    const meta = {};
     const candidates = await findLikelyReviewers(review, { conn, limit: SCAN_LIMIT, _meta: meta });
     if (!candidates.length) return null;
     // A scan that hit its row cap can't prove what else the window held
@@ -464,8 +395,7 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
     // r2 P2). The counts below come from the same scan the rung decided on.
     // A trusted pair: timestamp and location observed together
     // post-migration AND the location is the review's (null = legacy = not
-    // confident). sole_click and click_near require it; click_name only
-    // reports it, as `locationTrusted`.
+    // confident). Both rungs require it.
     const trusted = (c) => c.pairTrusted === true && c.locationMatch === true;
     const plural = (n, noun) => `${n} other ${noun}${n === 1 ? '' : 's'}`;
     const decision = (c, rung, evidence) => ({
@@ -475,7 +405,6 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
       clickOffsetLabel: c.clickOffsetLabel,
       rung,
       evidence,
-      locationTrusted: trusted(c),
     });
 
     // sole_click — the sole-clicker check holds over the RAW window,
@@ -487,36 +416,7 @@ async function findConfidentClickMatch(review, { conn = db } = {}) {
       return decision(only, 'sole_click', 'only click in the window, same location');
     }
 
-    // click_name — exactly one clicker in the RAW window carries the
-    // reviewer's complete surname (a linked same-surname clicker still
-    // competes — their click may aim at another location's profile;
-    // pre-push P1 — and so does one whose clicks all went to ANOTHER
-    // location's form, which the location-filtered scan never returns;
-    // pre-push r4 P1), and that one must be an unlinked candidate. Two
-    // surname matches ("Cruz" and "De La Cruz" both end "Maria De La
-    // Cruz") = a human decides. A legacy pair is fine (the surname
-    // corroborates); a customer with ANY pair stamped for a different
-    // location is not — the retained pair may be the untrusted first click
-    // while their newer tap went elsewhere (GH codex r1 P1), or a second
-    // request row of theirs may be stamped elsewhere (pre-push r5 P1).
-    // `all` holds archived clickers too — competition, never `named`
-    // (their customerActive is false; GH codex r6 P1).
     const all = meta.allCandidates;
-    const namedAll = all.filter((c) => c.nameMatch === true);
-    const named = meta.surnameRung && namedAll.length === 1 && meta.surnameClickerElsewhere !== true
-      ? candidates.find((c) => c.customerId === namedAll[0].customerId)
-      : null;
-    if (named && eligible(named) && named.locationConflict !== true) {
-      // `all` holds ONE entry per clicker (their best click) from this
-      // location's scan, unstamped clicks included; every other entry
-      // failed the surname test, and the inverse scan found no same-surname
-      // click at any other location. The copy counts clickers, not clicks
-      // (GH codex r3 P2).
-      const others = all.length - 1;
-      return decision(named, 'click_name', `the reviewer's last name matches this customer's; ${
-        others ? `the ${plural(others, 'clicker')} at this location in the window had other last names` : 'no other clicker at this location in the window'}`);
-    }
-
     // click_near — the nearest click is minutes before the review and every
     // other clicker in the window (linked ones included) is hours away or
     // after it. The nearest must itself be an unlinked, trusted,

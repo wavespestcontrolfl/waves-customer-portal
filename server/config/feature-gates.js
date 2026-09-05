@@ -1376,15 +1376,6 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
-  // The surname rung of that matcher (click_name: the ONE in-window clicker
-  // whose complete last name is the reviewer's; see
-  // findConfidentClickMatch). Ships DARK on its own switch because its
-  // ambiguity semantics were still converging at review time (#3822 r6):
-  // off, the rung never links and its inverse-location scan never runs —
-  // sole_click and click_near stay on reviewClickAutoLink alone; the
-  // surname still ranks SUGGESTIONS. Needs reviewClickAutoLink too. Kill:
-  // unset.
-  reviewClickAutoLinkSurname: process.env.GATE_REVIEW_CLICK_AUTOLINK_SURNAME === 'true',
 
   // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
   // environment, same rationale as treatmentAutomationEnroll; each kill =
