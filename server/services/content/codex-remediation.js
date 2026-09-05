@@ -18,7 +18,7 @@
  * store serves both lanes.
  *
  * Safety:
- *   - Gated behind AUTONOMOUS_CODEX_REMEDIATION (default OFF).
+ *   - Gated behind AUTONOMOUS_CODEX_REMEDIATION (default ON for supporting blogs; explicit false disables).
  *   - It only ever pushes to an existing draft PR branch and re-requests review;
  *     it NEVER merges (merge still requires a genuine Codex-clean signal).
  *   - Bounded by CODEX_REMEDIATION_MAX_ROUNDS (default 3). After that — or if a
@@ -87,8 +87,8 @@ async function rawEligibilityBrief(db, briefId) {
   return { action_type: row.action_type, gsc_signal: gs };
 }
 
-function remediationEnabled() {
-  const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION || '').trim().toLowerCase();
+function remediationEnabled(actionType) {
+  const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION ?? (actionType === 'new_supporting_blog' ? 'true' : 'false')).trim().toLowerCase();
   return v === 'true' || v === '1' || v === 'on';
 }
 
@@ -2312,7 +2312,7 @@ async function mirrorFrontmatterToDraftPayload(db, runId, prNumber, frontmatterC
 
 /** Autonomous lane (autonomous-pr-poller): a run with a live PR, no blog_posts row. */
 async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
-  if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
+  if (!remediationEnabled(run?.action_type)) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
   const db = deps.db || dbDefault;
   // Foreign-parent guard (PR #3508 r15 P1): remediation fixes ONE file and
