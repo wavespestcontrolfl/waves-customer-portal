@@ -66,7 +66,7 @@ test.each(['pending', 'confirmed', 'en_route', 'on_site', 'completed', 'cancelle
   expect(await applyAppointmentAddress(conn, plan, 'admin-a')).toEqual([row.id]);
   const patch = conn.calls.find((call) => call.table === 'scheduled_services' && call.patch).patch;
   expect(patch).toMatchObject({ property_id: property.id, service_address_line1: property.address_line1,
-    service_address_line2: '', zone: null, lat: null, lng: null, pre_service_brief: null });
+    service_address_line2: '', zone: null, route_order: null, lat: null, lng: null, pre_service_brief: null });
   expect(patch).not.toHaveProperty('status');
   expect(patch).not.toHaveProperty('en_route_at');
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ trx: conn, critical: true }));
@@ -158,4 +158,25 @@ test('ordinary edit saves pre-acquire tech-day fences before maintenance too', (
   expect(fence).toBeGreaterThan(-1);
   expect(fence).toBeLessThan(maintenance);
   expect(fence).toBeLessThan(conditionalStop);
+});
+
+
+test.each(['address_line1', 'city', 'state', 'zip'])('rejects an incomplete %s before any plan writes', async (field) => {
+  for (const value of [null, undefined, '', '   ']) {
+    const conn = connection({ selected: { ...property, [field]: value } });
+    const plan = await planAppointmentAddress(conn, row.id, property.id);
+    await expect(applyAppointmentAddress(conn, plan, 'admin-a')).rejects.toMatchObject({ statusCode: 422, isOperational: true });
+    expect(conn.calls.some((call) => call.patch)).toBe(false);
+  }
+});
+
+test('a deleted appointment returns an operational not-found error', async () => {
+  await expect(planAppointmentAddress(connection({ rows: [] }), row.id, property.id))
+    .rejects.toMatchObject({ statusCode: 404, isOperational: true });
+});
+
+test('address changes discard the stale route position echoed by the modal', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const addressBranch = source.slice(source.indexOf('    if (addressPlan) {'));
+  expect(addressBranch.slice(0, 220)).toContain('delete updates.route_order');
 });

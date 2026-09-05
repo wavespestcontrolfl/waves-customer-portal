@@ -8531,7 +8531,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
     const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../services/appointment-address');
     const addressPlan = propertyId !== undefined ? await planAppointmentAddress(db, req.params.id, propertyId) : null;
-    if (addressPlan) delete updates.zone; // The selected property replaces a stale modal zone echo.
+    if (addressPlan) {
+      // The selected property replaces stale zone and route-position echoes.
+      delete updates.zone;
+      delete updates.route_order;
+    }
     let addressUpdatedIds = [];
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can

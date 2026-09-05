@@ -10,7 +10,7 @@ const retry = () => Object.assign(new Error('Appointments changed while saving. 
 // and that template. A grouped stop keeps all its services at one property.
 async function planAppointmentAddress(conn, serviceId, propertyId) {
   const anchor = await conn('scheduled_services').where({ id: serviceId }).first();
-  if (!anchor) throw Object.assign(new Error('Appointment not found'), { statusCode: 404 });
+  if (!anchor) throw Object.assign(new Error('Appointment not found'), { statusCode: 404, isOperational: true });
   const parentId = anchor.recurring_parent_id || (anchor.is_recurring ? anchor.id : null);
   let rows = await conn('scheduled_services').where({ customer_id: anchor.customer_id })
     .where((q) => {
@@ -53,8 +53,9 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   const property = await trx('customer_properties').where({
     id: plan.propertyId, customer_id: plan.anchor.customer_id, active: true,
   }).forShare().first();
-  if (!property || !property.address_line1) {
-    throw Object.assign(new Error('Choose an active address belonging to this customer.'), { statusCode: 422, isOperational: true });
+  if (!property || !['address_line1', 'city', 'state', 'zip'].every((field) =>
+    typeof property[field] === 'string' && property[field].trim())) {
+    throw Object.assign(new Error('Choose an active customer address with a street, city, state and ZIP code.'), { statusCode: 422, isOperational: true });
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
@@ -79,6 +80,7 @@ async function applyAppointmentAddress(trx, plan, actorId) {
     service_address_state: property.state || '',
     service_address_zip: property.zip || '',
     zone: null,
+    route_order: null,
     lat: property.latitude ?? null,
     lng: property.longitude ?? null,
     pre_service_brief: null,

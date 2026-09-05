@@ -21,6 +21,13 @@ const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 
+// Location belongs to the scored placement as much as its date and time do.
+// Reuse this field set in the preflight read and the atomic rebooker predicate.
+const LOCATION_FIELDS = [
+  'property_id', 'service_address_line1', 'service_address_line2',
+  'service_address_city', 'service_address_state', 'service_address_zip', 'lat', 'lng',
+];
+
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
 /**
@@ -43,7 +50,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -60,7 +67,9 @@ async function revalidatePlacement(service) {
     || norm(fresh.window_start) !== norm(service.window_start)
     || norm(fresh.window_end) !== norm(service.window_end)
     || String(fresh.technician_id || '') !== String(service.technician_id || '');
-  if (changed) {
+  const locationChanged = LOCATION_FIELDS.some((field) =>
+    String(fresh[field] ?? '') !== String(service[field] ?? ''));
+  if (changed || locationChanged) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Placement changed since it was scored' };
   }
   return { ok: true, fresh, code: null, reason: null };
@@ -300,6 +309,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
+    ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
   };
 
   // Canonical move — transactional, overlap-checked, silent. ALWAYS a
