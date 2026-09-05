@@ -327,7 +327,12 @@ function builtinTranscriptMayReplace(row) {
   // recording transcript the row will get if the providers fail — and the
   // AI segment is durable in metadata.relay_transcript (end()'s stash), from
   // which the processor rebuilds the composite. Never for a non-transfer.
-  return provider === 'conversation_relay' && isTransferredRow(row) && relayTranscriptStashed(row);
+  return provider === 'conversation_relay' && (isTransferredRow(row) || isReconnectedRow(row)) && relayTranscriptStashed(row);
+}
+
+/** PR 2B: a call that reconnected (relay_reconnects > 0) — its recording is evidence-bearing like a transfer's. */
+function isReconnectedRow(row) {
+  return (Number(parseJsonObject(row && row.metadata).relay_reconnects) || 0) > 0;
 }
 
 /** The AI segment is safe in metadata.relay_transcript (PR 2A). */
@@ -336,7 +341,7 @@ function relayTranscriptStashed(row) {
   return Boolean(meta.relay_transcript && typeof meta.relay_transcript === 'object' && String(meta.relay_transcript.text || '').trim());
 }
 // The SQL twin of the rule above, re-checked in the write.
-const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND COALESCE(metadata->'relay_transcript'->>'text', '') <> '' AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred'))";
+const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND COALESCE(metadata->'relay_transcript'->>'text', '') <> '' AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred' OR COALESCE((metadata->>'relay_reconnects')::int, 0) > 0))";
 
 // A second recording that arrived while the row's recording was load-bearing
 // (decideRecordingAttach → park). Nothing is lost: the recording rides in
@@ -1884,11 +1889,18 @@ async function appendSecondFailureTransfer(req, twiml, callSid) {
     const { loadOfficeHours, isOfficeOpenAt } = require('../services/voice-agent/relay-context');
     const hours = await withDeadline(loadOfficeHours(), STAMP_DEADLINE_MS, null);
     if (!hours || isOfficeOpenAt(hours, new Date()) !== true) return false;
+    // An UNCONFIRMED owner read (timeout / error) is not a proven-null owner:
+    // the ring claim would then match 0 rows and the caller would get an
+    // empty response — fall back to voicemail instead (codex r1 P1).
     const row = await withDeadline(
-      db('call_log').where('twilio_call_sid', callSid).first('metadata').then((r) => r || null),
+      db('call_log').where('twilio_call_sid', callSid).first('metadata').then((r) => r || false).catch(() => 'unconfirmed'),
       STAMP_DEADLINE_MS,
-      null,
+      'unconfirmed',
     );
+    if (row === 'unconfirmed') {
+      logger.warn(`[relay-complete] second failure for ${maskSid(callSid)} — owner read unconfirmed, voicemail instead of a ring`);
+      return false;
+    }
     const owner = row ? (parseJsonObject(row.metadata).relay_session_claim_owner || null) : null;
     logger.info(`[relay-complete] second failure for ${maskSid(callSid)} — office open, ringing staff`);
     await appendRelayTransfer(req, twiml, callSid, { reason: 'transfer', owner: owner ? String(owner) : null });

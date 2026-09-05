@@ -206,6 +206,18 @@ describe('/relay-complete — the second failure', () => {
     expect(res2.body).not.toContain('<Dial');
   });
 
+  test('an UNCONFIRMED owner read on the second failure ⇒ voicemail, never an empty response (codex r1 P1)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    const { builder } = primeDb({ claimRows: 0, firstRow: RECONNECTED_ROW });
+    let reads = 0;
+    builder.first = jest.fn(() => (++reads <= 1 ? Promise.resolve(RECONNECTED_ROW) : Promise.reject(new Error('pool down')))); // the reconnect-state read answers; the owner read fails
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: { gen: '777' } }, res);
+    expect(res.body).toContain('<Record');
+    expect(res.body).not.toContain('<Dial');
+  });
+
   test('a sandbox second failure ⇒ today\'s relay_failed stamp + hangup (never staff)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';

@@ -846,7 +846,8 @@ describe('builtinTranscriptMayReplace (pure) and POST /transcription', () => {
     expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: stashed })).toBe(true);
     expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: JSON.stringify(stashed) })).toBe(true);
     expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_handoff: {} } })).toBe(false); // not stashed
-    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_transcript: { text: 'Agent: hi' } } })).toBe(false); // not a transfer
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_transcript: { text: 'Agent: hi' } } })).toBe(false); // not a transfer, not reconnected
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_transcript: { text: 'Agent: hi' }, relay_reconnects: 1 } })).toBe(true); // a reconnected call's voicemail (PR 2B)
     expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay' })).toBe(false);
   });
 

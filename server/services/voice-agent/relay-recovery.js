@@ -75,8 +75,11 @@ function resumeGreeting(language) {
 }
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, promises = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled = false, noLeadCreated = false, modelFailures = 0, toolFailures = 0, promises = [] }) {
   return {
+    // The provider-failure streak at this leg's close (restored on resume).
+    model_failures: Number(modelFailures) || 0,
+    tool_failures: Number(toolFailures) || 0,
     // This leg's capture state: a filed re-service deliberately creates NO
     // lead, and the resumed leg must not route it through lead capture again.
     reservice_filed: reserviceFiled === true,
@@ -230,9 +233,12 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
       const callerLabel = `${require('./relay-transcript').CALLER_LABEL}: `;
       const callerTurns = full.split('\n').filter((line) => line.startsWith(callerLabel)).map((line) => line.slice(callerLabel.length).trim()).filter(Boolean);
       const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments.filter((seg) => seg && typeof seg === 'object') : [];
+      const latest = [...legs].sort((a, b) => (Number(b.generation) || 0) - (Number(a.generation) || 0))[0] || null;
       return {
         reconnects,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
+        modelFailures: latest ? Number(latest.model_failures) || 0 : 0,
+        toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
         reserviceFiled: legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
         // The seed keeps the TAIL (the most recent turns matter most).

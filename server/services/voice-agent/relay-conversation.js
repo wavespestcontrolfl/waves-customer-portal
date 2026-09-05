@@ -1563,10 +1563,12 @@ class RelayConversation {
     this._handoffForFailure = true;
     const { copy } = require('./relay-language');
     logger.warn(`[voice-relay] provider-failure handoff callSid=${maskSid(this.callSid)} model=${this._modelFailures} tools=${this._toolFailures}`);
-    this.say(copy('troubleConnecting', this.language));
     const { isTransferAvailable } = require('./relay-transfer');
     const officeOpen = toolCtx && typeof toolCtx.officeOpenNow === 'function' ? toolCtx.officeOpenNow() : null;
     if (toolCtx && isTransferAvailable(officeOpen)) {
+      // "…connect you with the office" is said only when a transfer is
+      // actually attempted (codex r1 P2); the callback line stands alone.
+      this.say(copy('troubleConnecting', this.language));
       try {
         const { executeTool } = require('./relay-tools');
         const out = await executeTool('transfer_to_office', { intent: 'system trouble', summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
@@ -1577,8 +1579,10 @@ class RelayConversation {
         logger.warn(`[voice-relay] provider-failure transfer failed callSid=${maskSid(this.callSid)}: ${err.message} — taking the callback instead`);
       }
     }
+    // The callback: say so and end the leg. The capture floor is NOT run
+    // here — end() runs it once on the socket close that follows the end
+    // frame (a second pass here duplicated the lead activity, codex r1 P2).
     this.say(copy('troubleCallback', this.language));
-    try { await this._runCaptureFloor('provider_failure'); } catch { /* best-effort by contract */ }
     if (!this._ending) {
       this._ending = true;
       try { if (this._endSession) this._endSession({ reason: 'provider_failure', captured: this.leadCaptured, owner: this.sessionKey || null }); } catch (e) {
@@ -1636,6 +1640,11 @@ class RelayConversation {
     // no lead is owed (the floor stays down) and the close reports it filed.
     if (state.reserviceFiled) { this._reserviceFiled = true; this._noLeadCreated = true; this.leadCaptured = true; }
     else if (state.noLeadCreated) this._noLeadCreated = true;
+    // The provider-failure streak continues across the drop (codex r1 P2):
+    // a second consecutive failure on the resumed leg hands off at the
+    // documented threshold instead of counting from zero again.
+    this._modelFailures = Math.max(this._modelFailures, Number(state.modelFailures) || 0);
+    this._toolFailures = Math.max(this._toolFailures, Number(state.toolFailures) || 0);
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
@@ -2069,6 +2078,8 @@ class RelayConversation {
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
           noLeadCreated: this._noLeadCreated === true,
+          modelFailures: this._modelFailures,
+          toolFailures: this._toolFailures,
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict, expectation: v.expectation || null, at: v.at || null })),
         });
         const appended = await withTimeout(
