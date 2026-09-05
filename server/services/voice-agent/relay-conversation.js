@@ -2126,7 +2126,7 @@ class RelayConversation {
     }
     // An unconfirmed append cannot safely union local text with older legs:
     // only the transaction has scrubbed their cross-socket turn sequence.
-    if (segment && !segmentAppended) return;
+    const deferTranscript = Boolean(segment && !segmentAppended);
     const supersededAtClose = await this._sessionSuperseded().catch(() => false);
     if (supersededAtClose) {
       logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
@@ -2209,7 +2209,7 @@ class RelayConversation {
         for (const s of this._turnStats) this._finishTurn(s);
         const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats } = require('./relay-transcript');
         const capturedLead = this.leadCaptured && !this._noLeadCreated;
-        const transcriptUpdate = buildTranscriptUpdate({
+        const transcriptUpdate = deferTranscript ? null : buildTranscriptUpdate({
           turns: this._transcript,
           modelSummary: this._modelSummary,
           reason,

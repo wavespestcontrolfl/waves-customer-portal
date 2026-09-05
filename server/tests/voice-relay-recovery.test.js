@@ -277,8 +277,9 @@ describe('the conversation side', () => {
     const update = jest.fn(async () => 0);
     primeDb({ updateImpl: update });
     await convoWithTurns().end('ws_close');
-    expect(update).toHaveBeenCalledTimes(1);
-    expect(update.mock.calls[0][0]).not.toHaveProperty('call_outcome');
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls[1][0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
+    expect(update.mock.calls[1][0]).not.toHaveProperty('transcription');
   });
 
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {
