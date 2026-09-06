@@ -572,16 +572,17 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // finite predicates or after a completed observation ("no weeds seen, ...").
   const explicitMoistureSignal = obsText
     .replace(/\b(not|never|[a-z]+n['’]t)\s+yet\b/g, '$1')
+    .replace(/\byet\s+to(?=\s+(?:be\s+)?(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b)/g, 'not')
     // A trailing passive dismissal still belongs to the same diagnosis.
     // Keep an explicit different object ("but excluded disease") separate.
-    .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|is|has|had|been|currently|actually|yet|ever|previously)\s+)*(?:(?:excluded|ruled out)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$)|(?:not|never|[a-z]+n['’]t)\s+(?:been\s+)?(?:(?:currently|actually|yet|ever|previously)\s+)*(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b))/g, ' ')
+    .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|is|has|had|been|currently|actually|yet|ever|previously|later|subsequently)\s+)*(?:(?:excluded|ruled out)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$)|(?:not|never|[a-z]+n['’]t)\s+(?:been\s+)?(?:(?:currently|actually|yet|ever|previously)\s+)*(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b))/g, ' ')
     // Two finite predicates joined by "and" or a comma are separate observations, unlike
     // a shared subject list ("no signs of overwatering and underwatering").
     .replace(/(\b(?:is|are|was|were|has|have|had|do|does|did)\b[^.!?;,]*?)(?:\band\b|,)(?=[^.!?;,]*\b(?:is|are|was|were|has|have|had|points? to|suggests?|indicates?|shows?|appears?|looks?|remains?|persists?)\b)/g, '$1;')
     .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
     .some(clause => [...clause.matchAll(/\b(?:under[\s-]?water(?:ing|ed)|(?:sprinklers?|irrigation)(?:\s+heads?)?\s+(?:(?:is|are|does|do)\s+)?(?:not|[a-z]+n['’]t)\s+(?:reach(?:ing)?|cover(?:ing)?))\b/g)].some(match => {
       const before = clause.slice(0, match.index).replace(/\bnot\s+(?:only|just)\b/g, '');
-      const after = clause.slice(match.index + match[0].length);
+      const after = clause.slice(match.index + match[0].length).replace(/^\s*[:—–-]\s*/, ' ');
       // Only the noun shares a predicate: "underwatering and disease were not
       // observed" differs from "under-watered and no disease was observed".
       const predicate = match[0].startsWith('under') && match[0].endsWith('ing')
@@ -590,9 +591,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       // A bare mention or a condition under consideration is not a diagnosis.
       // Require observed evidence or an explicit state/causal assertion first.
       const currentEvidence = !match[0].startsWith('under')
-        || /\b(?:visible|observed|seen|evident|confirmed|detected|found|signs?|evidence|show(?:s|ed|ing)?|suggest(?:s|ed|ing)?|indicat(?:e[sd]?|ing)|point(?:s|ed|ing)? to|consistent with)\b[^.!?;]*$/.test(before)
+        || /\b(?:visible|observed|seen|evident|confirmed|detected|found|signs?|evidence|show(?:s|ed|ing)?|suggest(?:s|ed|ing)?|indicat(?:e[sd]?|ing)|point(?:s|ed|ing)? to|caused by|due to|because of|consistent with)\b[^.!?;]*$/.test(before)
         || (match[0].endsWith('ed') && /\b(?:is|are|was|were|look(?:s|ed)?|appear(?:s|ed)?|remain(?:s|ed)?)\s+(?:\w+\s+)*$/.test(before))
-        || /^\s*(?::|[—–-])?\s*(?:(?:symptoms?|signs?)\s+)?(?:(?:is|are|was|were|has been|have been|remains?)\s+)?(?:(?:currently|clearly|still|visibly)\s+)*(?:visible|observed|seen|evident|present|confirmed|detected|found|caus(?:es?|ing)|inconsistent across|not (?:caused by|due to))\b/.test(predicate);
+        || /^\s*(?:(?:symptoms?|signs?)\s+)?(?:(?:is|are|was|were|has been|have been|remains?)\s+)?(?:(?:currently|clearly|still|visibly)\s+)*(?:visible|observed|seen|evident|present|confirmed|detected|found|caus(?:es?|ing)|inconsistent across|not (?:caused by|due to))\b/.test(predicate);
       // Monitoring, historical/resolved conditions, and uncertain diagnoses are not
       // present moisture evidence. Scope these qualifiers to this occurrence;
       // a separate observed diagnosis must still produce the coverage warning.
