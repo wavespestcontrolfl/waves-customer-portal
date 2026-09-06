@@ -108,6 +108,20 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
   });
 
+  test('a terminal grouped sibling does not suppress a remaining live appointment', async () => {
+    const visitId = '40000000-0000-4000-8000-000000000001';
+    await mockConn('scheduled_services').where({ id: TARGET }).update({ visit_id: visitId });
+    await mockConn('scheduled_services').insert({
+      id: BLOCKER, visit_id: visitId, scheduled_date: OLD_DAY, status: 'completed',
+      technician_id: TECH, window_start: '09:00', window_end: '10:00', lat: 27.545, lng: -82.4,
+    });
+    expect(await probe()).toEqual([]);
+    expect((await findAvailableSlots(OPTIONS)).slots[0].start_time).toBe('09:00');
+    // A rescheduled sibling still counts as live visit membership.
+    await mockConn('scheduled_services').where({ id: BLOCKER }).update({ status: 'rescheduled' });
+    expect((await probe())[0].conflict_reason).toBe('route_unverified');
+  });
+
   test('a same-day active target cannot be simulated as an unused technician at HQ', async () => {
     await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY, status: 'on_site' });
     const fit = await checkArrivalPlacement({

@@ -9,6 +9,7 @@ const RouteOptimizer = require('../route-optimizer');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects } = require('./day-stops');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute } = require('../route-reorder-window-fit');
 
@@ -74,7 +75,7 @@ async function loadArrivalRouteContext({
   // certify a partial group by excluding siblings from the simulated route.
   const grouped = !!target.visit_id && !!(await conn('scheduled_services')
     .where({ visit_id: target.visit_id }).whereNot('id', serviceId)
-    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES).first('id'));
+    .whereNotIn('status', TERMINAL_ROW_STATUSES).first('id'));
   const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
   return { target, rows: rows.filter(row => !excluded.has(String(row.id))), date, now, grouped, activeTarget };
 }
@@ -105,7 +106,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     estimated_duration_minutes: durationMinutes ?? context.target.estimated_duration_minutes,
   };
   const own = rows.filter(row => row.technician_id === target.technician_id && row.reservation_expires_at == null);
-  if (!target.technician_id || !hasCoords(target) || grouped || own.some(row => !hasCoords(row))) {
+  if (!target.technician_id || !hasCoords(target) || grouped) {
     return unverified(target, date);
   }
   let origin = RouteOptimizer.HQ;
@@ -127,6 +128,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     if (completed.length) origin = completed[0];
   }
   const pending = own.filter(row => row.status !== 'completed');
+  if (!hasCoords(origin) || pending.some(row => !hasCoords(row))) return unverified(target, date);
   const ordered = currentOrder([...pending, target]).map(row => ({ ...row, estimated_duration_minutes: workDuration(row) }));
   const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered, { origin, startMin, dayEndMin });
   const fail = {

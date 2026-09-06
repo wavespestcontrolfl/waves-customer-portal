@@ -151,3 +151,17 @@ test.each(['check_out_time', 'completed_at'])('completed stops can anchor the ro
   expect(fit.feasible).toBe(true);
   expect(fit.arrivals.map(row => row.id)).toEqual(['target']);
 });
+
+test('an older completed stop needs no coordinates when the latest origin is known', () => {
+  const now = parseETDateTime(`${DATE}T10:30:00`);
+  const older = { ...northern(), id: 'older', status: 'completed', lat: null, lng: null,
+    actual_end_time: parseETDateTime(`${DATE}T09:00:00`) };
+  const latest = { ...southern(), status: 'completed', actual_end_time: now };
+  const candidate = { ...target(), lat: latest.lat, lng: latest.lng };
+  const fit = evaluateArrivalPlacement(context({ now, target: candidate, rows: [older, latest] }), placement('10:00'));
+  expect(fit.feasible).toBe(true);
+  expect(fit.arrivals.map(row => row.id)).toEqual(['target']);
+  expect(evaluateArrivalPlacement(context({ now, target: candidate,
+    rows: [older, { ...latest, lat: null, lng: null }],
+  }), placement('10:00')).reason).toBe('route_unverified');
+});
