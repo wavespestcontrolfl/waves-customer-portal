@@ -1,14 +1,14 @@
 /**
  * <AdminDispatchPage>— top-level dispatcher surface at /admin/dispatch.
- * Eight tabs, all rendered as one centered pill:
+ * Dispatch workspaces, rendered as one centered pill:
  *   - "Board"        — phase 2 dispatch board (map + roster)
- *   - "Schedule"     — DispatchPageV2's schedule grid (default)
+ *   - "Schedule"     — DispatchPageV2's schedule grid
  *   - "Protocols"    — DispatchPageV2's Protocols panel
  *   - "Tech Match"   — DispatchPageV2's TechMatchPanel
  *   - "CSR Booking"  — DispatchPageV2's CSRPanel
  *   - "Job Scores"   — DispatchPageV2's RevenuePanel
  *   - "Insights"     — DispatchPageV2's InsightsPanel
- *   - "Automation"   — Auto-Dispatch runs and decision audit
+ * Auto-Dispatch supervision is linked to Agent Ops; old Automation links redirect.
  *
  * Per-tab URL state via ?tab=<key>. Default = board. Tabs that route into
  * DispatchPageV2 pass `activeTab` so its internal tab strip can stay
@@ -26,11 +26,10 @@
 import React, {
   Suspense,
   useState,
-  useEffect,
   useRef,
   useCallback,
 } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   CalendarDays,
   CalendarPlus,
@@ -44,7 +43,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminUser } from "../../lib/adminAuth";
-import AutoDispatchPage from "./AutoDispatchPage";
+import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
 import DispatchBoardPage from "./DispatchBoardPage";
 
 const DispatchPageV2 = React.lazy(() => import("./DispatchPageV2"));
@@ -58,7 +57,6 @@ const TABS = {
   CSR: "csr",
   REVENUE: "revenue",
   INSIGHTS: "insights",
-  AUTOMATION: "automation",
 };
 const TAB_LIST = [
   { key: TABS.BOARD, label: "Board", Icon: Map },
@@ -88,9 +86,6 @@ const TAB_LIST = [
     Icon: Lightbulb,
     className: "hidden md:inline-flex",
   },
-  // Auto-Dispatch is an owner/admin tool — every /api/admin/auto-dispatch
-  // endpoint is requireAdmin, so the tab is filtered by role below.
-  { key: TABS.AUTOMATION, label: "Automation", Icon: Bot, adminOnly: true },
 ];
 
 // Top-level tab → DispatchPageV2 internal activeTab. The schedule grid
@@ -101,19 +96,20 @@ const innerActiveTabFor = (topTab) =>
 
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const isAdmin = getAdminUser()?.role === "admin";
-  const visibleTabs = TAB_LIST.filter(({ adminOnly }) => !adminOnly || isAdmin);
-  const validTabKeys = visibleTabs.map((t) => t.key);
-  const initial = validTabKeys.includes(searchParams.get(TAB_KEY))
+  const validTabKeys = TAB_LIST.map((t) => t.key);
+  const tab = validTabKeys.includes(searchParams.get(TAB_KEY))
     ? searchParams.get(TAB_KEY)
     : TABS.BOARD;
-  const [tab, setTab] = useState(initial);
+  const setTab = (nextTab) => {
+    const next = new URLSearchParams(searchParams);
+    next.set(TAB_KEY, nextTab);
+    setSearchParams(next, { replace: true });
+  };
 
-  // Report the tab that actually RENDERS: Dispatch is lazy-loaded and its
-  // default/role-gated tab is only written back to the URL by the sync
-  // effect below — on a cold load past the raw beacon's settle window the
-  // layout would otherwise record a tabless (or stale legacy-redirect)
-  // row (Codex #2961 r19).
+  // Report the tab that actually renders, including a tabless/invalid URL's
+  // Board fallback. Tab selection follows the URL on every navigation.
   useRenderedTabBeacon("/admin/dispatch", tab, [searchParams]);
 
   // DispatchPageV2 owns the "create appointment" state + modal; expose a
@@ -135,16 +131,9 @@ export default function AdminDispatchPage() {
   }, []);
   const handleAddAppointment = () => openCreateRef.current?.();
 
-  // Keep URL in sync without remount-thrashing the inactive tab content
-  // (DispatchPageV2 in particular does its own data fetches).
-  useEffect(() => {
-    const current = searchParams.get(TAB_KEY);
-    if (current !== tab) {
-      const next = new URLSearchParams(searchParams);
-      next.set(TAB_KEY, tab);
-      setSearchParams(next, { replace: true });
-    }
-  }, [tab]);
+  if (isAdmin && searchParams.get(TAB_KEY) === "automation") {
+    return <AdminTabRedirect to="/admin/agents" tab="dispatch" />;
+  }
 
   return (
     <div className="flex flex-col bg-surface-page min-h-[calc(100vh-64px)] max-w-[1300px] mx-auto">
@@ -154,25 +143,20 @@ export default function AdminDispatchPage() {
         <AdminCommandHeader
           title="Schedule"
           icon={CalendarDays}
-          sections={visibleTabs}
+          sections={TAB_LIST}
           activeKey={tab}
           onSectionChange={setTab}
           ariaLabel="Schedule section"
-          navGridClassName={
-            isAdmin
-              ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"
-              : "grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
-          }
-          action={
-            tab === TABS.SCHEDULE
-              ? {
+          navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+          actions={[
+            ...(tab === TABS.SCHEDULE ? [{
                   label: "Add Appointment",
                   icon: CalendarPlus,
                   onClick: handleAddAppointment,
                   disabled: !createReady,
-                }
-              : null
-          }
+                }] : []),
+            ...(isAdmin ? [{ label: "Auto-Dispatch", icon: Bot, variant: "ghost", onClick: () => navigate("/admin/agents?tab=dispatch") }] : []),
+          ]}
         />{" "}
       </div>{" "}
       <div
@@ -181,8 +165,6 @@ export default function AdminDispatchPage() {
       >
         {tab === TABS.BOARD ? (
           <DispatchBoardPage />
-        ) : tab === TABS.AUTOMATION && isAdmin ? (
-          <AutoDispatchPage embedded />
         ) : (
           <Suspense
             fallback={

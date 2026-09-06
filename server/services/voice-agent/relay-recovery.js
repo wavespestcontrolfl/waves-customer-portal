@@ -98,7 +98,9 @@ function resumeGreeting(language) {
 
 /** A failure callback may finalize only the generation it proved. */
 function fallbackFence(q, { generation, callbackGeneration }) {
-  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [generation])
+  return q.whereRaw("call_outcome IS DISTINCT FROM ?", ['ai_transferred'])
+    .whereRaw("metadata->>'relay_transfer_ring_at' IS NULL")
+    .whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [generation])
     .whereRaw("(?::bigint = 0 OR ?::bigint = ?::bigint OR COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?)",
       [generation, callbackGeneration, generation, generation]);
 }
@@ -156,7 +158,7 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         estimateFields: nonEmptyFields(Object.assign({}, ...[...legs].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0)).map((seg) => nonEmptyFields(seg.estimate_fields) || {}))),
         // The seed keeps the TAIL (the most recent turns matter most).
         segmentsText: full.length > RESUME_SEED_MAX_CHARS ? `[…]${full.slice(-RESUME_SEED_MAX_CHARS)}` : full,
-        relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : null,
+        relayLeadId: meta.relay_lead_id ? String(meta.relay_lead_id) : ([...legs].reverse().find((seg) => seg.lead_id)?.lead_id || null),
         promises,
         callerTurns, // the earlier legs' caller lines — the resumed capture floor's summary starts from these
       };
@@ -181,16 +183,16 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
 async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOUT_MS } = {}) {
   if (!callSid) return null;
   let timer;
-  const read = db('call_log').where('twilio_call_sid', callSid).first('metadata').then((row) => {
+  const read = db('call_log').where('twilio_call_sid', callSid).first('metadata', 'call_outcome').then((row) => {
     if (!row) return null;
     let meta = row.metadata;
     if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-    if (!meta || typeof meta !== 'object') return { reconnects: 0, reconnectMs: null, profile: null };
+    if (!meta || typeof meta !== 'object') meta = {};
     // The relay profile the first leg was stamped with (id + validated
     // attrs) — the resumed leg opens with the SAME one, so a sandbox cell
     // or a production profile is attributed to the whole call.
-    const profile = meta.relay_profile_id
-      ? { relayProfileId: String(meta.relay_profile_id), relayAttrs: (meta.relay_attrs && typeof meta.relay_attrs === 'object') ? meta.relay_attrs : {} }
+    const profile = Object.hasOwn(meta, 'relay_profile_id')
+      ? { relayProfileId: meta.relay_profile_id ? String(meta.relay_profile_id) : null, relayAttrs: (meta.relay_attrs && typeof meta.relay_attrs === 'object') ? meta.relay_attrs : {} }
       : null;
     return {
       reconnects: Number(meta.relay_reconnects) || 0,
@@ -200,6 +202,7 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
       // call (the resumed leg is live); below it ⇒ only the first leg ever
       // did — the reconnect TwiML was never acted on.
       claimGen: Number(meta.relay_session_claim_gen) || 0,
+      transferClaimed: row.call_outcome === 'ai_transferred' || Boolean(meta.relay_transfer_ring_at),
       profile,
     };
   });

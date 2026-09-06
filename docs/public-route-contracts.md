@@ -628,6 +628,10 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+Overlapping annual coverage on public `/accept` returns 409
+`{ error, code: 'ANNUAL_PREPAY_OVERLAP' }` with the existing call-the-office
+explanation and no acceptance committed. Clients preserve the appointment
+selection and display that billing conflict instead of a slot-taken message.
 A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
 non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
 bedroom reply proves the row's address or dollars stale; lifted only by the
@@ -864,7 +868,9 @@ carries its own `nearby` boolean, true when its detour is within
 roll-ups. The per-slot flag is shared by every consumer of that engine:
 `/api/booking/availability`, this GET, re-service, and the find-slots
 searches — added in #3888 so the picker labels each time from its own
-route-fit, not the day's). POST is a WRITE with two owner-authorized
+route-fit, not the day's). Day lists contain all feasible starts; only the
+separate recommendations are curated. Moving an existing self-booked visit
+excludes that booking from its own day-cap count. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
@@ -1131,19 +1137,27 @@ bounded, fenced UPDATE claims the reconnect on the call_log row
 NULL / status in-progress; a voicemail / transferred / relay_failed row is
 never resumed; an unconfirmed claim never re-renders, a late-landing one is
 put back) and the handler renders the same `<Connect><ConversationRelay>`
-the call started with (same action incl. `?lang=es` / `?sandbox=1`, plus
+the call started with (an explicit untuned stamp stays untuned); production
+reconnect rendering rechecks `voiceAiAgent` and the recovery gate after async
+lookups. It retains the same action incl. `?lang=es` / `?sandbox=1`, plus
 `gen=<the row's relay_reconnect_ms>` so the resumed leg's own failure is
 told apart from a Twilio retry of the first leg's — a retry on a row that
 already reconnected gets a bare `<Response/>` and never ends the healthy
 session; a resumed welcome greeting, `<Parameter resumed="1">`, a token
-minted AFTER the stamp so the new socket's generation is ≥ the fence). The session
+minted AFTER the stamp so the new socket's generation is ≥ the fence. The session
 treats `resumed` as a hint and re-proves it from the row before seeding the
-earlier turns or skipping its capture floor. A second failure: office open
+earlier turns or skipping its capture floor. Close-time segment storage may
+also use the server-verified, burned call token to retain that socket's own
+text on an unclaimed row or after reconnect; this proof never grants account
+access or prior-dialogue hydration. Captured lead ids persist in the segment
+as a fallback when the call linkage stamp did not land. A second failure: office open
 AND `GATE_VOICE_RELAY_TRANSFER` ⇒ the staff ring above (owner-bound to the
 row's current claim owner, generic whisper); otherwise today's voicemail.
 With recovery enabled, an unconfirmed reconnect claim/state read returns
 503 with no fallback instructions. Voicemail, sandbox failure, and staff-ring
-claims are fenced to the proven reconnect generation; a predicate that loses
+claims are fenced to the proven reconnect generation; voicemail/failure
+writes also atomically refuse rows with a claimed staff ring or transferred
+outcome, even if the replacement socket never acquired a session claim; a predicate that loses
 to a newer reconnect returns a bare response instead of stale fallback TwiML.
 Any change to the claim, the owner fence, the reconnect fence, the sandbox
 branch or what the whisper may speak is security-critical).

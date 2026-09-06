@@ -55,8 +55,8 @@ const AGENTS = [
     id: 'dispatch',
     name: 'Dispatch Agent',
     shortName: 'Dispatch',
-    description: 'Route optimization proposals, schedule readiness, and field execution risks.',
-    primaryUrl: '/admin/dispatch',
+    description: 'Auto-Dispatch runs, route optimization, and scheduling exceptions.',
+    primaryUrl: '/admin/agents?tab=dispatch',
   },
   {
     id: 'pricing',
@@ -862,6 +862,36 @@ async function loadPlannerRunTasks() {
   };
 }
 
+// Day-move runs have their own ledger: their visibility must not depend on
+// the separately gated reorder pass creating a planner row later that night.
+async function loadAutoDispatchTasks() {
+  if (!(await tableExists('auto_dispatch_runs'))) return { missing: true, tasks: [] };
+  const rows = await db('auto_dispatch_runs')
+    .where('started_at', '>=', addETDays(new Date(), -7))
+    .orderBy('started_at', 'desc')
+    .limit(3);
+  return {
+    tasks: rows.map((row) => {
+      const failed = row.status === 'failed' || row.status === 'completed_with_errors';
+      return task({
+        id: `auto_dispatch_run:${row.id}`,
+        agentId: 'dispatch',
+        title: `Auto-Dispatch ${row.mode === 'apply' ? 'apply' : 'dry-run'} · ${row.status.replace(/_/g, ' ')}`,
+        summary: `${row.total_evaluated || 0} evaluated · ${row.total_changed || 0} changed · ${row.total_recommended || 0} recommended · ${row.total_failed || 0} failed`,
+        priority: failed ? 'high' : 'low',
+        status: failed ? 'needs_review' : 'info',
+        source: 'auto_dispatch_runs',
+        sourceLabel: 'Auto-Dispatch',
+        sourceId: row.id,
+        createdAt: row.started_at,
+        actionUrl: `/admin/agents?tab=dispatch&run=${encodeURIComponent(row.id)}`,
+        actionLabel: 'Open run',
+        impact: failed ? 'Run needs attention' : 'Informational',
+      });
+    }),
+  };
+}
+
 async function loadPricingProposalTasks() {
   if (!(await tableExists('pricing_engine_proposals'))) return { missing: true, tasks: [] };
   const rows = await db('pricing_engine_proposals')
@@ -930,7 +960,7 @@ function sourceAgentHint(sourceId) {
   if (['opportunity_queue', 'seo_actions'].includes(sourceId)) return 'seo_geo';
   if (sourceId === 'ad_campaigns') return 'ads';
   if (sourceId === 'google_reviews') return 'reviews';
-  if (sourceId === 'route_optimization_planner_runs') return 'dispatch';
+  if (['route_optimization_planner_runs', 'auto_dispatch_runs'].includes(sourceId)) return 'dispatch';
   if (sourceId === 'pricing_engine_proposals') return 'pricing';
   return null;
 }
@@ -953,6 +983,7 @@ async function loadOverviewSources() {
     loadSource('ad_campaigns', 'PPC', loadAdTasks),
     loadSource('google_reviews', 'Google Reviews', loadReviewTasks),
     loadSource('route_optimization_planner_runs', 'Route Planner', loadPlannerRunTasks),
+    loadSource('auto_dispatch_runs', 'Auto-Dispatch', loadAutoDispatchTasks),
     loadSource('pricing_engine_proposals', 'Pricing Proposals', loadPricingProposalTasks),
   ]);
 }

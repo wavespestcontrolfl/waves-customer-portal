@@ -1,5 +1,10 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
+jest.mock('../routes/admin-customers', () => {
+  const actual = jest.requireActual('../routes/admin-customers');
+  return { ...actual, _private: { ...actual._private, lockAndAssertNoAnnualPrepayOverlap: jest.fn().mockResolvedValue() } };
+});
+
 /**
  * Booking-audit P1 regressions on PUT /api/estimates/:token/accept:
  *
@@ -361,6 +366,40 @@ beforeEach(() => {
 });
 
 describe('FIX 1 — standard recurring conversion is atomic with acceptance', () => {
+  test('annual coverage overlap returns a billing code and rolls back acceptance', async () => {
+    resetStore(recurringPestEstimate());
+    const scheduledDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+    db.__state.tables.scheduled_services = [{
+      id: 'ss-prepay-hold', source_estimate_id: 'est-atomic-1',
+      customer_id: null, technician_id: null, status: 'pending',
+      scheduled_date: scheduledDate, window_start: '09:00:00', window_end: '10:00:00',
+      estimated_duration_minutes: 60,
+      reservation_expires_at: new Date(Date.now() + 15 * 60000),
+    }];
+    const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
+    const overlap = new Error('Annual coverage already exists');
+    overlap.annualPrepayOverlap = true;
+    lockAndAssertNoAnnualPrepayOverlap.mockRejectedValueOnce(overlap);
+
+    const response = await putAccept('tok-atomic-1-x0123456789', {
+      paymentMethodPreference: 'prepay_annual',
+      slotId: `${scheduledDate}_09-00_unassigned`,
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.data).toEqual({
+      code: 'ANNUAL_PREPAY_OVERLAP',
+      error: expect.stringContaining('already has an active annual prepay plan'),
+    });
+    expect(storedEstimate().status).toBe('sent');
+    expect(storedEstimate().price_locked_at == null).toBe(true);
+    expect(db.__state.tables.scheduled_services[0].customer_id).toBeNull();
+    expect(db.__state.tables.scheduled_services[0].reservation_expires_at).toBeTruthy();
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(InvoiceService.create).not.toHaveBeenCalled();
+    expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+
   test('conversion failure rolls the acceptance back (5xx, estimate stays retryable) and a retry succeeds', async () => {
     resetStore(recurringPestEstimate());
     EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));

@@ -7292,6 +7292,20 @@ const CallRecordingProcessor = {
     // V2 prompt, so every stamp for this call must carry its hash.
     const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
 
+    if (relayPending) {
+      // A socket append can commit after writeTranscript returned. Read the
+      // scrubbed composite at the extraction boundary so both extractors and
+      // routing consume the same relay evidence as the persisted call.
+      const fresh = await db('call_log').where({ id: call.id })
+        .where('processing_token', procToken).first('transcription');
+      if (!fresh) return abandonToPeer('the relay transcript refresh');
+      if (fresh.transcription?.startsWith('[AI segment]') && fresh.transcription !== transcription) {
+        transcription = fresh.transcription;
+        recordedSegmentText = recordedPartOfComposite(transcription);
+        await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
+      }
+    }
+
     let extracted;
     try {
       const extractStartedAt = Date.now();

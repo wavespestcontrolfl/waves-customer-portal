@@ -20,6 +20,8 @@ function deferred() {
 }
 function fixture(url, label = "Current") {
   const path = new URL(url, "http://localhost").pathname;
+  // The job card is gate-off here (GATE_JOB_CARD unset): the legacy tabs render.
+  if (path.includes("/protocols/job-card/")) return { enabled: false };
   if (path.endsWith("/turf-profile")) return { profile: { track_key: "A_St_Aug_Sun", lawn_sqft: 10000 } };
   if (path.endsWith("/photos/relevant")) return { photos: [{ name: `${label} photo guide`, description: "Fixture reference" }] };
   if (path.endsWith("/seasonal-index")) return { pests: [] };

@@ -40,6 +40,13 @@ brand-new row and returns 409 once the placeholder owns the email, and
    field eligibility are separate on purpose: an office admin stays active
    without ever becoming dispatchable, and a trainee can sign in before they
    take work.
+5. Team tab → **Capabilities**: every hire starts with all five dispatch
+   categories (general pest, mosquito, lawn/tree & shrub, rodent,
+   termite/WDO) at *Needs review* — auto-dispatch may still place them there
+   but scores those stops lower. Mark a category *Qualified* once you have
+   seen them do it; *Off* stops auto-dispatch from offering them that work
+   (visits already assigned are listed for manual reassignment, never
+   moved). The editor records who verified each category and when.
 
 ## Before you start
 

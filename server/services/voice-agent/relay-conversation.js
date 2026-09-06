@@ -487,7 +487,7 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -571,6 +571,7 @@ class RelayConversation {
     // (CallSid, from)? Independent of whether an account matched — an
     // unmatched-but-real caller is verified; a WS client that declared an ANI
     // is not. Read by the tool ctx below.
+    this._callTokenVerified = callTokenVerified === true;
     this._callerVerified = false;
     this._contextReady = null;
     // Session language PROOF (codex #3561 r3). `this.language` is the setup
@@ -1590,7 +1591,6 @@ class RelayConversation {
    * write: only the row's current claim owner may record.
    */
   async _recordCommitments({ transcript, sessionKey, promises = this._promises }) {
-    if (!transcript) return;
     try {
       const { isEnabled } = require('../../config/feature-gates');
       if (!isEnabled('callCommitments')) return;
@@ -1760,7 +1760,7 @@ class RelayConversation {
     // PR 2B: the earlier segment(s) of a reconnected call ride the USER role
     // the same way, ONCE, as played text — the model resumes instead of
     // starting over. Only when the row proved the reconnect.
-    if (!this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS && require('./relay-recovery').isRecoveryGateOn()) {
+    if (this._callerVerified === true && !this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS && require('./relay-recovery').isRecoveryGateOn()) {
       // The previous socket appends its segment only after draining its turn
       // chain and in-flight writes; a reconnect that wins that race read an
       // empty list. Reload (bounded) on each of the first turns until the
@@ -2106,15 +2106,16 @@ class RelayConversation {
     const recovery = require('./relay-recovery');
     const recoveryOn = recovery.isRecoveryGateOn();
     let segmentAppended = false;
+    let segmentWrite = null;
     let segment = null; // this socket's close record; only confirmed, scrubbed appends may finalize
     // Only a socket that legitimately HELD this call's claim may append (hook
     // P1): verification IS that proof (the claim is won inside the caller
     // resolution, verified callers only), and the statement re-checks it —
     // the row's current owner, or an older generation on a row a reconnect
-    // has since taken over (the superseded first leg). An unverified socket
-    // (capture-only, never claimed) writes through today's owner-fenced
-    // reconcile alone.
-    if (recoveryOn && this.callSid && this._transcript.length && this._callerVerified === true) {
+    // has since taken over. A server-verified call token also permits storing
+    // this socket's own text when ANI verification cannot claim the row; it
+    // grants no account access or permission to load prior dialogue.
+    if (recoveryOn && this.callSid && this._transcript.length && (this._callerVerified === true || this._callTokenVerified)) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
         segment = segmentStore.buildSegment({
@@ -2125,6 +2126,7 @@ class RelayConversation {
           turns: this._transcript.length,
           latency: summarizeTurnStats(this._turnStats),
           versions: this._versionStamps(),
+          leadId: this._leadId,
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
           noLeadCreated: this._noLeadCreated === true,
@@ -2139,8 +2141,9 @@ class RelayConversation {
           lookupResults: this._lookupResults,
           slotRefs: [...this._slotRefs],
         });
+        segmentWrite = segmentStore.appendSegment(db, this.callSid, segment, { allowUnclaimed: this._callTokenVerified });
         const appended = await withTimeout(
-          segmentStore.appendSegment(db, this.callSid, segment),
+          segmentWrite,
           WRITE_DRAIN_TIMEOUT_MS,
           0,
         );
@@ -2153,54 +2156,19 @@ class RelayConversation {
     // An unconfirmed append cannot safely union local text with older legs:
     // only the transaction has scrubbed their cross-socket turn sequence.
     const deferTranscript = Boolean(segment && !segmentAppended);
-    const supersededAtClose = await this._sessionSuperseded().catch(() => false);
-    if (supersededAtClose) {
-      logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
-      // …except that this socket's segment may just have RECOMPOSED a call
-      // the replacement already finalized (appendSegmentPatch): the unified
-      // message row follows it. Bounded, best-effort.
-      if (segmentAppended) {
-        // …and the replacement's commitments pass may already have run on a
-        // transcript without this segment: reconcile once more, on the
-        // PERSISTED composed transcript, under the row's CURRENT owner (the
-        // write is idempotent per call). Bounded read; fail-soft.
-        try {
-          const row = await withTimeout(
-            db('call_log').where('twilio_call_sid', this.callSid).first('transcription', 'metadata').catch(() => null),
-            2000,
-            null,
-          );
-          const meta = row ? ((typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) || {}) : {};
-          const owner = meta.relay_session_claim_owner || null;
-          if (row && typeof row.transcription === 'string' && row.transcription) {
-            // The ROW's latest promise per kind (the just-appended segment
-            // included) — never this superseded socket's own map, which
-            // could overwrite a deadline the resumed leg gave (hook P1).
-            const promises = new Map(segmentStore.latestPromises(meta.relay_segments)
-              .map((p) => [p.kind, { verdict: p.verdict, expectation: p.expectation, at: p.at ? new Date(p.at) : null }]));
-            await this._recordCommitments({ transcript: row.transcription, sessionKey: owner ? String(owner) : null, promises });
-          }
-          // …and the replacement's capture floor may have run before this
-          // segment landed, with no caller turns to summarise (hook r22 P1).
-          await this._refreshFloorLeadSummary(meta);
-          // …and its call_summary likewise (codex r5 P2): a deterministic
-          // summary (or none) is rebuilt from the whole call's caller lines;
-          // a model-written one is left alone.
-          await this._refreshCallSummary(meta);
-        } catch (err) {
-          logger.warn(`[voice-relay] late-segment commitments pass skipped callSid=${maskSid(this.callSid)}: ${err.message}`);
-        }
-        // Copy the repaired whole-call duration and summary into the inbox.
-        // Still sync the appended transcript if any best-effort repair failed.
-        try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (syncErr) {
-          logger.warn(`[voice-relay] voice message sync after a late segment failed callSid=${maskSid(this.callSid)}: ${syncErr.message}`);
-        }
+    try {
+      const supersededAtClose = await this._sessionSuperseded().catch(() => false);
+      if (supersededAtClose) {
+        logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
+        // …except that this socket's segment may just have RECOMPOSED a call
+        // the replacement already finalized (appendSegmentPatch): the unified
+        // message row follows it. Bounded, best-effort.
+        if (segmentAppended) await this._reconcileLateSegment();
+        return;
       }
-      return;
-    }
 
-    await this._runCaptureFloor(reason);
-    if (!this.callSid) return;
+      await this._runCaptureFloor(reason);
+      if (!this.callSid) return;
 
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
@@ -2210,7 +2178,6 @@ class RelayConversation {
     // calls don't linger as ringing/no-answer/null, then resync the unified
     // message row. Keyed by CallSid — a no-op (0 rows) when no call_log row
     // exists for the session (a call answered outside the signed webhooks).
-    try {
         // RACE: end() runs on EVERY WebSocket close, including a relay failure
         // (rejected upgrade / WS error / transient disconnect). On failure Twilio
         // also hits /relay-complete, which stamps call_outcome='voicemail' as the
@@ -2424,7 +2391,10 @@ class RelayConversation {
         // and the sandbox record nothing, as before.
         const transferSalvaged = salvaged > 0 && this.sandbox !== true
           && (this._transferRequested === true || (resume.reconnects > 0));
-        if ((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) {
+        if (((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) || (recoveryOn && this._resume)) {
+          // A silent resumed leg can finalize a transfer without writing any
+          // transcript. The locked writer still consumes earlier durable
+          // segments and checks their now-final outcome for eligibility.
           // PR 2B: on a reconnected call the persisted transcript is the
           // composed one (all segments); the commitments pass reads THAT
           // under the same owner fence, so segment 1's promises reach Owed
@@ -2442,8 +2412,65 @@ class RelayConversation {
         }
     } catch (err) {
       logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
+    } finally {
+      if (recoveryOn && !deferTranscript) {
+        // The resume snapshot may predate an older socket's append. Refresh
+        // after finalization from durable segments with the existing CAS fence.
+        try {
+          const fresh = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('metadata'), 2000, null);
+          if (fresh) await this._refreshCallSummary(typeof fresh.metadata === 'string' ? JSON.parse(fresh.metadata) : fresh.metadata);
+        } catch (err) {
+          logger.warn(`[voice-relay] final summary refresh failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
+      }
+      if (deferTranscript && segmentWrite) {
+        // Attach only after the outcome reconcile: a write that settled
+        // during the capture floor must not check commitment eligibility
+        // against the still-null outcome and lose its sole repair pass.
+        // The deadline still bounds end(); an unsettled append stays detached.
+        void segmentWrite.then(async (rows) => {
+          if (Number(rows) > 0) await this._reconcileLateSegment();
+        }).catch((err) => logger.warn(`[voice-relay] late segment failed callSid=${maskSid(this.callSid)}: ${err.message}`));
+      }
     }
 
+  }
+
+  /** Shared repair for a superseded close and an append confirmed after end's deadline. */
+  async _reconcileLateSegment() {
+    try {
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid)
+        .first('transcription', 'metadata'), 2000, null);
+      if (!row) return;
+      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+      const owner = meta.relay_session_claim_owner || null;
+      // A never-reconnected call's late append does not claim an empty
+      // transcript. Only its still-current owner can complete that write.
+      if (owner && owner === this.sessionKey) {
+        const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
+        await db('call_log').where('twilio_call_sid', this.callSid)
+          .whereRaw("metadata->>'relay_session_claim_owner' = ?", [this.sessionKey])
+          .where((q) => q.whereNull('call_outcome').orWhereIn('call_outcome', ['ai_handled', 'relay_failed', 'ai_transferred']))
+          .where((q) => q.whereNull('transcription_provider').orWhere('transcription_provider', TRANSCRIPTION_PROVIDER))
+          .whereRaw("transcription_metadata->'recorded_segment_rejected' IS NULL")
+          .whereRaw('? IS NOT NULL', [segmentStore.composeSegmentsSql(db)])
+          .update({ transcription: segmentStore.composeSegmentsSql(db), transcription_provider: TRANSCRIPTION_PROVIDER,
+            transcription_status: 'completed', updated_at: new Date() });
+      }
+      // recordRelayCommitments re-reads the segments/promises under its own
+      // row lock; these arguments are only the non-segment fallback.
+      const promises = new Map(segmentStore.latestPromises(meta.relay_segments).map((p) => [p.kind, p]));
+      await this._recordCommitments({ transcript: segmentStore.segmentsText(meta.relay_segments) || row.transcription,
+        sessionKey: owner || this.sessionKey, promises });
+      await this._refreshFloorLeadSummary(meta);
+      await this._refreshCallSummary(meta);
+    } catch (err) {
+      logger.warn(`[voice-relay] late segment reconciliation failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+    } finally {
+      try { await withTimeout(Promise.resolve(syncVoiceMessageForCall(this.callSid)), WRITE_DRAIN_TIMEOUT_MS); } catch (err) {
+        logger.warn(`[voice-relay] late segment message sync failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      }
+    }
   }
 
   /**
@@ -2452,9 +2479,9 @@ class RelayConversation {
    * (a deterministic one from its own turns, or none at all) misses the
    * caller's pre-drop lines. Rebuilt from EVERY segment's caller lines; a
    * summary the model wrote (capture_lead's) is never replaced. Bounded,
-   * compare-and-set on the deterministic prefix.
+   * compare-and-set on explicit deterministic provenance.
    */
-  async _refreshCallSummary(meta) {
+  async _refreshCallSummary(meta, retry = true) {
     if (!this.callSid) return false;
     const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta && meta.relay_segments));
     try {
@@ -2473,12 +2500,20 @@ class RelayConversation {
       const summary = buildCallSummary({ turns: callerTurns.map((text) => ({ role: 'caller', text })), leadCaptured });
       const rows = await withTimeout(
         db('call_log').where('twilio_call_sid', this.callSid)
-          .where((q) => q.whereNull('call_summary').orWhere('call_summary', 'like', 'AI phone assistant%'))
-          .update({ call_summary: summary, updated_at: new Date() }),
+          .whereRaw("COALESCE(metadata->'relay_segments', '[]'::jsonb) = ?::jsonb", [JSON.stringify(legs)])
+          .where((q) => q.whereNull('call_summary').orWhereRaw("transcription_metadata->>'summary_source' = ?", ['deterministic']))
+          .update({ call_summary: summary,
+            transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'deterministic')"),
+            updated_at: new Date() }),
         WRITE_DRAIN_TIMEOUT_MS,
         0,
       );
-      return Number(rows) > 0;
+      if (Number(rows) > 0 || !retry) return Number(rows) > 0;
+      const fresh = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('metadata'), 2000, null);
+      if (!fresh) return false;
+      const current = typeof fresh.metadata === 'string' ? JSON.parse(fresh.metadata) : fresh.metadata;
+      return this._refreshCallSummary(current, false);
+
     } catch (err) {
       logger.warn(`[voice-relay] call summary refresh after a late segment failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       return false;
