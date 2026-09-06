@@ -799,11 +799,12 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}, recoveryFa
   // The one voicemail stamp every fallback on this callback takes: owner +
   // eligible-state fenced, so a reconnect that took the row meanwhile keeps
   // its own reconcile (hook / codex r3 P1).
-  const transferRow = () => {
+  const ringClaim = recoveryFallback ? require('crypto').randomUUID() : null;
+  const transferRow = (ownRingClaim = null) => {
     const q = db('call_log').where('twilio_call_sid', callSid);
-    return recoveryFallback ? require('../services/voice-agent/relay-recovery').fallbackFence(q, recoveryFallback) : q;
+    return recoveryFallback ? require('../services/voice-agent/relay-recovery').fallbackFence(q, { ...recoveryFallback, ringClaim: ownRingClaim }) : q;
   };
-  const stampTransferVoicemail = () => transferRow()
+  const stampTransferVoicemail = () => transferRow(ringClaim)
     .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
     .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
     .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() });
@@ -833,7 +834,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}, recoveryFa
         .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['voicemail', 'relay_failed']))
         .update({
           call_outcome: db.raw('CASE WHEN call_outcome IS NULL OR call_outcome NOT IN (?, ?, ?) THEN ? ELSE call_outcome END', [...RELAY_TERMINAL_OUTCOMES, 'ai_transferred']),
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text)", [new Date().toISOString()]),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text) || ?::jsonb", [new Date().toISOString(), JSON.stringify(ringClaim ? { relay_transfer_ring_claim: ringClaim } : {})]),
           updated_at: new Date(),
         })
         .catch((err) => { logger.warn(`[relay-complete] transfer ring claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
@@ -1889,7 +1890,7 @@ async function renderRelayReconnect(req, callSid, failure, genMs) {
     wsUrl,
     callSid,
     action,
-    ...(spanish ? { language: SPANISH_LANGUAGE, ...(spanishVoice ? { voice: spanishVoice } : {}) } : {}),
+    ...(spanish ? { language: SPANISH_LANGUAGE, voice: spanishVoice || null } : {}),
     welcomeGreeting: recovery.resumeGreeting(language),
     tokenNow: genMs, // a concurrent reissue makes this token stale at the atomic claim fence
     ...relayOpts,

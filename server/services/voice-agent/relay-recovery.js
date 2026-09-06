@@ -98,9 +98,10 @@ function resumeGreeting(language) {
 }
 
 /** A failure callback may finalize only the generation it proved. */
-function fallbackFence(q, { generation, callbackGeneration }) {
-  return q.whereRaw("call_outcome IS DISTINCT FROM ?", ['ai_transferred'])
-    .whereRaw("metadata->>'relay_transfer_ring_at' IS NULL")
+function fallbackFence(q, { generation, callbackGeneration, ringClaim = null }) {
+  // A callback may compensate only its own atomically stamped ring claim,
+  // including when the claim's result arrives after the webhook deadline.
+  return q.whereRaw("((call_outcome IS DISTINCT FROM ? AND metadata->>'relay_transfer_ring_at' IS NULL) OR metadata->>'relay_transfer_ring_claim' = ?)", ['ai_transferred', ringClaim])
     .whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [generation])
     .whereRaw("(?::bigint = 0 OR ?::bigint = ?::bigint OR COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?)",
       [generation, callbackGeneration, generation, generation]);

@@ -5,6 +5,7 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(async () => {}) }));
 /** Isolated loopback PostgreSQL only; creates and drops its own fixture schema. */
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -98,6 +99,15 @@ postgres('atomic relay segment append and composition', () => {
     expect(row.transcription_provider).toBeNull();
   });
 
+  test('the superseded same-generation nonce retains its segment after reconnect takeover', async () => {
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: {
+      relay_reconnects: 1, relay_reconnect_ms: 2, relay_session_claim_gen: 2, relay_session_claim_owner: 'nonce-z',
+    } });
+    expect(await appendSegment(db, 'CA-fixture', buildSegment({ generation: 2, sessionKey: 'nonce-a', text: 'Caller: earlier leg' }))).toBe(1);
+    expect(await appendSegment(db, 'CA-fixture', buildSegment({ generation: 2, sessionKey: 'nonce-zz', text: 'Caller: not a prior owner' }))).toBe(0);
+    expect((await db('call_log').first()).metadata.relay_segments[0].text).toBe('Caller: earlier leg');
+  });
+
   test.each([[1, 2], [2, 1]])('concurrent split PAN closes %j sanitize metadata, stash and composed copies atomically', async (first, second) => {
     await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
       metadata: { relay_reconnects: 1, relay_reconnect_ms: 3, relay_transcript: { text: 'old' } },
@@ -189,6 +199,51 @@ postgres('atomic relay segment append and composition', () => {
     expect(refreshed).toBe(!modelWritten);
     if (modelWritten) expect(row.call_summary).toBe(modelSummary);
     else expect(row.call_summary).toContain('first leg | second leg');
+  });
+
+  test.each([
+    [null, null, 'Caller: retained unverified text'],
+    ['foreign', null, null],
+    [null, 'fixture_recording', 'Recorded caller message.'],
+  ])('trusted late repair respects owner %s and provider %s', async (owner, provider, expected) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const segment = buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: retained unverified text' });
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: 'ai_handled',
+      metadata: { relay_session_claim_owner: owner, relay_segments: [segment] },
+      transcription_provider: provider, transcription: provider ? 'Recorded caller message.' : null });
+    const convo = Object.assign(Object.create(RelayConversation.prototype), {
+      callSid: 'CA-fixture', sessionKey: 'first', _callTokenVerified: true,
+      _recordCommitments: jest.fn(async () => {}), _refreshFloorLeadSummary: jest.fn(async () => {}), _refreshCallSummary: jest.fn(async () => {}),
+    });
+    await convo._reconcileLateSegment();
+    const row = await db('call_log').first();
+    expect(row.transcription).toBe(expected);
+    expect(row.metadata.relay_session_claim_owner).toBe(owner);
+  });
+
+  test.each([['first', true], ['replacement', false], [null, true]])('post-floor linkage is fenced against owner %s', async (owner, expected) => {
+    const { stampCallLeadLinkage } = require('../services/voice-agent/relay-context');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: {
+      relay_session_claim_owner: owner, relay_lead_id: 'existing-lead',
+    } });
+    expect(await stampCallLeadLinkage('CA-fixture', 'floor-lead', { sessionKey: 'first' })).toBe(expected);
+    expect((await db('call_log').first()).metadata.relay_lead_id).toBe(expected ? 'floor-lead' : 'existing-lead');
+  });
+
+  test.each([null, 'deterministic', 'model'])('late owning repair preserves model summary provenance over %s', async (source) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: 'ai_handled',
+      metadata: { relay_session_claim_owner: 'first', relay_segments: [buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: ants' })] },
+      call_summary: source ? 'Previously stored summary' : null,
+      transcription_metadata: source ? { summary_source: source } : null });
+    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture', sessionKey: 'first',
+      _modelSummary: 'Caller requested help with ants and a callback.',
+      _recordCommitments: jest.fn(async () => {}), _refreshFloorLeadSummary: jest.fn(async () => {}),
+    });
+    await convo._reconcileLateSegment();
+    const row = await db('call_log').first();
+    expect(row.call_summary).toBe(source === 'model' ? 'Previously stored summary' : convo._modelSummary);
+    expect(row.transcription_metadata.summary_source).toBe('model');
   });
 
   test('a summary repair retries from a changed segment snapshot instead of overwriting with stale text', async () => {
