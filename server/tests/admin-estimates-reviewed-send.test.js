@@ -129,7 +129,7 @@ function estimateDatabase(table) {
   builder.whereNotNull = jest.fn((field) => { filters.push((candidate) => candidate[field] != null); return builder; });
   builder.whereIn = jest.fn((field, values) => { filters.push((candidate) => values.includes(candidate[field])); return builder; });
   builder.whereNotIn = jest.fn((field, values) => { filters.push((candidate) => !values.includes(candidate[field])); return builder; });
-  for (const method of ['whereRaw', 'orWhere', 'orWhereRaw', 'forUpdate', 'orderBy', 'limit']) builder[method] = jest.fn(() => builder);
+  for (const method of ['whereRaw', 'orWhere', 'orWhereRaw', 'forUpdate', 'orderBy', 'limit', 'transacting']) builder[method] = jest.fn(() => builder);
   builder.modify = jest.fn((callback) => { callback(builder); return builder; });
   builder.first = jest.fn(async () => matches() ? structuredClone(row) : null);
   builder.select = jest.fn(async () => matches() ? [structuredClone(row)] : []);
@@ -325,6 +325,48 @@ describe('reviewed message parity', () => {
 });
 
 describe('reviewed multi-property offer revisions', () => {
+  test.each(['showOneTimeOption', 'billByInvoice'])('%s cannot change on a sent sibling while another property is being sent', async (option) => {
+    row.status = 'sent';
+    row.estimate_group_id = 'synthetic-group';
+    db.mockImplementation((table) => {
+      const builder = estimateDatabase(table);
+      const first = builder.first.getMockImplementation();
+      builder.first.mockImplementation(async () => builder.where.mock.calls.some(([value]) => value?.estimate_group_id)
+        && builder.whereNot.mock.calls.some(([value]) => value?.id === row.id)
+        ? { id: 'synthetic-sending-anchor' } : first());
+      return builder;
+    });
+    const response = await invoke('/:id', 'patch', { [option]: false });
+    expect(response.statusCode).toBe(409);
+    expect(response.body.error).toMatch(/group is being sent/);
+    expect(mutations).toEqual([]);
+  });
+
+  test('delivery options remain editable after the group handoff completes', async () => {
+    row.status = 'sent';
+    row.estimate_group_id = 'synthetic-group';
+    row.bill_by_invoice = true;
+    const response = await invoke('/:id', 'patch', { billByInvoice: false });
+    expect(response.body).toEqual({ success: true });
+    expect(row.bill_by_invoice).toBe(false);
+    expect(db.raw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', 'synthetic-group'],
+    );
+  });
+
+  test('a delivery-option update refuses membership that changed while waiting for its group lock', async () => {
+    row.status = 'sent';
+    row.estimate_group_id = 'synthetic-group';
+    db.raw.mockImplementationOnce((sql, bindings) => {
+      row.estimate_group_id = 'synthetic-different-group';
+      return { sql, bindings };
+    });
+    const response = await invoke('/:id', 'patch', { billByInvoice: false });
+    expect(response.statusCode).toBe(409);
+    expect(mutations).toEqual([]);
+  });
+
   test.each(['SERVER', 'CLIENT_FALLBACK'])('%s pricing cannot revise a published sibling while the group is sending', async (authority) => {
     const queriedGroups = [];
     const trx = jest.fn(() => {

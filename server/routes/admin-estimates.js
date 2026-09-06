@@ -45,6 +45,8 @@ const {
   estimateEditVersion,
   estimateViewUrl,
   reviseAdminEstimate,
+  lockScheduledGroupGuardGroups,
+  assertNoRevisionDuringGroupSend,
   staleCallLinkageReason,
   completePendingInvalidation,
   takePendingInvalidation,
@@ -4954,7 +4956,8 @@ router.patch('/:id', async (req, res, next) => {
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
-    if (updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined) {
+    const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
+    if (changesDeliveryOptions) {
       updateQuery = updateQuery.whereNot({ status: 'sending' }).whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
       updates.updated_at = db.fn.now();
     }
@@ -4970,13 +4973,24 @@ router.patch('/:id', async (req, res, next) => {
         "COALESCE(estimate_data->'proposal'->'commercialTerms'->>'paymentTerms', '') = ''",
       );
     }
-    const updatedCount = await updateQuery.update(updates);
+    const updatedCount = changesDeliveryOptions ? await db.transaction(async (trx) => {
+      // Published siblings stay sent/viewed during a group handoff. Use the
+      // same group-then-row lock and in-flight guard as a full revision.
+      await lockScheduledGroupGuardGroups(trx, estimate);
+      const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      if (!locked || estimateEditVersion(locked) !== estimateEditVersion(estimate)) return 0;
+      await assertNoRevisionDuringGroupSend(trx, locked);
+      return updateQuery.transacting(trx).update(updates);
+    }) : await updateQuery.update(updates);
     if (!updatedCount) {
       return res.status(409).json({ error: 'Estimate changed while you were editing. Refresh and retry.' });
     }
     logger.info(`[estimates] Updated estimate ${req.params.id}: ${JSON.stringify(Object.keys(updates))}`);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    next(err);
+  }
 });
 
 // DELETE /api/admin/estimates/:id — delete a draft estimate only.
