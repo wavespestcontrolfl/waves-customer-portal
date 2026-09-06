@@ -2238,7 +2238,8 @@ class RelayConversation {
       // A never-reconnected call's late append does not claim an empty
       // transcript. Only its still-current owner can complete that write.
       if (owner && owner === this.sessionKey) {
-        const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
+        const { TRANSCRIPTION_PROVIDER, buildCallSummary } = require('./relay-transcript');
+        const modelSummary = this._modelSummary ? buildCallSummary({ modelSummary: this._modelSummary }) : null;
         await db('call_log').where('twilio_call_sid', this.callSid)
           .whereRaw("metadata->>'relay_session_claim_owner' = ?", [this.sessionKey])
           .where((q) => q.whereNull('call_outcome').orWhereIn('call_outcome', ['ai_handled', 'relay_failed', 'ai_transferred']))
@@ -2246,6 +2247,10 @@ class RelayConversation {
           .whereRaw("transcription_metadata->'recorded_segment_rejected' IS NULL")
           .whereRaw('? IS NOT NULL', [segmentStore.composeSegmentsSql(db)])
           .update({ transcription: segmentStore.composeSegmentsSql(db), transcription_provider: TRANSCRIPTION_PROVIDER,
+            ...(modelSummary ? {
+              call_summary: db.raw("CASE WHEN call_summary IS NULL OR transcription_metadata->>'summary_source' = 'deterministic' THEN ? ELSE call_summary END", [modelSummary]),
+              transcription_metadata: db.raw("CASE WHEN call_summary IS NULL OR transcription_metadata->>'summary_source' = 'deterministic' THEN COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model') ELSE transcription_metadata END"),
+            } : {}),
             transcription_status: 'completed', updated_at: new Date() });
       }
       // recordRelayCommitments re-reads the segments/promises under its own
@@ -2460,7 +2465,7 @@ class RelayConversation {
           // twilio_call_sid): the late-segment summary refresh and the
           // office-confirm recovery resolve through it (codex r3 P2).
           const { stampCallLeadLinkage } = require('./relay-context');
-          await withTimeout(stampCallLeadLinkage(this.callSid, floorLeadId), 2000, false);
+          await withTimeout(stampCallLeadLinkage(this.callSid, floorLeadId, { sessionKey: this.sessionKey }), 2000, false);
           if (this._bookingRequested) {
             const { attachLeadToVoiceBookingCard } = require('./relay-booking');
             await attachLeadToVoiceBookingCard(this.callSid, floorLeadId).catch(() => {});

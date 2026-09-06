@@ -94,7 +94,7 @@ async function appendSegment(db, callSid, segment) {
     const query = trx('call_log').where('twilio_call_sid', callSid)
       .where((q) => q
         .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
-        .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [segment.generation || 0]));
+        .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND (COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ? OR (COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) = ? AND COALESCE(metadata->>'relay_session_claim_owner', '') > ?)))", [segment.generation || 0, segment.generation || 0, segment.session_key || '']));
     const row = await query.clone().forUpdate().first('metadata');
     if (!row) return 0;
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
