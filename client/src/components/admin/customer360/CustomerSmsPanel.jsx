@@ -27,6 +27,22 @@ import AuthenticatedCallAudio from "../AuthenticatedCallAudio";
 import { deliveryLabel, formatDuration } from "./activity";
 import { etDateString, formatETDate, formatETTime } from "../../../lib/timezone";
 
+// Estimate contacts are historical snapshots after acceptance. Resolve the
+// account's current phone before opening an account-scoped conversation.
+export async function openEstimateMessages(estimate, openMessages) {
+  try {
+    if (!estimate.customerId) {
+      openMessages?.({ firstName: estimate.customerName, phone: estimate.customerPhone });
+      return;
+    }
+    const { customer } = await adminFetch(`/admin/customers/${estimate.customerId}/estimates-summary`);
+    if (!customer?.phone) throw new Error("This customer has no current phone number.");
+    openMessages?.({ id: customer.id, firstName: customer.first_name, lastName: customer.last_name, phone: customer.phone });
+  } catch (err) {
+    window.alert(err?.message || "Could not load the customer's current contact.");
+  }
+}
+
 const REFRESH_MS = 30000;
 const NEAR_BOTTOM_PX = 48;
 

@@ -1,4 +1,4 @@
-import { useCustomerSms } from "../../components/admin/customer360/CustomerSmsPanel";
+import { useCustomerSms, openEstimateMessages } from "../../components/admin/customer360/CustomerSmsPanel";
 // Canonical admin estimate builder. Create and revise share service inputs
 // and the server pricing path; preview uses the persisted customer renderer.
 import React, {
@@ -3973,6 +3973,7 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(null);
     setForm((f) => ({
       ...f,
+      ...clearedPropertyFields(),
       address: "",
       homeSqFt: "",
       stories: "1",
@@ -4300,7 +4301,7 @@ export default function EstimateToolViewV2({
           <h1 className="text-24 font-semibold">{editMode ? "Edit estimate" : "Create estimate"}</h1>
           <span role="status" className="text-14 text-zinc-600">{saving ? "Saving…" : generating ? "Recalculating pricing…" : dirty ? "Unsaved changes" : editMode ? "Saved estimate loaded" : "New estimate"}</span>
         </div>
-        {form.customerPhone && <Button variant="secondary" className="min-h-11" onClick={() => openMessages?.({ id: form.customerId, firstName: form.customerName, phone: form.customerPhone })}>Message contact</Button>}
+        {form.customerPhone && <Button variant="secondary" className="min-h-11" onClick={() => { void openEstimateMessages(form, openMessages); }}>Message contact</Button>}
         <nav aria-label="Estimate sections" className="flex flex-wrap gap-2 mt-3">
           {[["customer", "Customer & property"], ["services", "Services"], ["pricing", "Pricing & terms"], ["review", "Review & send"]].map(([key, label]) =>
             <Button key={key} variant="ghost" className="min-h-11" onClick={() => document.getElementById(`estimate-${key}`)?.scrollIntoView({ block: "start" })}>{label}</Button>)}

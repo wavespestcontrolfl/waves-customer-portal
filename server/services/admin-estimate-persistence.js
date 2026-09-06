@@ -1372,7 +1372,7 @@ async function resolveEstimatePropertyLinkage(database, body) {
       if (!UUID_RE.test(propertyId)) throw errorWithStatus('propertyId must be a UUID', 400);
       const property = await database('customer_properties').where({ id: propertyId }).first();
       if (!property || property.active === false) throw errorWithStatus('Property not found', 404);
-      if (body.customerId && String(property.customer_id) !== String(body.customerId)) {
+      if (!body.customerId || String(property.customer_id) !== String(body.customerId)) {
         throw errorWithStatus('Property belongs to a different customer', 400);
       }
       fields.property_id = propertyId;

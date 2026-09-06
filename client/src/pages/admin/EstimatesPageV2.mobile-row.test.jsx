@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MobileEstimateRow } from "./EstimatesPageV2";
 
 const { openMessages } = vi.hoisted(() => ({ openMessages: vi.fn() }));
-vi.mock("../../components/admin/customer360/CustomerSmsPanel", () => ({
+vi.mock("../../components/admin/customer360/CustomerSmsPanel", async (importOriginal) => ({
+  ...await importOriginal(),
   useCustomerSms: () => openMessages,
   CustomerSmsProvider: ({ children }) => children,
 }));

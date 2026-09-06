@@ -1,4 +1,4 @@
-import { CustomerSmsProvider, useCustomerSms } from "../../components/admin/customer360/CustomerSmsPanel";
+import { CustomerSmsProvider, useCustomerSms, openEstimateMessages } from "../../components/admin/customer360/CustomerSmsPanel";
 // client/src/pages/admin/EstimatesPageV2.jsx
 // Monochrome V2 of EstimatePage. Strict 1:1 on data, endpoints, behavior:
 //   - GET   /admin/estimates
@@ -74,22 +74,6 @@ import {
 } from "lucide-react";
 
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
-
-// Estimate contacts are historical snapshots after acceptance. Resolve the
-// account's current phone before opening an account-scoped conversation.
-async function openEstimateMessages(estimate, openMessages) {
-  try {
-    if (!estimate.customerId) {
-      openMessages?.({ firstName: estimate.customerName, phone: estimate.customerPhone });
-      return;
-    }
-    const { customer } = await adminFetch(`/admin/customers/${estimate.customerId}/estimates-summary`);
-    if (!customer?.phone) throw new Error("This customer has no current phone number.");
-    openMessages?.({ id: customer.id, firstName: customer.first_name, lastName: customer.last_name, phone: customer.phone });
-  } catch (err) {
-    window.alert(err?.message || "Could not load the customer's current contact.");
-  }
-}
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";

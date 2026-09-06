@@ -6,6 +6,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import EstimateToolViewV2 from './EstimateToolViewV2';
 
+const { openMessages } = vi.hoisted(() => ({ openMessages: vi.fn() }));
+vi.mock('../../components/admin/customer360/CustomerSmsPanel', async (importOriginal) => ({ ...await importOriginal(), useCustomerSms: () => openMessages }));
+
 vi.mock('../../components/admin/EstimateSendDialog', () => ({ useEstimateSend: () => vi.fn() }));
 
 const ADDRESS_A = '100 Example Court, Venice, FL 34285';
@@ -55,6 +58,7 @@ function deferred() {
 let fetchMock;
 let lookupReply;
 beforeEach(() => {
+  openMessages.mockClear();
   localStorage.setItem('waves_admin_token', 'qa-token');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(window, 'alert').mockImplementation(() => {});
@@ -232,4 +236,33 @@ it('starts a sibling from a reopened draft, clears parent edit identity, and sav
   expect(saved.clientDraftId).toMatch(/^[a-f0-9-]{36}$/);
   expect(saved.clientDraftId).not.toBe(SOURCE.id);
   expect(fetchMock.mock.calls.filter(([, options]) => options?.method === 'PUT')).toHaveLength(0);
+});
+
+it('clears the previous property and customer identity when starting the next estimate', async () => {
+  function Workspace() {
+    const [editId, setEditId] = useState(SOURCE.id);
+    return <EstimateToolViewV2 editEstimateId={editId} onStartNew={() => setEditId('')} />;
+  }
+  render(<MemoryRouter><Workspace /></MemoryRouter>);
+  await screen.findByDisplayValue('QA Contact');
+  fireEvent.click(screen.getByRole('button', { name: 'Next estimate (keep services)' }));
+  expect(screen.getByLabelText('Customer name')).toHaveValue('');
+  expect(screen.getByLabelText('Service address')).toHaveValue('');
+  change('Customer name', 'QA Next lead');
+  // Save before an address edit can independently clear the old property.
+  change('Home Sq Ft', '2400');
+  const saved = await generateAndSave();
+  expect(saved).toMatchObject({ customerId: null, propertyId: null, leadId: null, customerName: 'QA Next lead', address: '' });
+  expect(saved.clientDraftId).not.toBe(SOURCE.id);
+});
+
+it('resolves the live customer phone before messaging from a reopened estimate', async () => {
+  const base = fetchMock.getMockImplementation();
+  fetchMock.mockImplementation((url, options) => String(url).endsWith('/estimates-summary')
+    ? Promise.resolve(jsonResponse({ customer: { id: OWNER.id, first_name: 'QA', last_name: 'Current', phone: '+19415550199' } }))
+    : base(url, options));
+  renderEditor({ editEstimateId: SOURCE.id });
+  await screen.findByDisplayValue('QA Contact');
+  fireEvent.click(screen.getByRole('button', { name: 'Message contact' }));
+  await waitFor(() => expect(openMessages).toHaveBeenCalledWith({ id: OWNER.id, firstName: 'QA', lastName: 'Current', phone: '+19415550199' }));
 });

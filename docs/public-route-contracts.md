@@ -624,6 +624,13 @@ OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the
 gate writes a `referral_clicks` row, malformed/unknown codes redirect
 home without touching the DB).
+The estimate `/data` response includes `verifiedStaffPreview: true` only
+when `adminPreview=1` is accompanied by a valid staff bearer token. The
+customer SPA uses that verified field (or the existing verified
+`adminDraftPreview` flag) to disable customer actions in previews; a copied
+query marker alone does not change a published customer's actions. The
+field is absent from ordinary customer responses.
+
 `/api/estimates/:token` core family (GET view + `/data`, PUT `/accept`,
 `/decline`, `/select-tier`, `/preferences`, POST `/bundle-inquiry`, GET
 `/pdf` — the customer estimate surface behind every estimate link.

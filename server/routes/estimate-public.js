@@ -25502,6 +25502,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      ...(verifiedStaffPreview ? { verifiedStaffPreview: true } : {}),
       // Soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). Include-when-TRUE only:
       // gate on, a live accept-active row, never a staff draft preview (the
       // write 404s a draft). Absent otherwise so gate-off responses stay

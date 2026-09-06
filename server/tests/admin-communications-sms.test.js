@@ -1677,7 +1677,7 @@ describe('admin communications SMS route', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/communications/log?phone=${encodeURIComponent(phone)}`, { headers: { Authorization: 'Bearer admin' } });
       expect(res.status).toBe(200);
-      expect(builder.whereRaw).toHaveBeenCalledWith(expect.not.stringContaining('RIGHT('), expectedDigits);
+      expect(builder.whereRaw).toHaveBeenCalledWith(expect.not.stringContaining('RIGHT('), [expectedDigits]);
     });
   });
 

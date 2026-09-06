@@ -139,6 +139,17 @@ describe('EstimateViewPage staff draft preview', () => {
     expect(opts?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it('does not disable customer actions from an unverified copied preview marker', async () => {
+    window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
+    stubLocalStorage({});
+    const payload = draftPreviewPayload({ adminDraftPreview: false });
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(payload)));
+    render(<EstimateViewPage />);
+    await screen.findByText('Waves will confirm & schedule your trenching');
+    expect(screen.queryByText('Saved estimate preview')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Scheduling preview')).not.toBeInTheDocument();
+  });
+
   it('exports the banner as a standalone component', () => {
     render(<DraftPreviewBanner />);
     expect(screen.getByText('Draft preview — not sent to the customer yet')).toBeInTheDocument();
@@ -147,6 +158,7 @@ describe('EstimateViewPage staff draft preview', () => {
     window.history.replaceState({}, '', '/estimate/draft-preview-token?adminPreview=1');
     stubLocalStorage({ waves_admin_token: 'staff-jwt' });
     const payload = draftPreviewPayload({ adminDraftPreview: false });
+    payload.verifiedStaffPreview = true;
     Object.assign(payload.estimate, { id: 'estimate-fixture', status: 'sent', serviceCategory: 'pest', softExit: { enabled: true } });
     payload.pricing.askChips = ['What happens during service?'];
     payload.cta = { canAccept: true, terminalState: null, quoteRequired: false, reviewBeforeBooking: false };

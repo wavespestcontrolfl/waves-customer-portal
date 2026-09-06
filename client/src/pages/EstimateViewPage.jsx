@@ -5056,10 +5056,10 @@ function EstimateViewPageInner() {
       return false;
     }
   });
-  // The marker can only disable actions; server authentication still owns
-  // access. Sent/viewed previews have the same no-write boundary as drafts.
+  // Preview mode is verified by the server. A copied query marker or an
+  // expired staff token must not disable an ordinary customer view.
   const adminDraftPreview = data?.adminDraftPreview === true;
-  const readOnlyPreview = adminPreviewRequested || adminDraftPreview;
+  const readOnlyPreview = data?.verifiedStaffPreview === true || adminDraftPreview;
   // Headless document capture (?mode=pdf — mirrors /report/:token?mode=pdf):
   // renders EstimateProposalDocument instead of the interactive page. The
   // /data fetch carries the mode (plus the optional signed valid-through pin)
@@ -7411,7 +7411,7 @@ function EstimateViewPageInner() {
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
-          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={adminPreviewRequested} /> : null}
+          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={readOnlyPreview} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard
             offer={addServiceOffer}
@@ -7519,7 +7519,7 @@ function EstimateViewPageInner() {
         />
         {/* The success screen renders from the accept response without a
             /data refetch, so the referral card rides acceptResult.referral. */}
-        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={adminPreviewRequested} /> : null}
+        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={readOnlyPreview} /> : null}
       </Page>
     );
   }
