@@ -204,4 +204,12 @@ postgres('atomic relay segment append and composition', () => {
     expect(await registerSegmentSession(db, 'CA-fixture', 'late')).toBe(false);
   });
 
+  test('a superseded equal-generation nonce cannot finalize through the shared close fence', async () => {
+    const { closeFenceSql } = require('../services/voice-agent/relay-segments');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
+      metadata: { relay_reconnect_ms: 2, relay_session_claim_gen: 2, relay_session_claim_owner: 'nonce-z' } });
+    expect(await closeFenceSql(db('call_log').where('id', 'fixture'), 2, 'nonce-a').update({ call_summary: 'stale' })).toBe(0);
+    expect(await closeFenceSql(db('call_log').where('id', 'fixture'), 2, 'nonce-z').update({ call_summary: 'current' })).toBe(1);
+  });
+
 });
