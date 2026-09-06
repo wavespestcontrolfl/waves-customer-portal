@@ -574,7 +574,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     .replace(/\b(not|never|[a-z]+n['’]t)\s+yet\b/g, '$1')
     // A trailing passive dismissal still belongs to the same diagnosis.
     // Keep an explicit different object ("but excluded disease") separate.
-    .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|is|has|had|been|currently|actually|yet|ever|previously)\s+)*(?:(?:excluded|ruled out)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$)|(?:not|never|[a-z]+n['’]t)\s+(?:been\s+)?(?:(?:currently|actually|yet|ever|previously)\s+)*(?:observed|seen|visible|evident|present|detected|found|supported)\b))/g, ' ')
+    .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|is|has|had|been|currently|actually|yet|ever|previously)\s+)*(?:(?:excluded|ruled out)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$)|(?:not|never|[a-z]+n['’]t)\s+(?:been\s+)?(?:(?:currently|actually|yet|ever|previously)\s+)*(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b))/g, ' ')
     // Two finite predicates joined by "and" are separate observations, unlike
     // a shared subject list ("no signs of overwatering and underwatering").
     .replace(/(\b(?:is|are|was|were|has|have|had|do|does|did)\b[^.!?;,]*?)\band\b(?=[^.!?;,]*\b(?:is|are|was|were|has|have|had|points? to|suggests?|indicates?|shows?|appears?|looks?|remains?|persists?)\b)/g, '$1;')

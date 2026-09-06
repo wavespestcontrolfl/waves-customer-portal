@@ -304,6 +304,9 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Underwatering cannot be confirmed.',
     'Underwatering is unconfirmed.',
     'Evidence for underwatering is inconclusive.',
+    'Underwatering was considered but was not confirmed.',
+    'Underwatering was considered, but it has not been verified.',
+    'Underwatering was considered but not proven.',
     'No evidence that the sprinkler heads are not reaching the edge.',
     'Monitor for sprinkler heads not reaching the pavement edge.',
   ])('does not invent sprinkler advice from %s', observation => {
