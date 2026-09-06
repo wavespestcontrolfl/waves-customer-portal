@@ -377,3 +377,27 @@ test('never heals a moved secondary property with primary-customer coordinates',
   expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
   expect(res).toMatchObject({ skipped: 1, evaluated: 0, geocode_attempts: 0 });
 });
+
+
+test.each([
+  ['2026-08-01', 'earlier-due'],
+  ['2026-08-04', 'higher-score'],
+])('capped due placement honors deadline %s before route score', async (earlierDue, expectedId) => {
+  const previous = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    servicesResult = [
+      svc({ id: 'higher-score', window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04' }),
+      svc({ id: 'earlier-due', window_start: null, window_end: null, recurring_dispatch_due_date: new Date(`${earlierDue}T00:00:00Z`) }),
+    ];
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (row) => row.id === 'earlier-due'
+      ? { current: CURRENT_GOOD, candidates: [CAND_SMALL] }
+      : { current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe(expectedId);
+  } finally {
+    if (previous === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    else process.env.AUTO_DISPATCH_ALLOW_APPLY = previous;
+  }
+});

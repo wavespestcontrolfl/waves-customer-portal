@@ -384,10 +384,10 @@ async function runAutoDispatch(opts = {}) {
       }
     }
 
-    // ── Pass 2 (apply mode): apply the collected moves BEST-IMPROVEMENT-FIRST ──
-    // The cap bounds how many moves a run applies, so it must fund the LARGEST
-    // route gains: apply in descending pass-1 improvement instead of first-by-
-    // scheduled_date. Each move is RE-EVALUATED ONCE against the now-live schedule
+    // ── Pass 2 (apply mode): due deadlines first, then route improvement ──
+    // Fund the earliest unplaced due dates before their placement window closes.
+    // Equal deadlines and ordinary optimization keep descending route gains.
+    // Each move is RE-EVALUATED ONCE against the now-live schedule
     // right before the apply/cap decision, so a move whose gain an earlier apply
     // already captured is dropped (no_change), the cap-held backlog reflects
     // current value, and a failed apply logs the actually-attempted placement.
@@ -400,10 +400,13 @@ async function runAutoDispatch(opts = {}) {
     // that actually apply under a binding cap — they are the top-ranked ones,
     // applied earliest, where the pass-1 estimate has diverged least from live.
     if (config.mode !== 'dry_run' && plannedMoves.length) {
-      plannedMoves.sort((a, b) =>
-        Number(!!(b.service.recurring_dispatch_due_date && !b.service.window_start))
-        - Number(!!(a.service.recurring_dispatch_due_date && !a.service.window_start))
-        || b.result.improvement - a.result.improvement);
+      plannedMoves.sort((a, b) => {
+        const aDue = !a.service.window_start ? toDateStr(a.service.recurring_dispatch_due_date) : null;
+        const bDue = !b.service.window_start ? toDateStr(b.service.recurring_dispatch_due_date) : null;
+        return Number(!!bDue) - Number(!!aDue)
+          || (aDue && bDue ? aDue.localeCompare(bDue) : 0)
+          || b.result.improvement - a.result.improvement;
+      });
       // Stragglers of a PARTIAL grouped move (codex #3609 r31 P1): the
       // failed member sits at its original placement and passes
       // revalidatePlacement (which never compares visit_id), so its own
