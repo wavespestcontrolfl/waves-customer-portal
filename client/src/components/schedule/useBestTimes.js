@@ -73,6 +73,8 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
             end: s.end_time,
             detourMinutes: s.detour_minutes,
             stopsThatDay: s.stops_that_day,
+            estimatedArrival: s.estimated_arrival || null,
+            arrivalWindows: s.route_mode === 'arrival_windows',
             // Id always travels — a consumer that can assign (create modal
             // auto mode) must adopt the tech the detour was scored for.
             technicianId: s.technician?.id || null,

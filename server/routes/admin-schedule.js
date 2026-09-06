@@ -8474,6 +8474,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // (move probe + recurrence guards) — returned as `warnings` so the
     // modal can say what stacked.
     const editWarnings = [];
+    const useArrivalWindows = require('../services/scheduling/arrival-route').arrivalWindowRoutingEnabled();
     // Rung-1 lock set for every date this save's recurrence paths can write
     // (cadence rewrite moves, make-recurring spawn, visit-count / ongoing
     // top-up extends), computed from an UNLOCKED peek with the same
@@ -8901,7 +8902,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               // non-null end and the visit went invisible to occupancy.
               updates.window_end = occEnd;
             }
-            if (!slotUnchanged && occDate && occStart && occEnd) {
+            // A longer job or a different technician/order can break arrival
+            // promises even when the nominal calendar block is unchanged.
+            const arrivalRouteChanged = useArrivalWindows && (assignmentNeedsChange
+              || (updates.estimated_duration_minutes !== undefined
+                && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes))
+              || (updates.route_order !== undefined && updates.route_order !== occRow.route_order));
+            if ((!slotUnchanged || arrivalRouteChanged) && occDate && occStart && occEnd) {
               const adminMoveClash = await findConflictingVisits({
                 db: trx,
                 date: occDate,
@@ -8911,10 +8918,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   id: req.params.id, parentBefore: recurringParentBefore, updates,
                 }),
                 excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+                arrivalWindow: { serviceId: req.params.id, changes: updates },
               });
               if (adminMoveClash.length) {
                 logger.warn(`[schedule/update-details] occupancy overlap on ${occDate} allowed (advisory — admin writes never block on conflicts)`);
-                editWarnings.push(slotOverlapWarning(occDate));
+                editWarnings.push(adminMoveClash[0].warning || slotOverlapWarning(occDate));
               }
             }
           }

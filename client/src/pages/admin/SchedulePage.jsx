@@ -1513,6 +1513,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return base + addonDur;
   })();
   const { conflicts: slotConflicts } = useSlotConflicts({
+    serviceId: service.id,
+    technicianId: form.technicianId || null,
     date: form.scheduledDate,
     windowStart: form.windowStart,
     windowEnd: form.windowEnd,
@@ -6921,6 +6923,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // them.
   const manualBlock = windowFor(manualTime);
   const { conflicts: manualConflicts } = useSlotConflicts({
+    serviceId: service.id,
+    technicianId: service.technicianId || service.technician_id || null,
     date: manualDate,
     windowStart: manualBlock?.start || manualTime,
     windowEnd: manualBlock?.end,

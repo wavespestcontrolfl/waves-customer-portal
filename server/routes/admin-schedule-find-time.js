@@ -207,6 +207,9 @@ router.post('/', async (req, res) => {
       topN: hint ? Math.min(requestedTopN * 3, 30) : requestedTopN,
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
+      // Existing-visit staff hints share their route check with the edit
+      // and rebooker save probes. Other consumers retain their slot contract.
+      ...(hint && serviceId ? { arrivalWindow: { serviceId } } : {}),
       slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -242,6 +245,10 @@ router.post('/', async (req, res) => {
         const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
         const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
         result.slots = result.slots.flatMap((s) => {
+          // The full arrival simulation already checked every actual work
+          // span against unassigned/other-tech work and live holds. Comparing
+          // its promise to nominal work blocks here would recreate the bug.
+          if (s.route_mode === 'arrival_windows') return [s];
           const baseMin = toMin(s.start_time);
           if (baseMin == null) return [];
           const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;

@@ -15486,7 +15486,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const NotificationService = require('../services/notification-service');
         const parts = [];
         if (dueConflicts.length) parts.push(`${dueConflicts.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}) — set a time from dispatch`);
-        if (!cardOnly && overlapDates.length) parts.push(`${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
+        if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
+          ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
+          : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           dueConflicts.length ? 'Series move left visits without a time window' : 'Series move overlaps other visits',

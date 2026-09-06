@@ -18,6 +18,7 @@
  * tech doesn't reschedule into tomorrow's 65% thunderstorms.
  */
 
+const Joi = require('joi');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
@@ -1008,6 +1009,12 @@ async function checkTarget({ serviceId, target, caller = null }) {
 const SLOT_CHECK_TARGET_CAP = 25;
 const SLOT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+const ARRIVAL_SLOT_FIELDS = Joi.object({
+  serviceId: Joi.string().guid().allow(null),
+  technicianId: Joi.string().guid().allow(null),
+  durationMinutes: Joi.number().positive().allow(null),
+}).unknown(true).prefs({ convert: false });
+
 async function checkSlots({ targets, caller = null } = {}) {
   if (!Array.isArray(targets) || targets.length === 0) return { ok: false, reason: 'bad_target' };
   if (targets.length > SLOT_CHECK_TARGET_CAP) return { ok: false, reason: 'too_many_targets' };
@@ -1019,10 +1026,14 @@ async function checkSlots({ targets, caller = null } = {}) {
     if (hhmmToMinutes(t?.window?.start) == null || hhmmToMinutes(t?.window?.end) == null) {
       return { ok: false, reason: 'bad_target' };
     }
+    if (ARRIVAL_SLOT_FIELDS.validate(t).error) return { ok: false, reason: 'bad_target' };
     parsed.push({
       date,
       window: { start: t.window.start, end: t.window.end },
       excludeServiceIds: Array.isArray(t?.excludeServiceIds) ? t.excludeServiceIds.map(String) : [],
+      serviceId: t.serviceId,
+      technicianId: t.technicianId,
+      durationMinutes: t.durationMinutes,
     });
   }
   // No service in hand, so nameScopeFor degrades to admin-or-nobody: admins
@@ -1047,12 +1058,26 @@ async function checkSlots({ targets, caller = null } = {}) {
     occupancyByDate.set(date, occupancy);
   }));
   // results[i] answers targets[i] — the bulk bars rely on the alignment.
-  const results = parsed.map((p) => ({
-    conflicts: conflictsForTarget(occupancyByDate.get(p.date), null, p.date, p.window, {
-      // Always an array (possibly empty) so conflictsForTarget never falls
-      // back to its [serviceId] default — there is no serviceId here.
-      excludeServiceIds: p.excludeServiceIds,
-    }),
+  const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
+  const results = await Promise.all(parsed.map(async (p) => {
+    if (p.serviceId && arrivalWindowRoutingEnabled()) {
+      try {
+        const fit = await checkArrivalPlacement({
+          serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
+          windowStart: p.window.start, windowEnd: p.window.end,
+          durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
+        });
+        return { conflicts: fit.feasible ? [] : [{ id: p.serviceId, warning: fit.warning, reason: fit.reason }] };
+      } catch (err) {
+        logger.info(`[slot-check] arrival route snapshot failed: ${err.message}`);
+        return { conflicts: [{ warning: 'Could not verify arrival windows. Review the route before driving it.', reason: 'route_unverified' }] };
+      }
+    }
+    return {
+      conflicts: conflictsForTarget(occupancyByDate.get(p.date), null, p.date, p.window, {
+        excludeServiceIds: p.excludeServiceIds,
+      }),
+    };
   }));
   return { ok: true, results };
 }

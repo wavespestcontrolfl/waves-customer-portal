@@ -902,3 +902,52 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
     }
   });
 });
+
+describe('staff arrival-window save opt-in', () => {
+  const savedGate = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = rawFactory('db.raw');
+    findConflictingVisits.mockResolvedValue([]);
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  });
+  afterAll(() => {
+    if (savedGate === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = savedGate;
+  });
+
+  test('a feasible staff move saves with the effective tech/window and no nominal-overlap warning', async () => {
+    const { trx, trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+    // An old raw block query would find an overlap. The shared arrival probe
+    // has verified that actual arrival and full work still fit the route.
+    trxScheduled.first.mockResolvedValue({ id: 'nominal-overlap' });
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' },
+      'admin', 'admin', { overlapAdvisory: true, adminWindowRules: true });
+    expect(result.success).toBe(true);
+    expect(result.warnings).toBeUndefined();
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      db: trx, date: TARGET, windowStart: '09:00', windowEnd: '11:00',
+      arrivalWindow: expect.objectContaining({ serviceId: 'svc-1', technicianId: 'tech-1',
+        changes: expect.objectContaining({ window_start: '09:00', window_end: '11:00' }) }),
+    }));
+    expect(trxScheduled.update).toHaveBeenCalled();
+  });
+
+  test('an impossible arrival stays advisory and returns the route-specific warning', async () => {
+    const { trxScheduled } = wireRescheduleMocks(service({ technician_id: 'tech-1' }));
+    const warning = 'The route cannot keep every promised arrival window.';
+    findConflictingVisits.mockResolvedValue([{ id: 'svc-1', conflict_reason: 'arrival_window', warning }]);
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' },
+      'admin', 'admin', { overlapAdvisory: true, adminWindowRules: true });
+    expect(result).toMatchObject({ success: true, warnings: [warning] });
+    expect(trxScheduled.update).toHaveBeenCalled();
+  });
+
+  test('customer reschedules retain the existing blocking occupancy contract with the flag on', async () => {
+    wireRescheduleMocks(service());
+    findConflictingVisits.mockResolvedValue([{ id: 'occupied' }]);
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' },
+      'customer_request', 'customer_sms')).rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+    expect(findConflictingVisits.mock.calls[0][0]).not.toHaveProperty('arrivalWindow');
+  });
+});
