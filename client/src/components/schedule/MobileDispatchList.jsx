@@ -18,6 +18,7 @@ import { serviceColor } from '../../lib/service-colors';
 import { TIMEZONE, etDateString, etParts, isETToday, addETDays } from '../../lib/timezone';
 import InlineTechPicker from './InlineTechPicker';
 import QuickActionMenu from './QuickActionMenu';
+import DispatchReadinessStrip from './DispatchReadinessStrip';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -247,6 +248,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             {formatWindow(service)}
           </span>
         </button>
+        <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} className="mt-2" />
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
             {canAssignTechnician && (
