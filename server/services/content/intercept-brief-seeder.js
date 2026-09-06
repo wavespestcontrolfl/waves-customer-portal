@@ -387,6 +387,9 @@ function buildOperatorOverlay({ opportunity, pageType, requiredSections = [], sc
       emphasis: byline.emphasis,
     },
     global_rules: meta.manifest_notes || null,
+    // "Must not depict" lines for the post's generated images (competitor
+    // vehicles, logos on uniforms, …) — see category-seed-seeder.
+    image_avoid: (Array.isArray(payload.image_avoid) ? payload.image_avoid : []).map((v) => String(v || '').trim()).filter(Boolean),
     // Surfaced for the human reviewer on the refresh lane: requested schema
     // additions cannot ship through publishRefresh (schema is frozen).
     refresh_schema_note: isRefresh && Array.isArray(payload.schema_types) && payload.schema_types.length

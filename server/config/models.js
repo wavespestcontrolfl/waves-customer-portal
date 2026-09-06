@@ -81,6 +81,7 @@ const DEFAULTS = Object.freeze({
   GEMINI_VISION_FALLBACK: 'gemini-2.5-flash',
   OPENAI_EMBEDDING: 'text-embedding-3-small',
   SMS_SONNET: 'claude-sonnet-5',
+  GEMINI_IMAGE_PRO: 'gemini-3-pro-image',
   GEMINI_IMAGE_BEST: 'gemini-3.1-flash-image-preview',
   GEMINI_IMAGE_STABLE: 'gemini-2.5-flash-image',
   GEMINI_VIDEO_FAST: 'veo-3.1-fast-generate-preview',
@@ -181,6 +182,7 @@ const SMS_SONNET       = process.env.MODEL_SMS_SONNET       || DEFAULTS.SMS_SONN
 // backgrounds. BEST is the newest image model; STABLE is the GA fallback the
 // chain drops to if the newer ID 404s (preview IDs get retired), so an ID
 // retirement degrades quality, never availability.
+const GEMINI_IMAGE_PRO    = process.env.MODEL_GEMINI_IMAGE_PRO    || DEFAULTS.GEMINI_IMAGE_PRO;
 const GEMINI_IMAGE_BEST   = process.env.MODEL_GEMINI_IMAGE        || DEFAULTS.GEMINI_IMAGE_BEST;
 const GEMINI_IMAGE_STABLE = process.env.MODEL_GEMINI_IMAGE_STABLE || DEFAULTS.GEMINI_IMAGE_STABLE;
 
@@ -333,6 +335,7 @@ module.exports = {
   GEMINI_VISION_BEST,
   GEMINI_TEXT_BEST,
   GEMINI_VISION_FALLBACK,
+  GEMINI_IMAGE_PRO,
   GEMINI_IMAGE_BEST,
   GEMINI_IMAGE_STABLE,
   GEMINI_VIDEO_FAST,
