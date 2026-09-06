@@ -169,4 +169,24 @@ postgres('atomic relay segment append and composition', () => {
     }
   });
 
+  test.each([
+    [null, null, 'Caller: retained unverified text'],
+    ['foreign', null, null],
+    [null, 'fixture_recording', 'Recorded caller message.'],
+  ])('trusted late repair respects owner %s and provider %s', async (owner, provider, expected) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const segment = buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: retained unverified text' });
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: 'ai_handled',
+      metadata: { relay_session_claim_owner: owner, relay_segments: [segment] },
+      transcription_provider: provider, transcription: provider ? 'Recorded caller message.' : null });
+    const convo = Object.assign(Object.create(RelayConversation.prototype), {
+      callSid: 'CA-fixture', sessionKey: 'first', _callTokenVerified: true,
+      _recordCommitments: jest.fn(async () => {}), _refreshFloorLeadSummary: jest.fn(async () => {}), _refreshCallSummary: jest.fn(async () => {}),
+    });
+    await convo._reconcileLateSegment();
+    const row = await db('call_log').first();
+    expect(row.transcription).toBe(expected);
+    expect(row.metadata.relay_session_claim_owner).toBe(owner);
+  });
+
 });

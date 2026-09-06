@@ -278,3 +278,18 @@ describe('the conversation side', () => {
   });
 
 });
+
+  test('authenticated close registration does not wait for caller verification', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const register = jest.spyOn(segmentStore, 'registerSegmentSession').mockResolvedValueOnce(true);
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockResolvedValueOnce(1);
+    try {
+      const convo = new RelayConversation({ callSid: 'CA-silent', sessionKey: 'silent', callTokenVerified: true, send: jest.fn() });
+      convo._callerVerified = false;
+      convo._runCaptureFloor = jest.fn(async () => {});
+      await convo.end('ws_close');
+      expect(register).toHaveBeenCalledWith(expect.anything(), 'CA-silent', 'silent');
+      expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-silent', expect.objectContaining({ session_key: 'silent', text: '', turns: 0 }));
+    } finally { register.mockRestore(); append.mockRestore(); }
+  });

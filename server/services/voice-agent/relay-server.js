@@ -394,6 +394,7 @@ function attachVoiceRelay(httpServer) {
             callSid: authenticatedCallSid,
             sessionKey: relaySessionKey,
             sessionGeneration: relaySessionGeneration,
+            callTokenVerified: true, // authenticated and burned before upgrade; never frame input
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,

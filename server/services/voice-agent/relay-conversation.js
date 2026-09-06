@@ -484,7 +484,7 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -558,6 +558,13 @@ class RelayConversation {
     // (CallSid, from)? Independent of whether an account matched — an
     // unmatched-but-real caller is verified; a WS client that declared an ANI
     // is not. Read by the tool ctx below.
+    this._callTokenVerified = callTokenVerified === true;
+    // Authenticated socket evidence is independent of caller/account identity.
+    // Keep the underlying promise for a close that outlives its deadline.
+    this._segmentRegistration = process.env.GATE_VOICE_RELAY_RECOVERY === 'true'
+      && this._callTokenVerified && this.callSid && this.sessionKey
+      ? segmentStore.registerSegmentSession(db, this.callSid, this.sessionKey).catch(() => false)
+      : null;
     this._callerVerified = false;
     this._contextReady = null;
     // Session language PROOF (codex #3561 r3). `this.language` is the setup
@@ -1548,6 +1555,7 @@ class RelayConversation {
 
   async _sessionSuperseded() {
     if (!this.sessionKey || !this.callSid) return false;
+    if (this._segmentRegistration && !await withTimeout(this._segmentRegistration, 2000, false)) return true;
     // ⭐ ONLY A CLAIMED SESSION CAN BE SUPERSEDED. An UNVERIFIED session never
     // held privileged context: it is capture-only by construction, its writes
     // are unlinked, and killing it on a foreign owner terminated the one
@@ -1557,7 +1565,7 @@ class RelayConversation {
     // closed: it must still prove the claim is exactly its own.
     if (this._callerVerified !== true) return false;
     const { relaySessionClaimOwner } = require('./relay-context');
-    const res = await relaySessionClaimOwner(this.callSid);
+    const res = await withTimeout(relaySessionClaimOwner(this.callSid), 2000, { ok: false });
     return !(res && res.ok === true && res.owner === this.sessionKey);
   }
 
@@ -1909,7 +1917,7 @@ class RelayConversation {
     // has since taken over (the superseded first leg). An unverified socket
     // (capture-only, never claimed) writes through today's owner-fenced
     // reconcile alone.
-    if (recoveryOn && this.callSid && this._callerVerified === true) {
+    if (recoveryOn && this.callSid && (this._callerVerified === true || this._callTokenVerified)) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
         segment = segmentStore.buildSegment({
@@ -1932,7 +1940,8 @@ class RelayConversation {
           lookupResults: this._lookupResults,
           slotRefs: [...this._slotRefs],
         });
-        segmentWrite = segmentStore.appendSegment(db, this.callSid, segment);
+        segmentWrite = (this._segmentRegistration || Promise.resolve(true)).then((registered) => registered
+          ? segmentStore.appendSegment(db, this.callSid, segment) : 0);
         const appended = await withTimeout(
           segmentWrite,
           WRITE_DRAIN_TIMEOUT_MS,
@@ -2237,11 +2246,11 @@ class RelayConversation {
       const owner = meta.relay_session_claim_owner || null;
       // A never-reconnected call's late append does not claim an empty
       // transcript. Only its still-current owner can complete that write.
-      if (owner && owner === this.sessionKey) {
+      if ((owner && owner === this.sessionKey) || (!owner && this._callTokenVerified)) {
         const { TRANSCRIPTION_PROVIDER, buildCallSummary } = require('./relay-transcript');
         const modelSummary = this._modelSummary ? buildCallSummary({ modelSummary: this._modelSummary }) : null;
         await db('call_log').where('twilio_call_sid', this.callSid)
-          .whereRaw("metadata->>'relay_session_claim_owner' = ?", [this.sessionKey])
+          .whereRaw("(metadata->>'relay_session_claim_owner' = ? OR (?::boolean AND metadata->>'relay_session_claim_owner' IS NULL))", [this.sessionKey, this._callTokenVerified === true])
           .where((q) => q.whereNull('call_outcome').orWhereIn('call_outcome', ['ai_handled', 'relay_failed', 'ai_transferred']))
           .where((q) => q.whereNull('transcription_provider').orWhere('transcription_provider', TRANSCRIPTION_PROVIDER))
           .whereRaw("transcription_metadata->'recorded_segment_rejected' IS NULL")
