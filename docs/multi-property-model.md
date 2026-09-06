@@ -72,14 +72,20 @@ default.
 
 ## 2026-09-06 — property relationship field
 
-- **`customer_properties.relationship`** (migration `20260906000020`,
-  vocabulary `constants/property-relationships.js`): `own_home` /
-  `rental_owned` / `family_home` / `managed_for_client`, nullable,
-  CHECK-constrained. Owner decision 2026-09-06: "family" is a RELATIONSHIP
-  (the payer's tie to the address), not a seventh occupancy value. Backfilled
-  only where the contact role proves it (property-manager profiles →
-  `managed_for_client`); occupancy is never read as ownership evidence, so
-  every other legacy row stays NULL for the office to set. Editable on the
+- **`customer_properties.relationship`** (migration `20260906000020` adds the
+  column; `20260906000050` corrects its backfill — see below; vocabulary
+  `constants/property-relationships.js`): `own_home` / `rental_owned` /
+  `family_home` / `managed_for_client`, nullable, CHECK-constrained. Owner
+  decision 2026-09-06: "family" is a RELATIONSHIP (the payer's tie to the
+  address), not a seventh occupancy value. Backfilled only where the contact
+  role proves it (property-manager profiles → `managed_for_client`);
+  occupancy is never read as ownership evidence, so every other legacy row
+  stays NULL for the office to set. `20260906000020`'s first revision derived
+  `own_home` / `rental_owned` from occupancy and had already run on the PR's
+  Railway preview when that was corrected, so the file stays at the revision
+  those environments ran and `20260906000050` clears the occupancy-derived
+  values (untouched rows only, prior values in `audit_log`) and re-asserts
+  the manager-only backfill. Editable on the
   Customer 360 Properties panel (row select + add form); `POST`/`PATCH
   /:id/properties` validate it; `recordCallProperty` accepts it but the call
   pipeline does not classify it yet.

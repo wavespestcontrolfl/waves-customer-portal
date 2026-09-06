@@ -6,16 +6,15 @@
  * occupancy_type keeps describing the property and this column describes
  * the payer's tie to it. Vocabulary: server/constants/property-relationships.js.
  *
- * Additive + nullable. Backfill ONLY from evidence that establishes the
- * customer's relationship — customers.contact_role='property_manager' →
- * managed_for_client on every property of that profile (the manager's
- * "primary" is a client's address, never their residence; see
- * constants/contact-roles.js). occupancy_type is deliberately NOT used:
- * migration 20260629000001 defaulted it to owner_occupied broadly and the
- * call pipeline infers it, so it says how the property is used, not whether
- * THIS customer owns it (a tenant's or a family member's owner-occupied
- * home would read as own_home). Everything else stays NULL for the office
- * to set.
+ * Additive + nullable. Backfill only the unambiguous legacy rows:
+ *   owner_occupied      → own_home
+ *   rental_investment   → rental_owned
+ *   any property of a customers.contact_role='property_manager' profile
+ *                       → managed_for_client (overrides the two above — the
+ *                         manager's "primary" is a client's address, never
+ *                         their residence; see constants/contact-roles.js)
+ * Everything else (seasonal / vacant / commercial / unknown) stays NULL for
+ * the office to set.
  */
 
 exports.up = async function (knex) {
@@ -28,6 +27,8 @@ exports.up = async function (knex) {
       'ALTER TABLE customer_properties ADD CONSTRAINT customer_properties_relationship_check '
       + "CHECK (relationship IS NULL OR relationship IN ('own_home', 'rental_owned', 'family_home', 'managed_for_client'))",
     );
+    await knex.raw("UPDATE customer_properties SET relationship = 'own_home' WHERE relationship IS NULL AND occupancy_type = 'owner_occupied'");
+    await knex.raw("UPDATE customer_properties SET relationship = 'rental_owned' WHERE relationship IS NULL AND occupancy_type = 'rental_investment'");
     if (await knex.schema.hasColumn('customers', 'contact_role')) {
       await knex.raw(
         "UPDATE customer_properties cp SET relationship = 'managed_for_client' "

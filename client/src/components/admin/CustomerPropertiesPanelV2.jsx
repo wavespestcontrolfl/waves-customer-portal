@@ -265,7 +265,7 @@ export default function CustomerPropertiesPanelV2({
                     value={p.relationship || ""}
                     disabled={!canEdit || writeBusy}
                     onChange={(e) => patchRow(p.id, { relationship: e.target.value || null })}
-                    className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                    className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
                   >
                     {RELATIONSHIP_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>
@@ -278,7 +278,7 @@ export default function CustomerPropertiesPanelV2({
                     value={p.occupancy_type || "unknown"}
                     disabled={!canEdit || writeBusy}
                     onChange={(e) => patchRow(p.id, { occupancy_type: e.target.value })}
-                    className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                    className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
                   >
                     {OCCUPANCY_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>
