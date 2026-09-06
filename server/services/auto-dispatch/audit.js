@@ -146,4 +146,38 @@ async function completeRun(runId, { status, totals, error = null }) {
   } catch (_) { /* non-critical */ }
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES };
+// Include skipped/locked rows: unplaced due dates must not disappear behind
+// eligibility filters or the run cap. The existing bell dedupes repeated runs.
+async function flagUnplacedVisits(config, nowDate = new Date()) {
+  const { etDateString, addETDays } = require('../../utils/datetime-et');
+  const { toDateStr } = require('./dates');
+  const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
+  const rows = await db('scheduled_services as s')
+    .join('customers as c', 'c.id', 's.customer_id')
+    .whereNotNull('s.recurring_dispatch_due_date')
+    .whereNull('s.window_start')
+    .whereIn('s.status', ['pending', 'confirmed'])
+    .where('s.recurring_dispatch_due_date', '<=', cutoff)
+    .where('c.active', true)
+    .whereNull('c.deleted_at')
+    .select('s.id', 's.customer_id', 's.recurring_dispatch_due_date');
+  const notifications = require('../notification-service');
+  for (const row of rows) {
+    const due = toDateStr(row.recurring_dispatch_due_date);
+    const notice = await notifications.notifyAdmin(
+      'schedule_conflict',
+      'Recurring visit still needs a time',
+      `A recurring visit due ${due} is still awaiting placement within three days of its due date. Review availability and customer preferences in dispatch.`,
+      {
+        bell: true,
+        link: `/admin/dispatch?tab=schedule&date=${due}`,
+        dedupeKey: `recurring-dispatch:${row.id}:${due}`,
+        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
+      },
+    );
+    if (!notice) throw new Error(`Recurring placement exception could not be recorded for ${row.id}`);
+  }
+  return rows.length;
+}
+
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits };

@@ -463,3 +463,14 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard({ trx, members })).resolves.toBeUndefined();
   });
 });
+
+
+test('apply refuses a stale or out-of-bounds recurring due-date placement before calling the rebooker', async () => {
+  const row = { ...SERVICE, recurring_dispatch_due_date: '2026-08-04' };
+  db.mockImplementation(() => readRow(row));
+  await expect(applyAutoDispatchMove(row, BEST, 'run1')).rejects.toMatchObject({ code: 'RECURRING_DUE_DATE_LIMIT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+
+  db.mockImplementation(() => readRow({ ...row, recurring_dispatch_due_date: '2026-08-05' }));
+  await expect(applyAutoDispatchMove(row, { ...BEST, date: '2026-08-06' }, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+});

@@ -130,3 +130,12 @@ describe('isRecurringPlanActive', () => {
     expect(r.active).toBe(true);
   });
 });
+
+
+test('a deferred visit can be placed inside the normal date lock, but staff locks still win', () => {
+  const row = svc({ scheduled_date: '2026-06-21', recurring_dispatch_due_date: '2026-06-21', window_start: null });
+  expect(isEligibleForAutoDispatch(row, CTX)).toMatchObject({ eligible: true });
+  expect(isEligibleForAutoDispatch(row, { ...CTX, routeTiers: { enabled: true, today: CTX.today } })).toMatchObject({ eligible: true });
+  expect(isEligibleForAutoDispatch({ ...row, auto_dispatch_locked: true }, CTX)).toMatchObject({ eligible: false, reason_code: 'MANUALLY_LOCKED' });
+  expect(isEligibleForAutoDispatch({ ...row, auto_dispatch_excluded: true }, CTX)).toMatchObject({ eligible: false, reason_code: 'AUTO_DISPATCH_EXCLUDED' });
+});

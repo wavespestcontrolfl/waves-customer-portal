@@ -46,6 +46,7 @@
  */
 
 const express = require('express');
+const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
@@ -521,6 +522,7 @@ router.get('/:token', async (req, res, next) => {
       // recurring note to "your later visits shift to match" and drops the
       // legacy pull-forward warning (every date move re-anchors).
       collectiveAnchor: isSeriesVisit(svc) && collectiveAnchorActive(),
+      futurePlacementDays: isSeriesVisit(svc) && gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH') ? 3 : null,
       // The visit's time already passed without service — the page renders
       // the "we missed each other" rebook framing instead of the standard
       // reschedule copy.
@@ -674,6 +676,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       // from the reschedule_log row the original commit wrote (series
       // commits log reason_code '<reason>_series').
       let replaySeriesShifted = false;
+      let replayPlacementDays = null;
       if (isSeriesVisit(svc)) {
         try {
           const lastLog = await db('reschedule_log')
@@ -685,6 +688,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           replaySeriesShifted = !!lastLog
             && String(lastLog.reason_code || '').endsWith('_series')
             && apptDateStr(lastLog.new_date) === date;
+          if (replaySeriesShifted) {
+            const move = await db('series_moves')
+              .where({ anchor_service_id: svc.id, new_date: date, status: 'committed' })
+              .orderBy('created_at', 'desc').first('result');
+            replayPlacementDays = move?.result?.futurePlacementDays || null;
+          }
         } catch (err) {
           logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
         }
@@ -698,6 +707,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         startLabel: label12(startTime),
         endLabel: label12(svc.window_end),
         seriesShifted: replaySeriesShifted,
+        futurePlacementDays: replayPlacementDays,
       });
     }
 
@@ -928,6 +938,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       endLabel: slot.end_label,
       // The success card tells the customer their following visits moved too.
       seriesShifted: !!shiftedOccurrences,
+      futurePlacementDays: result.futurePlacementDays || null,
       occurrencesRescheduled: shiftedOccurrences ? shiftedOccurrences.length : 1,
     });
   } catch (err) {

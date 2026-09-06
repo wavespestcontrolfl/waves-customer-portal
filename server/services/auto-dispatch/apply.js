@@ -43,7 +43,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date');
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -56,7 +56,8 @@ async function revalidatePlacement(service) {
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
   }
-  const changed = toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
+  const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
+    || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
     || norm(fresh.window_start) !== norm(service.window_start)
     || norm(fresh.window_end) !== norm(service.window_end)
     || String(fresh.technician_id || '') !== String(service.technician_id || '');
@@ -160,6 +161,10 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       ...(config.routeTiersEnabled === true ? { routeTiers: { enabled: true, today } } : {}),
     };
     for (const r of rows) {
+      if (r.recurring_dispatch_due_date) {
+        const drift = routeTiers.daysBetween(toDateStr(r.recurring_dispatch_due_date), best.date);
+        if (drift == null || Math.abs(drift) > 3) throw refuse(r.id, 'would leave its recurring due date ±3 days');
+      }
       if (r.customer_deleted_at) throw refuse(r.id, 'belongs to an archived customer');
       const elig = isEligibleForAutoDispatch(r, eligCtx);
       if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
@@ -242,6 +247,12 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     throw Object.assign(new Error(check.reason), { code: check.code });
   }
   const fresh = check.fresh;
+  if (fresh.recurring_dispatch_due_date) {
+    const drift = routeTiers.daysBetween(toDateStr(fresh.recurring_dispatch_due_date), best.date);
+    if (drift == null || Math.abs(drift) > 3) {
+      throw Object.assign(new Error('Placement is outside the recurring due date ±3 days'), { code: 'RECURRING_DUE_DATE_LIMIT' });
+    }
+  }
 
   // Re-assert the operator opt-out flags + original date INSIDE the rebooker's
   // move transaction so a lock/reschedule landing between the read above and the
@@ -257,6 +268,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
+    recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
   };
 
   // Canonical move — transactional, overlap-checked, silent. ALWAYS a

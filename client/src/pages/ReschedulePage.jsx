@@ -144,6 +144,12 @@ function slotReanchors(data, slotDate) {
 // 2026-07-30): every date move shifts the series, so one steady sentence
 // replaces the legacy conditional pull-forward warning.
 function recurringNoteCopy(data, selectedSlot) {
+  const changesSeries = data?.collectiveAnchor
+    ? !selectedSlot || String(selectedSlot.date) !== String(data?.current?.date || '')
+    : selectedSlot && slotReanchors(data, selectedSlot.date);
+  if (data?.futurePlacementDays === 3 && changesSeries) {
+    return 'Your selected appointment will be confirmed. Later visits will follow the new schedule, with each day and time arranged within 3 days of its due date. Existing appointment commitments will be reviewed separately.';
+  }
   if (data?.collectiveAnchor) {
     // A same-date selection is a time-only move — the server's
     // shouldReanchor never shifts the series for it, so the note must not
@@ -162,14 +168,15 @@ function recurringNoteCopy(data, selectedSlot) {
     : 'Only this visit will move — the rest of your regular service schedule stays the same.';
 }
 
-function ReanchorNote() {
+function ReanchorNote({ futurePlacementDays }) {
   return (
     <div data-glass="soft" style={{
       background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8,
       padding: '10px 12px', fontSize: 14, color: '#9A3412', lineHeight: 1.5,
     }}>
-      Heads up — moving this far up shifts your whole plan: your following
-      visits will move to match the new date, keeping your regular schedule.
+      {futurePlacementDays === 3
+        ? 'Your selected appointment will be confirmed. We’ll arrange later visits within 3 days of their new due dates.'
+        : 'Heads up — moving this far up shifts your whole plan: your following visits will move to match the new date, keeping your regular schedule.'}
     </div>
   );
 }
@@ -536,7 +543,9 @@ function SuccessCard({ result, service }) {
         Your {service?.type || 'service'} visit is now scheduled for{' '}
         <strong style={{ color: S.text }}>{formatDateLabel(result.newDate)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
-        {result.seriesShifted ? ' We also shifted your upcoming visits to follow the new date — your regular schedule now runs from this one.' : ''}
+        {result.seriesShifted ? (result.futurePlacementDays === 3
+          ? ' Your later visits will follow the new schedule. We’ll arrange their days and times within 3 days of each due date.'
+          : ' We also shifted your upcoming visits to follow the new date — your regular schedule now runs from this one.') : ''}
         {' '}We'll text you a confirmation shortly.
       </div>
     </Card>
@@ -804,7 +813,7 @@ function V2DayGrid({ availability, selectedDate, onSelectDay }) {
   );
 }
 
-function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, submitError, reanchorNote }) {
+function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, submitError, reanchorNote, futurePlacementDays }) {
   return (
     <Card>
       <div data-gt="h3x" style={{ fontSize: 17, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 2 }}>
@@ -856,7 +865,7 @@ function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, subm
                   // Inside the picked row (full-width grid item) so the
                   // heads-up sits directly under the Confirm it applies to —
                   // never below the fold behind later slots.
-                  <div style={{ gridColumn: '1 / -1' }}><ReanchorNote /></div>
+                  <div style={{ gridColumn: '1 / -1' }}><ReanchorNote futurePlacementDays={futurePlacementDays} /></div>
                 ) : null}
               </div>
             );
@@ -1439,6 +1448,7 @@ export default function ReschedulePage() {
                 onConfirm={confirm}
                 submitting={submitting}
                 submitError={submitError}
+                futurePlacementDays={data.futurePlacementDays}
                 reanchorNote={!!(!data.collectiveAnchor && selectedSlot && slotReanchors(data, selectedSlot.date))}
               />
             )}
@@ -1548,7 +1558,7 @@ export default function ReschedulePage() {
               <DayGroup key={day.date} day={day} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />
             ))}
             {!data.collectiveAnchor && selectedSlot && slotReanchors(data, selectedSlot.date) ? (
-              <div style={{ marginBottom: 10 }}><ReanchorNote /></div>
+              <div style={{ marginBottom: 10 }}><ReanchorNote futurePlacementDays={data?.futurePlacementDays} /></div>
             ) : null}
             <button
               type="button"

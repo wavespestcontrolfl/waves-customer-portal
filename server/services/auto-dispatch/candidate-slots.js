@@ -185,6 +185,20 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     dateTo = shiftDateStr(origDate, tol);
     if (!dateTo || dateTo > horizonCap) dateTo = horizonCap;
   }
+  // Customer re-anchors carry a permanent due date. Repeated route nudges
+  // must stay within the SAME ±3 days, including when route tiers are off.
+  if (service.recurring_dispatch_due_date) {
+    const due = toDateStr(service.recurring_dispatch_due_date);
+    const dueFrom = shiftDateStr(due, -3);
+    const dueTo = shiftDateStr(due, 3);
+    if (!service.window_start) {
+      // No promised time to freeze: first placement can use tomorrow onward.
+      dateFrom = etDateString(addETDays(ctx.nowDate, 1));
+      dateTo = horizonCap;
+    }
+    if (dateFrom < dueFrom) dateFrom = dueFrom;
+    if (dateTo > dueTo) dateTo = dueTo;
+  }
   if (dateFrom > dateTo) {
     // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
     const current = await computeCurrentPlacement(service, prefs, ctx);

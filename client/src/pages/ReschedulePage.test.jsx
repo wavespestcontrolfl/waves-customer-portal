@@ -368,9 +368,10 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument();
   });
 
-  it('v2: big pull-forward on a recurring visit warns before Confirm and reports the series shift after', async () => {
+  it.each([null, 3])('v2: recurring move discloses future placement (%s days) before and after confirming', async (futurePlacementDays) => {
     const payload = reschedulablePayload({
       isRecurring: true,
+      futurePlacementDays,
       reanchorPullForwardDays: 14,
       current: { date: '2026-08-13', windowStart: '12:00', windowEnd: '13:00' },
     });
@@ -386,6 +387,7 @@ describe('ReschedulePage Waves AI search', () => {
           startLabel: '1:00 PM',
           endLabel: '2:00 PM',
           seriesShifted: true,
+          futurePlacementDays,
           occurrencesRescheduled: 3,
         }));
       }
@@ -400,13 +402,15 @@ describe('ReschedulePage Waves AI search', () => {
 
     // …picking a slot 32 days earlier than the visit shows the heads-up.
     fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
-    expect(screen.getByText(/shifts your whole plan/)).toBeInTheDocument();
+    expect(screen.getByText(futurePlacementDays === 3
+      ? /We’ll arrange later visits within 3 days/ : /shifts your whole plan/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
     await waitFor(() => {
       expect(screen.getByText('You\'re all set')).toBeInTheDocument();
     });
-    expect(screen.getByText(/shifted your upcoming visits to follow the new date/)).toBeInTheDocument();
+    expect(screen.getByText(futurePlacementDays === 3
+      ? /We’ll arrange their days and times within 3 days/ : /shifted your upcoming visits to follow the new date/)).toBeInTheDocument();
   });
 
   it('v2: a small move on a recurring visit shows no series warning', async () => {

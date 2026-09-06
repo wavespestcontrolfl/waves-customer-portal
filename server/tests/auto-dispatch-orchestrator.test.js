@@ -20,6 +20,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),
+  flagUnplacedVisits: jest.fn(async () => 0),
 }));
 
 const db = require('../models/db');
@@ -337,4 +338,31 @@ test('idempotency: an already-moved visit needs a much larger gain to move again
   const moved = await runAutoDispatch({ mode: 'dry_run' });
   expect(moved.recommended).toBe(0);
   expect(lastDecision('no_change').reason_code).toBe('NO_SCORE_IMPROVEMENT');
+});
+
+
+test('an untimed due date is placed even when it offers no route improvement', async () => {
+  servicesResult = [svc({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04' })];
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [CAND_SMALL] });
+  const res = await runAutoDispatch({ mode: 'dry_run', minScoreImprovement: 100 });
+  expect(res).toMatchObject({ recommended: 1, changed: 0 });
+  expect(audit.flagUnplacedVisits).not.toHaveBeenCalled();
+});
+
+test('unplaced due dates get the run budget ahead of ordinary route improvements', async () => {
+  const previous = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    servicesResult = [svc({ id: 'ordinary' }), svc({ id: 'due', window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04' })];
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (row) => row.id === 'due'
+      ? { current: CURRENT_GOOD, candidates: [CAND_SMALL] }
+      : { current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('due');
+    expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
+  } finally {
+    if (previous === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    else process.env.AUTO_DISPATCH_ALLOW_APPLY = previous;
+  }
 });

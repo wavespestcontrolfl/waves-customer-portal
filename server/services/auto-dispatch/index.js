@@ -20,7 +20,7 @@ const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
-const { toDateStr } = require('./dates');
+const { toDateStr, shiftDateStr } = require('./dates');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
 const routeTiers = require('./route-tiers');
@@ -71,7 +71,7 @@ function makeCapabilityFn(map) {
   };
 }
 
-function loadEligibleServices(lockBoundary, lookaheadEnd) {
+function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
   return db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     // is_recurring=true only — booster-month rows carry a recurring_parent_id but
@@ -84,7 +84,14 @@ function loadEligibleServices(lockBoundary, lookaheadEnd) {
     // so filter it here like the reminder/billing crons do.
     .whereNull('customers.deleted_at')
     .whereIn('scheduled_services.status', ['pending', 'confirmed'])
-    .where('scheduled_services.scheduled_date', '>', lockBoundary)
+    .where(function () {
+      this.where('scheduled_services.scheduled_date', '>', lockBoundary)
+        .orWhere(function () {
+          this.whereNotNull('scheduled_services.recurring_dispatch_due_date')
+            .whereNull('scheduled_services.window_start')
+            .where('scheduled_services.recurring_dispatch_due_date', '>=', shiftDateStr(today, -3));
+        });
+    })
     .where('scheduled_services.scheduled_date', '<=', lookaheadEnd)
     .where(function () {
       this.where('scheduled_services.auto_dispatch_locked', false)
@@ -178,7 +185,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   };
   const auditCtx = { newPlacement, scores, prefsSnapshot, routeMetrics, constraints };
 
-  if (improvement < threshold) {
+  if (!(service.recurring_dispatch_due_date && !service.window_start) && improvement < threshold) {
     return { kind: 'no_change', reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}`, audit: auditCtx };
   }
   return { kind: 'move', improvement, best, threshold, audit: auditCtx };
@@ -215,7 +222,7 @@ async function runAutoDispatch(opts = {}) {
     const loadBoundary = tiersOn
       ? etDateString(addETDays(nowDate, routeTiers.TIER2_MIN_DAYS_OUT - 1))
       : lockBoundary;
-    const services = await loadEligibleServices(loadBoundary, lookaheadEnd);
+    const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
 
     // Tier-mode bulk context: reminder-freeze + drift anchors, one query each.
     // Both FAIL CLOSED — a failed read freezes/anchors-unknowns every visit
@@ -285,7 +292,7 @@ async function runAutoDispatch(opts = {}) {
         // ── ROUTE-TIERS guards (only when GATE_ROUTE_TIERS is on) ──
         let tierWindow = null;
         let tierMeta = null;
-        if (tiersOn) {
+        if (tiersOn && !(service.recurring_dispatch_due_date && !service.window_start)) {
           // Reminder freeze — the 72h reminder is the HARD gate. Unreadable
           // status freezes everything (fail closed).
           if (!reminderFreeze || reminderFreeze.failed) {
@@ -388,7 +395,10 @@ async function runAutoDispatch(opts = {}) {
     // that actually apply under a binding cap — they are the top-ranked ones,
     // applied earliest, where the pass-1 estimate has diverged least from live.
     if (config.mode !== 'dry_run' && plannedMoves.length) {
-      plannedMoves.sort((a, b) => b.result.improvement - a.result.improvement);
+      plannedMoves.sort((a, b) =>
+        Number(!!(b.service.recurring_dispatch_due_date && !b.service.window_start))
+        - Number(!!(a.service.recurring_dispatch_due_date && !a.service.window_start))
+        || b.result.improvement - a.result.improvement);
       // Stragglers of a PARTIAL grouped move (codex #3609 r31 P1): the
       // failed member sits at its original placement and passes
       // revalidatePlacement (which never compares visit_id), so its own
@@ -425,7 +435,7 @@ async function runAutoDispatch(opts = {}) {
           // `expect` (it pins the ORIGINAL scheduled_date; a visit whose date
           // slipped near enough for a 72h reminder to fire has necessarily
           // changed date and 409s). Fail closed on an unreadable re-check.
-          if (tiersOn) {
+          if (tiersOn && !(pm.service.recurring_dispatch_due_date && !pm.service.window_start)) {
             const applyFreeze = await routeTiers.loadReminderFreeze(db, [pm.service.id], new Date());
             if (applyFreeze.failed) {
               guardReadDegraded = true;
@@ -515,6 +525,15 @@ async function runAutoDispatch(opts = {}) {
     logger.error(`[auto-dispatch] run ${runId} fatal: ${fatal.message}`);
   }
 
+  if (config.mode === 'apply') {
+    try {
+      await audit.flagUnplacedVisits(config);
+    } catch (err) {
+      totals.failed++;
+      if (runStatus === 'completed') runStatus = 'completed_with_errors';
+      logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
+    }
+  }
   await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${geocoded}/${geocodeAttempts}`);
   return { runId, status: runStatus, geocoded, geocode_attempts: geocodeAttempts, ...totals };
