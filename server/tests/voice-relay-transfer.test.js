@@ -122,6 +122,7 @@ describe('executeTool transfer_to_office', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValue(new Error('pool down')) });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.toolFailed).toBe(true);
     expect(ctx.writeHandoff).toHaveBeenCalledTimes(2);
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
     await new Promise((r) => setImmediate(r));
@@ -132,6 +133,7 @@ describe('executeTool transfer_to_office', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValueOnce(new Error('pool down')).mockResolvedValueOnce(0) });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.toolFailed).toBe(true);
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
   });
 
@@ -154,6 +156,7 @@ describe('executeTool transfer_to_office', () => {
     const { ctx } = ctxFor({ writeHandoff: jest.fn(async () => 0) });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started.*Do NOT try again/s);
     expect(ctx.writeHandoff).toHaveBeenCalledTimes(1);
+    expect(ctx.toolFailed).toBe(true);
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(ctx.say).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
@@ -522,6 +525,7 @@ describe('codex r5 follow-ups', () => {
     const revertHandoff = jest.fn(async () => 1);
     const { ctx } = ctxFor({ endForTransfer: jest.fn(() => false), revertHandoff });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.toolFailed).toBe(true);
     expect(revertHandoff).toHaveBeenCalledWith(ctx.writeHandoff.mock.calls[0][0].attempt);
     await new Promise((r) => setImmediate(r));
     expect(triggerNotification).not.toHaveBeenCalled();
