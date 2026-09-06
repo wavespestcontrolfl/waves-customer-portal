@@ -20,7 +20,7 @@ const place = (unit = '') => ({
   formatted_address: '100 Example Street, Sarasota, FL 34236',
   address_components: [component('street_number', '100'), component('route', 'Example Street'), component('locality', 'Sarasota'), component('administrative_area_level_1', 'FL'), component('postal_code', '34236'), component('subpremise', unit)],
 });
-const detail = { customer: { id: 'fixture', firstName: 'Test', lastName: 'Account', active: true, address: { line1: '200 Example Road', line2: 'Old unit', city: 'Venice', state: 'FL', zip: '34285' } } };
+const detail = { customer: { id: 'fixture', firstName: 'Test', lastName: 'Account', active: true, address: { line1: '200 Example Rd.', line2: 'Old unit', city: 'Venice', state: 'FL', zip: '34285' } } };
 
 beforeEach(() => {
   vi.stubEnv('VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE', 'true');
@@ -129,4 +129,40 @@ it('initializes after a Maps download takes longer than eight seconds', () => {
 it('retains Enter submission for existing autocomplete consumers', () => {
   render(<AddressAutocomplete aria-label="Legacy street" value="typed address" onChange={() => {}} />);
   expect(fireEvent.keyDown(screen.getByLabelText('Legacy street'), { key: 'Enter' })).toBe(true);
+});
+
+it('clears a unit when a later property selection changes the street', async () => {
+  render(<CustomerPropertiesPanelV2 customerId="fixture" canEdit />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add service address' }));
+  selectPlace(place());
+  fireEvent.change(screen.getByLabelText('Unit / line 2'), { target: { value: 'Unit A' } });
+  fireEvent.change(screen.getByLabelText('Street address'), { target: { value: '200 Other' } });
+  const replacement = place();
+  replacement.address_components[0] = component('street_number', '200');
+  selectPlace(replacement);
+  expect(screen.getByLabelText('Unit / line 2')).toHaveValue('');
+  fireEvent.change(screen.getByLabelText('Unit / line 2'), { target: { value: 'Unit B' } });
+  selectPlace(replacement);
+  expect(screen.getByLabelText('Unit / line 2')).toHaveValue('Unit B');
+});
+
+it('preserves an existing unit across Google street spelling changes and omitted address components', async () => {
+  render(<Customer360ProfileV2 customerId="fixture" onClose={() => {}} />);
+  fireEvent.click((await screen.findAllByRole('button', { name: /^edit$/i }))[0]);
+  const normalized = {
+    address_components: [
+      component('street_number', '200'),
+      { types: ['route'], long_name: 'Example Road', short_name: 'Example Rd' },
+    ],
+  };
+  selectPlace(normalized);
+  expect(screen.getByLabelText('Address')).toHaveValue('200 Example Road');
+  expect(screen.getByLabelText('Address line 2')).toHaveValue('Old unit');
+  expect(screen.getByLabelText('City')).toHaveValue('Venice');
+  expect(screen.getByLabelText('State')).toHaveValue('FL');
+  expect(screen.getByLabelText('ZIP')).toHaveValue('34285');
+  selectPlace(place('Unit 7'));
+  // The last selection, not the originally loaded customer, now owns this unit.
+  selectPlace(place());
+  expect(screen.getByLabelText('Address line 2')).toHaveValue('Unit 7');
 });

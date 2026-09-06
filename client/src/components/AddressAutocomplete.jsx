@@ -7,6 +7,21 @@ const SWFL_BOUNDS = {
   west: -83.05,
 };
 
+// This only preserves unit input in a form; server address identity stays authoritative.
+// Google's own long/short street names handle suffix changes without a second
+// street-suffix catalog in the browser.
+export function sameAutocompleteAddress(previous, parts) {
+  const key = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const streetMatches = [parts.line1, parts.line1Short]
+    .some((line) => line && key(line) === key(previous.line1));
+  return streetMatches && ['city', 'state', 'zip'].every((field) => {
+    if (!previous[field] || !parts[field]) return true;
+    const before = key(previous[field]);
+    const after = key(parts[field]);
+    return field === 'zip' ? before.slice(0, 5) === after.slice(0, 5) : before === after;
+  });
+}
+
 /**
  * Google Places address autocomplete input.
  *
@@ -14,7 +29,7 @@ const SWFL_BOUNDS = {
  *   value       — controlled input string
  *   onChange    — (value) => void  (fires on typing)
  *   onSelect    — (parts) => void  (fires when user picks a suggestion)
- *                 parts: { formatted, line1, line2, city, state, zip, lat, lng }
+ *                 parts: { formatted, line1, line1Short, line2, city, state, zip, lat, lng }
  *                 line2 = Google subpremise (unit/apt) when the user typed one;
  *                 line1 stays street-only so geocode/parcel matching is clean
  *   placeholder
@@ -116,6 +131,7 @@ export default function AddressAutocomplete({
         const parts = {
           formatted: p.formatted_address || '',
           line1,
+          line1Short: [get('street_number'), getShort('route')].filter(Boolean).join(' '),
           line2: get('subpremise'),
           city: get('locality') || get('sublocality') || get('postal_town'),
           state: getShort('administrative_area_level_1'),
@@ -209,6 +225,7 @@ export default function AddressAutocomplete({
           const parts = {
             formatted: p.formatted_address || typed,
             line1,
+            line1Short: [get('street_number'), getShort('route')].filter(Boolean).join(' '),
             line2: get('subpremise'),
             city: get('locality') || get('sublocality') || get('postal_town'),
             state: getShort('administrative_area_level_1'),

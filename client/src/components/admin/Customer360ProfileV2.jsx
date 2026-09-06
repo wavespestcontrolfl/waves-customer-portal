@@ -48,7 +48,7 @@
 
 import { useState, useEffect, useRef, useId } from "react";
 import { createPortal } from "react-dom";
-import AddressAutocomplete from "../AddressAutocomplete";
+import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import {
   Bell,
   CheckCircle2,
@@ -5164,6 +5164,7 @@ export default function Customer360ProfileV2({
   const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
   const [editForm, setEditForm] = useState({});
+  const editAddressRef = useRef(null);
   const initialEditForm = useRef({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState("");
@@ -5570,6 +5571,7 @@ export default function Customer360ProfileV2({
   // mobile Edit pill, and the ⋯ menu item must prefill identical fields (the
   // menu copy once dropped profileLabel, so the mobile modal showed it blank).
   const openEditModal = () => {
+    editAddressRef.current = c.address || null;
     const form = {
       firstName: c.firstName || "",
       lastName: c.lastName || "",
@@ -8284,16 +8286,20 @@ export default function Customer360ProfileV2({
                       value={editForm.addressLine1}
                       onChange={(value) => setEditForm((p) => ({ ...p, addressLine1: value }))}
                       onSelect={(parts) => {
+                        const previous = editAddressRef.current;
+                        editAddressRef.current = {
+                          line1: parts.line1 || editForm.addressLine1,
+                          city: parts.city || editForm.city,
+                          state: parts.state || editForm.state,
+                          zip: parts.zip || editForm.zip,
+                        };
                         setEditForm((p) => ({
                           ...p,
-                          addressLine1: parts.line1,
-                          addressLine2: parts.line2 || (
-                            parts.line1.toLowerCase() === (c.address?.line1 || "").toLowerCase()
-                              ? p.addressLine2 : ""
-                          ),
-                          city: parts.city,
-                          state: parts.state,
-                          zip: parts.zip,
+                          addressLine1: parts.line1 || p.addressLine1,
+                          addressLine2: parts.line2 || (!previous || sameAutocompleteAddress(previous, parts) ? p.addressLine2 : ""),
+                          city: parts.city || p.city,
+                          state: parts.state || p.state,
+                          zip: parts.zip || p.zip,
                         }));
                         document.getElementById("customer-edit-addressLine2")?.focus();
                       }}
