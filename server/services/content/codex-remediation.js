@@ -1072,9 +1072,10 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
     } catch (_) {
       return { violation: 'body-derived schema types unavailable', changed: {} };
     }
-    const proposed = canonValue(fixed.data.schema_types);
-    if (proposed !== canonValue(original.data.schema_types) && proposed !== canonValue(schemaTypes)) {
-      return { violation: 'schema_types may only follow the publisher-derived FAQPage change', changed: {} };
+    const proposedTypes = fixed.data.schema_types;
+    const proposed = canonValue(Array.isArray(proposedTypes) ? [...proposedTypes].sort() : proposedTypes);
+    if (proposed !== canonValue([...original.data.schema_types].sort()) && proposed !== canonValue([...schemaTypes].sort())) {
+      return { violation: 'schema_types differs from the original and body-derived declaration sets', changed: {} };
     }
     if (canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
       if (!findings.some((finding) => FAQ_FINDING_RE.test(String(finding?.body || '')))) {
@@ -1082,7 +1083,7 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
       }
       baseline = fm.stringify({ ...original.data, schema_types: schemaTypes }, original.content);
     }
-    if (proposed !== canonValue(schemaTypes)) {
+    if (canonValue(proposedTypes) !== canonValue(schemaTypes)) {
       markdown = fm.stringify({ ...fixed.data, schema_types: schemaTypes }, fixed.content);
     }
   }
@@ -1099,7 +1100,8 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
 function retryableFrontmatterPark(state) {
   if (state.park_phase !== PARK_PRE_PUSH || state.sync_pending_sha || atRoundLimit(state.rounds)) return false;
   return /^fix changed frontmatter beyond the whitelist: (?:frontmatter key "(?:schema_types|spoke_links)" changed|meta_description changed but no finding in this round targets it)/.test(String(state.park_reason || ''))
-    || state.park_reason === 'fix changes the body-derived schema types (frontmatter schema is frozen)';
+    || state.park_reason === 'fix changes the body-derived schema types (frontmatter schema is frozen)'
+    || state.park_reason === 'frontmatter repair rejected after bounded retry: schema_types may only follow the publisher-derived FAQPage change';
 }
 
 /**
