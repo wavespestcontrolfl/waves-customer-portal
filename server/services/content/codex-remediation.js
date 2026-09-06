@@ -1072,9 +1072,11 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
     } catch (_) {
       return { violation: 'body-derived schema types unavailable', changed: {} };
     }
-    const proposed = canonValue(fixed.data.schema_types);
-    if (proposed !== canonValue(original.data.schema_types) && proposed !== canonValue(schemaTypes)) {
-      return { violation: 'schema_types may only follow the publisher-derived FAQPage change', changed: {} };
+    const proposedTypes = fixed.data.schema_types;
+    const proposed = canonValue(Array.isArray(proposedTypes) ? [...proposedTypes].sort() : proposedTypes);
+    const allowedDeclarations = [original.data.schema_types, schemaTypes].map((types) => canonValue([...types].sort()));
+    if (!allowedDeclarations.includes(proposed)) {
+      return { violation: 'schema_types differs from the original and body-derived declaration sets', changed: {} };
     }
     if (canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
       if (!findings.some((finding) => FAQ_FINDING_RE.test(String(finding?.body || '')))) {
@@ -1082,13 +1084,19 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
       }
       baseline = fm.stringify({ ...original.data, schema_types: schemaTypes }, original.content);
     }
-    if (proposed !== canonValue(schemaTypes)) {
+    if (canonValue(proposedTypes) !== canonValue(schemaTypes)) {
       markdown = fm.stringify({ ...fixed.data, schema_types: schemaTypes }, fixed.content);
     }
   }
   const result = frontmatterFixViolation(baseline, markdown, findings);
-  if (!result.violation && schemaTypes && canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
+  if (result.violation) return { ...result, markdown };
+  // Only a permitted FAQ schema change rewrites the validation baseline.
+  if (baseline !== originalMd) {
     result.changed.schema_types = schemaTypes;
+  }
+  if (Object.keys(result.changed).length === 0
+    && original.content.trimEnd() === fixed.content.trimEnd()) {
+    markdown = originalMd;
   }
   return { ...result, markdown };
 }
@@ -1099,7 +1107,8 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
 function retryableFrontmatterPark(state) {
   if (state.park_phase !== PARK_PRE_PUSH || state.sync_pending_sha || atRoundLimit(state.rounds)) return false;
   return /^fix changed frontmatter beyond the whitelist: (?:frontmatter key "(?:schema_types|spoke_links)" changed|meta_description changed but no finding in this round targets it)/.test(String(state.park_reason || ''))
-    || state.park_reason === 'fix changes the body-derived schema types (frontmatter schema is frozen)';
+    || state.park_reason === 'fix changes the body-derived schema types (frontmatter schema is frozen)'
+    || state.park_reason === 'frontmatter repair rejected after bounded retry: schema_types may only follow the publisher-derived FAQPage change';
 }
 
 /**
@@ -2091,7 +2100,17 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // any post-commit synchronization. Best-effort on transient GitHub errors
   // (the recovery branch re-drives an interrupted round next tick).
   try {
-    const fresh = await gh.getPr(prNumber);
+    let fresh = await gh.getPr(prNumber);
+    // GitHub can briefly return the pre-push head from BOTH the PR and ref
+    // endpoints. Give that exact predecessor three seconds to catch up
+    // before withholding sync. A closed PR or any different head goes
+    // straight to the existing fail-closed checks below.
+    for (let retry = 0; retry < 3
+      && fresh?.state === 'open' && !fresh.merged && !fresh.merged_at
+      && fresh.head?.sha === headSha && headSha !== newHead; retry += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      fresh = await gh.getPr(prNumber);
+    }
     if (!fresh || fresh.merged || fresh.merged_at || fresh.state !== 'open') {
       const terminal = fresh && (fresh.merged || fresh.merged_at) ? 'merged' : 'closed';
       await markPrTerminal(prNumber, terminal, db);
@@ -2142,6 +2161,13 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead, PARK_POST_PUSH);
       }
       // Open AND at our head on the re-read → proceed with the round.
+    }
+    // A cached PR response can catch up to our commit while the branch has
+    // already advanced again. Confirm the ref immediately before syncing;
+    // lookup failures fall through to the fail-closed catch below.
+    const syncHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase();
+    if (!newHead || syncHead !== String(newHead).trim().toLowerCase()) {
+      return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(syncHead)}); sync withheld`, onPark, newHead || headSha, PARK_POST_PUSH);
     }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that

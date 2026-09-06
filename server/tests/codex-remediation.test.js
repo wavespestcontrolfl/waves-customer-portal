@@ -460,6 +460,55 @@ describe('runRemediationForPr', () => {
     expect(db._tables.codex_remediation_state[0].rounds).toBe(1);
   });
 
+  test('a short read-after-write lag on both GitHub views waits for the pushed head before syncing', async () => {
+    const db = makeDb();
+    let reads = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: ++reads < 4 ? HEAD : 'newcommit999aaa', ref: CTX.branch } }),
+      getBranchSha: async () => reads < 4 ? HEAD : 'newcommit999aaa',
+    } });
+    const onRemediated = jest.fn();
+    const result = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(result.remediated).toBe(true);
+    expect(onRemediated).toHaveBeenCalledTimes(1);
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ synced_sha: 'newcommit999aaa', sync_pending_sha: null });
+    expect(gh._calls.comments).toHaveLength(1);
+  });
+
+  test.each(['parallel777push', null, 'error'])('cached PR catches up to our commit but the ref is %s → sync stays held', async (refResult) => {
+    const db = makeDb();
+    let reads = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: ++reads < 3 ? HEAD : 'newcommit999aaa', ref: CTX.branch } }),
+      getBranchSha: async () => {
+        if (refResult === 'error') throw new Error('ref unavailable');
+        return refResult;
+      },
+    } });
+    const onRemediated = jest.fn();
+    const result = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(result.parked).toBe(true);
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ park_phase: 'post_push', sync_pending_sha: 'newcommit999aaa' });
+    expect(gh._calls.comments).toHaveLength(0);
+  });
+
+  test('a branch that keeps reporting the pre-push head exhausts the consistency wait and stays held', async () => {
+    const db = makeDb();
+    let reads = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => { reads += 1; return { state: 'open', head: { sha: HEAD, ref: CTX.branch } }; },
+      getBranchSha: async () => HEAD,
+    } });
+    const onRemediated = jest.fn();
+    const result = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(result.parked).toBe(true);
+    expect(reads).toBe(5);
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ park_phase: 'post_push', sync_pending_sha: 'newcommit999aaa' });
+    expect(gh._calls.comments).toHaveLength(0);
+  });
+
   test('ref confirms our push but the state re-read shows a NEWER head → park stamped with OUR push', async () => {
     // A concurrent push C lands between the ref confirmation and the state
     // re-read: syncing our B would mirror content the merge won't take.
@@ -1565,6 +1614,13 @@ describe('publisher-derived FAQ schema during remediation', () => {
     }
   });
 
+  test('a requested FAQPage may appear between existing entries and is normalized to publisher order', () => {
+    const fixed = fm.stringify({ title: 'T', schema_types: ['Article', 'FAQPage', 'BreadcrumbList'] }, FAQ_BODY);
+    const prepared = rem.prepareFrontmatterFix(plain, fixed, [{ body: 'Add the FAQ required by the brief and declare FAQPage.' }]);
+    expect(prepared.violation).toBeNull();
+    expect(fm.parse(prepared.markdown).data.schema_types).toEqual(['Article', 'BreadcrumbList', 'FAQPage']);
+  });
+
   test('unrelated findings cannot add or remove the FAQ declaration', () => {
     for (const [original, body] of [[plain, FAQ_BODY], [faq, PLAIN_BODY]]) {
       const fixed = fm.stringify(fm.parse(original).data, body);
@@ -1588,6 +1644,12 @@ describe('publisher-derived FAQ schema during remediation', () => {
     expect(prepared.markdown).toBe(fixed);
     expect(prepared.changed).toEqual({});
     expect(fm.parse(prepared.markdown).data.schema_types).toEqual(schema_types);
+
+    const reordered = fm.stringify({ title: 'T', schema_types: ['Article', 'HowTo', 'BreadcrumbList', 'FAQPage'] }, fm.parse(fixed).content);
+    const normalized = rem.prepareFrontmatterFix(original, reordered, [{ body: 'Correct the introduction.' }]);
+    expect(normalized.violation).toBeNull();
+    expect(normalized.changed).toEqual({});
+    expect(fm.parse(normalized.markdown).data.schema_types).toEqual(schema_types);
 
     const removed = rem.prepareFrontmatterFix(original, fm.stringify({ title: 'T', schema_types }, PLAIN_BODY), [{ body: 'Remove the FAQ.' }]);
     expect(removed.violation).toBeNull();
@@ -3823,6 +3885,18 @@ describe('production frontmatter remediation recovery', () => {
     expect(revalidateFix).toHaveBeenCalledWith(gh._calls.putFile[0].content);
   });
 
+  test('a schema reorder with unchanged content does not manufacture a formatting-only commit', async () => {
+    const original = '---\ntitle: "Exterior inspection"\nschema_types: [Article, BreadcrumbList]\n---\nInspect the exterior gaps.\n';
+    const reordered = fm.stringify({ ...fm.parse(original).data, schema_types: ['BreadcrumbList', 'Article'] }, fm.parse(original).content);
+    const gh = makeGh({ fileContent: original });
+    const result = await runRemediationForPr(CTX, {
+      db: makeDb(), gh, callAnthropic: makeCall(reordered), validateFixedBlogFile: PASS,
+    });
+    expect(result.parked).toBe(true);
+    expect(result.reason).toContain('produced no change');
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
   test.each([
     ['spoke_links', { spoke_links: [{ domain: 'example.com', anchor: 'outside site' }] }],
     ['meta_description', { meta_description: 'An unsolicited metadata rewrite.' }],
@@ -3844,6 +3918,7 @@ describe('production frontmatter remediation recovery', () => {
     'fix changed frontmatter beyond the whitelist: frontmatter key "spoke_links" changed (immutable during remediation; fixable: meta_description, hero_image.alt)',
     'fix changed frontmatter beyond the whitelist: meta_description changed but no finding in this round targets it',
     'fix changes the body-derived schema types (frontmatter schema is frozen)',
+    'frontmatter repair rejected after bounded retry: schema_types may only follow the publisher-derived FAQPage change',
   ])('a pinned autonomous pre-push park resumes without resetting its rounds: %s', async (park_reason) => {
     const db = makeDb({ codex_remediation_state: [{
       pr_number: 5, status: 'parked', rounds: 1, parked_head_sha: HEAD, park_phase: 'pre_push',
@@ -3857,10 +3932,13 @@ describe('production frontmatter remediation recovery', () => {
     expect(result.round).toBe(2);
   });
 
-  test('a second invalid proposal stays parked across later polls and never requests review', async () => {
+  test.each([
+    { spoke_links: [{ domain: 'example.com' }] },
+    { schema_types: ['Article', 'FAQPage'] },
+  ])('a second invalid proposal stays parked across later polls and never requests review: %j', async (patch) => {
     const db = makeDb();
     const gh = makeGh({ fileContent: BASE, preHead: HEAD });
-    const badFix = fm.stringify({ ...fm.parse(BASE).data, spoke_links: [{ domain: 'example.com' }] }, 'Fixed body.');
+    const badFix = fm.stringify({ ...fm.parse(BASE).data, ...patch }, 'Fixed body.');
     const call = jest.fn(makeCall(badFix));
     const deps = { db, gh, callAnthropic: call, validateFixedBlogFile: PASS };
     expect((await runRemediationForPr(CTX, deps)).parked).toBe(true);
