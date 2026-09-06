@@ -91,6 +91,7 @@ const FALLBACK_KIND_LABEL = {
   '72h': '72-hour appointment reminder',
   '24h': '24-hour appointment reminder',
   en_route: 'technician en-route notice',
+  tech_arrived: 'technician arrival notice',
 };
 
 // messaging_audit_log purpose / original_message_type → fallback kind.
