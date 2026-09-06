@@ -436,7 +436,12 @@ function composeRelaySegment(call) {
   // /relay-complete stamps even when both packet writes failed (hook P1).
   const transferred = meta && typeof meta === 'object'
     && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || Boolean(meta.relay_transfer_ring_at));
-  if (!transferred) return null;
+  // PR 2B: a RECONNECTED call that fell to voicemail (second failure,
+  // transfer unavailable) carries no transfer marker but the same evidence
+  // problem — its recording must not erase the composed relay transcript.
+  const reconnected = meta && typeof meta === 'object' && (Number(meta.relay_reconnects) || 0) > 0;
+  const registered = Array.isArray(meta?.relay_segment_owners) && meta.relay_segment_owners.length > 0;
+  if (!transferred && !reconnected && !registered) return null;
   const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
   // The durable copy first: end() stashes the relay transcript under
   // metadata.relay_transcript because the recording-status swap CLEARS the
@@ -445,10 +450,18 @@ function composeRelaySegment(call) {
   let text = String((stash && stash.text) || '').trim();
   let tmeta = stash && stash.metadata && typeof stash.metadata === 'object' ? stash.metadata : null;
   if (!text) {
-    if (call.transcription_provider !== TRANSCRIPTION_PROVIDER) return null;
-    text = String(call.transcription || '').trim();
-    tmeta = call.transcription_metadata;
-    if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
+    if (call.transcription_provider === TRANSCRIPTION_PROVIDER) {
+      text = String(call.transcription || '').trim();
+      tmeta = call.transcription_metadata;
+      if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
+    }
+  }
+  // PR 2B: the segments themselves are the third source — a resumed leg that
+  // failed before any turn wrote no stash and the recording swap cleared the
+  // columns, but every earlier socket appended its segment.
+  if (!text && Array.isArray(meta.relay_segments)) {
+    text = String(require('./relay-segments').segmentsText(meta.relay_segments) || '').trim();
+    tmeta = null;
   }
   if (!text) return null;
   return {

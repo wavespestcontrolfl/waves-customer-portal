@@ -407,9 +407,10 @@ describe('pre-push hook round 9', () => {
     expect(src).toContain("const fresh = await db('call_log').where({ id: call.id }).first('metadata', 'call_outcome', 'transcription', 'transcription_provider', 'transcription_metadata');"); // composed from the CURRENT row, not the claim snapshot
     // …and when the stash had NOT landed at compose time on a transfer-marked row, every transcript write composes INSIDE the UPDATE
     // from the row's metadata and reads the written value back (a stash landing between the read and the write is still composed).
-    expect(src).toContain('relayPending = transferred && !segment;');
+    expect(src.includes('relayPending = transferred;')).toBe(true); // …and on every write of a reconnected call (PR 2B)
     expect(src.match(/await writeTranscript\(/g)).toHaveLength(4); // primary, both fallbacks, and the relay-only rejection write
-    expect(src).toMatch(/CASE WHEN \$\{STASH_SQL\} THEN '\[AI segment\]' \|\| .*\(metadata->'relay_transcript'->>'text'\).*\|\| \?::text ELSE \?::text END/);
+    expect(src).toMatch(/CASE WHEN \? IS NOT NULL THEN '\[AI segment\]' \|\| E'\\\\n' \|\| \? \|\| .*\|\| \?::text ELSE \?::text END/); // the relay text = the stash, else the segments (PR 2B), composed inside the UPDATE
+    expect(src.includes("COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?, CASE WHEN transcription_provider = ? THEN NULLIF(transcription, '') END)")).toBe(true);
     expect(src).toContain("}, ['transcription']);");
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
     expect(src).toContain("} else if (recordedFallbackOf(call)) {");
@@ -423,8 +424,9 @@ describe('pre-push hook round 9', () => {
     expect(relayOnlyAt).toBeLessThan(wholeCallAt);
     const site = src.slice(relayOnlyAt, wholeCallAt);
     expect(site).toContain("if (!wroteRelayOnly) return abandonToPeer('the relay-only transcript write');");
-    expect(site).toContain('relayPending = !relayOnly;'); // a still-pending AI text is composed inside this UPDATE too
-    expect(site).toContain(': TRANSCRIPTION_REJECTED_SENTINEL;'); // …onto the BARE sentinel — the header is added exactly once by composition
+    expect(site).toContain('relayPending = true;'); // a still-pending AI text — or any reconnected call — is composed inside this UPDATE (PR 2B)
+    expect(site).toContain('recordedSegmentText = null; // the write composes around the BARE sentinel, never the rejected text');
+    expect(site).toContain('transcription = TRANSCRIPTION_REJECTED_SENTINEL;'); // …onto the BARE sentinel — the header is added exactly once by composition
     expect(site).toContain('fallbackImplausible = false;');
     expect(site).toContain('primaryTranscriptRejected = false;');
     expect(site).toContain('recorded_segment_rejected');
@@ -605,5 +607,27 @@ describe('whisper + AI segment', () => {
     expect(await p2).toMatch(/call has ended/);
     jest.useRealTimers();
     expect(c2.endForTransfer).not.toHaveBeenCalled();
+  });
+});
+
+// Exercise the production reader closure without starting the recording
+// pipeline's external transcription/notification work.
+describe('recording rejection needs evidence beyond a reconnect attempt', () => {
+  test.each([
+    [{ relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 500 }, false],
+    [{ relay_reconnects: 1 }, false],
+    [{ relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 900 }, true],
+    [{ relay_reconnects: 1, relay_transcript: { text: 'Caller: Please help with pests.' } }, true],
+    [{ relay_handoff: { intent: 'office' } }, true],
+  ])('metadata %j enables the rejection exception: %s', async (metadata, expected) => {
+    const source = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const start = source.indexOf('const currentRelayState = async () => {');
+    const end = source.indexOf('\n    };', start) + '\n    };'.length;
+    const call = { id: 'call-evidence', call_outcome: 'voicemail', metadata };
+    const db = () => ({ where: () => ({ first: async () => call }) });
+    const state = await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return currentRelayState(); })()`, {
+      call, db, composeRelaySegment: transfer.composeRelaySegment,
+    });
+    expect(state.transferred).toBe(expected);
   });
 });

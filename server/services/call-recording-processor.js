@@ -6746,34 +6746,74 @@ const CallRecordingProcessor = {
       }
       let meta = row.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || row.call_outcome === 'ai_transferred';
-      return { row, segment: composeRelaySegment(row), transferred, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
+      // A reconnect attempt alone may have been compensated without any AI
+      // session. Preserve a pending relay segment only with text or proof
+      // that a resumed socket claimed the call.
+      const segment = composeRelaySegment(row);
+      const resumedClaim = Number(meta?.relay_reconnect_ms) > 0 && Number(meta?.relay_session_claim_gen) >= Number(meta.relay_reconnect_ms);
+      const reconnected = Number(meta?.relay_reconnects) > 0 && Boolean(segment || resumedClaim);
+      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || (Array.isArray(meta?.relay_segment_owners) && Boolean(segment)) || row.call_outcome === 'ai_transferred';
+      return { row, segment, transferred, reconnected, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
     };
+    // Registering claims and appending closes share the call-row lock with
+    // this barrier. Do not transcribe, reject, extract or route a partial set.
+    const initialRelayState = await currentRelayState();
+    const initialRelayMeta = typeof initialRelayState.row.metadata === 'string'
+      ? JSON.parse(initialRelayState.row.metadata) : (initialRelayState.row.metadata || {});
+    if (process.env.GATE_VOICE_RELAY_RECOVERY === 'true' || Array.isArray(initialRelayMeta.relay_segment_owners)) {
+      const sealed = await require('./voice-agent/relay-segments').sealSegmentsForExtraction(db, call.id, procToken);
+      if (sealed.status === 'ownership_lost') return abandonToPeer('the relay completion barrier');
+      if (sealed.status === 'ready') call.metadata = sealed.row.metadata;
+      if (sealed.status !== 'ready') {
+        // Use the existing bounded extraction retry/triage mechanism. A
+        // crashed socket cannot be retried forever or silently treated as
+        // complete: after the normal cap, the office reviews the recording.
+        throw new Error('Relay close records are missing; if the socket was abandoned, inspect the recording and resolve intake manually.');
+      }
+    }
     // Transfer-marked row whose relay text had NOT landed at compose time:
     // the transcript write below then composes INSIDE the UPDATE from the
     // row's metadata, so a stash landing between the read and the write is
     // still composed (hook P1) — and the written value is read back so
     // extraction sees what the row holds.
     let relayPending = false;
-    const STASH_SQL = "COALESCE(metadata->'relay_transcript'->>'text', '') <> ''";
+    // The relay text the row holds RIGHT NOW: the stash, else the segments
+    // (PR 2B — a silent resumed leg wrote no stash, but every earlier socket
+    // appended its segment). Composed inside the UPDATE, never from a read.
+    const relayTextSql = () => db.raw(
+      "COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?, CASE WHEN transcription_provider = ? THEN NULLIF(transcription, '') END)",
+      [require('./voice-agent/relay-segments').composeSegmentsSql(db), RELAY_TRANSCRIPTION_PROVIDER],
+    );
+    const STASH_SQL = '? IS NOT NULL';
     const composeInSql = (text) => db.raw(
-      `CASE WHEN ${STASH_SQL} THEN '[AI segment]' || E'\\n' || (metadata->'relay_transcript'->>'text') || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || ?::text ELSE ?::text END`,
-      [text, text],
+      `CASE WHEN ? IS NOT NULL THEN '[AI segment]' || E'\\n' || ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || ?::text ELSE ?::text END`,
+      [relayTextSql(), relayTextSql(), text, text],
     );
     const writeTranscript = async (query, patch) => {
       if (!relayPending) return Number(await query.update(patch)) || 0;
       const hasStructured = Object.prototype.hasOwnProperty.call(patch, 'transcript_structured');
+      // Preserve a legacy column-backed AI segment before this same UPDATE
+      // assigns the column to the recording provider. Retries retain the AI leg.
+      const relayStash = db.raw(
+        "CASE WHEN NULLIF(metadata->'relay_transcript'->>'text', '') IS NULL AND ? IS NOT NULL THEN COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transcript', jsonb_build_object('text', ?::text, 'metadata', jsonb_build_object('provider', ?::text))) ELSE metadata END",
+        [relayTextSql(), relayTextSql(), RELAY_TRANSCRIPTION_PROVIDER],
+      );
+      // The RECORDED text is what the row composes around — never an
+      // in-memory composite (a reconnected call may already have composed
+      // one at read time; the UPDATE re-composes from current metadata).
+      const recorded = recordedSegmentText || patch.transcription;
       const rows = await query.update({
         ...patch,
-        transcription: composeInSql(patch.transcription),
+        transcription: composeInSql(recorded),
+        metadata: relayStash,
         transcript_structured: hasStructured
-          ? db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE ?::jsonb END`, [patch.transcript_structured == null ? null : patch.transcript_structured])
-          : db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE transcript_structured END`),
+          ? db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE ?::jsonb END`, [relayTextSql(), patch.transcript_structured == null ? null : patch.transcript_structured])
+          : db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE transcript_structured END`, [relayTextSql()]),
       }, ['transcription']);
       const n = Array.isArray(rows) ? rows.length : Number(rows) || 0;
       const written = Array.isArray(rows) && rows[0] ? rows[0].transcription : null;
       if (n > 0 && typeof written === 'string' && written.startsWith('[AI segment]')) {
-        recordedSegmentText = patch.transcription;
+        recordedSegmentText = recorded;
         transcription = written;
         logger.info(`[call-proc] relay stash landed during transcription for ${maskSid(callSid)} — composite written in the UPDATE`);
       }
@@ -6781,7 +6821,9 @@ const CallRecordingProcessor = {
     };
     const composeRelay = async (text, provenance) => {
       const { segment, label, transferred } = await currentRelayState();
-      relayPending = transferred && !segment;
+      // Every transfer or reconnect composes from the current row inside
+      // the write, preserving column-backed relay text across provider changes.
+      relayPending = transferred;
       if (!segment) return text;
       recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
       provenance.metadata.relay = segment.metadata;
@@ -7066,13 +7108,18 @@ const CallRecordingProcessor = {
       // With the relay text still pending, the BARE sentinel is written:
       // composition (in the UPDATE now, or the late stash) adds the segment
       // header exactly once, and a bare sentinel stays a rejected fallback.
-      transcription = relayOnly ? `${relayOnly.text}\n\n[${relayState.label} segment]\n${TRANSCRIPTION_REJECTED_SENTINEL}` : TRANSCRIPTION_REJECTED_SENTINEL;
+      // A RECONNECTED call composes inside the UPDATE from the row's current
+      // metadata (a later segment can land between the read and this write,
+      // hook P1): the bare sentinel is the recorded text it composes around.
+      // The write also preserves any column-backed relay text.
+      transcription = TRANSCRIPTION_REJECTED_SENTINEL;
       transcriptionProvenance = transcriptionProvenance || { provider: null, model: null, metadata: {} };
       transcriptionProvenance.metadata = { ...(transcriptionProvenance.metadata || {}), ...(relayOnly ? { relay: relayOnly.metadata } : {}), recorded_segment_rejected: { reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rejectedChars, recording_seconds: recordingSeconds } };
       // Through the same SQL-time composition as every other transcript write
       // (hook P1): when the AI text was still pending here, a stash landing
       // before this UPDATE is composed ahead of the rejected segment.
-      relayPending = !relayOnly;
+      relayPending = true;
+      recordedSegmentText = null; // the write composes around the BARE sentinel, never the rejected text
       const wroteRelayOnly = await writeTranscript(
         db('call_log').where({ id: call.id }).where('processing_token', procToken),
         { transcription, transcription_status: 'completed', transcription_provider: transcriptionProvenance.provider, transcription_model: transcriptionProvenance.model, transcript_structured: null, transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date() },
@@ -7180,6 +7227,29 @@ const CallRecordingProcessor = {
       return { success: true, skipped: true, reason: 'transcription_rejected_implausible' };
     }
 
+    if (!transcription) {
+      const relay = await currentRelayState();
+      if (relay.segment && !call.recording_url) {
+        // With no recording to retrieve, the durable AI conversation remains
+        // usable. A provider failure for an existing recording must retain
+        // no_transcription so the normal sweep retries that recorded leg.
+        // A silent/unavailable recording does not erase the caller's durable
+        // AI conversation. Store the plain relay representation and retain
+        // the AI label for extraction; there is no recorded half to invent.
+        transcription = relay.segment.text;
+        transcriptionProvenance = { provider: RELAY_TRANSCRIPTION_PROVIDER, model: null,
+          metadata: { relay: relay.segment.metadata, recording_transcription_unavailable: true } };
+        const wrote = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+          transcription: db.raw('COALESCE(?, ?)', [relayTextSql(), transcription.slice('[AI segment]\n'.length)]),
+          transcription_provider: RELAY_TRANSCRIPTION_PROVIDER, transcription_status: 'completed',
+          transcription_model: null, transcript_structured: null,
+          transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date(),
+        });
+        if (!wrote) return abandonToPeer('the relay-only transcript write');
+        relayPending = true;
+      }
+    }
+
     if (transcription) {
       await updateUnifiedVoiceMessage(
         { ...call, transcription },
@@ -7265,6 +7335,21 @@ const CallRecordingProcessor = {
     // Catalog-aware provenance: the catalog block is part of the rendered
     // V2 prompt, so every stamp for this call must carry its hash.
     const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
+
+    if (relayPending) {
+      // The registered set is sealed before transcription. Refresh the
+      // processor's own composed write while retaining its claim fence.
+      const fresh = await db('call_log').where({ id: call.id })
+        .where('processing_token', procToken).first('transcription', 'transcription_provider');
+      if (!fresh) return abandonToPeer('the relay transcript refresh');
+      const relayText = fresh.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER
+        ? `[AI segment]\n${fresh.transcription || ''}` : fresh.transcription;
+      if (relayText?.startsWith('[AI segment]') && relayText !== transcription) {
+        transcription = relayText;
+        recordedSegmentText = recordedPartOfComposite(transcription);
+        await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
+      }
+    }
 
     let extracted;
     try {
