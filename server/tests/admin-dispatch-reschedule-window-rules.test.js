@@ -205,10 +205,11 @@ test('a pre-8am on-the-hour window reaches the rebooker (no day-start floor); a 
   expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
 });
 
-test('an on-the-hour window inside the day reaches the rebooker', async () => {
+test('an on-the-hour window opts into the same staff arrival check for a one-off move', async () => {
   const { status } = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
   expect(status).toBe(200);
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ overlapAdvisory: true, adminWindowRules: true });
 });
 
 test('a SUPPLIED but malformed window (truncated range / end-only object / {}) is 422, never a silent date-only move', async () => {

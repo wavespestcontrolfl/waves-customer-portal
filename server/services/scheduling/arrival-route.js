@@ -15,7 +15,7 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute } = require('..
 const COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
   'estimated_duration_minutes', 'status', 'route_order', 'created_at', 'visit_id',
-  'reservation_expires_at', 'actual_end_time', 'time_window',
+  'reservation_expires_at', 'actual_end_time', 'check_out_time', 'completed_at', 'time_window',
 ];
 
 function arrivalWindowRoutingEnabled() {
@@ -75,7 +75,8 @@ async function loadArrivalRouteContext({
   const grouped = !!target.visit_id && !!(await conn('scheduled_services')
     .where({ visit_id: target.visit_id }).whereNot('id', serviceId)
     .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES).first('id'));
-  return { target, rows: rows.filter(row => !excluded.has(String(row.id))), date, now, grouped };
+  const activeTarget = dateOnly(stored.scheduled_date) === date && ['en_route', 'on_site'].includes(stored.status);
+  return { target, rows: rows.filter(row => !excluded.has(String(row.id))), date, now, grouped, activeTarget };
 }
 
 function unverified(target, date) {
@@ -98,7 +99,7 @@ function routeDriveMinutes(stops, origin) {
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
 function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60 }) {
   if (!context) return unverified(null, 'this date');
-  const { date, rows, now, grouped } = context;
+  const { date, rows, now, grouped, activeTarget } = context;
   const target = {
     ...context.target, window_start: windowStart, window_end: windowEnd,
     estimated_duration_minutes: durationMinutes ?? context.target.estimated_duration_minutes,
@@ -108,17 +109,21 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     return unverified(target, date);
   }
   let origin = RouteOptimizer.HQ;
-  let startMin = 8 * 60;
+  // Staff may promise an early on-the-hour arrival; depart early enough
+  // to model that route instead of imposing the public finder's 8 AM floor.
+  let startMin = Math.min(8 * 60, ...[target, ...own].map(row => effectiveWindowRange(row)?.startMin ?? Infinity));
   const today = date === etDateString(now);
   if (today) {
     // An in-progress stop needs live remaining-work/travel truth. Never sell
     // a fit by pretending the technician can restart that day from HQ.
-    if (own.some(row => ['en_route', 'on_site'].includes(row.status))) return unverified(target, date);
+    if (activeTarget || own.some(row => ['en_route', 'on_site'].includes(row.status))) return unverified(target, date);
     const parts = etParts(now);
     startMin = Math.max(startMin, parts.hour * 60 + parts.minute);
-    const completed = own.filter(row => row.status === 'completed');
-    if (completed.some(row => !row.actual_end_time)) return unverified(target, date);
-    completed.sort((a, b) => new Date(b.actual_end_time) - new Date(a.actual_end_time));
+    const completed = own.filter(row => row.status === 'completed').map(row => ({
+      ...row, completionTime: row.actual_end_time || row.check_out_time || row.completed_at,
+    }));
+    if (completed.some(row => !row.completionTime)) return unverified(target, date);
+    completed.sort((a, b) => new Date(b.completionTime) - new Date(a.completionTime));
     if (completed.length) origin = completed[0];
   }
   const pending = own.filter(row => row.status !== 'completed');

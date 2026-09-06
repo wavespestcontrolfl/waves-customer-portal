@@ -12,8 +12,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const knex = require('knex');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { findConflictingVisits, acquireOccupancyLock } = require('../services/scheduling/occupancy');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { checkSlots } = require('../services/rain-out');
+const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 
 const connection = process.env.ARRIVAL_ROUTE_TEST_DATABASE_URL;
 const describeDb = connection ? describe : describe.skip;
@@ -105,6 +106,18 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     });
     expect((await probe())[0].conflict_reason).toBe('route_unverified');
     expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
+  });
+
+  test('a same-day active target cannot be simulated as an unused technician at HQ', async () => {
+    await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY, status: 'on_site' });
+    const fit = await checkArrivalPlacement({
+      conn: mockConn, serviceId: TARGET, date: DAY, technicianId: TECH,
+      windowStart: '09:00', windowEnd: '10:00', now: parseETDateTime(`${DAY}T08:00:00`),
+      // Rebooker resets status for the saved row; that must not erase the
+      // evidence that its technician is currently carrying out this stop.
+      changes: { status: 'confirmed' },
+    });
+    expect(fit.reason).toBe('route_unverified');
   });
 
   test('kill switch retains the existing fixed-block offer and save contracts', async () => {

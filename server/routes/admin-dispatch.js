@@ -4821,6 +4821,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Staff surface: occupancy clashes commit with a warning instead of
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
+    rescheduleOptions.adminWindowRules = true;
     rescheduleOptions.sourceSurface = 'dispatch_board';
     rescheduleOptions.notifyRequested = notifyCustomer !== false;
     if (operationKey) rescheduleOptions.operationKey = operationKey;

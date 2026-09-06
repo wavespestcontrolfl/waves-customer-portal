@@ -134,3 +134,20 @@ test('the last completed location anchors the remaining same-day route', () => {
   expect(fit.estimatedArrival).toBe(`${Math.floor(simulation.arrivals[0].arrivalMin / 60)}:${String(simulation.arrivals[0].arrivalMin % 60).padStart(2, '0')}`);
   expect(evaluateArrivalPlacement(context({ now, rows: [{ ...done, actual_end_time: null }] }), placement('10:00')).reason).toBe('route_unverified');
 });
+
+
+test('a legitimate early staff promise starts the simulated route before 8 AM', () => {
+  const early = { ...northern(), window_start: '06:00', window_end: '07:00' };
+  const fit = evaluateArrivalPlacement(context({ rows: [early, southern()] }), placement());
+  expect(fit.feasible).toBe(true);
+  expect(fit.arrivals.find(row => row.id === early.id).arrival < '08:00').toBe(true);
+});
+
+test.each(['check_out_time', 'completed_at'])('completed stops can anchor the route using %s', field => {
+  const now = parseETDateTime(`${DATE}T10:30:00`);
+  const done = { ...northern(), status: 'completed', [field]: now };
+  const candidate = { ...target(), lat: done.lat, lng: done.lng };
+  const fit = evaluateArrivalPlacement(context({ now, target: candidate, rows: [done] }), placement('10:00'));
+  expect(fit.feasible).toBe(true);
+  expect(fit.arrivals.map(row => row.id)).toEqual(['target']);
+});
