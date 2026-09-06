@@ -165,7 +165,19 @@ function estimatePestFloorSignal(estData = {}) {
 // require here would close a cycle through the two replay callers. Same dodge
 // commercial-floor-replay.js uses.
 function savedFloorReplaySignals(estData) {
-  const signals = {};
+  // Precision is replay state too: the pre-fix palm annual was whole dollars.
+  // Prefer the mapped snapshot, as the public/admin views do. Always overwrite
+  // any input-claimed mode, even when there is no saved palm evidence.
+  const saved = estData || {};
+  const result = saved.result || saved;
+  const palmRows = [result.lineItems, saved.engineResult?.lineItems].filter(Array.isArray).flat();
+  const palm = result.results?.injection || palmRows.find((line) => line?.service === 'palm_injection');
+  // Removal prunes the palm output. Its server-recorded event retains the
+  // quote-time mode for restore; events predating the stamp used whole dollars.
+  const palmRemoval = (Array.isArray(saved.serviceOptOut?.events) ? saved.serviceOptOut.events : [])
+    .filter((event) => event?.serviceKey === 'palm_injection' && event.included === false).pop();
+  const palmMode = palm ? palm.annualRounding : palmRemoval?.provenance?.floorSignals?.palmAnnualRounding;
+  const signals = { palmAnnualRounding: palm || palmRemoval ? (palmMode === 'cents' ? 'cents' : 'whole') : undefined };
   const lawnArm = estimateLawnFloorArmed(estData);
   if (typeof lawnArm === 'boolean') signals.useLawnCostFloor = lawnArm;
   const minSignal = require('./estimate-converter').estimateLawnProgramMinimumSignal(estData);

@@ -566,6 +566,8 @@ class RefreshAudit {
        ON CONFLICT (dedupe_key) DO UPDATE
          SET score = EXCLUDED.score,
              score_breakdown = EXCLUDED.score_breakdown,
+             claim_id = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
+                             THEN opportunity_queue.claim_id ELSE NULL END,
              signal_metadata = EXCLUDED.signal_metadata,
              page_url = EXCLUDED.page_url,
              service = EXCLUDED.service,

@@ -1,8 +1,4 @@
-const {
-  completionUsesReportLane,
-  reportV1InvoiceBodyCarriesPayLink,
-  completionSmsWithheldForMissingReportToken,
-} = require('../routes/admin-dispatch')._test;
+const { completionUsesReportLane, reportV1InvoiceBodyCarriesPayLink, completionSmsWithheldForMissingReportToken } = require('../services/complete-scheduled-service');
 const smsTemplates = require('../routes/admin-sms-templates');
 const { serviceReportV1SmsType } = require('../services/service-report/delivery');
 

@@ -5,21 +5,28 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const effectiveActionSql = require('./opportunity-action-sql');
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 100;
-const ALLOWED_STATUSES = new Set(['pending_review', 'pending', 'claimed', 'done', 'skipped', 'expired']);
+const ALLOWED_STATUSES = new Set(['all', 'pending_review', 'pending', 'claimed', 'done', 'skipped', 'expired']);
 const ALLOWED_DECISIONS = new Set(['requeue', 'dismiss', 'approve_trust_build', 'approve_named_competitor']);
 
-async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMIT } = {}) {
+async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMIT, offset = 0, actionType = null } = {}) {
   const normalizedStatus = normalizeStatus(status);
   const boundedLimit = normalizeLimit(limit);
+  const boundedOffset = Math.max(0, Number.parseInt(offset, 10) || 0);
 
   try {
-    const counts = await countsByStatus();
-    const opportunities = await db('opportunity_queue')
-      .where('status', normalizedStatus)
+    const counts = await countsByStatus(actionType);
+    const query = db('opportunity_queue');
+    if (actionType === 'other') query.whereRaw(`${effectiveActionSql} <> ?`, ['new_supporting_blog']);
+    else if (actionType) query.whereRaw(`${effectiveActionSql} = ?`, [actionType]);
+    if (normalizedStatus !== 'all') query.where('status', normalizedStatus);
+    const opportunities = await query
       .orderBy('updated_at', 'desc')
+      .orderBy('id', 'desc')
+      .offset(boundedOffset)
       .limit(boundedLimit)
       .select('*');
 
@@ -43,6 +50,8 @@ async function listReviewItems({ status = 'pending_review', limit = DEFAULT_LIMI
     return {
       status: normalizedStatus,
       limit: boundedLimit,
+      offset: boundedOffset,
+      total: normalizedStatus === 'all' ? Object.values(counts).reduce((sum, n) => sum + n, 0) : counts[normalizedStatus] || 0,
       counts,
       items: opportunities.map((opportunity) => buildReviewItem({
         opportunity,
@@ -157,6 +166,13 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     .orderBy('claimed_at', 'desc')
     .first();
 
+  if ((run?.action_type || opportunity.action_type) === 'new_supporting_blog') {
+    const err = new Error('Autonomous blogs are managed by the engine; no review decision is required');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
+
   // Bind the decision to the run the operator was looking at. If a requeue / re-run
   // replaced it since the detail view loaded, reject so a stale view can't
   // approve-and-publish a draft the operator never reviewed.
@@ -231,8 +247,10 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     }
   } else if (normalizedDecision === 'requeue') {
     await db.transaction(async (trx) => {
+      await lockCurrentRun(trx, opportunityId, run, expectedRunId);
       await updatePendingReviewOpportunity(trx, opportunityId, {
         status: 'pending',
+        claim_id: null,
         claimed_at: null,
         completed_at: null,
         skip_reason: null,
@@ -323,8 +341,11 @@ async function updatePendingReviewOpportunity(trx, opportunityId, updates) {
   return updated;
 }
 
-async function countsByStatus() {
-  const rows = await db('opportunity_queue')
+async function countsByStatus(actionType = null) {
+  const query = db('opportunity_queue');
+  if (actionType === 'other') query.whereRaw(`${effectiveActionSql} <> ?`, ['new_supporting_blog']);
+    else if (actionType) query.whereRaw(`${effectiveActionSql} = ?`, [actionType]);
+  const rows = await query
     .select('status')
     .count('* as count')
     .groupBy('status');
@@ -361,7 +382,7 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
     id: opportunity.id,
     status: opportunity.status,
     bucket: opportunity.bucket,
-    action_type: brief?.action_type || opportunity.action_type,
+    action_type: run?.action_type || brief?.action_type || opportunity.action_type,
     proposed_action_type: opportunity.action_type,
     page_type: brief?.page_type || null,
     query: opportunity.query,
@@ -425,7 +446,7 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
 }
 
 function reviewActions({ opportunity, run }) {
-  const pendingReview = opportunity?.status === 'pending_review';
+  const pendingReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
   return {
     can_requeue: pendingReview,
     can_dismiss: pendingReview,

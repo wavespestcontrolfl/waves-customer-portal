@@ -74,7 +74,7 @@ const card = {
   marginBottom: 20,
 };
 const eyebrow = {
-  fontSize: 12,
+  fontSize: 14,
   textTransform: 'uppercase',
   letterSpacing: '0.08em',
   color: MUTED,
@@ -95,7 +95,7 @@ function TrendArrow({ trend }) {
   const up = TREND_UP.has(trend);
   if (!up && !TREND_DOWN.has(trend)) return null;
   return (
-    <span style={{ color: up ? COLORS.red : COLORS.glassNavy, fontSize: 11, marginLeft: 4 }}>
+    <span style={{ color: up ? COLORS.red : COLORS.glassNavy, fontSize: 14, marginLeft: 4 }}>
       {up ? '▲' : '▼'}
     </span>
   );
@@ -177,10 +177,10 @@ function SupportingMetric({ metric }) {
       marginTop: 14, padding: '8px 14px', background: CARD,
       border: `1px solid ${BORDER}`, borderRadius: 999,
     }}>
-      <span style={{ fontSize: 12, color: MUTED, fontWeight: 600 }}>{metric.caption}</span>
+      <span style={{ fontSize: 14, color: MUTED, fontWeight: 600 }}>{metric.caption}</span>
       <span style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 18, color: TEXT }}>{value}</span>
-      {showOutOf ? <span style={{ fontSize: 12, color: MUTED }}>/ {metric.max}</span> : null}
-      {metric.label && metric.score != null ? <span style={{ fontSize: 12, color: MUTED }}>· {metric.label}</span> : null}
+      {showOutOf ? <span style={{ fontSize: 14, color: MUTED }}>/ {metric.max}</span> : null}
+      {metric.label && metric.score != null ? <span style={{ fontSize: 14, color: MUTED }}>· {metric.label}</span> : null}
       <TrendArrow trend={metric.trend} />
     </div>
   );
@@ -235,9 +235,9 @@ function MosquitoPressureRating({ metric, token, live, onRefreshed, onSettled })
             style={{ padding: '10px 0', borderRadius: 9, border: `1px solid ${BORDER}`, background: COLORS.white, color: TEXT, fontWeight: 700, fontSize: 15, cursor: busy ? 'wait' : 'pointer' }}>{n}</button>
         ))}
       </div>
-      <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
+      <div style={{ fontSize: 14, color: MUTED, marginTop: 6 }}>0 = none · 5 = a lot</div>
       {failed && (
-        <div style={{ fontSize: 12, color: '#991B1B', marginTop: 8 }}>
+        <div style={{ fontSize: 14, color: '#991B1B', marginTop: 8 }}>
           Couldn&rsquo;t save your rating — please tap a number to try again.
         </div>
       )}
@@ -378,7 +378,7 @@ export function MosquitoHabitatMap({ habitat, print = false }) {
                   <circle cx={n.x} cy={n.y} r="6.5" fill={COLORS.white} stroke={color} strokeWidth="2.5" />
                   <circle cx={n.x} cy={n.y} r="2.5" fill={color} />
                 </g>
-                <text x={n.x} y={n.y + (n.dy > 0 ? n.dy + 4 : n.dy)} textAnchor="middle" fontSize="10" fontWeight="700" fill={TEXT} fontFamily={FONTS.body}>{n.label}</text>
+                <text x={n.x} y={n.y + (n.dy > 0 ? n.dy + 4 : n.dy)} textAnchor="middle" fontSize="14" fontWeight="700" fill={TEXT} fontFamily={FONTS.body}>{n.label}</text>
               </g>
             );
           })}
@@ -390,7 +390,7 @@ export function MosquitoHabitatMap({ habitat, print = false }) {
       <div style={{ display: 'grid', gap: 6, marginTop: 4 }}>
         {treatment ? (
           <div className="mosq-legend-row" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 14, animationDelay: '0.35s' }}>
-            <span style={{ color: ringColor, fontWeight: 800, lineHeight: 1.2 }} aria-hidden="true">〰</span>
+            <span style={{ color: ringColor, fontWeight: 700, lineHeight: 1.2 }} aria-hidden="true">〰</span>
             <span style={{ color: BODY }}><strong style={{ color: TEXT }}>{treatment.label}</strong> — <span style={{ color: treated ? COLORS.glassNavy : COLORS.glassNavy, fontWeight: 700 }}>{treated ? 'Applied' : 'Monitored'}</span>{treatment.detail ? ` · ${treatment.detail}` : ''}</span>
           </div>
         ) : null}
@@ -418,7 +418,7 @@ export function MosquitoNextStep({ primaryMove }) {
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
       {primaryMove.impact ? <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
       {primaryMove.dueLabel ? (
-        <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.glassNavy, borderRadius: 999, fontSize: 12, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
+        <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.glassNavy, borderRadius: 999, fontSize: 14, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
       ) : null}
     </section>
   );
@@ -436,7 +436,7 @@ export function MosquitoOutlook({ outlook }) {
       <div data-gt="eyebrow" style={eyebrow}>Seasonal outlook</div>
       <h3 style={{ fontFamily: FONTS.serif, fontWeight: 500, fontSize: 18, color: TEXT, margin: '0 0 4px' }}>{title}</h3>
       {outlook.weatherSummary ? (
-        <div style={{ fontSize: 12, color: MUTED, marginBottom: 10 }}>{outlook.weatherSummary}{outlook.locationLabel ? ` · ${outlook.locationLabel}` : ''}</div>
+        <div style={{ fontSize: 14, color: MUTED, marginBottom: 10 }}>{outlook.weatherSummary}{outlook.locationLabel ? ` · ${outlook.locationLabel}` : ''}</div>
       ) : null}
       {m ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, border: `1px solid ${BORDER}`, borderRadius: 12, padding: '10px 12px' }}>
@@ -450,10 +450,10 @@ export function MosquitoOutlook({ outlook }) {
               <span style={{ fontSize: 14, fontWeight: 700, color: TEXT }}>{m.label}</span>
               <TrendArrow trend={m.trend} />
             </div>
-            {m.note ? <div style={{ fontSize: 12, color: MUTED, lineHeight: 1.4 }}>{m.note}</div> : null}
+            {m.note ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.4 }}>{m.note}</div> : null}
           </div>
           {m.level ? (
-            <span style={{ fontSize: 11, fontWeight: 700, color: LEVEL_COLOR[m.level] || COLORS.grayMid, textTransform: 'capitalize', flexShrink: 0 }}>{m.level}</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: LEVEL_COLOR[m.level] || COLORS.grayMid, textTransform: 'capitalize', flexShrink: 0 }}>{m.level}</span>
           ) : null}
         </div>
       ) : null}
@@ -463,11 +463,11 @@ export function MosquitoOutlook({ outlook }) {
           {outlook.conditions.headline && outlook.conditions.body ? ' ' : ''}
           {outlook.conditions.body || ''}
           {outlook.conditions.factsLine ? (
-            <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>At service time: {outlook.conditions.factsLine}</div>
+            <div style={{ fontSize: 14, color: MUTED, marginTop: 4 }}>At service time: {outlook.conditions.factsLine}</div>
           ) : null}
         </div>
       ) : null}
-      {outlook.disclaimer ? <div style={{ fontSize: 11, color: MUTED, marginTop: 10, fontStyle: 'italic' }}>{outlook.disclaimer}</div> : null}
+      {outlook.disclaimer ? <div style={{ fontSize: 14, color: MUTED, marginTop: 10, fontStyle: 'italic' }}>{outlook.disclaimer}</div> : null}
     </section>
   );
 }

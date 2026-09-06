@@ -125,9 +125,8 @@ const TRUST_RANK = {
  * and what their thresholds are. Adding a new purpose? Add a row here.
  *
  * Field meanings:
- *   - allowEmoji              Customer/lead audiences are NEVER allowed emoji,
- *                             regardless of purpose. Internal BI is the only
- *                             audience where emoji is permitted (see internal_briefing).
+ *   - allowEmoji              Controls emoji on non-SMS channels. SMS always
+ *                             permits emoji, regardless of audience or purpose.
  *   - allowExactPrice         Legacy/no-op policy field retained for older
  *                             tests/config readers. Exact dollar amounts are
  *                             allowed in SMS; suppression/consent still gate.
@@ -455,8 +454,8 @@ const PURPOSE_POLICY = {
  * audience-level overrides on top of the per-purpose row.
  *
  * Audience overrides:
- *   - audience 'customer' or 'lead' force allowEmoji=false regardless of
- *     purpose default.
+ *   - audience 'customer' or 'lead' force allowEmoji=false for non-SMS
+ *     channels regardless of purpose default. SMS permits emoji.
  *   - audience 'internal' allows emoji.
  *   - audience 'admin' should never emoji a customer-facing message; for
  *     sms/email to an admin operator we treat the

@@ -12,17 +12,21 @@ const mockInsert = jest.fn();
 const mockMerge = jest.fn();
 // failCall writes where({ id }).update(patch) against a call row the adapter filed as ok.
 const mockUpdate = jest.fn(() => Promise.resolve(1));
+// The session row already in the table when a turn is recorded (null = first turn).
+let sessionPrev = null;
 const mockDb = jest.fn((table) => ({
   insert: (row) => {
     const p = mockInsert(table, row);
     p.onConflict = (target) => ({ merge: (updates) => { mockMerge(table, target, updates); return { returning: p.returning }; } });
     return p;
   },
-  where: (cond) => ({ update: (patch) => mockUpdate(table, cond, patch) }),
+  where: (cond) => ({ update: (patch) => mockUpdate(table, cond, patch), first: () => Promise.resolve(sessionPrev) }),
 }));
 jest.mock('../models/db', () => {
   const db = (...args) => mockDb(...args);
   db.raw = (sql) => sql;
+  // the session recorder reads-then-writes inside one transaction
+  db.transaction = async (fn) => { const trx = (...args) => mockDb(...args); trx.raw = () => Promise.resolve(); return fn(trx); };
   return db;
 });
 // warn lines are captured globally: each isolateModules load gets its own mock instance.
@@ -57,7 +61,10 @@ function load() {
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
-const ledgerRows = () => mockInsert.mock.calls.filter(([t]) => t === 'llm_dispatch_log').map(([, row]) => row);
+const ledgerRows = () => mockInsert.mock.calls.filter(([t, row]) => t === 'llm_dispatch_log' && row.row_kind !== 'session_turn').map(([, row]) => row);
+const turnRows = () => mockInsert.mock.calls.filter(([t, row]) => t === 'llm_dispatch_log' && row.row_kind === 'session_turn').map(([, row]) => row);
+// merges by target: the session row (provider_ref) vs the turn row (step_id)
+const mergesFor = (kind) => mockMerge.mock.calls.filter(([, target]) => String(target).includes(`'${kind}'`));
 const callRows = () => ledgerRows().filter((r) => r.row_kind === 'call');
 
 function fetchJson(data, { ok = true, status = 200 } = {}) {
@@ -624,8 +631,8 @@ describe('llm call ledger', () => {
       global.fetch = fetchJson({ id: 'sess_2', status: 'idle', usage: { input_tokens: 250, output_tokens: 40 } });
       const { metrics } = load();
       await expect(metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_2' })).resolves.toEqual(expect.any(Number));
-      expect(mockMerge).toHaveBeenCalledTimes(1);
-      const [table, target, updates] = mockMerge.mock.calls[0];
+      expect(mergesFor('session')).toHaveLength(1);
+      const [table, target, updates] = mergesFor('session')[0];
       expect(table).toBe('llm_dispatch_log');
       expect(String(target)).toBe("(provider_ref) WHERE row_kind = 'session'");
       // counters and latency only grow
@@ -635,8 +642,65 @@ describe('llm call ledger', () => {
       // a terminal status is sticky: ok only ever goes false, the first error and served model stay
       expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
       for (const col of ['error_code', 'error_class', 'served_model']) expect(String(updates[col])).toBe(`COALESCE(llm_dispatch_log.${col}, EXCLUDED.${col})`);
+      // the session's start is its earliest recorded turn start (LEAST skips a null side)
+      expect(String(updates.started_at)).toBe('LEAST(llm_dispatch_log.started_at, EXCLUDED.started_at)');
       // the first write's identity and context stay: nothing else is merged
-      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model']);
+      expect(Object.keys(updates).sort()).toEqual(['cache_write_tokens', 'cached_input_tokens', 'error_class', 'error_code', 'input_tokens', 'latency_ms', 'ok', 'output_tokens', 'reasoning_tokens', 'served_model', 'started_at']);
+    });
+
+    it('writes one session_turn row per turn, keyed by (session, turn start), with that turn\'s delta of the counters — every re-record of the same turn upserts the SAME row monotonically', async () => {
+      const { metrics } = load();
+      const turnA = Date.now() - 500;
+      // first record of the session: no session row yet → the delta is the whole snapshot
+      sessionPrev = null;
+      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 250, output_tokens: 40 } });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA });
+      expect(turnRows()).toHaveLength(1);
+      expect(turnRows()[0]).toMatchObject({ row_kind: 'session_turn', lane_id: 'agent_assistant', provider_ref: 'sess_9', ok: true, input_tokens: 250, output_tokens: 40, cached_input_tokens: null });
+      expect(turnRows()[0].step_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(turnRows()[0].latency_ms).toBeGreaterThanOrEqual(500);
+      // the runner's captured start is persisted on both rows: created_at is the recording time,
+      // after the usage GET, so a start derived from it would drift by the fetch (Codex r12 on #3891)
+      expect(turnRows()[0].started_at).toEqual(new Date(turnA));
+      expect(ledgerRows().at(-1)).toMatchObject({ row_kind: 'session', started_at: new Date(turnA) });
+      // the same turn re-recorded (a runner's finally, a retry) carries the SAME key → the unique
+      // partial index on step_id makes it an upsert, merged like the session row (monotone)
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, failure: 'streaming_failed' });
+      expect(turnRows()[1].step_id).toBe(turnRows()[0].step_id);
+      expect(turnRows()[1]).toMatchObject({ ok: false, error_code: 'streaming_failed' });
+      expect(mergesFor('session_turn')).toHaveLength(2);
+      const [, target, updates] = mergesFor('session_turn')[1];
+      expect(String(target)).toBe("(step_id) WHERE row_kind = 'session_turn'");
+      // turn counters are deltas since the last record → they ADD (null only while all unknown); latency still GREATEST
+      expect(String(updates.input_tokens)).toBe('CASE WHEN llm_dispatch_log.input_tokens IS NULL AND EXCLUDED.input_tokens IS NULL THEN NULL ELSE COALESCE(llm_dispatch_log.input_tokens, 0) + COALESCE(EXCLUDED.input_tokens, 0) END');
+      expect(String(updates.latency_ms)).toBe('GREATEST(EXCLUDED.latency_ms, llm_dispatch_log.latency_ms)');
+      expect(String(updates.ok)).toBe('(llm_dispatch_log.ok AND EXCLUDED.ok)');
+      expect(String(updates.error_code)).toBe('COALESCE(llm_dispatch_log.error_code, EXCLUDED.error_code)');
+      // the next turn: the cumulative snapshot grew by 100 / 5 → only that lands on its own row
+      sessionPrev = { input_tokens: 250, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 40, reasoning_tokens: null };
+      global.fetch = fetchJson({ id: 'sess_9', status: 'idle', usage: { input_tokens: 350, output_tokens: 45 } });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA + 1000 });
+      expect(turnRows()[2].step_id).not.toBe(turnRows()[0].step_id);
+      expect(turnRows()[2]).toMatchObject({ input_tokens: 100, output_tokens: 5, ok: true });
+      // a delayed lower snapshot never goes negative; a failed usage GET keeps null counters (the
+      // row still exists under its key; the recovered snapshot fills it through GREATEST)
+      sessionPrev = { input_tokens: 400, cached_input_tokens: null, cache_write_tokens: null, output_tokens: 50, reasoning_tokens: null };
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA + 2000 });
+      expect(turnRows()[3]).toMatchObject({ input_tokens: 0, output_tokens: 0 });
+      global.fetch = jest.fn(() => Promise.reject(new Error('network')));
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA + 3000 });
+      expect(turnRows()[4]).toMatchObject({ input_tokens: null, output_tokens: null });
+      // an explicit turnId wins over the start time (two turns in one millisecond stay two rows)
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, turnId: 't-1' });
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9', startedAt: turnA, turnId: 't-2' });
+      expect(turnRows()).toHaveLength(7);
+      expect(new Set([turnRows()[0].step_id, turnRows()[5].step_id, turnRows()[6].step_id]).size).toBe(3);
+      // no turn start and no turn id → no turn row, the session row alone, with no start to persist
+      await metrics.recordSessionUsage({ laneId: 'agent_assistant', sessionId: 'sess_9' });
+      expect(turnRows()).toHaveLength(7);
+      expect(ledgerRows().at(-1)).toMatchObject({ row_kind: 'session', started_at: null });
+      expect(mergesFor('session')).toHaveLength(8);
+      sessionPrev = null;
     });
 
     it('is a no-op while the gate is off', async () => {

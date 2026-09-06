@@ -7,7 +7,9 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Staged explicit paths only (no `git add -A`)
 - [ ] Diff touches `client/` → `npm run check:portal-brand` passes
 - [ ] Diff touches blog schema → `npm run verify:blog-schema` passes
-- [ ] New raw SQL / migration → waves-db skill verification done (read-only prod check; BEGIN…ROLLBACK dry-run on dev/preview)
+- [ ] New raw SQL / migration → waves-db verification completed against
+  verified dev/preview PostgreSQL; deployment-specific claims have the
+  separately required production evidence
 - [ ] Money-touching diff → waves-billing invariants reviewed
 
 ## Post-push
@@ -15,6 +17,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Re-checked remote tip ~2 min later (external Codex hijack watch)
 - [ ] **(portal only)** `scripts/verify-pr-checks.sh` passed — PR head == my SHA, NOT CONFLICTING, and a `tests` pull_request run exists for this head (a CONFLICTING PR's workflow silently never fires, and a stale green from the OLD head is not CI). Read the "run attribution" line it prints: `exact` only when `VERIFY_PR_PUSH_AFTER` was set before the push; otherwise it is inferred, which cannot distinguish a leftover run from a same-SHA re-push. **After any force-push or recovery push, export that timestamp before pushing.** Astro repo: no script — check mergeable + the Pages build by hand.
 - [ ] `@codex` (fresh PR) or `@codex review` (subsequent push) posted and not bounced
+- [ ] Session owns the CI/review wait and remediation under waves-ship §4; pending results are not handed to Adam to relay
 
 ## CI green gate (separate from the trigger check above)
 - [ ] The `tests` run for the FINAL head **concluded `success`** — `gh pr checks <n>` shows every job pass. `verify-pr-checks.sh` proves CI is ALIVE, not that it passed, and exits 0 on a run that is still in progress or that failed/was cancelled/skipped. Nothing else in this checklist requires a green conclusion, so without this box an operator can satisfy every item and merge on red CI.
@@ -29,7 +32,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 
 ## Merge authorization
 - [ ] Blast-radius diff? Check the diff against the FULL CLAUDE.md rule-18 list (money, customer comms, schema/CHECK values, public token routes, every webhook payload, admin auth, iOS/Android-consumed endpoints, astro spoke-fleet form posts and feeds, retained V1 exports, persisted identifiers) plus AGENTS.md P0 domains → Adam's in-session authorization is REQUIRED; standing "merge when clean" does not apply
-- [ ] Otherwise: Adam authorized this merge in-session, OR a standing "merge when clean" applies AND the Codex gate above passed (a rebutted round qualifies only once its P0/P1 rebuttals are confirmed or Adam-accepted; an unevaluated or re-disputed P0/P1 rebuttal does not)
+- [ ] Otherwise: the task authorizes shipping and does not restrict merging — merge when clean is the standing default under waves-ship §5, with no separate merge prompt. Both the final-HEAD CI and Codex gates above passed (an unevaluated or re-disputed P0/P1 rebuttal still blocks)
 - [ ] If the PR was just un-drafted: the deeper un-draft review has completed on the final HEAD
 - [ ] Squash commit message checked — it comes from the commit message (written from a file), not the PR title
 
@@ -38,4 +41,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Railway deploy green (portal) / Pages builds green (astro)
 - [ ] Stacked children retargeted to main (should have happened BEFORE merge)
 - [ ] Gate/kill-switch documented; prod behavior spot-checked if a gate was flipped
-- [ ] Worktree removed if the lane is closed
+- [ ] Next already-authorized PR in this lane started after verification and scope/ownership checks under waves-ship §5, or lane completion / specific blocker recorded
+- [ ] If the lane is closed, task-created worktree removed only after the
+  ownership/state/dependency checks in waves-ship §5; otherwise retained
+  with the reason recorded. Reused worktrees require explicit removal authorization.

@@ -35,8 +35,11 @@ function primeCallLog({ rows = 1, updateImpl } = {}) {
   const builder = {
     update,
     where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+    whereIn: jest.fn(() => builder),
+    whereRaw: jest.fn(() => builder), // the salvage's provider guard (PR 2A)
   };
   db.mockReturnValue(builder);
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   return { builder, guardQ, update };
 }
 
@@ -213,7 +216,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(syncVoiceMessageForCall).toHaveBeenCalledWith('CA-transcript-1');
     // The guard is still in place around the whole update.
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
   });
 
   // ⭐ THE VOICEMAIL-EATING ORDERING, end to end.
@@ -247,9 +250,9 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     const convo = conversationWithTurns('CA-already-voicemail');
     await convo.end('ws_close');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
     expect(update).toHaveBeenCalledTimes(2);
-    expect(builder.where).toHaveBeenCalledWith('call_outcome', 'relay_failed');
+    expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['relay_failed', 'ai_transferred']);
     expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
     expect(update.mock.calls[1][0]).not.toHaveProperty('status');
     expect(update.mock.calls[1][0]).not.toHaveProperty('answered_by');
@@ -319,7 +322,7 @@ describe('end() persists the transcript on the SAME call_log row', () => {
     expect(db).toHaveBeenCalledTimes(2);
     expect(update.mock.calls[1][0]).not.toHaveProperty('call_outcome');
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
     expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/transcript NOT persisted/i));
   });
 

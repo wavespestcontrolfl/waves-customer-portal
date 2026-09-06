@@ -85,6 +85,32 @@ function parseNonNegativeMeasurement(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+function assertNonNegativeQuantity(value, name) {
+  const parsed = parseNonNegativeMeasurement(value);
+  if (!['number', 'string'].includes(typeof value) || String(value).trim() === '' || parsed === null) {
+    throw buildPricingError(`${name} must be a non-negative number`, { field: name });
+  }
+  return parsed;
+}
+
+// Null is an unpriced/manual quote and zero can be included work. NaN and
+// Infinity are calculation failures and must never fall through `price || 0`.
+function assertFinitePriceFields(items) {
+  const fields = ['price', 'total', 'annual', 'monthly', 'perApp', 'perVisit',
+    'priceAfterDiscount', 'totalAfterDiscount', 'annualAfterDiscount',
+    'monthlyAfterDiscount', 'annualAfterCredits', 'monthlyAfterCredits',
+    'initial', 'followUp', 'installation'];
+  for (const item of items) {
+    for (const field of fields) {
+      if (typeof item?.[field] === 'number' && !Number.isFinite(item[field])) {
+        throw buildPricingError('Unable to calculate a valid service price. Check the service quantities.', {
+          service: item.service, field,
+        });
+      }
+    }
+  }
+}
+
 function normalizeToken(value) {
   return String(value || '')
     .trim()
@@ -4085,6 +4111,7 @@ function buildPricingError(message, metadata = {}) {
   err.statusCode = 400;
   err.code = 'PRICING_VALIDATION_ERROR';
   err.isOperational = true;
+  err.failClosed = true; // Invalid pricing must not enter the save-time client fallback.
   err.metadata = metadata;
   return err;
 }
@@ -5107,7 +5134,7 @@ function priceTrapOnlyRetainer(options = {}) {
   const setupFee = waiveSetupFee ? 0 : cfg.setupFee;
   const retainerPrice = annualPrepaid ? plan.annualPrice : plan.monthlyPrice;
   const finalPrice = retainerPrice + setupFee + extraCallbackPrice;
-  const warnings = [cfg.warning];
+  const warnings = [cfg.warning, 'Confirm the retainer payment schedule and monitoring appointments before sending.'];
   if (requestedExtraCallbacks > 0 && extraCallbackCount === 0) {
     warnings.push('Extra response callbacks can only be billed after included retainer response callbacks are used.');
   }
@@ -5117,6 +5144,8 @@ function priceTrapOnlyRetainer(options = {}) {
     name: plan.label,
     trapOnlyRetainerPlan: planKey,
     trapOnlyRetainerBilling: billing,
+    requiresManualReview: true,
+    manualReviewReasons: ['retainer_payment_and_monitoring_schedule_confirmation'],
     // Customer-facing terms read the billing mode off the row (codex #3823 r8 P1).
     retainerBilling: billing,
     trapOnlyRetainerAnnualPrice: plan.annualPrice,
@@ -5343,6 +5372,9 @@ function priceSanitation(options = {}) {
     debrisCharge: Math.round(debrisCharge),
     accessMult,
     customQuoteRecommended,
+    requiresManualReview: customQuoteRecommended,
+    manualReviewReasons: customQuoteRecommended ? ['sanitation_debris_custom_quote_recommended'] : [],
+    warnings: customQuoteRecommended ? ['Sanitation debris exceeds 50 cu ft; a custom quote is recommended.'] : [],
     detail: `${cfg.label} — ${cfg.durationMin} min | ${affectedSqFt} sf affected`
       + (debrisOverage > 0 ? ` | +${debrisOverage} cu ft debris` : '')
       + (accessMult > 1 ? ` | ${accessType} access ×${accessMult}` : ''),
@@ -5719,7 +5751,8 @@ function priceOneTimeLawn(property, options = {}) {
     // the priceLawnCare call below.
   } = options;
 
-  const normalizedTreatment = treatmentType === 'fertilization' ? 'fert' : treatmentType;
+  const normalizedTreatment = ['fertilization', 'fertilizer'].includes(treatmentType) ? 'fert' : treatmentType;
+  assertEnum(normalizedTreatment, Object.keys(ONE_TIME.lawn.treatmentMultipliers), 'treatmentType');
   const lawnResult = priceLawnCare(property, {
     track,
     // One-time work anchors on the STANDARD (6x) per-app — the column the
@@ -8007,6 +8040,9 @@ function priceDethatching(lawnSqFt, options = {}) {
 // Urgency handling matches v2 applyOT (urgency multiplier only — rc discount
 // is applied downstream by the discount engine for one-time services).
 function pricePlugging(lawnSqFt, spacing = 12, options = {}) {
+  lawnSqFt = assertNonNegativeQuantity(lawnSqFt, 'pluggingArea');
+  spacing = assertNonNegativeQuantity(spacing, 'pluggingSpacing');
+  assertEnum(spacing, [6, 9, 12], 'pluggingSpacing');
   const { urgency = 'ROUTINE', afterHours = false } = options;
   const cfg = SPECIALTY.plugging;
   const ppsf = cfg.spacingRates[`${spacing}inch`] || cfg.spacingRates['12inch'];
@@ -8219,7 +8255,8 @@ function priceStingingInsect(options = {}) {
     AFRICANIZED: 'Africanized Bees',
   };
 
-  let price = cfg.tiers[Math.max(0, Math.min(cfg.tiers.length - 1, tier - 1))];
+  const tierNumber = assertPositiveInteger(assertNonNegativeQuantity(tier, 'stingingTier'), 'stingingTier');
+  let price = cfg.tiers[Math.min(cfg.tiers.length - 1, tierNumber - 1)];
   const mods = [];
   // v2 parity: raw addon values (not r'd). Base tiers stay r'd-matched.
   if (aggressive === 'MILD') { price += 75; mods.push('+$75 aggressive'); }
@@ -8851,7 +8888,10 @@ function calculateRodentGuaranteeCombo(config = {}) {
   // standalone quote would, and the station count is the bracket allowance
   // unless the caller states one (codex #3591 r14 P2).
   const bait = priceRodentBait({ footprint: sqft, lawnSqFt: 0, lotSqFt: sqft, features: {}, roofType });
-  const stations = stationCount || bait.stations;
+  const stations = stationCount
+    ? assertPositiveInteger(assertNonNegativeQuantity(stationCount, 'stationCount'), 'stationCount')
+    : bait.stations;
+  const exceedsStationAllowance = stations > bait.stations;
   const baitQuarterly = Number(bait.perVisit) || 0;
 
   const GUARANTEE_PREMIUM = { 12: 0.15, 24: 0.25 };
@@ -8883,6 +8923,9 @@ function calculateRodentGuaranteeCombo(config = {}) {
     },
     guaranteeTerm: term,
     stationCount: stations,
+    requiresManualReview: exceedsStationAllowance,
+    manualReviewReasons: exceedsStationAllowance ? ['rodent_combo_station_allowance_exceeded'] : [],
+    warnings: exceedsStationAllowance ? [`Requested ${stations} stations exceeds the priced allowance of ${bait.stations}; confirm the scope before sending.`] : [],
     exclusionDetails: {
       estimatedPoints: exclusion.estimatedPoints,
       estimatedHours: exclusion.estimatedHours,
@@ -8927,6 +8970,7 @@ function applyRodentBundle(componentTotal, bundle) {
 }
 
 module.exports = {
+  assertFinitePriceFields,
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,

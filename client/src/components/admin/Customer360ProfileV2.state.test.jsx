@@ -67,6 +67,75 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
   });
 
+  it('does not request or offer admin-only history to a technician', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({ error: 'Forbidden' }, 403)));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(screen.queryByText('Could not load customer history.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
+  });
+
+  it.each([{ events: [] }, { events: [{ type: 'interaction', title: 'Recovered fixture note' }] }])(
+    'distinguishes unavailable history from successful empty/nonempty history after retry (%j)',
+    async ({ events }) => {
+      localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+      let failTimeline = true;
+      vi.stubGlobal('fetch', vi.fn((url) => {
+        const path = String(url);
+        if (path.endsWith('/timeline')) return failTimeline
+          ? response({ error: 'Unavailable' }, 503)
+          : response({ timeline: events });
+        if (path.endsWith('/customer-a')) return failTimeline ? response(customerDetail('customer-a', 'Avery')) : response({ error: 'Profile unavailable' }, 503);
+        return response({});
+      }));
+      render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not load customer history.');
+      expect(screen.getAllByText('Avery Customer')).toHaveLength(2);
+      expect(screen.queryByText('No timeline events')).not.toBeInTheDocument();
+      expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
+      failTimeline = false;
+      fireEvent.click(screen.getByRole('button', { name: 'Retry customer history' }));
+      expect(await screen.findByText(events.length ? 'Recovered fixture note' : 'No timeline events')).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByText(`Timeline (${events.length})`)).toBeInTheDocument();
+      expect(screen.getAllByText('Avery Customer')).toHaveLength(2);
+      expect(fetch.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(1);
+    },
+  );
+
+  it('ignores history from an old customer when switching records during retry', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const oldHistory = deferred();
+    let attempts = 0;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a/timeline')) {
+        attempts += 1;
+        return attempts === 1 ? response({ error: 'Unavailable' }, 503) : oldHistory.promise;
+      }
+      if (path.endsWith('/customer-b/timeline')) return response({ timeline: [{ title: 'Beta fixture note' }] });
+      if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      if (path.endsWith('/customer-b')) return response(customerDetail('customer-b', 'Blake'));
+      return response({});
+    }));
+    const { rerender } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry customer history' }));
+    await waitFor(() => expect(attempts).toBe(2));
+    rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    expect(await screen.findByText('Beta fixture note')).toBeInTheDocument();
+    await act(async () => {
+      oldHistory.resolve(new Response(JSON.stringify({ timeline: [{ title: 'Stale Alpha note' }] })));
+      await oldHistory.promise;
+    });
+    expect(screen.queryByText('Stale Alpha note')).not.toBeInTheDocument();
+    expect(screen.getByText('Beta fixture note')).toBeInTheDocument();
+    expect(screen.getAllByText('Blake Customer')).toHaveLength(2);
+  });
+
   it('shows the account-owner appointment-SMS box CHECKED when no preference is stored', async () => {
     // Opt-OUT semantics (20260725000001): an absent preference means the
     // account holder IS included, so a strict `=== true` here would render the
@@ -157,6 +226,41 @@ describe('Customer360ProfileV2 profile state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'PUT')).toBe(true));
     await waitFor(() => expect(propertyFetches()).toBe(2));
+  });
+
+  it('saves a city correction without resubmitting unchanged shared contacts or billing settings', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    detail.customer.address.city = 'Duette';
+    detail.customer.email = 'shared@example.test';
+    detail.customer.phone = '+12025550123';
+    detail.customer.monthlyRate = 0;
+    let savedPayload;
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/admin/customers/customer-a') && options.method === 'PUT') {
+        savedPayload = JSON.parse(options.body);
+        if ('email' in savedPayload || 'phone' in savedPayload) {
+          return response({ error: 'contact_exists_on_another_account' }, 409);
+        }
+        detail.customer.address.city = savedPayload.city;
+        return response({ success: true });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) return response(detail);
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+    fireEvent.change(screen.getByDisplayValue('Duette'), { target: { value: 'Parrish' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByText('Edit customer')).not.toBeInTheDocument());
+    expect(savedPayload).toEqual({
+      addressLine1: 'customer-a Main St', addressLine2: 'Unit 4', city: 'Parrish', state: 'FL', zip: '34102',
+    });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+    expect(screen.getByDisplayValue('Parrish')).toBeInTheDocument();
   });
 
   it('flags partially refunded payments in overview Recent Transactions', async () => {

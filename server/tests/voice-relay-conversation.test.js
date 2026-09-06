@@ -64,8 +64,11 @@ describe('RelayConversation — explicit end after capture', () => {
     const builder = {
       update,
       where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+      whereIn: jest.fn(() => builder),
     };
     db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
 
     const convo = new RelayConversation({ callSid: 'CA9', from: '+19415551234', send: jest.fn() });
     convo.leadCaptured = true; // skip the capture-floor lead write
@@ -76,7 +79,7 @@ describe('RelayConversation — explicit end after capture', () => {
     // the guard callback ran whereNull('call_outcome') OR orWhereNotIn(..., the
     // terminal outcomes — voicemail, and relay_failed on the sandbox)
     expect(guardQ.whereNull).toHaveBeenCalledWith('call_outcome');
-    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed']);
+    expect(guardQ.orWhereNotIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'relay_failed', 'ai_transferred']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'completed', answered_by: 'ai_agent', call_outcome: 'ai_handled',
     }));
@@ -89,9 +92,12 @@ describe('RelayConversation — explicit end after capture', () => {
     const builder = {
       update,
       where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
+      whereIn: jest.fn(() => builder),
       whereRaw: jest.fn(() => builder),
     };
     db.mockReturnValue(builder);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     const convo = new RelayConversation({ callSid: 'CA-failed', sessionKey: 'nonce-MINE', from: '+19415551234', send: jest.fn() });
     convo.leadCaptured = true;
     convo._transcript.push({ role: 'caller', text: 'hi, ants again', turn: 1 }, { role: 'agent', text: 'Sorry to hear that.', turn: 1 });
@@ -99,8 +105,8 @@ describe('RelayConversation — explicit end after capture', () => {
     expect(updates).toHaveLength(2);
     expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
     // The salvage is keyed to the failure stamp, owner-fenced, and never touches the outcome.
-    expect(builder.where).toHaveBeenCalledWith('call_outcome', 'relay_failed');
-    expect(builder.whereRaw).toHaveBeenCalledTimes(2);
+    expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['relay_failed', 'ai_transferred']);
+    expect(builder.whereRaw).toHaveBeenCalledTimes(3); // owner fence ×2 + the salvage's provider guard (PR 2A)
     expect(updates[1]).toEqual(expect.objectContaining({ transcription_status: 'completed' }));
     expect(updates[1]).not.toHaveProperty('call_outcome');
     expect(updates[1]).not.toHaveProperty('status');

@@ -49,7 +49,10 @@ function productGroups(product) {
   });
 }
 
-async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate) {
+// strict: a failed read throws instead of reading as "no prior application"
+// (the job card's mix helper withholds a dose on missing safety data; the
+// closeout and plan engine keep their lenient default).
+async function latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict = false } = {}) {
   const groupColumn = `${groupType}_group`;
   const rows = await knex('service_products as sp')
     .join('service_records as sr', 'sp.service_record_id', 'sr.id')
@@ -70,7 +73,7 @@ async function latestComparableGroupApplication(knex, customerId, product, group
     .orderBy('sr.service_date', 'desc')
     .select('sr.service_date', 'sp.product_name', `pc.${groupColumn} as catalog_group`, 'pc.hrac_group_secondary as catalog_group_secondary', 'sp.moa_group')
     .limit(1)
-    .catch(() => []);
+    .catch((err) => { if (strict) throw err; return []; });
   return rows[0] || null;
 }
 
@@ -104,6 +107,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
   plan,
   products = [],
   serviceDate,
+  strict = false,
 }) {
   const blocks = [];
   const warnings = [];
@@ -111,7 +115,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
   const plannedIds = collectProductIds([plan?.protocol?.base, plan?.mixCalculator?.items]);
   const conditionalIds = collectProductIds([plan?.protocol?.conditional]);
   const catalogRows = submittedProductIds.length
-    ? await knex('products_catalog').whereIn('id', submittedProductIds).catch(() => [])
+    ? await knex('products_catalog').whereIn('id', submittedProductIds).catch((err) => { if (strict) throw err; return []; })
     : [];
   const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
 
@@ -177,7 +181,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
     }
 
     for (const [groupType, groupValue] of productGroups(product)) {
-      const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate);
+      const last = await latestComparableGroupApplication(knex, customerId, product, groupType, groupValue, serviceDate, { strict });
       const lastGroups = groupType === 'moa'
         ? [last?.catalog_group, last?.moa_group]
         : groupType === 'hrac'
@@ -200,7 +204,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
   const turfProfile = await knex('customer_turf_profiles')
     .where({ customer_id: customerId, active: true })
     .first()
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
   const grassType = normalizeText(turfProfile?.grass_type || plan?.propertyGate?.trackName || plan?.propertyGate?.trackKey);
   const cultivar = normalizeText(turfProfile?.cultivar);
   if ((grassType.includes('st augustine') || grassType.includes('st_augustine') || cultivar.includes('floratam')) && serviceSuggestsDethatching(service, products)) {
@@ -246,4 +250,5 @@ function managerApprovalSummary(approval, blocks, actor) {
 module.exports = {
   evaluateWaveGuardManagerApprovals,
   managerApprovalSummary,
+  latestComparableGroupApplication,
 };

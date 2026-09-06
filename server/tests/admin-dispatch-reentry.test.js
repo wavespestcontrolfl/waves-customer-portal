@@ -64,13 +64,14 @@ const fs = require('fs');
 const path = require('path');
 
 const router = require('../routes/admin-dispatch');
-const { reentryEditPlan, completionReentryPlan, productReentryFloor, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
+const { reentryEditPlan } = require('../routes/admin-dispatch')._test;
+const { completionReentryPlan, productReentryFloor, REENTRY_EDIT_MAX_MINUTES } = require('../services/complete-scheduled-service');
 const { normalizeAdvisoryForTreatmentScope, buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
 const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct } = require('../services/service-report/service-line-configs');
 const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
-const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const source = (fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8'));
 const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
 const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
 

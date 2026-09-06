@@ -318,6 +318,13 @@ async function requestReserviceText(input = {}, ctx = {}) {
         source: VOICE_REQUEST_SOURCE,
       })
       .returning('*');
+    // The claim takeover cannot pass the call-row lock until both the ticket
+    // and this evidence commit. A failed transaction leaves neither behind.
+    if (ctx.sessionKey && ctx.callSid && process.env.GATE_VOICE_RELAY_RECOVERY === 'true') {
+      await trx('call_log').where({ twilio_call_sid: ctx.callSid }).update({
+        metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_reservice_filed: true })]),
+      });
+    }
     return { status: 'created', row };
   });
   if (filedTicket.status === 'already_booked') {

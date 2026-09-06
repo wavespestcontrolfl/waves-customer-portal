@@ -49,6 +49,10 @@ const COPY = {
     en: 'Sorry, I had trouble there. Could you say that again?',
     es: 'Disculpe, tuve un problema. ¿Podría repetirlo?',
   },
+  transferring: {
+    en: 'Sure — let me connect you with a Waves team member now. One moment.',
+    es: 'Claro, le comunico ahora con un miembro del equipo de Waves. Un momento.',
+  },
   toolRounds: {
     en: "Sorry — that's taking me longer than it should. I've made a note for the team to follow up. Is there anything else I can help with?",
     es: 'Disculpe, esto me está tomando más de lo debido. He dejado una nota para que el equipo le dé seguimiento. ¿Hay algo más en lo que pueda ayudarle?',
