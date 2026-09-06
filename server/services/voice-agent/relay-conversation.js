@@ -1647,8 +1647,8 @@ class RelayConversation {
         }).catch((err) => {
           logger.error(`[voice-relay] abandoned callback revert failed callSid=${maskSid(this.callSid)}: ${err.message}`);
         });
-        // Pool checkout can outlive the SQL deadline. Keep observing its
-        // actual result, but do not hold the conversation open for cleanup.
+        // Pool checkout or a row lock can outlive the caller's deadline.
+        // Observe the actual result without holding the conversation open.
         await withTimeout(compensation, 2000);
       }
     }
@@ -2205,7 +2205,8 @@ class RelayConversation {
     // Finish this owner's bounded capture before sealing its close record so
     // persisted capture flags describe the artifact that actually committed.
     // Every authenticated socket still appends, including a superseded one.
-    if (!(await this._sessionSuperseded().catch(() => false))) await this._runCaptureFloor(reason);
+    const floorDeferred = await this._sessionSuperseded().catch(() => false);
+    if (!floorDeferred) await this._runCaptureFloor(reason);
     const recovery = require('./relay-recovery');
     const recoveryOn = recovery.isRecoveryGateOn();
     let segmentAppended = false;
@@ -2275,6 +2276,10 @@ class RelayConversation {
         return;
       }
 
+      // A slow registration/owner read fails closed in the first probe. The
+      // append wait may resolve it, so retry the floor once ownership is now
+      // proven. Its committed linkage supplies truthful capture reporting.
+      if (floorDeferred) await this._runCaptureFloor(reason);
       if (!this.callSid) return;
 
     // Reconcile call reporting: this call was handled by the AI agent, not
@@ -2668,17 +2673,21 @@ class RelayConversation {
       return await withTimeout(db.transaction(async (trx) => {
         await trx.raw("SET LOCAL statement_timeout = '2s'");
         await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
-        // Capture takes the call lock before the lead lock too. An append or
-        // staff edit either precedes this read or follows the entire repair.
+        // Serialize against capture with its existing per-call lock, then use
+        // the recording reconciler's leads -> call_log row-lock order.
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['voice-lead-capture', String(this.callSid)]);
+        const initial = await trx('call_log').where('twilio_call_sid', this.callSid).first(trx.raw("metadata->>'relay_lead_id' AS relay_lead_id"));
+        const linkedId = initial?.relay_lead_id || null;
+        const lead = await trx('leads').where(linkedId
+          ? { id: String(linkedId) } : { twilio_call_sid: this.callSid }).forUpdate().first('id', 'transcript_summary');
+        if (!lead) return false;
         const call = await trx('call_log').where('twilio_call_sid', this.callSid).forUpdate().first('id', 'metadata');
         if (!call) return false;
         const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+        if ((meta.relay_lead_id || null) !== linkedId) return false;
         if (Array.isArray(meta.relay_segment_owners) && !segmentStore.hasCompleteSegments(meta)) return false;
         const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta.relay_segments));
         if (!callerTurns.length) return false;
-        const lead = await trx('leads').where(meta.relay_lead_id
-          ? { id: String(meta.relay_lead_id) } : { twilio_call_sid: this.callSid }).forUpdate().first('id', 'transcript_summary');
-        if (!lead) return false;
         const marker = meta.relay_floor_summary;
         const owned = marker ? marker.lead_id === String(lead.id) && marker.sha256 === sha256(lead.transcript_summary)
           : lead.transcript_summary === floorSummary([], scrubForStorage);
