@@ -1900,7 +1900,7 @@ async function reconcileSupersededPr(run) {
     const pr = await gh.getPr(number);
     if (!pr || pr.state === 'open') return { retired: false };
     const merged = !!(pr.merged || pr.merged_at);
-    await stampTerminal(number, merged ? 'merged' : 'closed', run);
+    if (!await stampTerminal(number, merged ? 'merged' : 'closed', run)) return { retired: false };
     if (merged || run.action_type !== 'new_supporting_blog') return { retired: false };
     const result = await verifyClosedPrRetirement(run, { ...pr, number }, gh);
     return { retired: !!result?.retired };

@@ -2759,6 +2759,30 @@ describe('durable queue ownership and historical retirement', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a historical retirement retries failed terminal bookkeeping before releasing its fence', async () => {
+    const rem = require('../services/content/codex-remediation');
+    const stamp = jest.spyOn(rem, 'markPrTerminal').mockResolvedValueOnce({ error: 'db down' });
+    try {
+      const updates = setupDb({ pending: [makeRun({ outcome: 'failed' })], queue: [
+        { id: 'opp-1', status: 'pending_review', skip_reason: 'affiliate_review', claim_id: claim },
+      ] });
+      gh.getPr.mockResolvedValue(closed);
+
+      const failed = await poller.pollPending();
+      expect(failed.results[0].retired).toBe(false);
+      expect(updates.some((u) => u.updates.astro_pr_retired_at)).toBe(false);
+      expect(gh.retireBranch).not.toHaveBeenCalled();
+
+      const retried = await poller.pollPending();
+      expect(retried.results[0].retired).toBe(true);
+      expect(stamp).toHaveBeenCalledTimes(2);
+      expect(updates.find((u) => u.table === 'codex_remediation_state').updates.status).toBe('closed');
+      expect(updates.some((u) => u.updates.astro_pr_retired_at)).toBe(true);
+      expect(updates.some((u) => u.table === 'opportunity_queue')).toBe(false);
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    } finally { stamp.mockRestore(); }
+  });
+
   test.each([null, { ...closed, state: 'open' }, { ...closed, merged: true }, { ...closed, head: { ref: 'other', sha: 'other' } }])(
     'does not release a historical fence when the post-deletion recheck is inconclusive or changed (%j)', async (after) => {
       const updates = setupDb({ pending: [makeRun({ outcome: 'failed' })] });
