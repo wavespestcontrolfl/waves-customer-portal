@@ -1,6 +1,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
-jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn(), loadTemplateByKey: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(), loadTemplateByKey: jest.fn(),
+  queuedRowInFlight: jest.requireActual('../services/email-template-library').queuedRowInFlight,
+}));
+jest.mock('../services/twilio', () => ({ findOutboundMessageSince: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/sms-auto-send', () => ({ isRealProviderSend: jest.requireActual('../services/sms-auto-send').isRealProviderSend }));
@@ -46,6 +50,7 @@ jest.mock('../services/project-email', () => ({
 
 const db = require('../models/db');
 const EmailTemplateLibrary = require('../services/email-template-library');
+const TwilioService = require('../services/twilio');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendPrepToCustomer } = require('../services/prep-guide-sender');
@@ -88,7 +93,7 @@ let interactionQueries = [];
 let manualSmsRow = null;
 let interactionMarkerRow = null;
 function traceQuery(row) {
-  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q), orderBy: jest.fn(() => q), first: jest.fn(async () => row) };
+  const q = { where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNot: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q), orderBy: jest.fn(() => q), first: jest.fn(async () => row), select: jest.fn(async () => row ? (Array.isArray(row) ? row : [row]) : []) };
   return q;
 }
 // Honours a whereIn('status', …) filter so the live-lane read (first) and
@@ -228,6 +233,7 @@ beforeEach(() => {
   serviceUpdates = [];
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
   EmailTemplateLibrary.loadTemplateByKey.mockResolvedValue({ activeVersion: { id: 'v1' } });
+  TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
   renderSmsTemplate.mockResolvedValue('Prep text...');
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM123' });
 });
@@ -475,7 +481,8 @@ describe('sendPrepToCustomer', () => {
       && q.update.mock.calls.some(([p]) => p && p.prep_template_key === null))).toBe(true);
 
     serviceUpdates = [];
-    renderSmsTemplate.mockResolvedValue('Prep text...');
+    TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
+  renderSmsTemplate.mockResolvedValue('Prep text...');
     // sendCustomerMessage swallows provider failures; a throw WITHOUT a
     // provider outcome happened before the handoff — definite, claim released.
     sendCustomerMessage.mockRejectedValueOnce(new Error('socket hang up'));
@@ -920,14 +927,16 @@ describe('sendPrepToCustomer', () => {
     jest.clearAllMocks();
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
     sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM123' });
-    renderSmsTemplate.mockResolvedValue('Prep text...');
+    TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
+  renderSmsTemplate.mockResolvedValue('Prep text...');
     const emailDown = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
     expect(emailDown).toMatchObject({ ok: true, emailSent: false, smsSent: true, reason: 'partial', failedChannel: 'email' });
 
     // A clean Both carries no reason at all.
     jest.clearAllMocks();
     EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
-    renderSmsTemplate.mockResolvedValue('Prep text...');
+    TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
+  renderSmsTemplate.mockResolvedValue('Prep text...');
     const clean = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
     expect(clean.ok).toBe(true);
     expect(clean.reason).toBeUndefined();
@@ -1067,9 +1076,9 @@ describe('sprinkler timer guide', () => {
     const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
     expect(first.ok).toBe(true);
     expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].idempotencyKey).toBe('prep_guide_once:cust-1:prep.sprinkler_timer:claim-1');
-    // The library's own email row (queued / sent / uncertain — anything not refused) is enough…
+    // A delivered email is enough, even without the interaction marker…
     jest.clearAllMocks();
-    manualEmailRow = { id: 'em-1', status: 'queued', created_at: '2026-09-02T10:00:00Z' };
+    manualEmailRow = { id: 'em-1', status: 'sent', created_at: '2026-09-02T10:00:00Z' };
     const second = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
     expect(second).toMatchObject({ ok: false, reason: 'guide_already_sent', sentAt: '2026-09-02T10:00:00Z' });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
@@ -1199,6 +1208,72 @@ describe('sprinkler timer guide', () => {
     const busy = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
     expect(busy).toMatchObject({ ok: false, reason: 'prep_send_busy' });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('an abandoned queued email can retry (stale interaction claim: %s)', async (withClaim) => {
+    const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    manualEmailRow = { status: 'queued', queued_at: old, created_at: old };
+    if (withClaim) interactionMarkerRow = {
+      id: 'abandoned', body: 'Prep send claimed via Communications — dispatching.',
+      created_at: old, metadata: { guide_sms_to: null },
+    };
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(result).toMatchObject({ ok: true, emailSent: true });
+    expect(TwilioService.findOutboundMessageSince).not.toHaveBeenCalled();
+  });
+
+  test('a young queued email is busy; a newer abandoned attempt cannot hide a delivered email', async () => {
+    const now = new Date().toISOString();
+    manualEmailRow = { status: 'queued', queued_at: now, created_at: now };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' }))
+      .toMatchObject({ ok: false, reason: 'prep_send_busy' });
+    const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    manualEmailRow = [{ status: 'queued', queued_at: old }, { status: 'delivered', created_at: old }];
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' }))
+      .toMatchObject({ ok: false, reason: 'guide_already_sent' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each([{ found: true }, { unavailable: true }, { found: false, unavailable: true }, {}])(
+    'stale SMS claim stays blocked unless the provider proves absence: %j', async (outcome) => {
+      mockNotificationPrefsRow = { seasonal_tips: true };
+      const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      interactionMarkerRow = {
+        id: 'sms-claim', body: 'Prep send claimed via Communications — dispatching.',
+        created_at: old, metadata: { guide_sms_to: '+19415550102' },
+      };
+      TwilioService.findOutboundMessageSince.mockResolvedValue(outcome);
+      const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' });
+      expect(result).toMatchObject({ ok: false, reason: outcome.found ? 'guide_already_sent' : 'guide_check_failed' });
+      expect(TwilioService.findOutboundMessageSince).toHaveBeenCalledWith({
+        to: '+19415550102', sentAfter: old, bodyFragment: 'wavespestcontrol.com/sprinkler-timers/',
+      });
+      expect(interactionDeletes).toBe(0);
+      expect(interactionUpdates).toEqual(outcome.found
+        ? [{ body: 'Prep text confirmed by provider reconciliation — not resent.' }] : []);
+      expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  test('provider reconciliation failure preserves the stale claim; confirmed absence permits retry', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    interactionMarkerRow = {
+      id: 'sms-claim', body: 'Prep send claimed via Communications — dispatching.',
+      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      metadata: { guide_sms_to: customerRow.phone },
+    };
+    TwilioService.findOutboundMessageSince.mockRejectedValueOnce(new Error('provider unavailable'));
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'guide_check_failed' });
+    expect(interactionDeletes).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(result).toMatchObject({ ok: true, smsSent: true });
+    expect(interactionDeletes).toBe(1);
+    expect(interactionsInsert).toHaveBeenLastCalledWith(expect.objectContaining({
+      metadata: { guide_sms_to: customerRow.phone },
+    }), ['id']);
   });
 
   test('only an active recurring lawn customer (the Monday plan\'s audience) gets the guide; channel preferences are judged per leg, not by the audience', async () => {

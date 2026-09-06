@@ -866,14 +866,13 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
 
 // The send-once fence. Three sources, any one is enough: the interaction
 // marker (the pre-dispatch claim, settled on delivery), the email ledger for
-// this template (every attempt not refused outright — queued / uncertain
-// included), and the SMS log by the hub link the text carries (twilio.js
-// keeps no caller metadata; pre-push Codex P1 on 1c5df4ec7). A claim that
+// this template (delivered or uncertain attempts), and the SMS log by the
+// hub link the text carries (twilio.js keeps no caller metadata; pre-push Codex P1 on 1c5df4ec7). A claim that
 // never settled (process exit between the claim and the provider call) is
 // in flight while young and reclaimed once stale — never a permanent
 // "already sent" (GH Codex #3953 r4 P2).
 async function priorGuideDelivery(customer, config, pestType) {
-  const [marker, email, text] = await Promise.all([
+  const [marker, emails, text] = await Promise.all([
     db('customer_interactions')
       .where({ customer_id: customer.id })
       .whereIn('subject', [`${pestType} prep info sent`, `${config.label} prep sent (manual)`])
@@ -883,22 +882,45 @@ async function priorGuideDelivery(customer, config, pestType) {
       .where({ recipient_id: customer.id, template_key: config.emailTemplateKey })
       .whereNotIn('status', ['blocked', 'failed'])
       .orderBy('created_at', 'desc')
-      .first(),
+      .select('status', 'created_at', 'queued_at', 'sent_at', 'provider_message_id'),
     db('sms_log')
       .where({ customer_id: customer.id, direction: 'outbound' })
       .whereRaw('message_body ILIKE ?', [`%${GUIDE_SMS_LINK_SIGNATURE}%`])
       .orderBy('created_at', 'desc')
       .first(),
   ]);
-  let priorMarker = marker;
-  if (marker && marker.body === GUIDE_CLAIM_BODY) {
-    const ageMs = Date.now() - new Date(marker.created_at || 0).getTime();
-    if (ageMs < GUIDE_CLAIM_STALE_MS) return { refusal: { reason: 'prep_send_busy' } };
-    await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).del();
-    priorMarker = null;
-  }
-  const prior = priorMarker || email || text;
+  // A stale queued row is retryable under the email library's own policy.
+  // Inspect every attempt: a newer abandoned queue cannot hide an older send.
+  const email = emails.find((row) => row.status !== 'queued' || row.sent_at || row.provider_message_id);
+  const settledMarker = marker?.body !== GUIDE_CLAIM_BODY ? marker : null;
+  const prior = settledMarker || email || text;
   if (prior) return { refusal: { reason: 'guide_already_sent', sentAt: prior.created_at || null } };
+  if (emails.some((row) => EmailTemplateLibrary.queuedRowInFlight(row))) {
+    return { refusal: { reason: 'prep_send_busy' } };
+  }
+  if (marker) {
+    const ageMs = Date.now() - new Date(marker.created_at || NaN).getTime();
+    if (!Number.isFinite(ageMs) || ageMs < GUIDE_CLAIM_STALE_MS) return { refusal: { reason: 'prep_send_busy' } };
+    // Persist the intended recipient so a later phone edit cannot redirect
+    // reconciliation. Legacy claims did not record a channel or recipient.
+    const smsTo = marker.metadata?.guide_sms_to;
+    if (smsTo !== null) {
+      const TwilioService = require('./twilio');
+      const outcome = await TwilioService.findOutboundMessageSince({
+        to: smsTo || customer.phone,
+        sentAfter: marker.created_at,
+        bodyFragment: GUIDE_SMS_LINK_SIGNATURE,
+      });
+      if (outcome?.found) {
+        await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).update({
+          body: 'Prep text confirmed by provider reconciliation — not resent.',
+        });
+        return { refusal: { reason: 'guide_already_sent', sentAt: marker.created_at } };
+      }
+      if (outcome?.found !== false || outcome.unavailable) return { refusal: { reason: 'guide_check_failed' } };
+    }
+    await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).del();
+  }
   return { refusal: null };
 }
 
@@ -978,6 +1000,7 @@ async function openGuideSend({ customer, config, pestType, contacts, result, act
       admin_user_id: actorId || null,
       subject: `${config.label} prep sent (manual)`,
       body: GUIDE_CLAIM_BODY,
+      metadata: { guide_sms_to: contacts.wantSms ? contacts.phone : null },
     }, ['id']);
     return { refusal: null, consentBasis, claimId: claimed?.id ?? claimed ?? null, skippedLeg };
   } catch (err) {
