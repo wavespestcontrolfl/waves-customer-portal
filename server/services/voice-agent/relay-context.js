@@ -118,7 +118,7 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
     // Legacy shape (no sessionKey) keeps the strict one-claim predicate.
     const q = db('call_log').where({ twilio_call_sid: key });
     const trackSegments = process.env.GATE_VOICE_RELAY_RECOVERY === 'true' && owner;
-    if (trackSegments) q.whereRaw("COALESCE(metadata->>'relay_segments_sealed', 'false') <> 'true'");
+    q.whereRaw("COALESCE(metadata->>'relay_segments_sealed', 'false') <> 'true'");
     if (owner) {
       q.whereRaw(
         `((metadata->>'${RELAY_CLAIM_KEY}') IS NULL `
