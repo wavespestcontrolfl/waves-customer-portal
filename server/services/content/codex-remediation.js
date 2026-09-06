@@ -616,14 +616,21 @@ function stripCodeFence(text) {
 
 async function generateFix(markdown, findings, deps = {}, frontmatterFailure = null) {
   const call = deps.callAnthropic || callAnthropic;
-  const res = await call({
-    laneId: 'codex_remediation',
-    model: MODELS.FLAGSHIP,
-    system: FIX_SYSTEM,
-    text: buildFixUserMessage(markdown, findings, frontmatterFailure),
-    jsonMode: false,
-    maxTokens: 16000,
-  });
+  let res;
+  try {
+    res = await call({
+      laneId: 'codex_remediation',
+      model: MODELS.FLAGSHIP,
+      system: FIX_SYSTEM,
+      text: buildFixUserMessage(markdown, findings, frontmatterFailure),
+      jsonMode: false,
+      maxTokens: 16000,
+    });
+  } catch {
+    // Both initial and corrective failures must reach the caller's budget
+    // accounting, just like a provider's structured { ok: false } result.
+    return null;
+  }
   if (!res || !res.ok || !res.text) return null;
   // Fail closed on a truncated completion — committing a cut-off article would
   // pass the preview build and could merge.
@@ -844,6 +851,7 @@ const META_FINDING_RE = /meta[\s_-]?description/i;
 // LLM would happily "fix" the alt and mirror it. `\balt\b` covers "alt",
 // "alt text", "hero alt"; `hero_?alt` covers heroAlt / hero_alt casings.
 const HERO_ALT_FINDING_RE = /\balt\b|hero_?alt/i;
+const FAQ_FINDING_RE = /\bfaq(?:s|page)?\b|frequently\s+asked|common\s+questions/i;
 
 function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
   let a; let b;
@@ -1065,6 +1073,9 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
       return { violation: 'schema_types may only follow the publisher-derived FAQPage change', changed: {} };
     }
     if (canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
+      if (!findings.some((finding) => FAQ_FINDING_RE.test(String(finding?.body || '')))) {
+        return { violation: 'FAQ schema changed but no finding in this round targets the FAQ', changed: {} };
+      }
       baseline = fm.stringify({ ...original.data, schema_types: schemaTypes }, original.content);
     }
     if (proposed !== canonValue(schemaTypes)) {
@@ -1691,7 +1702,10 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
       if (refHead !== currentHead) staleMovedPastPark = false;
     }
-    let retryFrontmatter = parkedHead === currentHead && retryableFrontmatterPark(state);
+    // Only pinned autonomous runs retain a pollable claim after parking.
+    // Scheduler parks disarm their publishing claim for human review and
+    // must not be reactivated by this autonomous recovery path.
+    let retryFrontmatter = !!expectedParentSha && parkedHead === currentHead && retryableFrontmatterPark(state);
     if (retryFrontmatter) {
       try { retryFrontmatter = String(await gh.getBranchSha(branch)).toLowerCase() === currentHead; } catch (_) { retryFrontmatter = false; }
     }

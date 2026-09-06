@@ -1548,11 +1548,11 @@ describe('publisher-derived FAQ schema during remediation', () => {
   const faq = fm.stringify({ title: 'T', schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] }, FAQ_BODY);
 
   test('adding/removing a visible FAQ derives only its FAQPage declaration', () => {
-    const add = rem.prepareFrontmatterFix(plain, fm.stringify(fm.parse(plain).data, FAQ_BODY));
+    const add = rem.prepareFrontmatterFix(plain, fm.stringify(fm.parse(plain).data, FAQ_BODY), [{ body: 'Add the required FAQ.' }]);
     expect(add.violation).toBeNull();
     expect(add.changed).toEqual({ schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] });
     expect(fm.parse(add.markdown).data.schema_types).toEqual(add.changed.schema_types);
-    const remove = rem.prepareFrontmatterFix(faq, fm.stringify(fm.parse(faq).data, PLAIN_BODY));
+    const remove = rem.prepareFrontmatterFix(faq, fm.stringify(fm.parse(faq).data, PLAIN_BODY), [{ body: 'Remove the FAQ for this service.' }]);
     expect(remove.violation).toBeNull();
     expect(remove.changed).toEqual({ schema_types: ['Article', 'BreadcrumbList'] });
     expect(fm.parse(remove.markdown).data.schema_types).toEqual(remove.changed.schema_types);
@@ -1562,6 +1562,14 @@ describe('publisher-derived FAQ schema during remediation', () => {
     for (const schema_types of [['Article', 'HowTo'], ['Article'], ['FAQPage'], []]) {
       const proposed = fm.stringify({ ...fm.parse(plain).data, schema_types }, FAQ_BODY);
       expect(rem.prepareFrontmatterFix(plain, proposed).violation).toMatch(/schema_types/);
+    }
+  });
+
+  test('unrelated findings cannot add or remove the FAQ declaration', () => {
+    for (const [original, body] of [[plain, FAQ_BODY], [faq, PLAIN_BODY]]) {
+      const fixed = fm.stringify(fm.parse(original).data, body);
+      expect(rem.prepareFrontmatterFix(original, fixed, [{ body: 'Correct the image alt text.' }]).violation)
+        .toMatch(/no finding.*targets the FAQ/);
     }
   });
 
@@ -3780,6 +3788,7 @@ describe('arming replaces a completed hold but preserves a genuine one', () => {
 
 describe('production frontmatter remediation recovery', () => {
   const fm = require('../services/content-astro/frontmatter');
+  const PINNED_CTX = { ...CTX, expectedParentSha: HEAD };
   const FAQ = '\n\n## Frequently Asked Questions\n\n### What should I check?\n\nCheck the exterior gaps before choosing a screen.\n';
   const BASE = fm.stringify({
     title: 'Exterior gap inspection', slug: '/pest-control/exterior-gap-inspection/',
@@ -3820,13 +3829,13 @@ describe('production frontmatter remediation recovery', () => {
     'fix changed frontmatter beyond the whitelist: frontmatter key "spoke_links" changed (immutable during remediation; fixable: meta_description, hero_image.alt)',
     'fix changed frontmatter beyond the whitelist: meta_description changed but no finding in this round targets it',
     'fix changes the body-derived schema types (frontmatter schema is frozen)',
-  ])('an existing pre-push park resumes without resetting its rounds: %s', async (park_reason) => {
+  ])('a pinned autonomous pre-push park resumes without resetting its rounds: %s', async (park_reason) => {
     const db = makeDb({ codex_remediation_state: [{
       pr_number: 5, status: 'parked', rounds: 1, parked_head_sha: HEAD, park_phase: 'pre_push',
       park_reason,
     }] });
     const gh = makeGh({ fileContent: BASE, preHead: HEAD });
-    const result = await runRemediationForPr(CTX, {
+    const result = await runRemediationForPr(PINNED_CTX, {
       db, gh, callAnthropic: makeCall(BASE.replace('Inspect the exterior gaps.', 'Check the exterior gaps carefully.')), validateFixedBlogFile: PASS,
     });
     expect(result.remediated).toBe(true);
@@ -3862,7 +3871,7 @@ describe('production frontmatter remediation recovery', () => {
     }] });
     const gh = makeGh({ fileContent: BASE, preHead: HEAD });
     const call = jest.fn(makeCall(BASE + '\nChanged.'));
-    expect((await runRemediationForPr(CTX, { db, gh, callAnthropic: call, validateFixedBlogFile: PASS })).reason).toBe('parked');
+    expect((await runRemediationForPr(PINNED_CTX, { db, gh, callAnthropic: call, validateFixedBlogFile: PASS })).reason).toBe('parked');
     expect(call).not.toHaveBeenCalled();
     expect(gh._calls.putFile).toHaveLength(0);
   });
@@ -3877,7 +3886,7 @@ describe('production frontmatter remediation recovery', () => {
       return refHead;
     } } });
     const call = jest.fn(makeCall(BASE + '\nChanged.'));
-    expect((await runRemediationForPr(CTX, { db, gh, callAnthropic: call, validateFixedBlogFile: PASS })).reason).toBe('parked');
+    expect((await runRemediationForPr(PINNED_CTX, { db, gh, callAnthropic: call, validateFixedBlogFile: PASS })).reason).toBe('parked');
     expect(call).not.toHaveBeenCalled();
   });
 
@@ -3906,14 +3915,66 @@ describe('production frontmatter remediation recovery', () => {
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
-  test('autonomous fixes persist the body and derived schema with the head pin', async () => {
+  test('a corrective provider rejection consumes the round and stays parked on later polls', async () => {
+    const bad = fm.stringify({ ...fm.parse(BASE).data, spoke_links: [{ domain: 'example.com' }] }, 'Changed body.');
+    const call = jest.fn().mockResolvedValueOnce({ ok: true, text: bad }).mockRejectedValueOnce(new Error('provider timeout'));
+    const gh = makeGh({ fileContent: BASE, preHead: HEAD });
+    const db = makeDb();
+    const deps = { db, gh, callAnthropic: call, validateFixedBlogFile: PASS };
+    const result = await runRemediationForPr(PINNED_CTX, deps);
+    expect(result.parked).toBe(true);
+    expect(result.reason).toContain('no valid corrected file');
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ rounds: 1, status: 'parked' });
+    expect((await runRemediationForPr(PINNED_CTX, deps)).reason).toBe('parked');
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('initial provider rejections also exhaust the existing round budget', async () => {
+    const call = jest.fn().mockRejectedValue(new Error('provider timeout'));
+    const gh = makeGh({ fileContent: BASE, preHead: HEAD });
+    const db = makeDb();
+    const deps = { db, gh, callAnthropic: call, validateFixedBlogFile: PASS };
+    for (let round = 0; round < MAX_ROUNDS; round += 1) await runRemediationForPr(PINNED_CTX, deps);
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ rounds: MAX_ROUNDS, status: 'parked' });
+    expect((await runRemediationForPr(PINNED_CTX, deps)).reason).toBe('parked');
+    expect(call).toHaveBeenCalledTimes(MAX_ROUNDS);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('legacy scheduler parks remain in human review without a new publishing claim', async () => {
+    const previous = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    try {
+      const row = { id: 'scheduler-held', publish_status: 'pending_review', astro_pr_number: 5, astro_branch_name: CTX.branch };
+      const db = makeDb({ blog_posts: [row], codex_remediation_state: [{
+        pr_number: 5, status: 'parked', rounds: 1, parked_head_sha: HEAD, park_phase: 'pre_push',
+        park_reason: 'fix changes the body-derived schema types (frontmatter schema is frozen)',
+      }] });
+      const gh = makeGh({ fileContent: BASE, preHead: HEAD });
+      const call = jest.fn(makeCall(BASE + '\nChanged.'));
+      expect((await maybeRemediateBlogPost(row, { db, gh, callAnthropic: call, validateFixedBlogFile: PASS })).reason).toBe('parked');
+      expect(db._tables.blog_posts[0].publish_status).toBe('pending_review');
+      expect(db._tables.codex_remediation_state[0]).toMatchObject({ status: 'parked', rounds: 1 });
+      expect(call).not.toHaveBeenCalled();
+      expect(gh._calls.putFile).toHaveLength(0);
+    } finally {
+      if (previous === undefined) delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
+      else process.env.AUTONOMOUS_CODEX_REMEDIATION = previous;
+    }
+  });
+
+  test('autonomous legacy parks resume and persist the body and schema with the head pin', async () => {
     const previous = process.env.AUTONOMOUS_CODEX_REMEDIATION;
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     try {
       const run = { id: 'run-faq', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({
         body: fm.parse(BASE).content, frontmatter: fm.parse(BASE).data, autopublish_head_sha: HEAD,
       }) };
-      const db = makeDb({ autonomous_runs: [run] });
+      const db = makeDb({ autonomous_runs: [run], codex_remediation_state: [{
+        pr_number: 5, status: 'parked', rounds: 1, parked_head_sha: HEAD, park_phase: 'pre_push',
+        park_reason: 'fix changes the body-derived schema types (frontmatter schema is frozen)',
+      }] });
       const fixed = fm.stringify(fm.parse(BASE).data, fm.parse(BASE).content + FAQ);
       const gh = makeGh({ fileContent: BASE, preHead: HEAD, reviewComments: [finding({ body: 'Add the FAQ required by the brief.' })] });
       const pr = { number: 5, head: { sha: HEAD, ref: CTX.branch } };
@@ -3922,6 +3983,7 @@ describe('production frontmatter remediation recovery', () => {
         validateAutonomousRunGates: async () => ({ ok: true }),
       });
       expect(result.remediated).toBe(true);
+      expect(result.round).toBe(2);
       const payload = JSON.parse(db._tables.autonomous_runs[0].draft_payload);
       const committed = fm.parse(gh._calls.putFile[0].content);
       expect(payload.body).toBe(committed.content.trim());
