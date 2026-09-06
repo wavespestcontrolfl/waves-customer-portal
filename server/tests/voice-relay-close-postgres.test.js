@@ -25,9 +25,10 @@ postgres('atomic relay segment append and composition', () => {
     mockFixtureDb = db;
     await db.schema.createTable('call_log', (t) => {
       t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.text('transcription');
-      t.text('transcription_provider'); t.text('transcription_status');
+      t.text('transcription_provider'); t.text('transcription_status'); t.text('transcription_model');
       t.text('call_summary'); t.jsonb('transcription_metadata'); t.integer('duration_seconds'); t.timestamp('created_at').defaultTo(db.fn.now());
       t.text('source'); t.text('call_outcome'); t.jsonb('transcript_structured'); t.timestamp('updated_at');
+      t.text('status'); t.text('answered_by');
     });
     await db.schema.createTable('call_commitments', (t) => {
       t.increments('id');
@@ -91,6 +92,31 @@ postgres('atomic relay segment append and composition', () => {
     expect(refreshed).toBe(!modelWritten);
     if (modelWritten) expect(row.call_summary).toBe(modelSummary);
     else expect(row.call_summary).toContain('first leg | second leg');
+  });
+
+  test.each([null, 'Caller requested help with ants.'])('silent reconnect summary can be repaired according to its model provenance %s', async (modelSummary) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const prior = buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: first leg' });
+    const meta = { relay_session_claim_owner: 'resumed', relay_reconnect_ms: 2, relay_segments: [prior] };
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: meta,
+      transcription_metadata: { pan_detected: true } });
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    try {
+      const convo = new RelayConversation({ callSid: 'CA-fixture', sessionKey: 'resumed', sessionGeneration: 2, sandbox: true });
+      convo._resume = { callerTurns: ['first leg'] };
+      convo._modelSummary = modelSummary;
+      await convo.end('ws_close');
+      let row = await db('call_log').first();
+      expect(row.call_summary).toContain(modelSummary || 'first leg');
+      expect(row.transcription_metadata.summary_source).toBe(modelSummary ? 'model' : 'deterministic');
+      if (!modelSummary) expect(row.transcription_metadata.pan_detected).toBe(true);
+      const late = { ...meta, relay_segments: [...meta.relay_segments,
+        buildSegment({ generation: 2, sessionKey: 'resumed', text: 'Caller: later recovered detail' })] };
+      await db('call_log').update({ metadata: late });
+      expect(await convo._refreshCallSummary(late)).toBe(!modelSummary);
+      row = await db('call_log').first();
+      expect(row.call_summary).toContain(modelSummary || 'first leg | later recovered detail');
+    } finally { delete process.env.GATE_VOICE_RELAY_RECOVERY; }
   });
 
   test.each([['first', true], ['replacement', false], [null, true]])('post-floor linkage is fenced against owner %s', async (owner, expected) => {
