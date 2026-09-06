@@ -308,7 +308,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
   ];
   function executeQueues({ ledgerRefunded = '49.00', stragglers = [], unresolved = [], lingering = [] } = {}) {
     const q = previewQueues();
-    q.recurring_plan_alerts = [chain()];
+    q.recurring_plan_alerts = [chain(), chain()];
     q.scheduled_services.push(
       chain({ rows: [{ id: 'v-1', customer_id: 'cust-1', recurring_pattern: 'quarterly' }] }), // recurring series ledger evidence
       chain({ update: 1 }), // recurring_ongoing flip
@@ -340,7 +340,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
 
   it('records an explicit signup series stop in the recurrence transaction', async () => {
     const queues = executeQueues();
-    const ledger = queues.recurring_plan_alerts[0];
+    const ledger = queues.recurring_plan_alerts[1];
     setDbQueues(queues);
     await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
     expect(ledger.insert).toHaveBeenCalledWith(expect.objectContaining({

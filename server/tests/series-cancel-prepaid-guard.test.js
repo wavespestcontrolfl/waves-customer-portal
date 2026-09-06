@@ -215,7 +215,7 @@ test('an unpaid series still cancels through the same branch (guard is not a bla
   const ops = db.__state.writes.map((w) => `${w.table}:${w.op}`);
   expect(ops).toContain('<trx>:commit');
   expect(db.__state.writes.some((w) => w.table === 'scheduled_services' && w.op === 'update' && w.u.recurring_ongoing === false)).toBe(true);
-  const stopIndex = db.__state.writes.findIndex(w => w.table === 'recurring_plan_alerts');
+  const stopIndex = db.__state.writes.findIndex(w => w.table === 'recurring_plan_alerts' && w.op === 'insert');
   const commitIndex = db.__state.writes.findIndex(w => w.op === 'commit');
   expect(stopIndex).toBeGreaterThan(-1);
   expect(stopIndex).toBeLessThan(commitIndex);

@@ -247,6 +247,10 @@ describe('processCancellationRequest', () => {
     ];
     db.__tables.customer_interactions = [];
 
+    db.__tables.recurring_plan_alerts = [
+      { id: 'old-lapse', recurring_parent_id: 's1', customer_id: 'c1', alert_type: 'plan_lapsed', resolved_at: null },
+      { id: 'other-lapse', recurring_parent_id: 's1', customer_id: 'other', alert_type: 'plan_lapsed', resolved_at: null },
+    ];
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req1' });
 
     // s1 (pending future) + s2 (confirmed future) + s6 (rescheduled phantom) pulled.
@@ -283,7 +287,10 @@ describe('processCancellationRequest', () => {
     expect(svc('s1').recurring_ongoing).toBe(false);
     expect(svc('s2').recurring_ongoing).toBe(false);
     expect(svc('s5').recurring_ongoing).toBe(true);
-    expect(db.__tables.recurring_plan_alerts).toEqual([expect.objectContaining({ recurring_parent_id: 's1', customer_id: 'c1', resolved_action: 'cancel_series' })]);
+    const decisions = db.__tables.recurring_plan_alerts;
+    expect(decisions.filter(row => row.customer_id === 'c1')).toHaveLength(2);
+    expect(decisions.filter(row => row.customer_id === 'c1').every(row => row.resolved_action === 'cancel_series' && row.resolved_at)).toBe(true);
+    expect(decisions.find(row => row.id === 'other-lapse').resolved_at).toBeNull();
 
     // Customer churned / inactive + billing wound down.
     const cust = db.__tables.customers[0];

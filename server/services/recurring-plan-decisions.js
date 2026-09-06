@@ -7,6 +7,12 @@ async function recordRecurringSeriesStops(trx, rows, actorId = null) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
       ['recurring-series-maintenance', parentId]);
     const row = series.get(parentId);
+    // The stop also settles old ending/lapse holds. Retained prepaid visits
+    // must remain dispatchable without leaving an actionable renewal card.
+    await trx('recurring_plan_alerts')
+      .where({ recurring_parent_id: parentId, customer_id: row.customer_id })
+      .whereNull('resolved_at')
+      .update({ resolved_at: trx.fn.now(), resolved_action: 'cancel_series', resolved_by: actorId });
     await trx('recurring_plan_alerts').insert({
       recurring_parent_id: parentId,
       customer_id: row.customer_id,

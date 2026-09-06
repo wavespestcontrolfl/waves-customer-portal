@@ -1048,6 +1048,17 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(state.alert.resolved_at).toBeNull();
   });
 
+  test('an explicit cancellation blocks an old lapse card even while prepaid visits remain', async () => {
+    const { state, handler } = alertActionScenario({
+      decision: { resolved_action: 'cancel_series' },
+      seriesRows: [{ scheduled_date: daysOut(7), status: 'pending', prepaid_method: 'annual_prepay_invoice' }],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_lapsed', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(409);
+    expect(state.insertedVisits).toHaveLength(0);
+  });
+
   test.each(['extend', 'convert_ongoing', 'let_lapse'])('%s preserves an exhausted series with individually cancelled first and last visits', async (action) => {
     const { state, handler } = alertActionScenario({
       parentOverrides: { status: 'cancelled' },
@@ -1331,6 +1342,10 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   });
   test('does not treat an accepted plan awaiting its first service as a renewal', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ completed: false }), alert)).toBeNull();
+  });
+  test('an explicit series stop hides lapse cards even with retained paid visits', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ upcoming: 1, decision: { resolved_action: 'cancel_series' } }),
+      { ...alert, alertType: 'plan_lapsed' })).toBeNull();
   });
   test('keeps explicit lapse holds visible regardless of refill, date, or paid coverage', async () => {
     AnnualPrepayRenewals.annualPrepayCoversVisit.mockResolvedValue(true);

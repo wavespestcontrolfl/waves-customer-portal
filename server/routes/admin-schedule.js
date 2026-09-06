@@ -16606,12 +16606,12 @@ async function recurringAlertTemplate(conn, parent, cols) {
   const template = overlayRecurringTemplateOverrides(parent, cols);
   const profile = await resolveCompletionProfileForScheduledService(template, conn, { strict: true });
   if (profile.billingType === 'one_time') return null;
-  if (await countUpcomingSeriesVisits(conn, parent.id) === 0) {
-    const decision = await conn('recurring_plan_alerts')
-      .where({ recurring_parent_id: parent.id, customer_id: parent.customer_id })
-      .whereNotNull('resolved_at').orderBy('resolved_at', 'desc').orderBy('id', 'desc').first();
-    if (['let_lapse', 'cancel_series'].includes(decision?.resolved_action)) return null;
-  }
+  const decision = await conn('recurring_plan_alerts')
+    .where({ recurring_parent_id: parent.id, customer_id: parent.customer_id })
+    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc').orderBy('id', 'desc').first();
+  if (decision?.resolved_action === 'cancel_series') return null;
+  if (decision?.resolved_action === 'let_lapse'
+    && await countUpcomingSeriesVisits(conn, parent.id) === 0) return null;
   return template;
 }
 
