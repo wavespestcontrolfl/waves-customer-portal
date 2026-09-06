@@ -22,10 +22,12 @@ const catalog = { integrations: [{ id: "fixture-provider", name: "Synthetic prov
 let role;
 let pending;
 let failure;
+let healthOffline;
 beforeEach(() => {
-  role = "admin"; pending = null; failure = null;
+  role = "admin"; pending = null; failure = null; healthOffline = false;
   vi.stubGlobal("localStorage", { getItem: () => "fixture-token" });
   vi.stubGlobal("fetch", vi.fn(async (url) => {
+    if (healthOffline && url === "/api/health") throw new Error("Fixture health endpoint offline");
     if (pending && url.includes(pending)) return new Promise(() => {});
     if (failure && url.includes(failure)) return { ok: false, status: 503, json: async () => ({ error: "Fixture unavailable" }) };
     const data = url.includes("/auth/me") ? { id: "fixture-user", name: "Fixture operator", email: "operator@example.invalid", role }
@@ -64,6 +66,22 @@ describe("preserved Settings and diagnostic capabilities", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Refresh checks" })).toBeEnabled());
     expect(fetch.mock.calls.filter(([url, opts]) => url.endsWith("/token-health/check") && opts.method === "POST")).toHaveLength(1);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/integrations/health"))).toHaveLength(2);
+  });
+
+  it("keeps the old Team identity available when the separate health endpoint is offline", async () => {
+    healthOffline = true;
+    mount(<SettingsPage />, "/admin/settings?tab=team");
+    expect(await screen.findByText("Fixture operator")).toBeInTheDocument();
+    expect(screen.getByText(/operator@example.invalid/)).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/auth/me"))).toHaveLength(1);
+  });
+
+  it("does not display a previous identity or credential configuration when the profile read fails", async () => {
+    failure = "/auth/me";
+    mount(<SettingsPage />, "/admin/settings?tab=team");
+    expect(await screen.findByText("Unknown")).toBeInTheDocument();
+    expect(screen.queryByText("Fixture operator")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Integrations", exact: true })).not.toBeInTheDocument();
   });
 
   it("shows loading and failed catalog reads instead of a successful empty catalog", async () => {

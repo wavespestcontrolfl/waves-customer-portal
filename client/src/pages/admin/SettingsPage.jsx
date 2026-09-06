@@ -254,16 +254,12 @@ export default function SettingsPage() {
   }, [searchParams, isMobile]);
 
   useEffect(() => {
-    Promise.all([
-      fetch(`${API_BASE}/health`).then((r) => r.json()),
-      adminFetch("/admin/auth/me"),
-    ])
-      .then(([h, u]) => {
-        setHealth(h);
-        setUser(u);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+    // Account identity must survive a separate health-service outage. Each
+    // read settles independently; the profile remains server-authoritative.
+    Promise.allSettled([
+      fetch(`${API_BASE}/health`).then((r) => r.json()).then(setHealth),
+      adminFetch("/admin/auth/me").then(setUser),
+    ]).then(() => setLoading(false));
   }, []);
 
   // A ?tab= deep link into an owner-only group resolves to General once the
@@ -2515,4 +2511,3 @@ function IntegrationsTab({ canAdmin }) {
     </>
   );
 }
-
