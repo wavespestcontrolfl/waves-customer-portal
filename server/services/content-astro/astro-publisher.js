@@ -887,9 +887,10 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     }
   }
   // Both failed: ship the safer one — no logo beats a logo, then fewer
-  // detected marks and strings — with the reviewer note (Codex r6/r7 P2).
-  const violations = (c) => c.screen.logos.length + c.screen.readableText.length + (c.screen.forbidden || []).length;
-  const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || violations(a) - violations(b))[0];
+  // screen violations (stray strings, missing/incomplete captions, forbidden
+  // scenes — an allowed caption the image rendered is not one; Codex r11 P2)
+  // — with the reviewer note (Codex r6/r7 P2).
+  const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || a.screen.violations - b.screen.violations)[0];
   logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${safest.screen.reasons.join('; ')}) — shipping the safer candidate with a reviewer note`);
   return safest;
 }

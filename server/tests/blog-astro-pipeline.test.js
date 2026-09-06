@@ -3838,8 +3838,8 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
     const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
     imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
     screenGeneratedImage
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'] })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: ['Orkin'], reasons: ['logo or brand mark: Orkin', 'readable text: ZONE 5'] });
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: ['Orkin'], reasons: ['logo or brand mark: Orkin', 'readable text: ZONE 5'], violations: 2 });
     const before = Date.now();
     const out = await AstroPublisher.generatePlannedImage(args);
     expect(imageGenerator.generate).toHaveBeenCalledTimes(2);
@@ -3857,15 +3857,32 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
     expect(out.deadlineAt).toBe(first);
   });
 
-  test('with no logos on either side, the candidate with fewer detected strings ships (Codex r7 P2)', async () => {
+  test('with no logos on either side, the candidate with fewer screen violations ships (Codex r7 P2)', async () => {
     const imageGenerator = require('../services/content/image-generator');
     const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
     imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
     screenGeneratedImage
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5', 'SET TIME', 'RUN'], logos: [], reasons: ['readable text: ZONE 5, SET TIME, RUN'] })
-      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ON'], logos: [], reasons: ['readable text: ON'] });
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5', 'SET TIME', 'RUN'], logos: [], reasons: ['readable text: ZONE 5, SET TIME, RUN'], violations: 3 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ON'], logos: [], reasons: ['readable text: ON'], violations: 1 });
     const out = await AstroPublisher.generatePlannedImage(args);
     expect(out.screen.readableText).toEqual(['ON']);
+  });
+
+  test('an infographic that rendered its caption plus one stray label beats a retry that dropped the caption — allowed text is not a defect (Codex r11 P2)', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"', 'readable text: ORKIN'], violations: 2 });
+    // Equal violations → the first candidate (stable sort), never the captionless one by string count.
+    let out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
+    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
+    // More violations on the retry → the first candidate again.
+    out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
+    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
   });
 
   test('a caller-supplied deadline is honoured by both generate calls (near-duplicate re-framing shares the slot budget — Codex r8 P2)', async () => {

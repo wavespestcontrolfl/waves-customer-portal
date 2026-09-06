@@ -143,13 +143,13 @@ function parseScreen(text, { requireForbidden = false } = {}) {
 }
 const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 /**
- * screenGeneratedImage({ buffer, mimeType, allowedText })
- * → { ok, checked, readableText, logos, reasons }
+ * screenGeneratedImage({ buffer, mimeType, allowedText, avoidDepicting, timeoutMs })
+ * → { ok, checked, readableText, logos, forbidden, reasons, violations }
  *   ok=false when the image carries a logo / brand mark, or readable text
  *   beyond the captions the caller allowed (an infographic's own labels).
  */
 async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], timeoutMs = null } = {}) {
-  const open = { ok: true, checked: false, readableText: [], logos: [], forbidden: [], reasons: [] };
+  const open = { ok: true, checked: false, readableText: [], logos: [], forbidden: [], reasons: [], violations: 0 };
   if (!Buffer.isBuffer(buffer) || !buffer.length) return open;
   // timeoutMs bounds the whole vision chain (both legs) — the caller passes
   // what is left of its image-slot deadline; nothing left → unchecked
@@ -221,7 +221,12 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     const named = new Set(avoidDepicting.map((t) => normalizeText(t)).filter(Boolean));
     const forbidden = parsed.forbidden.filter((t) => named.has(normalizeText(t)));
     if (forbidden.length) reasons.push(`forbidden scene: ${forbidden.slice(0, 3).join('; ')}`);
-    return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, forbidden, reasons };
+    // violations counts what actually failed — stray strings, missing or
+    // incomplete captions, logos, forbidden scenes — never an allowed
+    // caption the image rendered correctly; the caller ranks two failed
+    // candidates on it (Codex r11 P2 on #3964).
+    const violations = parsed.logos.length + strayText.length + incomplete.length + missing.length + forbidden.length;
+    return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, forbidden, reasons, violations };
   } catch (err) {
     logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);
     return open;

@@ -207,14 +207,15 @@ describe('screenGeneratedImage', () => {
 
   test('a logo fails; invented labels fail; the infographic\'s own captions are allowed', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '```json\n{"readable_text": ["ORKIN"], "logos_or_brand_marks": ["Orkin logo on truck"], "notes": ""}\n```' });
-    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/logo or brand mark: Orkin/), expect.stringMatching(/readable text: ORKIN/)] });
+    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/logo or brand mark: Orkin/), expect.stringMatching(/readable text: ORKIN/)], violations: 2 });
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["SET TIME", "ZONE 5 RUN"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: SET TIME, ZONE 5 RUN/)] });
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF", "2  MANUAL", "3", "OFF"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL', '3 OFF'] })).toMatchObject({ ok: true });
+    // An allowed caption the image rendered is not a violation (Codex r11 P2 on #3964).
+    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL', '3 OFF'] })).toMatchObject({ ok: true, violations: 0 });
     // Extra words around an allowed caption are stray text, not the caption.
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF SALE", "2 MANUAL"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL'] })).toMatchObject({ ok: false, reasons: expect.arrayContaining([expect.stringMatching(/readable text: 1 OFF SALE/), expect.stringMatching(/missing caption: "1 OFF"/)]) });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL'] })).toMatchObject({ ok: false, reasons: expect.arrayContaining([expect.stringMatching(/readable text: 1 OFF SALE/), expect.stringMatching(/missing caption: "1 OFF"/)]), violations: 2 });
     // A reordered caption is stray text; a partial one is an incomplete caption (Codex r1 P2 on #3964).
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants Stop How To"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: expect.arrayContaining([expect.stringMatching(/readable text: Ants Stop How To/)]) });
