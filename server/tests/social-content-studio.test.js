@@ -841,6 +841,12 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(dauber).not.toContain('bee');
     expect(Studio.rowMatchesIntentKeywords({ title: 'Yellowjackets around the pool deck' }, dauber)).toBe(false);
     expect(Studio.rowMatchesIntentKeywords({ title: 'Mud dauber nests on lanai ceilings' }, dauber)).toBe(true);
+    // Damp-area arthropods keep separate intents (Codex r5 on #3990).
+    const damp = Studio.serviceIntentKeywords({ topic: 'earwigs and springtails after downpours', service: 'general pest' });
+    expect(damp).toEqual(expect.arrayContaining(['earwig', 'springtail']));
+    expect(damp).not.toContain('silverfish');
+    expect(damp).not.toContain('millipede');
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Silverfish in the bathroom' }, damp)).toBe(false);
     expect(Studio.serviceIntentKeywords({ topic: 'palmetto bugs in the garage' })).toEqual(expect.arrayContaining(['roach']));
     // End-to-end: the resolved keywords select the right row and reject the look-alike.
     const kws = Studio.serviceIntentKeywords({ topic: 'summer roaches moving indoors', service: 'general pest' });

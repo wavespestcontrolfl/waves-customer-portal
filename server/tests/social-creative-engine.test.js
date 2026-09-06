@@ -407,6 +407,10 @@ describe('diagnostic scenes apply only to matching topics (Codex r3 on #3990)', 
     expect(chinch).toContain('lawn-edge-sidewalk');
     const grub = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'grubs and root loss' }).map((c) => c.key);
     expect(grub).toContain('lawn-peeled-sod');
+    // The rain-day millipede scene shows millipedes, so a rain topic about other pests never gets it (Codex r5 on #3990).
+    const rainAnts = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.general, { service: 'general pest', topic: 'ants and roaches after heavy rain' }).map((c) => c.key);
+    expect(rainAnts).not.toContain('pest-lanai-floor-rain');
+    expect(Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.general, { service: 'general pest', topic: 'earwigs and springtails after downpours' }).map((c) => c.key)).toContain('pest-lanai-floor-rain');
     // Stems in `only` lists still match at a word start.
     const pellets = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.termite, { service: 'termite', topic: 'drywood termite pellets' }).map((c) => c.key);
     expect(pellets).toContain('termite-pellet-pile');

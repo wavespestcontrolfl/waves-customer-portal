@@ -453,7 +453,7 @@ const PEST_VERSUS_PAIRS = [
     service: 'mosquito',
     left: { name: 'No-See-Um', points: ['Tiny enough to pass through screens', 'Bites near water at dawn and dusk', 'Welts show up before you see the bug'] },
     right: { name: 'Mosquito', points: ['Visible, with a distinct whine', 'Breeds in standing water', 'Rests on walls and under eaves'] },
-    verdict: 'Cannot see what bit you? Probably a no-see-um.',
+    verdict: 'Bites alone do not tell. Bitten through the screen at dusk? Think no-see-ums.',
   },
   {
     key: 'honey_bee_vs_yellowjacket',
@@ -1962,7 +1962,12 @@ const SERVICE_INTENT_KEYWORDS = [
   // Mud daubers stand alone: the August "mud daubers on the lanai ceiling"
   // topic asks for a guide, and a yellowjacket or bee page is not that guide.
   { match: ['mud dauber', 'dirt dauber'] },
-  { match: ['silverfish', 'earwig', 'millipede', 'centipede', 'springtail'] },
+  // Damp-area arthropods are not interchangeable: a silverfish page is not
+  // an earwig guide, so each keeps its own intent.
+  { match: ['silverfish'] },
+  { match: ['earwig'] },
+  { match: ['springtail'] },
+  { match: ['millipede', 'centipede'] },
   { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub', 'whitefly', 'scale insect', 'mealybug', 'sooty mold'] },
 ];
 
