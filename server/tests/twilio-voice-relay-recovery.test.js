@@ -176,6 +176,16 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(res.body).toContain('<Parameter name="lang" value="es" />');
   });
 
+  test('Spanish reconnect retains the provider default when no Spanish voice was configured', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    require('../services/call-routing-config').getCallRoutingConfig.mockResolvedValueOnce({ agentEndpoint: 'wss://portal.wavespestcontrol.com/ws/voice-agent' });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: { lang: 'es' } }, res);
+    expect(res.body).toContain('language="es-US"');
+    expect(res.body).not.toMatch(/<ConversationRelay[^>]* voice=/);
+  });
+
   test('a sandbox failure reconnects on the sandbox action with the sandbox socket — never staff, never voicemail — and with the SAME profile the first leg was stamped with (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     process.env.SERVER_DOMAIN = 'preview.example.test';

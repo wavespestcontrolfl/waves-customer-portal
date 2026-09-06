@@ -4,7 +4,18 @@
  * Creates and drops only its own schema; never uses the app DATABASE_URL.
  */
 jest.mock('../models/db', () => {
-  const db = (...args) => mockPg(...args);
+  const db = (...args) => {
+    const query = mockPg(...args);
+    const update = query.update;
+    query.update = function(patch, ...rest) {
+      const result = update.call(this, patch, ...rest);
+      if (mockDelayRingResult && String(patch.metadata).includes("jsonb_build_object('relay_transfer_ring_at'")) {
+        return Promise.resolve(result).then((rows) => new Promise((resolve) => setTimeout(() => resolve(rows), 1600)));
+      }
+      return result;
+    };
+    return query;
+  };
   db.raw = (...args) => mockPg.raw(...args);
   db.transaction = (...args) => mockPg.transaction(...args);
   return db;
@@ -16,6 +27,12 @@ jest.mock('../services/reservice-scheduler', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notification-fixture' })) }));
 jest.mock('../services/voice-agent/relay-alert', () => ({ alertOwnerReservice: jest.fn(async () => true) }));
+jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(async () => {}) }));
+jest.mock('../services/voice-agent/relay-context', () => ({
+  ...jest.requireActual('../services/voice-agent/relay-context'),
+  loadOfficeHours: jest.fn(async () => ({ open: true })),
+  isOfficeOpenAt: jest.fn(() => true),
+}));
 const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { claimOwnedElsewhere, beginRelaySessionClaim, stampCallLeadLinkage } = require('../services/voice-agent/relay-context');
@@ -24,6 +41,7 @@ const { requestReserviceText } = require('../services/voice-agent/relay-reservic
 const connection = process.env.VOICE_RECOVERY_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
+let mockDelayRingResult = false;
 let admin;
 const schema = `relay_recovery_${randomUUID().replaceAll('-', '')}`;
 const callSid = 'CA-fixture';
@@ -34,7 +52,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 4 } });
-    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.integer('duration_seconds'); t.text('call_summary'); t.text('call_outcome'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
+    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.integer('duration_seconds'); t.text('call_summary'); t.text('call_outcome'); t.text('answered_by'); t.text('status'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
     await mockPg.schema.createTable('artifacts', (t) => { t.text('id').primary(); });
     await mockPg.schema.createTable('customers', (t) => { t.text('id').primary(); t.timestamp('deleted_at'); t.boolean('active'); t.text('waveguard_tier'); t.decimal('monthly_rate'); });
     await mockPg.schema.createTable('service_requests', (t) => {
@@ -156,6 +174,33 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       expect((await mockPg('call_log').where('twilio_call_sid', callSid).first('metadata')).metadata.relay_reservice_filed).toBeUndefined();
     } finally {
       await mockPg.raw('ALTER TABLE call_log DROP CONSTRAINT reject_reservice_evidence');
+    }
+  });
+
+  test.each([false, true])('second-failure ring compensation reaches voicemail; late result = %s', async (lateResult) => {
+    mockDelayRingResult = lateResult;
+    const savedNumbers = process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
+    const savedTransfer = process.env.GATE_VOICE_RELAY_TRANSFER;
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
+    process.env.WAVES_FALLBACK_FORWARD_NUMBERS = ',';
+    try {
+      await mockPg('call_log').where('twilio_call_sid', callSid).update({ metadata: {
+        relay_session_claim_owner: 'nonce-1', relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 500,
+      } });
+      const router = require('../routes/twilio-voice-webhook');
+      const handler = router.stack.find((layer) => layer.route?.path === '/relay-complete').route.stack[0].handle;
+      const res = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(), send: jest.fn().mockReturnThis() };
+      await handler({ body: { CallSid: callSid, ErrorCode: '64105' }, query: { gen: '777' } }, res);
+      expect(res.send.mock.calls[0][0]).toContain('<Record');
+      const row = await mockPg('call_log').where('twilio_call_sid', callSid).first();
+      expect(row.call_outcome).toBe('voicemail');
+      expect(row.metadata.relay_transfer_ring_at).toBeTruthy();
+      if (lateResult) await new Promise((resolve) => setTimeout(resolve, 200));
+    } finally {
+      mockDelayRingResult = false;
+      if (savedNumbers === undefined) delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS; else process.env.WAVES_FALLBACK_FORWARD_NUMBERS = savedNumbers;
+      if (savedTransfer === undefined) delete process.env.GATE_VOICE_RELAY_TRANSFER; else process.env.GATE_VOICE_RELAY_TRANSFER = savedTransfer;
     }
   });
 
