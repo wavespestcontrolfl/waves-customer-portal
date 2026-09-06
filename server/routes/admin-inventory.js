@@ -20,6 +20,7 @@ const {
   calcLandedCost,
   convertToOz,
   costLineFromUsage,
+  countUnitsCompatible,
   normalizeQuantityToOz,
   parsePackCount,
   parsePackSize,
@@ -3280,6 +3281,52 @@ function vendorRowPricePerOz(row) {
     ?? (numberOrNull(row.price_per_oz) > 0 ? numberOrNull(row.price_per_oz) : null);
 }
 
+// ── Shared vendor-row scoring (the ONE ranking basis) ──
+// Used by recalcBestPrice (the canonical writer) AND the Intelligence Bar's
+// compare_vendor_pricing / find_cheapest_vendor (Codex #3974 r1 P1: the IB
+// fell back to raw pack price where this writer ranked per unit, so the two
+// could name different winners). Three modes, chosen for the product:
+//   'oz'    — any row has a per-oz basis: rank by landed per-oz, else sticker
+//             per-oz (the r22 / landed contracts unchanged);
+//   'count' — no measured row, the catalog container reads as a count, and a
+//             row's count noun is compatible with it: rank by landed per-UNIT
+//             ((landed_cost ?? price) / pack count — a $10/10 pack with $20
+//             shipping must not beat a delivered $20/10 pack), persist the
+//             sticker per-unit;
+//   'raw'   — nothing scalable: rank by raw price (the r19 guard decides).
+// `ranked` = the pool first, then the unrankable rows by raw price; each entry
+// carries `rank` on the mode's basis (null when unrankable) for callers that
+// report spreads.
+function scoreVendorRows(rows, product) {
+  const unitSizeOz = numberOrNull(product?.unit_size_oz);
+  const catalog = unitSizeOz > 0 ? null : parsePackCount(product?.container_size);
+  const scored = rows.map((row) => {
+    const landedPerOz = storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
+    const perOz = vendorRowPricePerOz(row);
+    const price = numberOrNull(row.price_amount) ?? numberOrNull(row.price);
+    const pack = perOz == null ? parsePackCount(row.quantity) : null;
+    const countable = !!(pack && catalog && price != null && countUnitsCompatible(pack.unit, catalog.unit));
+    const landedTotal = numberOrNull(row.landed_cost);
+    return {
+      row,
+      perOz,
+      rankPerOz: landedPerOz ?? perOz,
+      perUnit: countable ? price / pack.count : null,
+      rankPerUnit: countable ? (landedTotal > 0 ? landedTotal : price) / pack.count : null,
+      price,
+    };
+  });
+  const sized = scored.filter((s) => s.perOz != null);
+  const counted = sized.length ? [] : scored.filter((s) => s.perUnit != null);
+  const mode = sized.length ? 'oz' : counted.length ? 'count' : 'raw';
+  const pool = mode === 'oz' ? sized : mode === 'count' ? counted : scored.slice();
+  const basis = mode === 'oz' ? 'rankPerOz' : mode === 'count' ? 'rankPerUnit' : 'price';
+  pool.sort((a, b) => (a[basis] - b[basis]) || (a.price - b.price));
+  for (const s of scored) s.rank = mode === 'raw' ? null : s[basis];
+  const rest = scored.filter((s) => !pool.includes(s)).sort((a, b) => a.price - b.price);
+  return { mode, pool, ranked: [...pool, ...rest], catalogCount: catalog ? catalog.count : null, catalogUnit: catalog && catalog.unit !== 'each' ? catalog.unit : null, unitSizeOz };
+}
+
 // ── Helper: recalculate best price for a product ──
 // CONTRACT: products_catalog.best_price is the price of ONE container of the
 // product's own unit_size_oz. Consumers divide best_price by unit_size_oz to
@@ -3335,44 +3382,11 @@ async function recalcBestPriceLocked(productId, dbc) {
     return;
   }
 
-  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz', 'best_price', 'container_size').first();
+  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz', 'best_price', 'container_size', 'cost_unit').first();
   const unitSizeOz = numberOrNull(product?.unit_size_oz);
-  // COUNT-BASED products (stations, traps, briquets — no oz conversion on
-  // either side): the catalog container is "1 station" / "20 count" and the
-  // rows are "10 stations" / "20 count". They scale like per-oz rows scale,
-  // per UNIT: the cheapest per-unit row wins and best_price = per-unit ×
-  // the catalog's own count — the figure the r19 COGS guard below used to
-  // protect by hand ($86.94/10 stations → $8.69/station). Only when no
-  // measured row exists; a row whose count cannot be read stays unscalable.
-  const catalogCount = unitSizeOz > 0 ? null : parsePackCount(product?.container_size);
-  const scored = rows.map((row) => {
-    // Landed cost converts through the row's unit too (r22-push P0).
-    const landedPerOz = storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
-    const perOz = vendorRowPricePerOz(row);
-    return {
-      row,
-      perOz,
-      // Landed per-oz cost (incl. shipping/fees) drives ORDERING when
-      // present — the price-sync contract (integrations-vendor-price-
-      // worker.js: COALESCE(landed_unit_price, normalized per-oz) ASC).
-      // A $50 pack with $30 shipping must not beat a delivered $60 pack.
-      // Persistence keeps the sticker-per-oz canonical-container contract.
-      rankPerOz: landedPerOz ?? perOz,
-      price: numberOrNull(row.price_amount) ?? numberOrNull(row.price),
-      perUnit: (() => { const n = perOz == null ? parsePackCount(row.quantity) : null; const pr = numberOrNull(row.price_amount) ?? numberOrNull(row.price); return n && pr != null ? pr / n : null; })(),
-    };
-  });
-  // Sized = a derivable STICKER per-oz only (codex r3 P1): a landed-only
-  // row (landed_unit_price with no quantity/normalized price — allowed by
-  // the report contract) has nothing to scale to the catalog container, so
-  // letting it win the sized pool would persist its raw pack price as
-  // best_price and corrupt per-oz costing downstream.
-  const sized = scored.filter((s) => s.perOz != null);
-  const counted = !sized.length && catalogCount ? scored.filter((s) => s.perUnit != null) : [];
-  const pool = sized.length ? sized : counted.length ? counted : scored;
-  pool.sort((a, b) => (sized.length ? a.rankPerOz - b.rankPerOz : counted.length ? a.perUnit - b.perUnit : a.price - b.price) || a.price - b.price);
+  const { mode, pool, catalogCount, catalogUnit } = scoreVendorRows(rows, product);
   const best = pool[0];
-  const countScalable = counted.length > 0;
+  const countScalable = mode === 'count';
   const scalable = (best.perOz != null && unitSizeOz > 0) || countScalable;
   // COUNT-BASED / unscalable products (codex r19-push P0, the HexPro 10x
   // COGS bug): when neither the winner nor the product yields a per-oz
@@ -3400,6 +3414,15 @@ async function recalcBestPriceLocked(productId, dbc) {
     : scalable
       ? Math.round(best.perOz * unitSizeOz * 100) / 100
       : best.price;
+  // Count-based COGS (Codex #3974 r1 P1): costLineFromUsage reads
+  // cost_per_unit FIRST and its best_price fallback needs unit_size_oz, so a
+  // count product's job/estimate cost would keep a seeded figure ($26.88/20)
+  // beside a current best price. The winning STICKER per-unit is written with
+  // the price; the existing cost_unit is kept (it names what one unit is —
+  // 'tablet'), else the catalog's counted noun, else 'each'.
+  const countCost = countScalable
+    ? { cost_per_unit: Math.round(best.perUnit * 10000) / 10000, cost_unit: product?.cost_unit || catalogUnit || 'each' }
+    : {};
 
   // Update the control-layer backing/cache fields atomically with the winner:
   // the pricing-engine DB bridge only trusts best_price when
@@ -3418,6 +3441,7 @@ async function recalcBestPriceLocked(productId, dbc) {
     best_price_updated_at: new Date(),
     best_price_status: 'current',
     needs_pricing: false,
+    ...countCost,
   });
   await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
   await dbc('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });
@@ -3662,7 +3686,14 @@ router.put('/:id', async (req, res, next) => {
       }
       return trx('products_catalog').where({ id: req.params.id }).first();
     });
-    res.json({ success: true, product: updated });
+    // A changed catalog size changes how vendor rows scale (per-oz size or
+    // count) — recalculate so the fix lands without an operator re-saving a
+    // vendor price (Codex #3974 r1 P2). Own serialized transaction, after the
+    // product write committed.
+    const sizeChanged = (upd.container_size !== undefined && (upd.container_size || null) !== (product.container_size || null))
+      || (upd.unit_size_oz !== undefined && numberOrNull(upd.unit_size_oz) !== numberOrNull(product.unit_size_oz));
+    if (sizeChanged) await recalcBestPrice(req.params.id);
+    res.json({ success: true, product: sizeChanged ? await db('products_catalog').where({ id: req.params.id }).first() : updated });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -3864,6 +3895,7 @@ router.applyPriceApproval = applyPriceApproval;
 // Per-oz ranking primitives for read-side consumers (IB comparisons must
 // use the same normalized/landed basis the recalculation ranks by).
 router.vendorRowPricePerOz = vendorRowPricePerOz;
+router.scoreVendorRows = scoreVendorRows;
 router.storedUnitCostPerOz = storedUnitCostPerOz;
 router.quantityToOz = quantityToOz;
 

@@ -335,14 +335,14 @@ describe('recalcBestPrice', () => {
     expect(flagged.where).toEqual([{ id: 'vp-a' }]);
   });
 
-  test('COUNT-BASED product: the cheapest PER-UNIT row wins and best_price is scaled to the catalog count — current, never the r19 stale guard', async () => {
-    // Summit dunks: catalog container "20 count"; Amazon $26.88/20, SiteOne $20.07/20.
+  test('COUNT-BASED product: the cheapest PER-UNIT row wins, best_price scales to the catalog count and cost_per_unit follows — current, never the r19 stale guard', async () => {
+    // Summit dunks: catalog "20 count", seeded cost_per_unit 1.344/tablet; Amazon $26.88/20, SiteOne $20.07/20.
     const { catalogUpdates } = wireBestPrice({
       rows: [
         { id: 'vp-amz', vendor_id: 'v-amz', price: 26.88, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Amazon' },
         { id: 'vp-s1', vendor_id: 'v-s1', price: 20.07, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' },
       ],
-      product: { unit_size_oz: null, best_price: 26.88, container_size: '20 count' },
+      product: { unit_size_oz: null, best_price: 26.88, container_size: '20 count', cost_unit: 'tablet' },
     });
     await recalcBestPrice('prod-1');
     expect(catalogUpdates).toHaveLength(1);
@@ -350,27 +350,46 @@ describe('recalcBestPrice', () => {
     expect(catalogUpdates[0].best_vendor).toBe('SiteOne');
     expect(catalogUpdates[0].best_price_status).toBe('current');
     expect(catalogUpdates[0].needs_pricing).toBe(false);
+    // COGS moves with the winner (r1 P1): 20.07 / 20 per tablet, unit kept.
+    expect(catalogUpdates[0].cost_per_unit).toBe(1.0035);
+    expect(catalogUpdates[0].cost_unit).toBe('tablet');
   });
 
-  test('COUNT-BASED product: a pack of 10 scales to the catalog\'s single unit — $86.94/10 stations → $8.69/station (the HexPro figure)', async () => {
+  test('COUNT-BASED product: a pack of 10 scales to the catalog\'s single unit — $86.94/10 stations → $8.69/station, cost_unit from the catalog noun', async () => {
     const { catalogUpdates } = wireBestPrice({
       rows: [{ id: 'vp-ves', vendor_id: 'v-ves', price: 86.94, quantity: '10 stations', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Veseris' }],
-      product: { unit_size_oz: null, best_price: 8.69, container_size: '1 station' },
+      product: { unit_size_oz: null, best_price: 8.69, container_size: '1 station', cost_unit: null },
     });
     await recalcBestPrice('prod-1');
     expect(catalogUpdates[0].best_price).toBe(8.69);
     expect(catalogUpdates[0].best_price_amount_cached).toBe(86.94);
     expect(catalogUpdates[0].best_price_status).toBe('current');
+    expect(catalogUpdates[0].cost_per_unit).toBe(8.694);
+    expect(catalogUpdates[0].cost_unit).toBe('station');
   });
 
-  test('COUNT-BASED product whose catalog count cannot be read ("1 case" vs "12 count") keeps the r19 stale guard', async () => {
+  test('COUNT-BASED product: rows rank by LANDED per-unit — a $10/10 pack with $20 shipping does not beat a delivered $20/10 pack; the sticker per-unit is what persists', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-cheap', vendor_id: 'v-cheap', price: 10, quantity: '10 stations', landed_cost: 30, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Cheap Sticker' },
+        { id: 'vp-deliv', vendor_id: 'v-deliv', price: 20, quantity: '10 stations', landed_cost: 20, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Delivered' },
+      ],
+      product: { unit_size_oz: null, best_price: null, container_size: '1 station', cost_unit: null },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Delivered');
+    expect(catalogUpdates[0].best_price).toBe(2);
+  });
+
+  test('COUNT-BASED product whose catalog noun is a container ("1 case") never scales against a generic count ("12 count") — the r19 stale guard stays', async () => {
     const { catalogUpdates } = wireBestPrice({
       rows: [{ id: 'vp-s1', vendor_id: 'v-s1', price: 31.16, quantity: '12 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' }],
-      product: { unit_size_oz: null, best_price: 31.16, container_size: 'one case' },
+      product: { unit_size_oz: null, best_price: 31.16, container_size: '1 case', cost_unit: null },
     });
     await recalcBestPrice('prod-1');
     expect(catalogUpdates[0].best_price_status).toBe('stale');
     expect(catalogUpdates[0].needs_pricing).toBe(true);
+    expect(catalogUpdates[0].cost_per_unit).toBeUndefined();
   });
 
   test('a measured row still takes precedence over count-based rows', async () => {
@@ -384,21 +403,74 @@ describe('recalcBestPrice', () => {
     await recalcBestPrice('prod-1');
     expect(catalogUpdates[0].best_vendor).toBe('Vendor A');
     expect(catalogUpdates[0].best_price).toBe(50);
+    expect(catalogUpdates[0].cost_per_unit).toBeUndefined();
   });
 
-  test('parsePackCount reads count packs and refuses measured or unreadable ones', () => {
-    const { parsePackCount } = require('../services/product-costing');
-    expect(parsePackCount('20 count')).toBe(20);
-    expect(parsePackCount('10 stations')).toBe(10);
-    expect(parsePackCount('1 trap')).toBe(1);
-    expect(parsePackCount('12 ct')).toBe(12);
-    expect(parsePackCount('25')).toBe(25);
-    expect(parsePackCount('100 case')).toBe(100);
+  test('scoreVendorRows is the shared basis the Intelligence Bar reads: count mode ranks compatible rows per unit and puts incompatible rows last with a null rank', () => {
+    const { scoreVendorRows } = inventoryRouter;
+    const rows = [
+      { id: 'a', price: 26.88, quantity: '20 count', vendor_name: 'Amazon' },
+      { id: 'b', price: 20.07, quantity: '20 count', vendor_name: 'SiteOne' },
+      { id: 'c', price: 5, quantity: '1 case', vendor_name: 'Case Seller' },
+    ];
+    const out = scoreVendorRows(rows, { unit_size_oz: null, container_size: '20 count' });
+    expect(out.mode).toBe('count');
+    expect(out.ranked.map((r) => r.row.id)).toEqual(['b', 'a', 'c']);
+    expect(out.ranked[0].rank).toBeCloseTo(20.07 / 20, 6);
+    expect(out.ranked[2].rank).toBeNull();
+    const oz = scoreVendorRows([{ id: 'x', price: 100, quantity: '128 oz' }, { id: 'y', price: 40, quantity: '32 oz' }], { unit_size_oz: 64 });
+    expect(oz.mode).toBe('oz');
+    expect(oz.ranked[0].row.id).toBe('x');
+  });
+
+  test('PUT /:id with a new containerSize recalculates the best price — "1 case" → "12 count" turns a stale count product current (r1 P2)', async () => {
+    const product = { id: 'prod-1', container_size: '1 case', unit_size_oz: null, best_price: 31.16, cost_unit: null, inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const rows = [{ id: 'vp-s1', vendor_id: 'v-s1', price: 31.16, quantity: '12 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' }];
+    const catalogUpdates = [];
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') return q.called('update') ? 1 : rows;
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; catalogUpdates.push(u); Object.assign(product, u); return 1; }
+        return { ...product }; // a fresh read each time, like a real row — the route's pre-update snapshot must not mutate
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '12 count' }) });
+      expect(r.status).toBe(200);
+      const body = await r.json();
+      expect(body.product.container_size).toBe('12 count');
+    });
+    const best = catalogUpdates.find((u) => u.best_price_status);
+    expect(best).toBeDefined();
+    expect(best.best_price_status).toBe('current');
+    expect(best.best_price).toBe(31.16);
+    expect(best.cost_per_unit).toBe(2.5967);
+  });
+
+  test('parsePackCount reads count packs with their noun; countUnitsCompatible refuses container-vs-item scaling', () => {
+    const { parsePackCount, countUnitsCompatible } = require('../services/product-costing');
+    expect(parsePackCount('20 count')).toEqual({ count: 20, unit: 'each' });
+    expect(parsePackCount('10 stations')).toEqual({ count: 10, unit: 'station' });
+    expect(parsePackCount('1 trap')).toEqual({ count: 1, unit: 'trap' });
+    expect(parsePackCount('12 ct')).toEqual({ count: 12, unit: 'each' });
+    expect(parsePackCount('25')).toEqual({ count: 25, unit: 'each' });
+    expect(parsePackCount('100 case')).toEqual({ count: 100, unit: 'case' });
     expect(parsePackCount('2.5 gal')).toBeNull();
     expect(parsePackCount('78 fl oz')).toBeNull();
     expect(parsePackCount('4 x 30g tubes')).toBeNull();
     expect(parsePackCount('one case')).toBeNull();
     expect(parsePackCount('')).toBeNull();
+    expect(countUnitsCompatible('each', 'station')).toBe(true);
+    expect(countUnitsCompatible('station', 'station')).toBe(true);
+    expect(countUnitsCompatible('case', 'case')).toBe(true);
+    expect(countUnitsCompatible('case', 'each')).toBe(false);
+    expect(countUnitsCompatible('each', 'pack')).toBe(false);
+    expect(countUnitsCompatible('station', 'trap')).toBe(false);
   });
 
   test('ranks by LANDED per-oz when present — cheap sticker + heavy shipping must not win', async () => {

@@ -356,23 +356,14 @@ function eligibleVendorRows(qb) {
     });
 }
 
-function rankVendorRows(rows) {
+function rankVendorRows(rows, product) {
+  // The canonical writer's scoring, verbatim (Codex #3974 r1 P1): per-oz when
+  // a measured row exists, per-UNIT for count-based products, raw price only
+  // when nothing scales — so the IB can never name a different winner than
+  // the catalog. Entries keep { row, perOz, rank, price }; rank is on the
+  // chosen basis (null when unrankable) and unrankable rows sort last.
   const adminInventoryRoute = require('../../routes/admin-inventory');
-  const scored = rows.map((row) => {
-    const perOz = adminInventoryRoute.vendorRowPricePerOz(row);
-    // Unit-aware landed conversion (r22-push P0) — never assume $/oz.
-    const landed = adminInventoryRoute.storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
-    const rank = landed != null ? landed : perOz;
-    const price = Number(row.price_amount ?? row.price) || 0;
-    return { row, perOz, rank, price };
-  });
-  scored.sort((a, b) => {
-    if (a.rank == null && b.rank == null) return a.price - b.price;
-    if (a.rank == null) return 1;
-    if (b.rank == null) return -1;
-    return (a.rank - b.rank) || (a.price - b.price);
-  });
-  return scored;
+  return adminInventoryRoute.scoreVendorRows(rows, product).ranked;
 }
 
 async function compareVendorPricing(input) {
@@ -392,7 +383,7 @@ async function compareVendorPricing(input) {
 
   // Ordered by UNIT cost, not raw pack price — a $40/32 oz offer must not
   // present as "cheaper" than a $50/64 oz one.
-  const ranked = rankVendorRows(rows);
+  const ranked = rankVendorRows(rows, product);
   const cheapest = ranked.length > 0 ? ranked[0] : null;
   const dearest = ranked.length > 0 ? ranked[ranked.length - 1] : null;
   const perOzSpread = cheapest?.rank != null && dearest?.rank != null && ranked.length > 1
@@ -452,7 +443,7 @@ async function findCheapestVendor(input) {
       .select('vendor_pricing.*', 'vendors.name as vendor_name');
 
     // Same per-oz basis as compareVendorPricing (GH r3 P1).
-    const ranked = rankVendorRows(rows).slice(0, 3);
+    const ranked = rankVendorRows(rows, p).slice(0, 3);
     const asEntry = (r) => (r ? {
       vendor: r.row.vendor_name,
       price: parseFloat(r.row.price_amount ?? r.row.price ?? 0),
