@@ -619,21 +619,21 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
 
 describe('current-visit procedure uses the same authority as product resolution', () => {
   test('the booked ET month selects the procedure; old cost annotations do not reach field readers', async () => {
-    const program = { name: 'Synthetic seasonal program', notes: ['Observe the marked area.', 'Office minimum $35.'], visits: [
+    const program = { name: 'Synthetic seasonal program', notes: ['Observe the marked area.', 'Add-on only; office minimum $35, never included in the base service.'], visits: [
       { visit: 1, month: 'Jan', primary: 'January-only work' },
-      { visit: 9, month: 'Sep', main_goal: 'Inspect the September areas.', primary: 'September work ($4.20)\nRecord observations', secondary: 'If needed, take a close-up photo.' },
+      { visit: 9, month: 'Sep', main_goal: 'Inspect the September areas.', notes: 'Do not enter the marked-off area.', primary: 'September work ($4.20)\nRecord observations', secondary: 'If needed, take a close-up photo.' },
     ] };
     const out = await jobCard.resolveVisitProducts({ facts: { isLawn: false, serviceType: 'Tree & Shrub Care', scheduledDate: '2030-09-30' }, protocols: { tree_shrub: program }, catalog: [], dbh: () => ({}) });
-    expect(out.procedure).toMatchObject({ title: 'Visit 9 · Sep', objective: 'Inspect the September areas.', steps: ['September work', 'Record observations'], notes: ['Observe the marked area.'] });
+    expect(out.procedure).toMatchObject({ title: 'Visit 9 · Sep', objective: 'Inspect the September areas.', visitNotes: ['Do not enter the marked-off area.'], steps: ['September work', 'Record observations'], notes: ['Observe the marked area.', 'Add-on only; office minimum [price omitted], never included in the base service.'] });
     expect(JSON.stringify(out.procedure)).not.toMatch(/January|\$/);
   });
 
   test.each(['active', 'draft', 'archived'])('lawn procedure respects the resolved protocol status (%s)', async status => {
-    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { month: 'Sep', visit: 9, trackKey: 'st_augustine' }, protocol: { structured: {
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { month: 'Sep', visit: 9, trackKey: 'st_augustine' }, protocol: { objective: 'Leave the marked area untreated.', structured: {
       status, grassTrack: 'st_augustine', name: 'Synthetic lawn protocol', version: 3, window: { title: 'September inspection', goal: 'Document site conditions.', requiredTasks: ['record_site_photo'] },
     } } });
     const out = await jobCard.resolveVisitProducts({ facts: { isLawn: true, serviceId: 'synthetic-visit' }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan } });
-    if (status === 'active') expect(out.procedure).toMatchObject({ source: 'Published protocol · version 3', steps: ['record site photo'] });
+    if (status === 'active') expect(out.procedure).toMatchObject({ source: 'Published protocol · version 3', visitNotes: ['Leave the marked area untreated.'], steps: ['record site photo'] });
     else expect(out.procedure).toBeNull();
     expect(buildPlan).toHaveBeenCalledTimes(1);
   });

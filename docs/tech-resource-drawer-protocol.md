@@ -9,9 +9,12 @@ the SOP performs no additional API call or write. The Job Card's existing
 paragraph cache behavior is unchanged.
 
 Non-lawn steps come from the selected service template in `protocols.json`,
-including its conditional steps and program notes. Catalog identity and the
+including its conditional steps and program notes. Visit-specific notes
+are preserved independently of the summary goal, both
+in the visible procedure and its download. Catalog identity and the
 appointment's Eastern calendar date select the template through the existing
-resolver. Legacy material-cost annotations and office price notes are omitted.
+resolver. Legacy material-cost annotations are omitted and office prices are
+masked without dropping the surrounding field restrictions.
 The sheet identifies this source as a service template; it does not certify
 the template's application rates as reviewed label evidence.
 

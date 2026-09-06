@@ -1074,7 +1074,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       name: structured.name,
       source: `Published protocol · version ${structured.version}`,
       title: structured.window.title,
-      objective: structured.window.goal || plan.protocol?.objective || null,
+      objective: structured.window.goal || null,
+      visitNotes: procedureLines(plan.protocol?.objective),
       steps: (structured.window.requiredTasks || []).map(task => String(task).replace(/_/g, ' ')),
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
@@ -1109,18 +1110,20 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
     name: program.name,
     source: 'Service template',
     title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
-    objective: procedureLines(visit.main_goal || visit.notes).join(' ') || null,
+    objective: procedureLines(visit.main_goal).join(' ') || null,
+    visitNotes: procedureLines(visit.notes),
     steps: procedureLines(visit.primary),
     conditional: procedureLines(visit.secondary),
     notes: procedureLines((program.notes || []).join('\n')),
   } };
 }
 
-// Service templates contain old material-cost annotations and office pricing
-// notes. They are not field procedure and must not bypass tech price masking.
+// Hide template costs without dropping restrictions elsewhere in the same
+// line (for example, an add-on-only scope beside a minimum office price).
 function procedureLines(text) {
-  return String(text || '').replace(/\([^)]*\$[^)]*\)/g, '')
-    .split('\n').map(line => line.trim()).filter(line => line && !/\$\s*\d/.test(line));
+  return String(text || '').replace(/\(\s*\$[\d,.]+\s*\)/g, '')
+    .replace(/\$\d(?:[\d,.]*\d)?(?:\s*[-–]\s*\$?\d(?:[\d,.]*\d)?)?/g, '[price omitted]')
+    .split('\n').map(line => line.trim()).filter(Boolean);
 }
 
 /**

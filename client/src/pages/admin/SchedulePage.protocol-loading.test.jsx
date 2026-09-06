@@ -49,7 +49,7 @@ describe("ProtocolPanel mix previews", () => {
     fetch.mockImplementation((url) => reply(url.includes('/protocols/job-card/') ? {
       enabled: true, serviceId: service.id, strip: { name: 'Fixture account', program: 'Lawn Care' }, products: [], addons: [], planBlocks: [],
       sprayCheck: { window: 'not_today' }, tank: { calibrated: false, reason: 'Fixture rig unavailable' },
-      protocol: { enabled: true, procedure: { name: 'Published fixture protocol', source: 'Published protocol · version 3', title: 'September visit', objective: 'Record current conditions.', steps: ['Inspect the marked area.'], conditional: [], notes: ['Read the source notes.'] }, addons: [] },
+      protocol: { enabled: true, procedure: { name: 'Published fixture protocol', source: 'Published protocol · version 3', title: 'September visit', objective: 'Record current conditions.', visitNotes: [], steps: ['Inspect the marked area.'], conditional: [], notes: ['Read the source notes.'] }, addons: [] },
     } : fixture(url)));
     await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
     fireEvent.click(screen.getByRole('button', { name: 'Protocol', exact: true }));

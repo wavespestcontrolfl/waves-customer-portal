@@ -6,7 +6,7 @@ import '@testing-library/jest-dom/vitest';
 import VisitProtocol from './VisitProtocol';
 
 const D = { card: '#fff', heading: '#18181b', muted: '#71717a', border: '#e4e4e7', bg: '#f4f4f5', white: '#fff', red: '#c8312f' };
-const procedure = { name: 'Synthetic procedure', source: 'Service template', title: 'Visit 9 · Sep', objective: 'Document conditions.', steps: ['Inspect the marked area.'], conditional: ['Take a detail photo if needed.'], notes: ['Reference note for this procedure.'] };
+const procedure = { name: 'Synthetic procedure', source: 'Service template', title: 'Visit 9 · Sep', objective: 'Document conditions.', visitNotes: ['Do not enter the marked-off area.'], steps: ['Inspect the marked area.'], conditional: ['Take a detail photo if needed.'], notes: ['Reference note for this procedure.'] };
 const card = { strip: { program: 'Synthetic booked service' }, planBlocks: [{ message: 'Fixture block remains unresolved.' }], protocol: { procedure, addons: [{ name: 'Unmatched add-on', procedure: null, note: 'No protocol matched this add-on' }] } };
 beforeEach(() => { vi.stubGlobal('scrollTo', vi.fn()); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -15,12 +15,14 @@ it('reads the selected procedure in place, keeps blocks visible, and restores fo
   const onJobCard = vi.fn();
   render(<VisitProtocol card={card} D={D} onJobCard={onJobCard} />);
   expect(screen.getByRole('alert')).toHaveTextContent('Fixture block remains unresolved.');
+  expect(screen.getByText('Do not enter the marked-off area.')).toBeVisible();
   expect(screen.getByText('No protocol matched this add-on')).toBeVisible();
   const opener = screen.getByRole('button', { name: 'Read SOP' });
   opener.focus();
   fireEvent.click(opener);
   const sheet = screen.getByRole('dialog', { name: 'Service SOP' });
   expect(within(sheet).getByText('Reference note for this procedure.')).toBeVisible();
+  expect(within(sheet).getByText('Do not enter the marked-off area.')).toBeVisible();
   expect(sheet).toHaveFocus();
   fireEvent.keyDown(document, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();

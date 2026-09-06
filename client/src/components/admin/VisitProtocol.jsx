@@ -9,6 +9,7 @@ function ProcedureText({ procedure, D, full = false }) {
     <h3 style={{ fontSize: 18, fontWeight: 500, margin: '0 0 12px' }}>{procedure.name}</h3>
     <p>{procedure.title}</p>
     {procedure.objective && <p style={{ padding: 12, background: D.bg }}>{procedure.objective}</p>}
+    {procedure.visitNotes.map((note, i) => <p key={i} style={{ padding: 12, background: D.bg }}>{note}</p>)}
     <ol style={{ paddingLeft: 24 }}>
       {procedure.steps.map((step, i) => <li key={i} style={{ padding: '8px 0 8px 4px' }}>{step}</li>)}
     </ol>
@@ -27,7 +28,7 @@ function SopSheet({ procedure, onClose, D }) {
   const panelRef = useModalFocus(true, onClose);
   useLockBodyScroll();
   function download() {
-    const content = [procedure.name, procedure.source, procedure.title, procedure.objective,
+    const content = [procedure.name, procedure.source, procedure.title, procedure.objective, ...procedure.visitNotes,
       'Steps', ...procedure.steps.map((step, i) => `${i + 1}. ${step}`),
       ...(procedure.conditional.length ? ['If needed', ...procedure.conditional] : []),
       ...procedure.notes,
