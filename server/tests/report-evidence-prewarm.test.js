@@ -104,7 +104,7 @@ describe('bounded wait (pre-push r1 P1: the SMS races the warm)', () => {
 describe('completion wiring (source contracts — both handlers are too heavy to stand up)', () => {
   const fs = require('fs');
   const path = require('path');
-  const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const dispatchSrc = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
   const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
 
   test('dispatch: bounded call site guarded on v1 + complete + non-backfill + customer-deliverable posture (r2 P1)', () => {

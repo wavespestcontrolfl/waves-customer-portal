@@ -485,7 +485,7 @@ describe('shouldCaptureApplicationConditions (completion route gate)', () => {
   // including product-bearing INCOMPLETE closeouts (the products were
   // physically applied; the old !isIncompleteVisit gate exported those
   // FDACS rows with null weather/wind).
-  const { shouldCaptureApplicationConditions } = require('../routes/admin-dispatch')._test;
+  const { shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 
   const base = {
     hasConditionsColumn: true,

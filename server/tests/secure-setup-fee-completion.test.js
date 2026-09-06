@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const dispatchSource = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const dispatchSource = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
 const verdictSource = fs.readFileSync(path.join(__dirname, '..', 'services', 'completion-charge-verdict.js'), 'utf8');
 const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');

@@ -76,21 +76,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const {
-  backfillCompletionPlan,
-  applyBackfillDurationPolicy,
-  applyBackfillRecordTimingPolicy,
-  backfillCompletionEndInstant,
-  backfillTimeOnSiteMinutes,
-  frozenResumeCompletionState,
-  BACKFILL_MAX_TIME_ON_SITE_MINUTES,
-  BACKFILL_INFERRED_START_FIELDS,
-  BACKFILL_LIFECYCLE_END_FIELDS,
-  BACKFILL_RECORD_END_FIELDS,
-  shouldAutoInvoiceCompletion,
-  backfillExpectedMintAtCommit,
-  shouldCaptureApplicationConditions,
-} = require('../routes/admin-dispatch')._test;
+const { backfillCompletionPlan, applyBackfillDurationPolicy, applyBackfillRecordTimingPolicy, backfillCompletionEndInstant, backfillTimeOnSiteMinutes, frozenResumeCompletionState, BACKFILL_MAX_TIME_ON_SITE_MINUTES, BACKFILL_INFERRED_START_FIELDS, BACKFILL_LIFECYCLE_END_FIELDS, BACKFILL_RECORD_END_FIELDS, shouldAutoInvoiceCompletion, backfillExpectedMintAtCommit, shouldCaptureApplicationConditions } = require('../services/complete-scheduled-service');
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
@@ -1979,7 +1965,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
   });
 
   describe('route wiring (source contracts)', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
     test('the completion tax basis is CALCULATOR-derived at the freeze point, not a flat property_type hard-code', () => {
       // TaxCalculator owns verified exemptions, service_taxability, and
@@ -2241,7 +2227,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(releaseAt).toBeGreaterThan(guardAt);
       // Actionable error: names the state (saved but NOT finalized) and the
       // action (retry), with a machine code + the committed record id.
-      const returnAt = body.indexOf('return res.status(503).json({');
+      const returnAt = body.indexOf('return ({ status: 503, body: {');
       expect(returnAt).toBeGreaterThan(releaseAt);
       expect(body).toContain('saved but NOT finalized. Retry the closeout');
       expect(body).toContain("code: 'backfill_invoice_mint_failed',");
@@ -2278,7 +2264,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // Fail-soft: the bell's own failure is logged, never thrown into a committed completion.
       expect(body).toMatch(/catch \(bellErr\) \{\s*\n\s*logger\.error\(/);
       // The bell sits AFTER the required-mint 503 return, so a backfill/required shape still fail-closes and never double-reports.
-      const returnAt = body.indexOf('return res.status(503).json({');
+      const returnAt = body.indexOf('return ({ status: 503, body: {');
       expect(bellAt).toBeGreaterThan(returnAt);
     });
 
@@ -2319,12 +2305,12 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
 });
 
 describe('completion route wiring (source contracts)', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
   const verdictSource = fs.readFileSync(path.join(__dirname, '../services/completion-charge-verdict.js'), 'utf8');
 
   test('route feeds the requester role into the plan and honors the 403 status', () => {
-    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: req\.techRole \}\)/);
-    expect(source).toMatch(/res\.status\(backfillPlan\.status \|\| 400\)\.json\(backfillPlan\.error\)/);
+    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole \}\)/);
+    expect(source).toMatch(/\{ status: backfillPlan\.status \|\| 400, body: backfillPlan\.error \}/);
   });
 
   test('completionServiceDate is backdated from the plan under backfill', () => {
@@ -2709,13 +2695,12 @@ describe('completion route wiring (source contracts)', () => {
     // the first call failed) — must flag the span untrusted AND carry the
     // backdated completed_at stamp (fix round 4).
     const flaggedCalls = source.match(
-      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*expectedCorrectionSeq: svc\.time_on_site_correction_seq \?\? null,\s*\n\s*\}\)/g,
+      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: completionInput\.actor\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*expectedCorrectionSeq: svc\.time_on_site_correction_seq \?\? null,\s*\n\s*\}\)/g,
     ) || [];
     expect(flaggedCalls.length).toBe(2);
-    // Exactly these two sites exist on the backfill-capable route; the third
-    // markComplete in this file belongs to PUT /:id/status, where backfill
-    // is unreachable (contract below) and the default rebuild is correct.
-    expect((source.match(/trackTransitions\.markComplete\(/g) || []).length).toBe(3);
+    // Both completion calls live in this service. PUT /:id/status retains
+    // its separate call in the route, where backfill is unreachable.
+    expect((source.match(/trackTransitions\.markComplete\(/g) || []).length).toBe(2);
     // The crash-resume re-derivation sits BEFORE the first flagged call, so
     // a flagless resumed retry that still owes the tracker flip reads the
     // healed flag, not the body's stale `false`.
@@ -2865,9 +2850,10 @@ describe('completion route wiring (source contracts)', () => {
     // /:serviceId/status and admin-schedule's bare completed flip each run
     // their own (ungated) referral/review rails, so the sweep must never be
     // able to route through them. Neither destructures `backfill`.
-    const statusRoute = source.slice(
-      source.indexOf("router.put('/:serviceId/status'"),
-      source.indexOf("router.get('/:serviceId/complete-preview'"),
+    const routeSource = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const statusRoute = routeSource.slice(
+      routeSource.indexOf("router.put('/:serviceId/status'"),
+      routeSource.indexOf("router.get('/:serviceId/complete-preview'"),
     );
     expect(statusRoute.length).toBeGreaterThan(0);
     expect(statusRoute).not.toContain('backfill');
@@ -2955,7 +2941,7 @@ describe('completion route wiring (source contracts)', () => {
 });
 
 describe('backfill keeps the pest recap quiet (Codex P2, PR #2897 fix round 6)', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
   test('completion never enqueues the recap render under backfill — the pending row feeds an operator-reachable Approve & send card', () => {
     // The PEST_RECAP rail branches on isBackfillCompletion FIRST: quiet

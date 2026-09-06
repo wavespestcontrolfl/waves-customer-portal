@@ -21,7 +21,8 @@ jest.mock('../routes/admin-schedule', () => ({
 const adminSchedule = require('../routes/admin-schedule');
 const { runPostCompletionSeriesMaintenance } = require('../services/recurring-series-extend');
 
-const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8')
+  + '\n' + fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
 describe('runPostCompletionSeriesMaintenance bridge', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -88,7 +89,7 @@ describe('dispatch routes wire the hook (source guards)', () => {
     const incompleteGuard = dispatchSrc.indexOf('if (isIncompleteVisit) {');
     expect(incompleteGuard).toBeGreaterThan(-1);
     expect(incompleteHook).toBeGreaterThan(incompleteGuard);
-    const returnAfterHook = dispatchSrc.indexOf('return res.json(responsePayload);', incompleteHook);
+    const returnAfterHook = dispatchSrc.indexOf('return ({ status: 200, body: responsePayload });', incompleteHook);
     expect(returnAfterHook).toBeGreaterThan(incompleteHook);
   });
 

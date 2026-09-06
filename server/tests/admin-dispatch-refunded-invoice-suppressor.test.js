@@ -14,15 +14,8 @@
  */
 const fs = require('fs');
 const path = require('path');
-const {
-  completionSuppressorInvoiceLookup,
-  completionTerminalInvoiceLookup,
-  completionNewestLiveInvoiceLookup,
-  splitTerminalCompletionInvoice,
-  reconcileLiveVsRefunded,
-  COMPLETION_TERMINAL_INVOICE_STATUSES,
-  shouldAutoInvoiceCompletion,
-} = require('../routes/admin-dispatch')._test;
+const { completionSuppressorInvoiceLookup, completionTerminalInvoiceLookup, completionNewestLiveInvoiceLookup, splitTerminalCompletionInvoice, reconcileLiveVsRefunded, COMPLETION_TERMINAL_INVOICE_STATUSES } = require('../services/completion-invoice-candidate');
+const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
 const InvoiceService = require('../services/invoice');
 
 function makeKnex(rows) {
@@ -190,7 +183,7 @@ describe('shouldAutoInvoiceCompletion: a terminal invoice on the visit suppresse
 });
 
 describe('completion route: terminal invoice → no mint, no pay link, manual-billing alert, report-only SMS (source contract)', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
 
   test('the own-visit terminal lookup runs after the direct suppressors and BEFORE the sibling first-application fallback, which is skipped when a terminal invoice exists', () => {
     const idx = src.indexOf('refundedOnVisit = await completionTerminalInvoiceLookup(db, {');
@@ -294,7 +287,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(block).toContain('if (!manualBillingAlerted) {');
     expect(block).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);');
     expect(block).toContain("code: 'terminal_invoice_manual_billing_alert_failed',");
-    expect(block).toMatch(/return res\.status\(503\)\.json\(\{/);
+    expect(block).toMatch(/return \(\{ status: 503, body: \{/);
     // No swallow: the only catch feeds the fail-closed branch.
     expect(block).not.toMatch(/catch \(e\) \{ logger\.warn\(`\[dispatch\] terminal-invoice/);
     // Position: the service_record is already durable, the attempt not yet finalized.
@@ -544,8 +537,8 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
 });
 
 describe('completion route wiring (source contract)', () => {
-  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
-  const completeRoute = source.slice(source.indexOf("router.post('/:serviceId/complete'"));
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+  const completeRoute = source.slice(source.indexOf('async function completeScheduledService('));
 
   test('both suppressor lookups route through the helper — no bare whereNot(void) invoice filter in the completion route', () => {
     expect(completeRoute).toMatch(/existingCompletionInvoice = await completionSuppressorInvoiceLookup\(db, \{ service_record_id: record\.id \}\)/);
@@ -567,7 +560,7 @@ function chainCalled(knex, method) {
 describe('canceled acceptance invoice → manual path with setup-fee wording (source contract)', () => {
   const fs2 = require('fs');
   const path2 = require('path');
-  const src2 = fs2.readFileSync(path2.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+  const src2 = fs2.readFileSync(path2.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
 
   test('the route parks the manual path (no partial remint) and flags the setup fee', () => {
     const at = src2.indexOf('siblingFirstApplication.canceledSetupFee');

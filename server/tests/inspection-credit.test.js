@@ -837,7 +837,7 @@ describe('closeout route wiring — source contracts (the completion route is to
   const path = require('path');
 
   it('the promise moment is the COMMITTED closeout instant, never the retry clock (pre-push P0)', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // On a crash-resume, `record` is the previously committed service_records
     // row; stamping the retry time instead would fail the ordering guard for
     // any booking made between closeout and retry, permanently denying the
@@ -848,7 +848,7 @@ describe('closeout route wiring — source contracts (the completion route is to
   });
 
   it('a completion resume re-promises the CLOSEOUT terms, never the live config (r23 P2)', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // A crash-resume can run after a pricing-config change; the offer must
     // carry the amount and window frozen with the consent marker — the same
     // source the recovery sweep reads.
@@ -869,7 +869,7 @@ describe('closeout route wiring — source contracts (the completion route is to
   });
 
   it('the receipt resend keys on the OFFER, not on first creation (r23 P2)', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // A crash between the offer insert and the resend queue leaves the
     // retry returning already_offered with the memo still unsent — and the
     // recovery sweep skips the visit because its offer exists. The resend
@@ -879,7 +879,7 @@ describe('closeout route wiring — source contracts (the completion route is to
   });
 
   it('both closeout gates use the shared inspection predicate, never the bare category (r24 P0)', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // rodent_inspection's typed profile is category 'rodent' — a bare
     // category === 'inspection' gate silently excludes it, so neither the
     // durable marker nor the offer ever fires for the one service whose
@@ -1058,7 +1058,7 @@ describe('closeout route wiring — source contracts (the completion route is to
   });
 
   it('quiet backfills record no promise and the replay path fast-redeems (r35 P2)', () => {
-    const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const dispatch = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // All three credit legs carry the backfill guard: the marker literal,
     // the locked adjustment, and the offer leg.
     const markerGuard = dispatch.indexOf('...(offerInspectionCredit\n              && !isBackfillCompletion');
@@ -1334,7 +1334,7 @@ describe('window + receipt copy', () => {
     // And the closeout marker gate honors it (source contract).
     const fs = require('fs');
     const path = require('path');
-    const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    const dispatch = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(dispatch).toContain("|| require('../services/inspection-credit').carriesStandingCreditPromise(completionProfile?.serviceKey))");
   });
 
