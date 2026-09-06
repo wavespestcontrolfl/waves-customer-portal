@@ -1069,7 +1069,17 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     // inventory, missing profile / area, PGR on stressed turf) ride along:
     // a blocked plan shows its products but no amounts.
     const blocks = planBlocksOf(loaded);
-    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks };
+    const structured = plan.protocol?.structured;
+    const procedure = structured?.status === 'active' && structured.grassTrack === gate.trackKey && structured.window ? {
+      name: structured.name,
+      source: `Published protocol · version ${structured.version}`,
+      title: structured.window.title,
+      objective: structured.window.goal || plan.protocol?.objective || null,
+      steps: (structured.window.requiredTasks || []).map(task => String(task).replace(/_/g, ' ')),
+      conditional: [],
+      notes: structured.operatingSentence ? [structured.operatingSentence] : [],
+    } : null;
+    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks, procedure };
   }
   return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null }), blocks: [] };
 }
@@ -1095,7 +1105,22 @@ function resolveProtocolLines(serviceType, scheduledDate, protocols, catalog, { 
   for (const line of linesFromProtocolText(visit, catalog)) {
     if (!lines.some((l) => l.product.id === line.product.id)) lines.push(line);
   }
-  return { visit, lines };
+  return { visit, lines, procedure: {
+    name: program.name,
+    source: 'Service template',
+    title: visit.visit_type || `Visit ${visit.visit}${visit.month && visit.month !== 'Any' ? ` · ${visit.month}` : ''}`,
+    objective: procedureLines(visit.main_goal || visit.notes).join(' ') || null,
+    steps: procedureLines(visit.primary),
+    conditional: procedureLines(visit.secondary),
+    notes: procedureLines((program.notes || []).join('\n')),
+  } };
+}
+
+// Service templates contain old material-cost annotations and office pricing
+// notes. They are not field procedure and must not bypass tech price masking.
+function procedureLines(text) {
+  return String(text || '').replace(/\([^)]*\$[^)]*\)/g, '')
+    .split('\n').map(line => line.trim()).filter(line => line && !/\$\s*\d/.test(line));
 }
 
 /**
@@ -1123,6 +1148,7 @@ async function resolveVisitLines({ facts, protocols, catalog, dbh = db, deps = {
       products: resolved.lines.length,
       visit: resolved.visit ? { number: resolved.visit.visit || null, month: resolved.visit.month || null } : null,
       note: resolved.visit ? null : 'No protocol matched this add-on',
+      procedure: resolved.procedure || null,
     });
   }
   return { ...primary, lines, addons };
@@ -1434,7 +1460,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
   const tank = tankFromCalibrations(calibrations);
-  const { visit, lines, blocks, addons, note } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
+  const { visit, lines, blocks, addons, note, procedure } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
   const products = lines.map((l) => l.product);
   // Limits are judged from the appointment start (now once the window has
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
@@ -1460,7 +1486,12 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     planBlocks: blocks,
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
     lineNote: note || null,
-    addons,
+    addons: addons.map(({ procedure: addonProcedure, ...addon }) => addon),
+    ...(gateEnvValue('GATE_PROTOCOL_SOP') ? { protocol: {
+      enabled: true,
+      procedure: procedure || null,
+      addons: addons.map(({ name, procedure: addonProcedure, note: addonNote }) => ({ name, procedure: addonProcedure || null, note: addonNote || null })),
+    } } : {}),
   };
 }
 

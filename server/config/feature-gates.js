@@ -1907,6 +1907,9 @@ const gates = {
   // (services/job-card.js) so a flip needs no redeploy; kill switch: unset
   // GATE_JOB_CARD — the endpoint answers {enabled:false} and the tab hides.
   jobCard: gateEnvValue('GATE_JOB_CARD'),
+  // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
+  // Uses the same visit resolver; unset restores the legacy protocol tabs.
+  protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
   // The wrapped-van scene on the appointment page + booking step 4 (owner
   // 2026-09-03). Rides the existing page payloads (appointment `vanScene`,
   // booking config `van_scene`) — no extra client fetch. Kill switch: unset
