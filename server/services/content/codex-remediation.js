@@ -2689,13 +2689,14 @@ async function readReconciliationState(trx, { runId, prNumber }, repo) {
   const opp = await trx('opportunity_queue').where({ id: selected.opportunity_id }).forUpdate().first();
   Joi.assert(opp, Joi.object({ status: Joi.valid('pending_review').required(),
     skip_reason: Joi.valid('astro_pr_pending_merge').required() }).unknown().required(), 'opportunity is no longer pending');
-  const run = await trx('autonomous_runs').where({ opportunity_id: selected.opportunity_id })
-    .orderBy('claimed_at', 'desc').forUpdate().first();
+  const run = await trx('autonomous_runs').where({ id: runId }).forUpdate().first();
   Joi.assert(run, Joi.object({ id: Joi.valid(runId).required(), action_type: Joi.valid('new_supporting_blog').required(),
     shadow_mode: Joi.valid(false).required(), outcome: Joi.valid('completed_pending_review').required(),
     skip_reason: Joi.valid('astro_pr_pending_merge').required(),
     astro_pr_url: Joi.valid(`https://github.com/${repo.owner}/${repo.repo}/pull/${prNumber}`).required(),
   }).unknown().required(), 'run is not the current live pending blog for this PR');
+  const { queueRowStillParkedLocked } = require('./autonomous-pr-poller')._internals;
+  if (!(await queueRowStillParkedLocked(run, trx))) throw new Error('run is not the current live pending blog for its queue claim');
   const state = await trx('codex_remediation_state').where({ pr_number: prNumber }).forUpdate().first();
   Joi.assert(state, Joi.object({ status: Joi.valid('active', 'parked', 'remediating').required(), branch: Joi.string().required(),
     sync_pending_sha: Joi.string().pattern(/^[0-9a-f]{40}$/).allow(null).required(),

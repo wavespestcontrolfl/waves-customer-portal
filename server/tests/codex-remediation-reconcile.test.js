@@ -18,7 +18,7 @@ const META = { title: 'Original title', slug: `/${SLUG}/`, canonical: `https://w
 function fixture() {
   let tables = {
     opportunity_queue: [{ id: OPP, status: 'pending_review', skip_reason: 'astro_pr_pending_merge' }],
-    autonomous_runs: [{ id: RUN, opportunity_id: OPP, claimed_at: '2020-01-01T00:00:00Z',
+    autonomous_runs: [{ id: RUN, opportunity_id: OPP, claimed_at: '2020-01-01T00:00:00Z', created_at: '2020-01-01T00:00:00Z',
       action_type: 'new_supporting_blog', shadow_mode: false, outcome: 'completed_pending_review',
       skip_reason: 'astro_pr_pending_merge', astro_pr_url: 'https://github.com/owner/astro/pull/999',
       comparison_table_result: { requiresHumanReview: true },
@@ -31,11 +31,16 @@ function fixture() {
     const filters = [];
     let ordered = false;
     const rows = () => {
-      const result = read()[table].filter(row => filters.every(f => Object.entries(f).every(([k, v]) => row[k] === v)));
+      const result = read()[table].filter(row => filters.every(f => f(row)));
       return ordered ? result.sort((a, b) => b.claimed_at.localeCompare(a.claimed_at)) : result;
     };
     const q = {
-      where(f) { filters.push(f); return q; },
+      where(key, op, value) {
+        if (typeof key === 'object') filters.push(row => Object.entries(key).every(([k, v]) => row[k] === v));
+        else filters.push(row => value === undefined ? row[key] === op : row[key] > value);
+        return q;
+      },
+      whereNot(key, value) { filters.push(row => row[key] !== value); return q; },
       forUpdate() { return q; },
       orderBy() { ordered = true; return q; },
       async first() { return structuredClone(rows()[0]); },
@@ -125,7 +130,7 @@ test.each(['close', 'move', 'ref'])('rejects PR %s during gate validation', asyn
 test('replacement run during validation cannot inherit approval', async () => {
   const f = fixture();
   f.deps.validateAutonomousRunGates.mockImplementation(async () => {
-    f.tables.autonomous_runs.push({ ...f.tables.autonomous_runs[0], id: 'replacement', claimed_at: '2020-01-02T00:00:00Z' });
+    f.tables.autonomous_runs.push({ ...f.tables.autonomous_runs[0], id: 'replacement', claimed_at: '2020-01-02T00:00:00Z', created_at: '2020-01-02T00:00:00Z' });
     return { ok: true, comparisonResult: {} };
   });
   await expect(reconcileAutonomousPr({ ...OPTIONS, execute: true }, f.deps)).rejects.toThrow('current live pending blog');
@@ -161,10 +166,10 @@ dbDescribe('PostgreSQL reconciliation transaction', () => {
       searchPath: [schema], pool: { min: 0, max: 2 } });
     await db.schema.createSchema(schema);
     await db.schema.createTable('opportunity_queue', t => {
-      t.uuid('id').primary(); t.string('status'); t.string('skip_reason');
+      t.uuid('id').primary(); t.string('status'); t.string('skip_reason'); t.uuid('claim_id');
     });
     await db.schema.createTable('autonomous_runs', t => {
-      t.uuid('id').primary(); t.uuid('opportunity_id'); t.timestamp('claimed_at');
+      t.uuid('id').primary(); t.uuid('opportunity_id'); t.timestamp('claimed_at'); t.timestamp('created_at'); t.uuid('queue_claim_id');
       t.string('action_type'); t.boolean('shadow_mode'); t.string('outcome'); t.string('skip_reason');
       t.text('astro_pr_url'); t.jsonb('comparison_table_result'); t.jsonb('draft_payload');
       t.timestamp('trust_build_approved_at'); t.string('trust_build_approved_by');
@@ -217,4 +222,12 @@ dbDescribe('PostgreSQL reconciliation transaction', () => {
       await db.raw('ALTER TABLE ?? DROP CONSTRAINT keep_hold', ['codex_remediation_state']);
     }
   });
+});
+
+
+test('a superseding queue claim cannot be reconciled even without a newer run', async () => {
+  const f = fixture(); f.tables.opportunity_queue[0].claim_id = 'new-claim';
+  const before = structuredClone(f.tables);
+  await expect(reconcileAutonomousPr({ ...OPTIONS, execute: true }, f.deps)).rejects.toThrow('queue claim');
+  expect(f.tables).toEqual(before);
 });
