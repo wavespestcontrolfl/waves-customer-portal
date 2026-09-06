@@ -136,6 +136,36 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.dropped).toBe(2);
   });
 
+  test.each([';', '\n'])(
+    'a quote cannot drop a condition or negation across a continuation boundary: %s', (separator) => {
+      const quote = `Treat the yard${separator}`;
+      const body = `${quote} only when the pets are inside.`;
+      const result = groundExtraction(extracted([], [
+        fact({ field: 'special_instructions', quote, value: quote }),
+        fact({ field: 'special_instructions', quote: body, value: body }),
+      ]), { message: source(body), properties });
+      expect(result.facts.map((item) => item.value)).toEqual([body]);
+      expect(result.dropped).toBe(1);
+      const negated = `Do not${separator} treat the yard.`;
+      const tail = 'treat the yard.';
+      expect(groundExtraction(extracted([], [fact({ field: 'special_instructions', quote: tail, value: tail })]), {
+        message: source(negated), properties,
+      }).facts).toEqual([]);
+    },
+  );
+
+  test.each(['Only when the pets are inside.', 'Unless the gate is locked.', 'But avoid the barn.'])(
+    'a full stop cannot hide the following qualifier: %s', (condition) => {
+      const quote = 'Treat the yard.';
+      const body = `${quote} ${condition}`;
+      const result = groundExtraction(extracted([], [
+        fact({ field: 'special_instructions', quote, value: quote }),
+        fact({ field: 'special_instructions', quote: body, value: body }),
+      ]), { message: source(body), properties });
+      expect(result.facts.map((item) => item.value)).toEqual([body]);
+    },
+  );
+
   test('a complete punctuated sentence stays valid when another sentence follows', () => {
     const message = source('Do not treat the barn. The dog stays inside.');
     const note = 'Do not treat the barn.';

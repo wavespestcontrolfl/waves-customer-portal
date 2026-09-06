@@ -93,9 +93,13 @@ function groundExtraction(parsed, { message, properties = [] }) {
       const before = message.message_body.slice(0, offset);
       const after = message.message_body.slice(offset + item.quote.length);
       // A literal substring is insufficient if it drops the preceding
-      // "do not" or a following condition from the same sentence.
-      if (before.trim() && !/[.!?;\n]\s*$/.test(before)) return false;
-      if (after.trim() && !/[.!?;\n]\s*$/.test(item.quote) && !/^\s*[.!?;\n]/.test(after)) return false;
+      // "do not" or a following condition from the same sentence. Semicolons
+      // and continuation newlines do not end a sentence.
+      if (before.trim() && !/[.!?]\s*$/.test(before)) return false;
+      if (after.trim() && !/[.!?]\s*$/.test(item.quote) && !/^\s*[.!?]/.test(after)) return false;
+      // A following qualifier still governs this instruction even when the
+      // customer used a full stop before it. Keep both in the quoted value.
+      if (/^\s*(?:[.!?]\s*)?(?:only|unless|except|but|provided|as long as|if|when|while|until)\b/i.test(after)) return false;
     }
     if (preference) return explicitContactPreference(item.quote) === item.value;
     if (code) return matchesExplicitAccessCode(item);
