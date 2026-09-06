@@ -2462,7 +2462,10 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
 router.post('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
     const customerProperties = require('../services/customer-properties');
-    const { address_line1, address_line2, city, state, zip, occupancy_type, label } = req.body || {};
+    const { address_line1, address_line2, city, state, zip, occupancy_type, relationship, label } = req.body || {};
+    const { normalizeRelationship } = require('../constants/property-relationships');
+    const rel = normalizeRelationship(relationship);
+    if (!rel.ok) return res.status(400).json({ error: 'invalid relationship' });
     if (!String(address_line1 || '').trim()) {
       return res.status(400).json({ error: 'address_line1 is required' });
     }
@@ -2500,6 +2503,7 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
       customerId: req.params.id,
       address_line1, address_line2, city, state: stateCode, zip,
       occupancyType: occupancy_type,
+      relationship: rel.value,
       label,
       source: 'manual',
     });
@@ -2511,7 +2515,7 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /api/admin/customers/:id/properties/:propertyId — edit occupancy/label.
+// PATCH /api/admin/customers/:id/properties/:propertyId — edit occupancy/relationship/label.
 router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next) => {
   try {
     const { OCCUPANCY_TYPES, listProperties } = require('../services/customer-properties');
@@ -2521,6 +2525,11 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
         return res.status(400).json({ error: 'invalid occupancy_type' });
       }
       updates.occupancy_type = req.body.occupancy_type;
+    }
+    if (req.body && req.body.relationship !== undefined) {
+      const rel = require('../constants/property-relationships').normalizeRelationship(req.body.relationship);
+      if (!rel.ok) return res.status(400).json({ error: 'invalid relationship' });
+      updates.relationship = rel.value;
     }
     if (req.body && req.body.label !== undefined) {
       const over = propertyFieldOverLimit({ label: req.body.label });
@@ -2771,7 +2780,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the
@@ -2860,6 +2869,10 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
         // customer sees on the public quote page, cited by the provenance card.
         estimateSlug: estimate.estimate_slug || null,
+        // The quoted property (estimates.property_id, nullable) — the New
+        // Appointment modal narrows the estimate list to the address being
+        // booked; an unlinked quote stays offered at every property.
+        propertyId: estimate.property_id || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,

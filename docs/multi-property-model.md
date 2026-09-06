@@ -45,3 +45,28 @@ Decided 2026-06-29: **new table (not extend `customer_accounts`); WaveGuard tier
 stays per-customer** (applies to all of a customer's properties). Open: sibling-
 row reconciliation, FK required/nullable, billing grain, backfill occupancy
 default.
+
+## 2026-09-06 — booking picker + relationship field
+
+- **New Appointment "Service address" picker.** When the customer has 2+
+  active properties AND `GATE_EDIT_APPT_ADDRESS=true`, the modal renders a
+  radio list (default = primary) and POSTs `propertyId`. The create route
+  resolves it through `bookingPropertyStamp` (`services/customer-properties.js`)
+  into the same `property_id` + `service_address_*` + `lat`/`lng` stamp the
+  Edit-appointment address change writes; recurring children and boosters
+  inherit it via `copyStampedServiceAddressFields`, and the zone / tech match
+  use the chosen property's city+ZIP. Off-gate a `propertyId` is refused
+  (409); absent, the sole-property anchor applies as before. A linked
+  estimate quoted for a different property is refused (422
+  `ESTIMATE_PROPERTY_MISMATCH`); the modal narrows the estimate list to the
+  chosen property (`schedule-estimates` now returns `propertyId`).
+- **`customer_properties.relationship`** (migration `20260906000020`,
+  vocabulary `constants/property-relationships.js`): `own_home` /
+  `rental_owned` / `family_home` / `managed_for_client`, nullable. Owner
+  decision 2026-09-06: "family" is a RELATIONSHIP (payer's tie to the
+  address), not a seventh occupancy value. Editable on the Customer 360
+  Properties panel and the add form; the call pipeline may pass it to
+  `recordCallProperty` but does not classify it yet.
+- Still deferred: per-property on-site contact / access notes, per-property
+  pricing attributes (Phase 3), and the multi-property estimate group UI
+  (reuses the existing multi-home discount — owner 2026-09-06).

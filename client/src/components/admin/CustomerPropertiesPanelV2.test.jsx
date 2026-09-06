@@ -55,6 +55,7 @@ describe('CustomerPropertiesPanelV2', () => {
     fireEvent.change(screen.getByLabelText('Street address'), { target: { value: '20 Oak St' } });
     fireEvent.change(screen.getByLabelText('City'), { target: { value: 'Naples' } });
     fireEvent.change(screen.getByLabelText('ZIP'), { target: { value: '34103' } });
+    fireEvent.change(screen.getByLabelText('Relationship'), { target: { value: 'family_home' } });
     fireEvent.change(screen.getByLabelText('Occupancy'), { target: { value: 'rental_investment' } });
     fireEvent.change(screen.getByLabelText('Label (optional)'), { target: { value: 'Vacation rental' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
@@ -64,9 +65,26 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(post[0]).toBe('/api/admin/customers/c1/properties');
     expect(JSON.parse(post[1].body)).toEqual({
       address_line1: '20 Oak St', address_line2: null, city: 'Naples', state: 'FL', zip: '34103',
-      occupancy_type: 'rental_investment', label: 'Vacation rental',
+      occupancy_type: 'rental_investment', relationship: 'family_home', label: 'Vacation rental',
     });
     expect(screen.queryByLabelText('Street address')).not.toBeInTheDocument();
+  });
+
+  it('PATCHes the relationship from the row select (blank clears it)', async () => {
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (opts.method === 'PATCH') return jsonResponse({ properties: [{ ...PRIMARY, relationship: 'family_home' }] });
+      return jsonResponse({ properties: [PRIMARY] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit />);
+    await screen.findByText(/10 Palm Ave/);
+
+    fireEvent.change(screen.getByLabelText('Relationship for 10 Palm Ave'), { target: { value: 'family_home' } });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, o]) => o && o.method === 'PATCH')).toBe(true));
+    const patch = fetchMock.mock.calls.find(([, o]) => o && o.method === 'PATCH');
+    expect(patch[0]).toBe('/api/admin/customers/c1/properties/p1');
+    expect(JSON.parse(patch[1].body)).toEqual({ relationship: 'family_home' });
+    await waitFor(() => expect(screen.getByLabelText('Relationship for 10 Palm Ave')).toHaveValue('family_home'));
   });
 
   it('blocks a partial address client-side and surfaces the server 409 verbatim', async () => {

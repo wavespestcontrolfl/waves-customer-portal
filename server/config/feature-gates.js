@@ -462,6 +462,12 @@ const gates = {
   // silently ignoring one (an ignored count reads to the office as a plan they
   // capped). Kill switch: unset or any non-'true' value; visits already added
   // or cancelled are not reversed when it flips.
+  // GATE_EDIT_APPT_ADDRESS also admits the New Appointment "Service address"
+  // picker (POST / with propertyId) — one flag for "the office chooses which
+  // of a multi-property customer's addresses a visit lands on". Off: the
+  // properties read answers canChangeAppointmentAddress:false, the modal
+  // hides the picker, and a propertyId on create is refused (409), so a
+  // stale tab cannot book to a secondary address while the lane is dark.
   editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 

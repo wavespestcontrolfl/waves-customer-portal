@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, Card, CardBody } from "../ui";
-import { OCCUPANCY_OPTIONS } from "../../lib/contact-roles";
+import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
 
 // customer_properties column widths (server PROPERTY_FIELD_LIMITS mirrors
@@ -15,6 +15,7 @@ const EMPTY_FORM = {
   state: "FL",
   zip: "",
   occupancy_type: "unknown",
+  relationship: "",
   label: "",
 };
 
@@ -116,6 +117,7 @@ export default function CustomerPropertiesPanelV2({
           state: stateCode,
           zip: form.zip.trim(),
           occupancy_type: form.occupancy_type || "unknown",
+          relationship: form.relationship || null,
           label: form.label.trim() || null,
         }),
       });
@@ -255,19 +257,34 @@ export default function CustomerPropertiesPanelV2({
                     )
                   )}
                 </div>
-                <select
-                  aria-label={`Occupancy for ${p.address_line1}`}
-                  value={p.occupancy_type || "unknown"}
-                  disabled={!canEdit || writeBusy}
-                  onChange={(e) => patchRow(p.id, { occupancy_type: e.target.value })}
-                  className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
-                >
-                  {OCCUPANCY_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    aria-label={`Relationship for ${p.address_line1}`}
+                    value={p.relationship || ""}
+                    disabled={!canEdit || writeBusy}
+                    onChange={(e) => patchRow(p.id, { relationship: e.target.value || null })}
+                    className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                  >
+                    {RELATIONSHIP_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label={`Occupancy for ${p.address_line1}`}
+                    value={p.occupancy_type || "unknown"}
+                    disabled={!canEdit || writeBusy}
+                    onChange={(e) => patchRow(p.id, { occupancy_type: e.target.value })}
+                    className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                  >
+                    {OCCUPANCY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             ))}
             {properties.length === 0 && (
@@ -348,6 +365,23 @@ export default function CustomerPropertiesPanelV2({
                   onChange={(e) => setForm((f) => ({ ...f, zip: e.target.value }))}
                 />
               </div>
+            </div>
+            <div>
+              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-rel">
+                Relationship
+              </label>
+              <select
+                id="cp-rel"
+                className={inputCls}
+                value={form.relationship}
+                onChange={(e) => setForm((f) => ({ ...f, relationship: e.target.value }))}
+              >
+                {RELATIONSHIP_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-occ">

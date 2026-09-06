@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildFindTimeRequestBody,
+  defaultBookingPropertyId,
   ESTIMATE_SOURCE_LABEL,
+  filterScheduleEstimatesForProperty,
   findScheduleEstimateById,
   formatScheduleEstimateAmount,
   MANUAL_SERVICE_ENTRY_LABEL,
@@ -160,5 +162,27 @@ describe('quick-add phone-match confirm helpers', () => {
       .toEqual({ confirmDuplicate: true, confirmMatchedAccountId: 'acct-1' });
     expect(quickAddConfirmFlags({ code: 'PHONE_MATCH_CONFIRM' }, { separateAccount: true }))
       .toEqual({ forceNewAccount: true, ignorePhoneMatch: true });
+  });
+});
+
+describe('multi-property booking helpers', () => {
+  const HOME = { id: 'p-home', is_primary: true, address_line1: '6176 46th St East' };
+  const RENTAL = { id: 'p-rental', is_primary: false, address_line1: '4410 Palma Sola Blvd' };
+
+  it('defaults the picker to the primary property, else the first, else nothing', () => {
+    expect(defaultBookingPropertyId([RENTAL, HOME])).toBe('p-home');
+    expect(defaultBookingPropertyId([RENTAL])).toBe('p-rental');
+    expect(defaultBookingPropertyId([])).toBe('');
+  });
+
+  it('offers property-linked quotes only at their own property and unlinked quotes everywhere', () => {
+    const forHome = { id: 1, propertyId: 'p-home' };
+    const forRental = { id: 2, propertyId: 'p-rental' };
+    const anywhere = { id: 3, propertyId: null };
+    const all = [forHome, forRental, anywhere];
+    expect(filterScheduleEstimatesForProperty(all, 'p-rental')).toEqual([forRental, anywhere]);
+    expect(filterScheduleEstimatesForProperty(all, 'p-home')).toEqual([forHome, anywhere]);
+    // No picker (single-property customer / lane dark) → nothing is hidden.
+    expect(filterScheduleEstimatesForProperty(all, '')).toEqual(all);
   });
 });

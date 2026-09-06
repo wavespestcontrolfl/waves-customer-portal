@@ -36,6 +36,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
+import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -411,6 +412,29 @@ export function quickAddConfirmFlags(conflict, { separateAccount = false } = {})
     : { confirmAttach: true, confirmMatchedAccountId: conflict?.match?.accountId };
 }
 
+// Multi-property booking helpers (pure — unit-tested).
+// The picker defaults to the customer's PRIMARY property (customers.address_*
+// mirrors it, so this is the address every other reader already assumes).
+export function defaultBookingPropertyId(properties = []) {
+  const primary = properties.find((p) => p && p.is_primary) || properties[0];
+  return primary ? String(primary.id) : '';
+}
+
+// Estimates quoted for a specific property are offered only when THAT
+// property is the one being booked; a quote with no property link stays
+// bookable at every address (the server refuses a mismatch either way).
+export function filterScheduleEstimatesForProperty(estimates = [], propertyId) {
+  if (!propertyId) return estimates;
+  return estimates.filter((e) => !e?.propertyId || String(e.propertyId) === String(propertyId));
+}
+
+export function formatBookingPropertyAddress(property) {
+  if (!property) return '';
+  const street = [property.address_line1, property.address_line2].filter(Boolean).join(', ');
+  const locality = [property.city, [property.state, property.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return { street, locality };
+}
+
 export function buildFindTimeRequestBody({
   customerId,
   serviceName,
@@ -460,6 +484,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // In-flight guard: a double-click on a confirm action must not pass the
   // same confirmation twice and insert two profiles.
   const [quickAddSubmitting, setQuickAddSubmitting] = useState(false);
+  // Service-address picker for a multi-property customer. `bookingProperties`
+  // is the customer's active customer_properties list; the picker renders
+  // only when the address lane is enabled server-side
+  // (canChangeAppointmentAddress — GATE_EDIT_APPT_ADDRESS) AND there is a
+  // real choice (2+ properties). Otherwise the server's sole-property anchor
+  // applies exactly as before. `propertyRefresh` re-reads the list after a
+  // quick-add "Attach as additional property" on the same customer.
+  const [bookingProperties, setBookingProperties] = useState([]);
+  const [bookingPropertyState, setBookingPropertyState] = useState('idle'); // idle | loading | ready | hidden | error
+  const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  const [propertyRefresh, setPropertyRefresh] = useState(0);
+  const propertyPickerActive = bookingPropertyState === 'ready';
+  const selectedBookingProperty = propertyPickerActive
+    ? bookingProperties.find((p) => String(p.id) === String(selectedPropertyId)) || null
+    : null;
   // A pending confirmation is only valid for the phone/address it was shown
   // for — editing either invalidates it.
   const setQuickAddField = (k, v) => {
@@ -606,6 +645,51 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => { cancelled = true; };
     // Deliberately keyed on the customer and default estimate only.
   }, [selectedCustomer?.id, defaultEstimateId]);
+
+  useEffect(() => {
+    const customerId = selectedCustomer?.id;
+    setBookingProperties([]);
+    setSelectedPropertyId('');
+    if (!customerId) { setBookingPropertyState('idle'); return undefined; }
+    let cancelled = false;
+    setBookingPropertyState('loading');
+    adminFetch(`/admin/customers/${customerId}/properties?context=appointment_address`)
+      .then((data) => {
+        if (cancelled) return;
+        const list = Array.isArray(data?.properties) ? data.properties : [];
+        setBookingProperties(list);
+        if (data?.canChangeAppointmentAddress === true && list.length > 1) {
+          setSelectedPropertyId(defaultBookingPropertyId(list));
+          setBookingPropertyState('ready');
+        } else {
+          setBookingPropertyState('hidden');
+        }
+      })
+      .catch(() => { if (!cancelled) setBookingPropertyState('error'); });
+    return () => { cancelled = true; };
+  }, [selectedCustomer?.id, propertyRefresh]);
+
+  // Opened to book a quote that was priced for one specific property: land the
+  // picker on that property so the estimate stays selectable.
+  useEffect(() => {
+    if (!propertyPickerActive || !linkedEstimate?.propertyId) return;
+    const match = bookingProperties.find((p) => String(p.id) === String(linkedEstimate.propertyId));
+    if (match && String(match.id) !== String(selectedPropertyId)) setSelectedPropertyId(String(match.id));
+    // Runs when the link or the picker readiness changes — never on the
+    // operator's own picker change (that path clears a mismatched link).
+  }, [propertyPickerActive, linkedEstimate?.propertyId]);
+
+  const chooseBookingProperty = (propertyId) => {
+    setSelectedPropertyId(String(propertyId));
+    // A quote priced for another property cannot ride this booking.
+    if (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId)) {
+      setLinkedEstimate(null);
+    }
+  };
+  const visibleScheduleEstimates = filterScheduleEstimatesForProperty(
+    scheduleEstimates,
+    propertyPickerActive ? selectedPropertyId : '',
+  );
 
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
@@ -1126,6 +1210,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (r.customer) {
         setQuickAddConflict(null);
         selectCustomer(r.customer);
+        setPropertyRefresh((n) => n + 1);
         setShowQuickAdd(false);
         setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
       }
@@ -1665,6 +1750,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // and then links, or — for estimate shapes that can't be auto-
           // accepted — books without the link and returns a warning.
           sourceEstimateId: linkedEstimate?.id || undefined,
+          // Only sent when the picker is live — otherwise the server's
+          // sole-property anchor decides, exactly as before this picker.
+          propertyId: propertyPickerActive && selectedPropertyId ? selectedPropertyId : undefined,
           urgency: 'routine',
           notes: customerNotes || undefined,
           internalNotes: internalNotes || undefined,
@@ -2186,6 +2274,54 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <button onClick={() => { setSelectedCustomer(null); setCustomerSearch(''); }} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
             </div>
           )}
+          {selectedCustomer && propertyPickerActive && (
+            <div role="radiogroup" aria-label="Service address" style={{ margin: '14px 0 0' }} data-testid="booking-property-picker">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ ...labelStyle, marginBottom: 0 }}>Service address</span>
+                <span style={{ fontSize: 11, color: D.muted }}>{bookingProperties.length} saved</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {bookingProperties.map((property) => {
+                  const selected = String(property.id) === String(selectedPropertyId);
+                  const address = formatBookingPropertyAddress(property);
+                  const chip = propertyRelationshipChip(property);
+                  return (
+                    <label
+                      key={property.id}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 12, padding: 12, borderRadius: 8, cursor: 'pointer',
+                        border: selected ? `2px solid ${D.text}` : `1px solid ${D.border}`,
+                        background: selected ? D.bg : D.card, minHeight: 44, boxSizing: 'border-box',
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="booking-property"
+                        value={String(property.id)}
+                        checked={selected}
+                        onChange={() => chooseBookingProperty(property.id)}
+                        aria-label={`Service address ${address.street}`}
+                        style={{ width: 18, height: 18, margin: 0, accentColor: D.text, flexShrink: 0 }}
+                      />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, color: D.text, fontWeight: 500 }}>{address.street}</div>
+                        <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{address.locality}</div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                        {chip && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, background: '#F4F4F5', color: '#52525B', fontWeight: 500 }}>{chip}</span>}
+                        {property.label && property.label !== 'Primary' && <span style={{ fontSize: 11, color: D.muted }}>{property.label}</span>}
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {selectedCustomer && bookingPropertyState === 'error' && (
+            <div role="alert" style={{ fontSize: 12, color: D.muted, marginTop: 10 }}>
+              Saved addresses could not be loaded — this appointment books to the customer's primary address.
+            </div>
+          )}
         </div>
 
         {/* Section 2: Services — invoice-style line items. Service rows
@@ -2223,13 +2359,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     style={inputStyle}
                   >
                     <option value="">{MANUAL_SERVICE_ENTRY_LABEL}</option>
-                    {scheduleEstimates.map((estimate) => (
+                    {visibleScheduleEstimates.map((estimate) => (
                       <option key={estimate.id} value={String(estimate.id)}>
                         {formatScheduleEstimateLabel(estimate)}
                         {estimate.linkedAppointment ? ' (already linked)' : ''}
                       </option>
                     ))}
                   </select>
+                  {selectedBookingProperty && visibleScheduleEstimates.length !== scheduleEstimates.length && (
+                    <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                      Showing estimates for {formatBookingPropertyAddress(selectedBookingProperty).street} only.
+                    </div>
+                  )}
                   {linkedEstimate && (
                     <>
                       {/* Acceptance status — spells out whether the customer
