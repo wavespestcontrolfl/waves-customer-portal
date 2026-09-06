@@ -309,3 +309,19 @@ describe('versus + milestone redesign (2026-09-06)', () => {
     }
   });
 });
+
+describe('versus card copy budget (the whole pair bank must fit)', () => {
+  const Studio = require('../services/social-content-studio');
+
+  test('no pair in PEST_VERSUS_PAIRS is elided on the square card, the GBP card, or the photo overlay', () => {
+    for (const pair of Studio.PEST_VERSUS_PAIRS) {
+      const input = { city: 'Lakewood Ranch', service: pair.service, left: pair.left, right: pair.right, verdict: pair.verdict };
+      for (const platform of ['square', 'gbp']) {
+        const svg = Renderer.renderSocialCardSvg({ variant: 'versus', ...input, platform });
+        expect({ pair: pair.key, platform, elided: svg.includes('...') }).toEqual({ pair: pair.key, platform, elided: false });
+      }
+      const overlay = Renderer.renderPhotoOverlaySvg({ variant: 'photo_versus', ...input, platform: 'square' });
+      expect({ pair: pair.key, overlay: overlay.includes('...') }).toEqual({ pair: pair.key, overlay: false });
+    }
+  });
+});

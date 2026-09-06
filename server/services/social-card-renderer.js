@@ -405,8 +405,10 @@ function renderVersusSvg(input = {}, logoDataUri = null) {
   // blue for the left pest, gold for the right — with the VS badge riding
   // the seam. Everything is sized from the tile, so three short points read
   // as a full card instead of a header over empty space.
+  // Up to three lines: the bank's verdicts run to ~90 chars and the tiles
+  // above give up height (the type-step loop below) rather than elide.
   const { size: verdictSize, lines: verdictLines } = fitText(
-    verdict, box.padR - box.padL - 200, [58, 50, 42].map((s) => Math.round(s * S)), 2
+    verdict, box.padR - box.padL - 200, [58, 50, 42].map((s) => Math.round(s * S)), 3
   );
   const verdictBlockH = verdictLines.length ? Math.round(verdictLines.length * verdictSize * 1.18) : 0;
   const verdictBottom = box.panelY + box.panelH - 96;
