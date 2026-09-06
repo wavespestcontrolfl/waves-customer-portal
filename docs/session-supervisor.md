@@ -65,7 +65,9 @@ The worker waits while the original process exists or another process has its
 transcript open. Claude's native agent listing also detects live sessions.
 PID start times distinguish a restarted process from a reused PID. Worktree,
 origin, branch, and pushed HEAD must still match before a resume. An ambiguous
-interrupted launch parks instead of launching a possible duplicate.
+interrupted launch fences the whole queue until inspected and explicitly retried.
+After a supervisor crash, the next tick terminates any recorded surviving worker
+before another job can launch; the interrupted job requires an explicit retry.
 
 ## See progress, pause, and recover
 
@@ -102,7 +104,9 @@ Only one resumed model process runs at a time. A run lasts at most 30 minutes,
 with at least five minutes between starts, at most three starts for unchanged
 PR evidence and twelve starts per job per rolling day. A permission denial,
 owner question, quota error, invalid final result, or failed CLI invocation
-parks the job. These are conservative limits, not guarantees about token use.
+parks the job. Reaching a resume limit keeps watching: new PR evidence resets
+the unchanged-evidence count, and rolling daily slots become available as they
+expire. These are conservative limits, not guarantees about token use.
 The two CLI commands are `codex exec --cd WORKTREE resume SESSION_UUID` and
 `claude -p --resume SESSION_UUID`; both return a structured disposition.
 No provider switching, model override, or new approval authority is introduced.

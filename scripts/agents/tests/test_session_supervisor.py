@@ -107,6 +107,47 @@ class SupervisorTests(unittest.TestCase):
             self.job['runs'] = [1000] * supervisor.MAX_DAILY_RUNS
             self.assertEqual(supervisor.inspect_job(self.job, 1061)['reason'], 'resume_limit')
 
+    def test_limits_keep_observing_and_recover_on_new_evidence_or_daily_expiry(self):
+        self.job['attempts'] = supervisor.MAX_ATTEMPTS
+        self.store()
+        with self.inspection(), patch.object(supervisor, 'resume') as resume:
+            supervisor.tick(self.root, execute=True)
+            limited = supervisor.read_jobs(self.root)[self.key]
+            self.assertEqual(limited['status'], 'watching')
+            self.assertEqual(limited['reason'], 'resume_limit')
+            self.fresh['fingerprint'] = 'late-review'
+            supervisor.tick(self.root, execute=True)
+            changed = supervisor.read_jobs(self.root)[self.key]
+            self.assertEqual(changed['attempts'], 0)
+            self.assertEqual(changed['fingerprint'], 'late-review')
+            resume.assert_not_called()
+            changed.update({'runs': [1000] * supervisor.MAX_DAILY_RUNS, 'changed_at': 1})
+            self.assertEqual(supervisor.inspect_job(changed, 1100)['reason'], 'resume_limit')
+            self.assertEqual(supervisor.inspect_job(changed, 87500)['action'], 'resume')
+
+    def test_orphan_in_paused_job_fences_other_jobs_and_is_reaped(self):
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                   start_new_session=True)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        self.job.update({'status': 'paused', 'worker_pid': process.pid,
+                         'worker_stamp': supervisor.process_stamp(process.pid)})
+        self.store()
+        waiter = threading.Thread(target=process.wait)
+        waiter.start()
+        with patch.object(supervisor, 'inspect_job', side_effect=AssertionError('queue launched')):
+            supervisor.tick(self.root, execute=False)
+            self.assertIsNone(process.poll())
+            supervisor.tick(self.root, execute=True)
+        waiter.join(timeout=3)
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(supervisor.read_jobs(self.root)[self.key]['reason'], 'orphaned_worker')
+
+    def test_unknown_launch_fences_queue_even_after_pause(self):
+        self.job.update({'status': 'paused', 'launch_pending': True})
+        self.store()
+        with patch.object(supervisor, 'inspect_job', side_effect=AssertionError('queue launched')):
+            supervisor.tick(self.root, execute=True)
+
     def test_pending_without_a_result_or_draft_never_spawns_model(self):
         with self.inspection():
             self.fresh['ready'] = False

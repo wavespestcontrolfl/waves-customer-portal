@@ -300,7 +300,8 @@ def resume(root, key, job):
                                    start_new_session=True)
         try:
             if not update_job(root, key, job['revision'], {'status': 'running', 'worker_pid': process.pid,
-                                                          'worker_stamp': process_stamp(process.pid)}):
+                                                          'worker_stamp': process_stamp(process.pid),
+                                                          'launch_pending': False}):
                 return {'state': 'blocked', 'reason': 'owner_decision'}
             process.stdin.write(prompt.encode())
             process.stdin.close()
@@ -351,8 +352,35 @@ def inspect_job(job, now):
     if not fresh['ready'] or now - job['changed_at'] < QUIET_SECONDS or now - job['last_run'] < RETRY_SECONDS:
         return {'action': 'skip', 'reason': 'waiting'}
     if job['attempts'] >= MAX_ATTEMPTS or len([r for r in job['runs'] if now - r < 86400]) >= MAX_DAILY_RUNS:
-        return {'action': 'block', 'reason': 'resume_limit'}
+        return {'action': 'skip', 'reason': 'resume_limit'}
     return {'action': 'resume', 'reason': 'pr_ready'}
+
+
+def reconcile_workers(root, jobs, execute):
+    # Holding the tick lock means no live supervisor can own these workers.
+    # Check every record, including paused jobs, before considering ANY launch.
+    clear = True
+    for key, job in jobs.items():
+        pid, stamp = job.get('worker_pid'), job.get('worker_stamp')
+        if stamp and process_stamp(pid) == stamp:
+            clear = False
+            print(json.dumps({'job': key, 'action': 'reap', 'reason': 'orphaned_worker'}), flush=True)
+            if not execute:
+                continue
+            # Only a recorded child that still leads its own session/group.
+            if os.getpgid(pid) != pid or os.getsid(pid) != pid:
+                raise RuntimeError('Worker identity is ambiguous; queue remains fenced')
+            os.killpg(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 10
+            while process_stamp(pid) == stamp and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if process_stamp(pid) == stamp:
+                os.killpg(pid, signal.SIGKILL)
+            update_job(root, key, job['revision'], {'status': 'blocked', 'reason': 'orphaned_worker'})
+        elif job.get('launch_pending') or job['status'] == 'launching':
+            clear = False
+            print(json.dumps({'job': key, 'action': 'block', 'reason': 'interrupted_launch'}), flush=True)
+    return clear
 
 
 def tick(root, execute=False):
@@ -362,6 +390,8 @@ def tick(root, execute=False):
             return
         with locked(root) if execute else nullcontext():
             jobs = read_jobs(root)
+        if not reconcile_workers(root, jobs, execute):
+            return
         for key, job in jobs.items():
             now = time.time()
             try:
@@ -382,7 +412,8 @@ def tick(root, execute=False):
             if decision['action'] != 'resume':
                 update_job(root, key, job['revision'], changes)
                 continue
-            changes.update({'status': 'launching', 'last_run': now, 'attempts': job['attempts'] + 1,
+            changes.update({'status': 'launching', 'launch_pending': True, 'worker_pid': None,
+                            'worker_stamp': None, 'last_run': now, 'attempts': job['attempts'] + 1,
                             'runs': [r for r in job['runs'] if now - r < 86400] + [now]})
             if not update_job(root, key, job['revision'], changes):
                 continue
@@ -394,7 +425,8 @@ def tick(root, execute=False):
                     result['reason'] = 'owner_decision'
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
                 status, result = 'blocked', {'reason': 'invalid_or_failed_resume'}
-            update_job(root, key, job['revision'], {'status': status, 'reason': result['reason']})
+            update_job(root, key, job['revision'], {'status': status, 'reason': result['reason'],
+                                                    'launch_pending': False})
             break  # One model process per tick, bounded and visible.
 
 
@@ -410,7 +442,7 @@ def control(root, args):
             job.update({'status': {'pause': 'paused', 'retry': 'watching', 'finish': 'complete'}[args.action],
                         'revision': str(uuid.uuid4()), 'reason': 'owner_' + args.action})
             if args.action == 'retry':
-                job.update({'attempts': 0, 'last_run': 0})
+                job.update({'attempts': 0, 'last_run': 0, 'launch_pending': False})
             atomic_json(root / 'jobs.json', jobs)
     print(json.dumps({'job': args.job, 'action': args.action, 'execute': args.execute}))
 
@@ -425,6 +457,7 @@ def stop(root, execute=False):
             atomic_json(root / 'jobs.json', jobs)
         # Let the tick observe its revoked revision and reap its own child.
         with locked(root, 'tick'):
+            reconcile_workers(root, read_jobs(root), True)
             command(['launchctl', 'bootout', f'gui/{os.getuid()}/{LABEL}'])
     print(json.dumps({'action': 'stop', 'execute': execute}))
 
