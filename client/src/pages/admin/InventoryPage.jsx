@@ -2826,7 +2826,7 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
     setReceivingId(request.id);
     try {
       const draft = receiveDrafts[request.id] || {};
-      const result = await adminFetch(`/admin/inventory/restock-requests/${request.id}/action`, {
+      await adminFetch(`/admin/inventory/restock-requests/${request.id}/action`, {
         method: "POST",
         body: JSON.stringify({
           action,
@@ -2839,14 +2839,7 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
         }),
       });
       if (action === "receive") {
-        const recheck = result.readinessRecheck;
-        if (recheck?.alertStatus === "resolved") {
-          showToast(`Stock received. Readiness alert resolved (${recheck.resolvedAlerts || 0}).`);
-        } else if (recheck?.blocked != null) {
-          showToast(`Stock received. Readiness rechecked: ${recheck.blocked} blocked remain.`);
-        } else {
-          showToast("Stock received.");
-        }
+        showToast("Stock received.");
       } else {
         showToast(action === "mark_ordered" ? "Marked ordered" : "Request cancelled");
       }
@@ -2865,7 +2858,7 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
         <div>
           <h3 style={{ margin: 0, color: D.heading }}>Restock requests</h3>
           <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
-            Product requests created from readiness and inventory exceptions.
+            Product requests for inventory needs.
           </p>
         </div>
         <select

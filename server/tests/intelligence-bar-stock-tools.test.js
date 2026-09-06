@@ -17,14 +17,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-// Intercept the lazy require in update_restock_request's receive path so the
-// test never loads the full admin-inventory route module.
-jest.mock('../routes/admin-inventory', () => ({
-  syncLawnReadinessAfterRestock: jest.fn(async () => ({ alertStatus: 'resolved' })),
-}));
-
 const dbMock = require('../models/db');
-const adminInventoryMock = require('../routes/admin-inventory');
 const { executeProcurementTool } = require('../services/intelligence-bar/procurement-tools');
 
 function makeRecordingDb(seed = {}) {
@@ -84,7 +77,6 @@ const UNTRACKED_PRODUCT = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  adminInventoryMock.syncLawnReadinessAfterRestock.mockResolvedValue({ alertStatus: 'resolved' });
 });
 
 describe('adjust_stock', () => {
@@ -319,10 +311,9 @@ describe('update_restock_request', () => {
     });
     expect(result.error).toMatch(/already received/);
     expect(mutations).toEqual([]);
-    expect(adminInventoryMock.syncLawnReadinessAfterRestock).not.toHaveBeenCalled();
   });
 
-  test('confirmed receive adds stock, logs a restock movement, closes the request, and runs the readiness recheck', async () => {
+  test('confirmed receive adds stock, logs a restock movement, closes the request', async () => {
     const mutations = useDb({
       products_catalog: [TRACKED_PRODUCT],
       product_restock_requests: [OPEN_REQUEST],
@@ -348,8 +339,8 @@ describe('update_restock_request', () => {
     const requestUpdate = mutations.find(m => m.table === 'product_restock_requests' && m.op === 'update');
     expect(requestUpdate.args[0]).toMatchObject({ status: 'received' });
 
-    expect(adminInventoryMock.syncLawnReadinessAfterRestock).toHaveBeenCalledTimes(1);
-    expect(result.readiness_recheck).toEqual({ alertStatus: 'resolved' });
+    expect(result).not.toHaveProperty('readiness_recheck');
+    expect(mutations.some(m => m.table === 'admin_alerts')).toBe(false);
   });
 
   test('mark_ordered and cancel only touch the request row', async () => {
@@ -364,6 +355,5 @@ describe('update_restock_request', () => {
     expect(result.status).toBe('ordered');
     expect(mutations).toHaveLength(1);
     expect(mutations[0]).toMatchObject({ table: 'product_restock_requests', op: 'update' });
-    expect(adminInventoryMock.syncLawnReadinessAfterRestock).not.toHaveBeenCalled();
   });
 });

@@ -59,8 +59,12 @@ function installDb({ existing = null } = {}) {
       whereIn: jest.fn(() => builder),
       first: jest.fn(async () => existing),
       insert: jest.fn((values) => {
-        inserts.push(values);
+        // The technicians insert is a single row; the capabilities seed on
+        // the same trx is an array of five and is not what these tests count.
+        if (!Array.isArray(values)) inserts.push(values);
         return {
+          // register seeds technician_capabilities on the same trx
+          onConflict: jest.fn(() => ({ ignore: jest.fn(async () => undefined) })),
           returning: jest.fn(async () => [{
             id: 'tech-new',
             name: values.name,

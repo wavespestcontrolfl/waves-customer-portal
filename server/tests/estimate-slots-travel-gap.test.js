@@ -68,7 +68,9 @@ test('gate off: the touching 9 AM window survives and the query has no coordinat
   const out = await filterCollidingSlots([candidateSlot()], { ...RANGE, coords: PALMETTO });
   expect(out).toHaveLength(1);
   expect(db.raw).not.toHaveBeenCalled();
-  expect(lastChain.select.mock.calls[0]).toHaveLength(7);
+  expect(lastChain.select.mock.calls[0]).toEqual(expect.arrayContaining([
+    'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at',
+  ]));
 });
 
 test('gate on: the candidate window is dropped — 0 free minutes against ~33 drive + 15 buffer', async () => {

@@ -168,7 +168,7 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
             <span>
               <span className="wpk-best-when">{day.fullDate} {'·'} {slot.start_label}</span>
               <span className="wpk-best-why">
-                {nearby ? "We're servicing a property close to you that day" : 'Our soonest opening'}
+                {nearby ? "We're servicing a property close to you that day" : 'Available appointment'}
                 {/* Rain marker (GATE_BOOKING_RAIN_CHIPS): appended only ≥40% */}
                 {Number.isFinite(day.rainChance ?? slot.rainChance) && (day.rainChance ?? slot.rainChance) >= 40
                   ? ` · ${Math.round(day.rainChance ?? slot.rainChance)}% rain`

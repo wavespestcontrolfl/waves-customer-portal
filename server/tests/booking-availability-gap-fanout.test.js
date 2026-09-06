@@ -147,8 +147,41 @@ describe('buildBookingAvailability — gap fan-out', () => {
       total_feasible: 1,
     });
     const availability = await build();
-    // Display cap is 4 slots/day; chronological — the legacy path offered
-    // exactly one (08:00).
-    expect(startTimes(availability)).toEqual(['08:00', '09:00', '10:00', '11:00']);
+    // Keep the full day so a search result is also valid at confirmation.
+    expect(startTimes(availability)).toEqual(['08:00', '09:00', '10:00', '11:00', '13:00', '14:00', '15:00']);
   });
+});
+
+test('an afternoon search result remains in the unfiltered confirmation-day list', async () => {
+  wireDayCapCounts([]);
+  listOccupiedWindows.mockResolvedValue([]);
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot('08:00', { latest_start_min: 16 * 60 })] });
+  const opts = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date() };
+  const searched = await buildBookingAvailability({ ...opts, timeOfDay: 'afternoon' });
+  const confirmation = await buildBookingAvailability(opts);
+  expect(startTimes(searched)).toContain('13:00');
+  for (const time of startTimes(searched)) expect(startTimes(confirmation)).toContain(time);
+});
+
+test.each(['self-booking', 'voice'])('a same-day %s move excludes itself from the day cap', async origin => {
+  listOccupiedWindows.mockResolvedValue([]);
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot('13:00', { latest_start_min: 16 * 60 })] });
+  const subquery = { select() { return this; }, from() { return this; }, as() { return this; }, whereNot: jest.fn().mockReturnThis() };
+  const voiceQuery = { where: () => voiceQuery, whereNotIn: jest.fn().mockReturnThis(), whereBetween: () => voiceQuery,
+    select: () => voiceQuery, count: () => voiceQuery, groupBy: () => voiceQuery,
+    then: resolve => resolve(origin === 'voice' ? [{ scheduled_date: D, count: voiceQuery.whereNotIn.mock.calls.some(([key]) => key === 'id') ? 2 : 3 }] : []),
+  };
+  db.raw = sql => sql;
+  db.mockImplementation(table => {
+    if (table === 'scheduled_services') return voiceQuery;
+    table.call(subquery);
+    const q = { whereBetween: () => q, select: () => q, count: () => q, groupBy: () => q,
+      then: resolve => resolve(origin === 'self-booking' ? [{ date: D, count: subquery.whereNot.mock.calls.some(([key]) => key === 'id') ? 2 : 3 }] : []),
+    };
+    return q;
+  });
+  const opts = { lat: 27.4, lng: -82.4, duration: 60, rangeFrom: D, rangeTo: D, config: CONFIG, today: new Date() };
+  expect((await buildBookingAvailability(opts)).days).toHaveLength(0);
+  const moved = await buildBookingAvailability({ ...opts, excludeServiceIds: ['moving-visit'], excludeSelfBookingId: origin === 'self-booking' ? 'moving-booking' : null });
+  expect(startTimes(moved)).toContain('13:00');
 });

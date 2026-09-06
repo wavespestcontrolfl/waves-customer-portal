@@ -156,4 +156,20 @@ function inheritReferenceUnit(row, reference) {
   return { ...row, service_address_line2: reference.service_address_line2 || refUnit };
 }
 
-module.exports = { stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql, sqlZip5, premiseStampConflicts, inheritReferenceUnit };
+// Effective destination for tools that already loaded both records. Match the
+// SQL readers: a divergent stamp must never borrow the primary home's unit.
+function effectiveServiceAddress(service = {}, customer = {}) {
+  const { streetEmbeddedUnitKey } = require('./customer-properties');
+  const diverges = stampedAddressDiverges({ ...service,
+    customer_address_line1: customer.address_line1, customer_city: customer.city, customer_zip: customer.zip });
+  const ownUnit = service.service_address_line1 && streetEmbeddedUnitKey(service.service_address_line1);
+  return {
+    line1: service.service_address_line1 ?? customer.address_line1,
+    line2: diverges || ownUnit ? service.service_address_line2 : (service.service_address_line2 ?? customer.address_line2),
+    city: service.service_address_city ?? customer.city,
+    state: service.service_address_state ?? customer.state,
+    zip: service.service_address_zip ?? customer.zip,
+  };
+}
+
+module.exports = { effectiveServiceAddress, stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql, sqlZip5, premiseStampConflicts, inheritReferenceUnit };

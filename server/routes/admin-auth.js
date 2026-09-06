@@ -25,6 +25,7 @@ const {
 const { validDateOnly } = require('../utils/date-only');
 const { canonicalStaffEmail } = require('../utils/staff-identity');
 const { employmentPatch } = require('../services/technician-eligibility');
+const { seedNewHireCapabilities } = require('../services/technician-capabilities');
 
 const RESET_TOKEN_BYTES = 32;
 const RESET_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -475,6 +476,9 @@ async function register(req, res, next) {
         fl_applicator_license: applicatorLicense,
         license_expiry: licenseExpiry,
       }).returning('*');
+      // Same start as a Team-tab hire: every category pending review until
+      // the Capabilities editor marks it Qualified.
+      await seedNewHireCapabilities(trx, tech.id);
       return { tech };
     });
     if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });

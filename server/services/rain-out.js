@@ -18,6 +18,7 @@
  * tech doesn't reschedule into tomorrow's 65% thunderstorms.
  */
 
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
@@ -150,15 +151,12 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
 const CUSTOM_SMS_MAX_SEGMENTS = 2;
 
 // Send-layer blockers the note guards can't see because they live in the
-// TEMPLATE's static text (an admin-saved emoji, a broken-render marker
-// like '1970'): discovering them AFTER the move strands a moved visit with
+// TEMPLATE's static text (a broken-render marker like '1970'): discovering them AFTER the move strands a moved visit with
 // no SMS, so commit() runs the send layer's own checks on the assembled
 // body pre-move (codex r9 P2).
 function customBodySendBlocked(body) {
   const { validateOutbound } = require('./sms-guard');
-  if (!validateOutbound(body).ok) return true;
-  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
-  return findEmoji(body).found;
+  return !validateOutbound(body).ok;
 }
 
 /**
@@ -313,12 +311,6 @@ function sanitizeCustomerNote(raw) {
     || containsBareHost(gsm) || containsBareHost(canonical)) {
     return { error: 'note_link_blocked' };
   }
-  // Same emoji rule sendCustomerMessage enforces (validators/voice.js) —
-  // checked HERE so an emoji note rejects BEFORE the move commits, instead
-  // of committing the reschedule and then silently blocking the SMS with
-  // EMOJI_FOR_CUSTOMER (codex PR P2).
-  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
-  if (findEmoji(gsm).found) return { error: 'note_emoji_blocked' };
   // The outbound sms-guard rejects bodies containing unsubstituted {vars},
   // "undefined"/"null"/"1970" etc. AFTER assembly — a note like "Gate code
   // 1970 still works" would commit the move and then lose the SMS (codex
@@ -706,7 +698,7 @@ async function loadOccupancy({
   // Same status exclusions the rebooker enforces at its commit gate. The
   // generic admin slot-check passes the admin set (skipped / no_show freed)
   // so its hints agree with the save-side probe (window-rules.js).
-  excludeStatuses = ['cancelled', 'completed'],
+  excludeStatuses = [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
 } = {}) {
   const { listOccupiedWindows } = require('./scheduling/occupancy');
   const rows = await listOccupiedWindows({

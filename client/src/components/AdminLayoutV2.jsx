@@ -1,3 +1,4 @@
+import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
 /*
  * AdminLayoutV2 — Square Dashboard-inspired light admin shell.
  *
@@ -161,6 +162,7 @@ export default function AdminLayoutV2() {
   const sidebarVisible = !isMobile || sidebarOpen;
 
   return (
+    <IntelligenceBarPageDataProvider>
     <div
       className="admin-shell-v2"
       style={{
@@ -679,5 +681,6 @@ export default function AdminLayoutV2() {
       {/* Global ⌘K palette */}
       <GlobalCommandPalette ref={paletteRef} />
     </div>
+    </IntelligenceBarPageDataProvider>
   );
 }
