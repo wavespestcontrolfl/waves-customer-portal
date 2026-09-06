@@ -843,7 +843,8 @@ const SCREEN_RETRY_STYLE = { photo: 'illustration', illustration: 'photo', carto
 async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, captions = [], avoidDepicting = [] }) {
   const imageGenerator = require('../content/image-generator');
   const { screenGeneratedImage } = require('../content/hero-alt-vision');
-  let plan = imageGenerator.planFor({ slug, mode, index, captions });
+  const subject = [title, keyword, topic].filter(Boolean).join(' ');
+  let plan = imageGenerator.planFor({ slug, mode, index, captions, subject });
   let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     let gen;
@@ -873,7 +874,7 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     if (screen.ok) return last;
     if (attempt === 0) {
       logger.warn(`[astro-publisher] ${mode} image for ${slug} failed the text/logo screen (${screen.reasons.join('; ')}) — regenerating once as ${SCREEN_RETRY_STYLE[plan.style] || 'illustration'}`);
-      plan = imageGenerator.planFor({ slug, mode, index: index + 1000, captions, style: SCREEN_RETRY_STYLE[plan.style] || 'illustration' });
+      plan = imageGenerator.planFor({ slug, mode, index: index + 1000, captions, subject, style: SCREEN_RETRY_STYLE[plan.style] || 'illustration' });
     }
   }
   logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${last.screen.reasons.join('; ')}) — shipping with a reviewer note`);
@@ -1255,7 +1256,9 @@ async function publishAstro(postId) {
         throw e;
       }
     } else if (!post.featured_image_url) {
-      heroImage = await generateHeroBuffer(post);
+      // The resolved slug, not post.slug: a calendar row without one would
+      // otherwise plan every hero from the same 'post' seed (Codex r1 P2).
+      heroImage = await generateHeroBuffer({ ...post, slug });
     }
     // Normalize any committed hero to a resized WebP. Generated heroes are
     // ~3-5MB PNGs and the layout renders the hero eager + fetchpriority=high

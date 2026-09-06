@@ -263,6 +263,13 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('the image lane exposes the Nano Banana Pro selector and reports it as the chain\'s second leg (Codex r1 P2 on #3964)', () => {
+    expect(sb.SELECTORS.find((s) => s.key === 'GEMINI_IMAGE_PRO')).toMatchObject({ env: 'MODEL_GEMINI_IMAGE_PRO', accepts: { providers: ['gemini'], cap: 'image' } });
+    const lane = sb.getSwitchboard().lanes.find((l) => l.id === 'image_gen');
+    expect(lane.fallback.model).toBe(MODELS.GEMINI_IMAGE_PRO);
+    expect(lane.note).toMatch(/gpt-image-2 → GEMINI_IMAGE_PRO → gpt-image-1\.5/);
+  });
+
   it('locks the lanes a generic picker must not move', () => {
     const { lanes, selectors } = sb.getSwitchboard();
     for (const id of ['call_extraction', 'transcription', 'embeddings', 'image_gen', 'mentions_prober']) {

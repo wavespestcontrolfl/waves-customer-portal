@@ -35,10 +35,44 @@ describe('planFor — deterministic variation per post and slot', () => {
     expect(styles.size).toBeGreaterThanOrEqual(2);
   });
 
-  test('infographic needs captions — without them it degrades to illustration; a forced style is honored', () => {
-    expect(gen.planFor({ slug: SLUG, mode: 'blog-body', index: 3, style: 'infographic' }).style).toBe('illustration');
+  test('infographic needs captions — without them it degrades to the post\'s unused fourth style; a forced style is honored', () => {
+    const degraded = gen.planFor({ slug: SLUG, mode: 'blog-body', index: 1, style: 'infographic' }).style;
+    expect(degraded).not.toBe('infographic');
+    expect(degraded).toBe(gen.stylePermutation(SLUG)[3]);
     expect(gen.planFor({ slug: SLUG, mode: 'blog-body', index: 3, style: 'infographic', captions: ['1 OFF'] }).style).toBe('infographic');
     expect(gen.planFor({ slug: SLUG, mode: 'blog-hero', index: 0, style: 'cartoon' }).style).toBe('cartoon');
+  });
+
+  test('hero, body-1 and body-2 never share a style within one post (Codex r1 P2 on #3964)', () => {
+    const slugs = Array.from({ length: 40 }, (_, i) => `post-${i}`);
+    let photoHeroes = 0;
+    for (const slug of slugs) {
+      const styles = [
+        gen.planFor({ slug, mode: 'blog-hero', index: 0 }).style,
+        gen.planFor({ slug, mode: 'blog-body', index: 1, captions: ['Step one'] }).style,
+        gen.planFor({ slug, mode: 'blog-body', index: 2, captions: ['Step two'] }).style,
+      ];
+      expect(new Set(styles).size).toBe(3);
+      // Without captions an infographic slot still lands on a style the other two slots do not use.
+      const noCaptions = [gen.planFor({ slug, mode: 'blog-hero', index: 0 }).style, gen.planFor({ slug, mode: 'blog-body', index: 1 }).style, gen.planFor({ slug, mode: 'blog-body', index: 2 }).style];
+      expect(new Set(noCaptions).size).toBe(3);
+      if (styles[0] === 'photo') photoHeroes += 1;
+    }
+    expect(photoHeroes).toBeGreaterThan(20); // the hero still leans photo for search thumbnails
+  });
+
+  test('the setting pool follows the subject: turf posts stay outdoors, equipment posts may use the garage, indoor pests may look out from the kitchen; no setting carries a time of day', () => {
+    const all = Object.values(gen.SETTINGS).flat();
+    for (const setting of all) expect(setting).not.toMatch(/\b(dusk|dawn|first light|noon|morning|afternoon|golden hour|night|day)\b/i);
+    expect(gen.settingsFor('Tropical sod webworm damage in St. Augustine lawns')).toEqual(gen.SETTINGS.yard);
+    expect(gen.settingsFor('Ficus whitefly on hedges in Sarasota')).toEqual(gen.SETTINGS.yard);
+    expect(gen.settingsFor('Rain Bird sprinkler timer: run it by hand')).toEqual(expect.arrayContaining(gen.SETTINGS.equipment));
+    expect(gen.settingsFor('Ghost ants in the kitchen')).toEqual(expect.arrayContaining(gen.SETTINGS.indoor));
+    expect(gen.settingsFor('Ghost ants in the kitchen')).not.toEqual(expect.arrayContaining(gen.SETTINGS.equipment));
+    for (let i = 0; i < 30; i += 1) {
+      const plan = gen.planFor({ slug: `turf-${i}`, mode: 'blog-hero', index: 0, subject: 'Chinch bug damage in a St. Augustine lawn' });
+      expect(gen.SETTINGS.yard).toContain(plan.setting);
+    }
   });
 });
 
@@ -123,6 +157,14 @@ describe('screenGeneratedImage', () => {
     // Extra words around an allowed caption are stray text, not the caption.
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF SALE", "2 MANUAL"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: 1 OFF SALE/)] });
+    // A reordered caption is stray text; a partial one is an incomplete caption (Codex r1 P2 on #3964).
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants Stop How To"], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: Ants Stop How To/)] });
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants"], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/incomplete caption: "How to Stop Ants"/)] });
+    // Split fragments that together cover the caption, in order, still pass.
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["How to", "Stop Ants"], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: true });
     expect(buildScreenPrompt({ allowedText: ['1 OFF'] })).toMatch(/ALLOWED.*"1 OFF"/);
   });
 
@@ -134,6 +176,9 @@ describe('screenGeneratedImage', () => {
     dispatchWithFallback.mockRejectedValue(new Error('boom'));
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, checked: false });
     expect(await screenGeneratedImage({ buffer: null })).toMatchObject({ ok: true, checked: false });
-    expect(parseScreen('{"readable_text": "x"}')).toEqual({ readableText: [], logos: [], notes: '' });
+    // A scalar or missing list is an unusable answer, not a clean verdict (Codex r1 P2 on #3964).
+    expect(parseScreen('{"readable_text": "x"}')).toBeNull();
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": "ORKIN", "logos_or_brand_marks": "Orkin logo"}' });
+    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, checked: false });
   });
 });

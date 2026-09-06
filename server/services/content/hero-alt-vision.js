@@ -112,9 +112,13 @@ function parseScreen(text) {
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     const obj = JSON.parse(raw.slice(start, end + 1));
+    // Both lists must be arrays: a scalar or missing field is an unusable
+    // answer (→ fail-open as unchecked), never a clean verdict (Codex r1 P2
+    // on #3964).
+    if (!obj || !Array.isArray(obj.readable_text) || !Array.isArray(obj.logos_or_brand_marks)) return null;
     return {
-      readableText: Array.isArray(obj.readable_text) ? obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean) : [],
-      logos: Array.isArray(obj.logos_or_brand_marks) ? obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean) : [],
+      readableText: obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean),
+      logos: obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean),
       notes: typeof obj.notes === 'string' ? obj.notes.slice(0, 200) : '',
     };
   } catch {
@@ -147,19 +151,40 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
     }
-    // An allowed caption may come back split ("1", "OFF") or joined; accept a
-    // detected string only when every one of its words belongs to ONE allowed
-    // caption — never a superset ("1 OFF SALE" is extra text around a caption
-    // and fails; pre-push Codex P1 on e8b864170).
-    const allowedTokenSets = allowedText.map((c) => new Set(normalizeText(c).split(' ').filter(Boolean))).filter((set) => set.size);
+    // An allowed caption may come back split ("1", "OFF") or joined. A
+    // detected string is the caption's only when it is a contiguous, in-order
+    // run of ONE allowed caption — never a superset ("1 OFF SALE"), never a
+    // reordering ("Ants Stop How To") — and the fragments read for a caption
+    // must together cover all of it: "Ants" alone for "How to Stop Ants" is an
+    // incomplete caption, which the prompt promised exactly (Codex r1 P2 on
+    // #3964, after the pre-push P1 on e8b864170).
+    const allowedSeqs = allowedText.map((c) => normalizeText(c).split(' ').filter(Boolean)).filter((seq) => seq.length);
+    const covered = allowedSeqs.map(() => new Set());
+    const runAt = (tokens, seq) => {
+      for (let i = 0; i + tokens.length <= seq.length; i += 1) {
+        if (tokens.every((tok, j) => seq[i + j] === tok)) return i;
+      }
+      return -1;
+    };
     const strayText = parsed.readableText.filter((t) => {
       const tokens = normalizeText(t).split(' ').filter(Boolean);
       if (!tokens.length) return false;
-      return !allowedTokenSets.some((set) => tokens.every((tok) => set.has(tok)));
+      let matched = false;
+      allowedSeqs.forEach((seq, c) => {
+        const at = runAt(tokens, seq);
+        if (at < 0) return;
+        matched = true;
+        for (let j = 0; j < tokens.length; j += 1) covered[c].add(at + j);
+      });
+      return !matched;
     });
+    const incomplete = allowedSeqs
+      .map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null))
+      .filter(Boolean);
     const reasons = [];
     if (parsed.logos.length) reasons.push(`logo or brand mark: ${parsed.logos.slice(0, 3).join(', ')}`);
     if (strayText.length) reasons.push(`readable text: ${strayText.slice(0, 3).join(', ')}`);
+    if (incomplete.length) reasons.push(`incomplete caption: ${incomplete.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
     return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, reasons };
   } catch (err) {
     logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);

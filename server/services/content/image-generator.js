@@ -145,22 +145,63 @@ const IMAGE_STYLES = Object.freeze({
     allowsText: true,
   },
 });
-// The hero leads with a photo most of the time (search thumbnails), then
-// alternates; body slots rotate through the styles the hero did not use.
-const HERO_STYLE_ROTATION = ['photo', 'photo', 'illustration', 'photo', 'cartoon', 'photo', 'infographic', 'illustration'];
-const BODY_STYLE_ROTATION = ['illustration', 'photo', 'cartoon', 'infographic', 'photo', 'illustration'];
-const SETTINGS = [
-  'inside a residential garage, controller and tools on the wall, driveway light through the open door',
-  'on a screened lanai looking out at the yard',
-  'along a front walk beside a stucco wall and mulched bed',
-  'at the curb of a quiet residential street at dusk',
-  'in a kitchen looking out through a window at the lawn',
-  'at the edge of a pool cage with turf and shrubs beyond',
-  'in a side yard between two homes, utility boxes and a hose bib',
-  'in a backyard at first light, dew on the grass',
-  'at a workbench with parts laid out on a towel',
-  'on a bright overcast day with soft, even light',
-];
+// One style permutation per post: the hero takes the first entry and body
+// slot k takes the k-th, so the hero and up to three body images never share
+// a style (Codex r1 P2 on #3964). The hero still leans photo (search
+// thumbnails): two posts in three put photo first.
+const STYLE_KEYS = Object.freeze(Object.keys(IMAGE_STYLES));
+function stylePermutation(slug) {
+  const seed = hashString(`${slug || 'post'}:styles`);
+  const pool = [...STYLE_KEYS];
+  const out = [];
+  let h = seed;
+  while (pool.length) {
+    h = Math.imul(h ^ (h >>> 13), 16777619) >>> 0;
+    out.push(pool.splice(h % pool.length, 1)[0]);
+  }
+  if (seed % 3 !== 0) {
+    out.splice(out.indexOf('photo'), 1);
+    out.unshift('photo');
+  }
+  return out;
+}
+// Settings carry NO time-of-day wording (time is chosen separately below), and
+// they are grouped by what the article is about: a yard/turf/plant post stays
+// outdoors, an equipment post may sit in the garage or at a workbench, an
+// indoor-pest post may look out from a kitchen. A sod-webworm post at a
+// workbench and a whitefly post in a kitchen were the off-topic cases (Codex
+// r1 P2 on #3964).
+const SETTINGS = Object.freeze({
+  yard: [
+    'on a screened lanai looking out at the yard',
+    'along a front walk beside a stucco wall and mulched bed',
+    'at the curb of a quiet residential street',
+    'at the edge of a pool cage with turf and shrubs beyond',
+    'in a side yard between two homes, utility boxes and a hose bib',
+    'in a backyard, dew on the grass',
+    'under an overcast sky with soft, even light',
+    'in a front yard, a sidewalk and mailbox at the edge of the frame',
+  ],
+  equipment: [
+    'inside a residential garage, controller and tools on the wall, light through the open door',
+    'at a workbench with parts laid out on a towel',
+    'beside an outdoor utility wall with a control box and a hose bib',
+  ],
+  indoor: [
+    'in a kitchen looking out through a window at the lawn',
+    'in a laundry room doorway, baseboards and a threshold in view',
+    'in a garage looking out toward the driveway',
+  ],
+});
+const EQUIPMENT_SUBJECT = /\b(controller|timer|clock|irrigation|sprinkler|spreader|mower|trimmer|sprayer|blower|hose|nozzle|equipment|tools?)\b/i;
+const INDOOR_SUBJECT = /\b(kitchen|pantry|bathroom|bedroom|attic|garage|indoors?|inside|baseboard|roach|cockroach|ants?|spiders?|rodents?|mice|mouse|rats?|bed bugs?|fleas?|silverfish|termites?)\b/i;
+function settingsFor(subject) {
+  const text = String(subject || '');
+  const pool = [...SETTINGS.yard];
+  if (EQUIPMENT_SUBJECT.test(text)) pool.push(...SETTINGS.equipment);
+  if (INDOOR_SUBJECT.test(text)) pool.push(...SETTINGS.indoor);
+  return pool;
+}
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
 function hashString(input) {
@@ -172,18 +213,23 @@ function hashString(input) {
   }
   return h >>> 0;
 }
-// planFor({ slug, mode, index }) — deterministic per post + slot. index 0 is
-// the hero; body slots are 1..n. A style the caller cannot support (an
-// infographic with no captions) degrades to illustration.
-function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], style: forced } = {}) {
+// planFor({ slug, mode, index, captions, subject, style }) — deterministic per
+// post + slot. index 0 is the hero; body slots are 1..n. `subject` (title +
+// keyword + section lead) picks the setting pool. A style the slot cannot
+// support (an infographic with no captions) degrades to the post's UNUSED
+// fourth style, so it still differs from the other slots.
+function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject = '', style: forced } = {}) {
   const seed = hashString(`${slug || 'post'}:${mode}:${index}`);
   const pick = (list, salt) => list[(seed + salt * 7919) % list.length];
-  const rotation = mode === 'blog-body' ? BODY_STYLE_ROTATION : HERO_STYLE_ROTATION;
-  let style = forced && IMAGE_STYLES[forced] ? forced : rotation[(hashString(slug || 'post') + index) % rotation.length];
-  if (style === 'infographic' && !(Array.isArray(captions) && captions.length)) style = 'illustration';
+  const perm = stylePermutation(slug);
+  const slot = mode === 'blog-body' ? index : 0;
+  let style = forced && IMAGE_STYLES[forced] ? forced : perm[slot % perm.length];
+  if (style === 'infographic' && !(Array.isArray(captions) && captions.length)) {
+    style = slot < 3 ? perm[3] : 'illustration';
+  }
   return {
     style,
-    setting: pick(SETTINGS, 1),
+    setting: pick(settingsFor(subject), 1),
     timeOfDay: pick(TIMES_OF_DAY, 2),
     vantage: pick(VANTAGES, 3),
   };
@@ -483,6 +529,9 @@ module.exports.ImageGenerator = ImageGenerator;
 module.exports.planFor = planFor;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
 module.exports._internals = {
+  stylePermutation,
+  settingsFor,
+  SETTINGS,
   DEFAULT_CHAIN,
   MODEL_MAP,
   MODE_SIZES,
