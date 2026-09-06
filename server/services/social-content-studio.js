@@ -1087,6 +1087,18 @@ function hasVideoCapableChannel(channels) {
   return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
 }
 
+// Is a fixed (deterministic) card that reached a network a FIX: alert?
+// Always for a campaign: a hero photo or a scene was expected, and its GBP
+// card beside a successful scene is still the fallback for the hero. For the
+// other kinds the GBP card beside a scene is the DESIGNED visual (GBP never
+// posts AI imagery), so the card is a fallback only when the engine was on
+// and eligible yet produced nothing — engine off means the card is the
+// designed visual everywhere.
+function fixedCardIsFallback({ isCampaignRun, engineProduced, creativeEligible, engineEnabled }) {
+  if (isCampaignRun) return true;
+  return !engineProduced && !!creativeEligible && !!engineEnabled;
+}
+
 // Everything that differs per run kind, in ONE table: the creative engine's
 // variant + overlay input, the deterministic card renderer (the GBP image and
 // the engine-off / engine-failed fallback, at 'gbp' or square), and the
@@ -2189,11 +2201,12 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       if (hero) return { url: hero, hero: true };
       return { url: await kind.renderCard(plan, preview, platform), hero: false };
     };
-    // A fixed card that reaches a network is a FIX: alert when something
-    // better was expected: always for a campaign (a hero or a scene), and for
-    // the other kinds only when the engine was on and eligible yet produced
-    // nothing — engine off means the card IS the designed visual there.
-    const cardIsFallback = isCampaignRun || (creativeEligible && CreativeEngine.CREATIVE_FLAGS.enabled);
+    const cardIsFallback = fixedCardIsFallback({
+      isCampaignRun,
+      engineProduced: creativeVariants.length > 0,
+      creativeEligible,
+      engineEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
+    });
     const legacyCardUrls = new Set();
     const trackFallbackCard = (visual) => {
       if (visual?.url && !visual.hero && cardIsFallback) legacyCardUrls.add(visual.url);
@@ -3599,6 +3612,7 @@ module.exports = {
   legacyCardShipped,
   RUN_KINDS,
   runKindFor,
+  fixedCardIsFallback,
   firstLivePage,
   suggestedLink,
   suggestedLinkTitle,

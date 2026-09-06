@@ -909,3 +909,20 @@ describe('RUN_KINDS / runKindFor (2026-09-06: every run kind on the creative eng
     }
   });
 });
+
+describe('fixedCardIsFallback (Codex r3 on #3987: alert scope)', () => {
+  test('campaign: the fixed card is always the fallback (hero or scene expected), even beside a successful scene', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: true, engineProduced: true, creativeEligible: true, engineEnabled: true })).toBe(true);
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: true, engineProduced: false, creativeEligible: false, engineEnabled: false })).toBe(true);
+  });
+
+  test('versus/milestone/review: the GBP card beside a successful scene is the designed visual, never an alert', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: true, creativeEligible: true, engineEnabled: true })).toBe(false);
+  });
+
+  test('versus/milestone/review: the card is a fallback only when the engine was on and eligible yet produced nothing', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: true, engineEnabled: true })).toBe(true);
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: true, engineEnabled: false })).toBe(false); // engine off = designed
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: false, engineEnabled: true })).toBe(false); // GBP-only run
+  });
+});
