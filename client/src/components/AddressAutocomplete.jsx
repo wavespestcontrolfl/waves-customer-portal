@@ -139,15 +139,27 @@ export default function AddressAutocomplete({
     };
     if (init()) return cleanup;
 
-    if (!document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')) {
-      const script = document.createElement('script');
+    let script = document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]');
+    if (!script) {
+      script = document.createElement('script');
       script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places&loading=async`;
       script.async = true;
       document.head.appendChild(script);
     }
-    const interval = setInterval(() => { if (init()) clearInterval(interval); }, 250);
-    const timeout = setTimeout(() => clearInterval(interval), 8000);
+    let interval;
+    let timeout;
+    const startPolling = () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+      if (init()) return;
+      interval = setInterval(() => { if (init()) clearInterval(interval); }, 250);
+      timeout = setTimeout(() => clearInterval(interval), 8000);
+    };
+    // Slow downloads get a fresh initialization window once the API arrives.
+    script.addEventListener('load', startPolling);
+    startPolling();
     return () => {
+      script.removeEventListener('load', startPolling);
       clearInterval(interval);
       clearTimeout(timeout);
       cleanup();

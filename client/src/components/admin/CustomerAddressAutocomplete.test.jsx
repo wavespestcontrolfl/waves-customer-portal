@@ -43,7 +43,7 @@ beforeEach(() => {
   ), { status: 200, headers: { 'Content-Type': 'application/json' } }));
   vi.stubGlobal('fetch', fetchMock);
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 it('fills and explicitly saves a property, preserving a manually entered unit', async () => {
   render(<CustomerPropertiesPanelV2 customerId="fixture" canEdit />);
@@ -108,4 +108,20 @@ it('does not submit on Enter or geocode on blur in selection-only mode', () => {
   expect(window.google.maps.Geocoder).not.toHaveBeenCalled();
   selectPlace(place('Unit 4'));
   expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ line2: 'Unit 4' }));
+});
+
+it('initializes after a Maps download takes longer than eight seconds', () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('google', undefined);
+  const { unmount } = render(<AddressAutocomplete value="" onChange={() => {}} />);
+  act(() => vi.advanceTimersByTime(9000));
+  expect(Autocomplete).not.toHaveBeenCalled();
+  vi.stubGlobal('google', { maps: { places: { Autocomplete } } });
+  const script = document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]');
+  fireEvent.load(script);
+  expect(Autocomplete).toHaveBeenCalledTimes(1);
+  unmount();
+  fireEvent.load(script);
+  expect(Autocomplete).toHaveBeenCalledTimes(1);
+  script.remove();
 });
