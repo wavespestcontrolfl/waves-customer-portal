@@ -38,6 +38,18 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.obligations[0]).toMatchObject({ party: 'waves', basis: 'request', due_at: null });
   });
 
+  test.each([
+    'Please send the estimate only if I approve the price.',
+    'Please call when the gate is repaired.',
+    'Schedule a visit after I return.',
+    'Please send the report once I confirm the recipient.',
+  ])('conditional work becomes an exception: %s', (body) => {
+    const message = source(body);
+    const result = groundExtraction(extracted([obligation(body, { description: body.split(/ only | when | after | once /)[0] })]),
+      { message, properties });
+    expect(result).toMatchObject({ obligations: [], dropped: 1 });
+  });
+
   test('customer promises stay customer-owned, with no staff callback invented', () => {
     const message = source("I'll send photos tomorrow");
     const result = groundExtraction(extracted([

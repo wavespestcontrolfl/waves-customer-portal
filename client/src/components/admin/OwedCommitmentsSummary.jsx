@@ -81,7 +81,7 @@ export default function OwedCommitmentsSummary({ customerId, source = "call" }) 
       <div className="text-14 text-ink-tertiary font-medium">
         {source === "sms" ? "SMS follow-up" : "Owed to this customer"}{rows.length ? ` (${rows.length}${nextOffset !== null ? "+" : ""})` : ""}
       </div>
-      {source === "sms" && <p className="text-14 text-ink-secondary">Mark done after verifying completion. Dismiss requests that no longer apply.</p>}
+      {source === "sms" && enabled && <p className="text-14 text-ink-secondary">Mark done after verifying completion. Dismiss requests that no longer apply.</p>}
       {error && <div className="text-14 text-alert-fg" role="alert">{error}</div>}
       {rows.map((row) => (
         <div key={row.id} className="border-t border-zinc-200 pt-2 text-14">

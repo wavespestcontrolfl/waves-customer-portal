@@ -102,6 +102,7 @@ describe("SMS follow-up controls", () => {
     vi.stubGlobal("fetch", vi.fn(async () => response({ commitments: [report], enabled: false })));
     render(<OwedCommitmentsSummary customerId="customer-1" source="sms" />);
     await screen.findByText("Send the inspection report");
+    expect(screen.queryByText(/Mark done after verifying completion/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Mark done" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
   });

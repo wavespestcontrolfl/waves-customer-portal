@@ -131,7 +131,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     if (!grounded(item) || !kindBelongsToParty(item.party, item.kind)) return false;
     // Mixed/negated instructions need a human reading of scope; a keyword
     // in an affirmative substring cannot authorize the opposite action.
-    if (/\b(?:not|never|no|don['’]t|do not|instead|unless|rather|but)\b/i.test(body)) return false;
+    if (/\b(?:not|never|no|don['’]t|do not|instead|unless|rather|but|if|when|after|once|until|provided|assuming|only)\b/i.test(body)) return false;
     if (!normalize(item.quote).includes(normalize(item.description))) return false;
     if (item.kind !== 'other' && !KIND_EVIDENCE[item.kind]?.test(item.description)) return false;
     if (message.direction === 'outbound') return item.party === 'waves' && item.basis === 'promise';

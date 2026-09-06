@@ -15,7 +15,7 @@ const { randomUUID } = require('node:crypto');
 const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { loadSmsFulfillmentEvidence, admissibleWitness } = require('../services/sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
@@ -540,6 +540,76 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await listSmsCommitments(mockPg, { customerId: message.customer_id })).toEqual([]);
     expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 25 * 3600000) })).toMatchObject({ scanned: 0 });
     expect(await mockPg('notifications')).toHaveLength(1);
+  });
+
+  test.each(['cancelled', 'bounced', 'changed_text'])('changed completion evidence stays open: %s', async (change) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const isVisit = change === 'cancelled';
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: isVisit ? 'schedule_visit' : 'send_appointment_confirmation',
+      quote: isVisit ? 'Schedule the visit' : 'Send confirmation to synthetic@example.invalid', due_at: after.toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const table = isVisit ? 'scheduled_services' : 'email_messages';
+    const [witness] = await mockPg(table).insert(isVisit ? {
+      customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Lawn', scheduled_date: etDateString(now), window_start: '09:00:00', status: 'confirmed', created_at: after,
+    } : { recipient_type: 'customer', recipient_id: message.customer_id, recipient_email_snapshot: 'synthetic@example.invalid',
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your appointment is confirmed' }).returning('id');
+    const type = isVisit ? 'visit' : 'email_delivery';
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `${type}:${witness.id}`,
+      quote: isVisit ? 'Quarterly Lawn' : 'Your appointment is confirmed' } });
+    const verify = async (row, evidence, opts) => {
+      const verdict = await verifySmsFulfillment(row, evidence, opts);
+      expect(verdict.verdict).toBe('fulfilled');
+      await mockPg(table).where({ id: witness.id }).update(isVisit ? { status: 'cancelled' }
+        : change === 'bounced' ? { status: 'bounced', bounced_at: now } : { text_snapshot: 'Please ignore the prior confirmation' });
+      return verdict;
+    };
+    expect(await refreshSmsCommitments({ conn: mockPg, now, verify })).toMatchObject({ fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('disabled automation keeps recorded open work readable', async () => {
+    await recordMessageOperations(mockPg, message, result, context);
+    process.env.GATE_SMS_COMMITMENT_FOLLOWUP = 'false';
+    expect(await listSmsCommitments(mockPg, { customerId: message.customer_id })).toHaveLength(1);
+  });
+
+  test.each([
+    ['100 Example Ln, Sarasota, FL 34236, USA', true],
+    ['100 Example Lane, Sarasota, FL, 34236', true],
+    ['100 Example Lane, Sarasota, 34236', true],
+    ['100 Example Lane, Another City, FL 34236', false],
+    ['100 Example Lane, Unit 2, Sarasota, FL 34236', false],
+  ])('formatted estimate address is property scoped: %s', async (address, allowed) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id,
+      address, service_interest: 'Lawn', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
+    expect(evidence.failures).toEqual([]);
+    expect(admissibleWitness(evidence.records.find((r) => r.id === estimate.id), { kind: 'send_estimate',
+      sms_context: { source_at: message.created_at, property_id: context.properties[0].id } })).toBe(allowed);
+  });
+
+  test('unrelated recurring schedules cannot truncate a scoped completion witness', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const otherProperty = randomUUID();
+    await mockPg('customer_properties').insert({ id: otherProperty, customer_id: message.customer_id,
+      address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+    const base = { customer_id: message.customer_id, service_type: 'Lawn', status: 'confirmed',
+      scheduled_date: etDateString(after), window_start: '09:00:00' };
+    await mockPg('scheduled_services').insert(Array.from({ length: 60 }, () => ({ ...base,
+      property_id: otherProperty, created_at: after })));
+    await mockPg('scheduled_services').insert(Array.from({ length: 60 }, () => ({ ...base,
+      property_id: context.properties[0].id, created_at: new Date(message.created_at.getTime() - 1000) })));
+    const [visit] = await mockPg('scheduled_services').insert({ ...base, property_id: context.properties[0].id,
+      created_at: after }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, { kind: 'schedule_visit',
+      sms_context: { property_id: context.properties[0].id } }, message, new Date(after.getTime() + 1000));
+    expect(evidence.failures).toEqual([]);
+    expect(evidence.records.filter((r) => r.type === 'visit').map((r) => r.id)).toEqual([visit.id]);
   });
 
   test('a human dismissal during verification wins over the stale automatic verdict', async () => {

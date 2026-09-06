@@ -6,7 +6,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { scrubSegments } = require('../utils/pan-scrub');
 const { VERSION, stringifySmsEvidence } = require('./sms-operational-extractor');
 const { hashExtractionSource } = require('./data-hygiene/source-extraction-store');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
 const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, whereEstimateCustomerOwnership } = require('./call-commitments');
 
 const LIMIT = 50;
@@ -57,20 +57,21 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .select('id', 'status', 'recipient_email_snapshot', 'text_snapshot', 'subject_snapshot', 'sent_at', 'delivered_at', 'bounced_at', 'created_at'),
     estimate: conn('estimates').modify((q) => whereEstimateCustomerOwnership(q, customerId))
       .modify((q) => handedOffWithin(q, after, now)).orderByRaw(handoffOrder(conn, after, now)).limit(LIMIT + 1)
-      .select(...HANDOFF_COLS(conn), 'property_id', 'service_interest', 'address',
-        conn.raw(`(SELECT p.id FROM customer_properties p
-          WHERE p.customer_id = ? AND p.active = true
-            AND lower(trim(concat_ws(' ', p.address_line1, NULLIF(trim(p.address_line2), '')))) = lower(trim(estimates.address))
-            AND (SELECT COUNT(*) FROM customer_properties other
-              WHERE other.customer_id = p.customer_id AND other.active = true
-                AND lower(trim(concat_ws(' ', other.address_line1, NULLIF(trim(other.address_line2), '')))) = lower(trim(estimates.address))) = 1
-          LIMIT 1) as address_property_id`, [customerId])),
+      .select(...HANDOFF_COLS(conn), 'property_id', 'service_interest', 'address'),
     invoice: conn('invoices').where({ customer_id: customerId }).where('sent_at', '>', after)
       .where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id'),
     visit: conn('scheduled_services').where({ customer_id: customerId })
       .where('created_at', '<=', now)
-      .where('scheduled_date', '>=', etDateString(addETDays(after, -1)))
+      .modify((q) => { if (commitment.sms_context?.property_id) q.where({ property_id: commitment.sms_context.property_id }); })
+      .where(function relevantActivity() {
+        this.where('created_at', '>', after)
+          .orWhere((q) => q.where('completed_at', '>', after).where('completed_at', '<=', now))
+          .orWhereExists(conn('job_status_history as h').select(conn.raw('1'))
+            .whereRaw('h.job_id = scheduled_services.id')
+            .whereIn('h.to_status', ['confirmed', 'rescheduled', 'completed'])
+            .where('h.transitioned_at', '>', after).where('h.transitioned_at', '<=', now));
+      })
       .orderBy('scheduled_date', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'created_at', conn.raw('scheduled_date::text as scheduled_date'), 'window_start', 'service_type', 'property_id',
         conn.raw('CASE WHEN completed_at <= ? THEN completed_at END as completed_at', [now]),
@@ -96,6 +97,19 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       records.push({ ...row, ref: `${type}:${row.id}`, type, text: text.slice(0, 16000) });
     }
   });
+  const unlinked = records.filter((row) => row.type === 'estimate' && !row.property_id);
+  if (unlinked.length) {
+    try {
+      const properties = await conn('customer_properties').where({ customer_id: customerId, active: true })
+        .select('id', 'address_line1', 'address_line2', 'city', 'zip');
+      for (const row of unlinked) {
+        const key = normalizedEstimateStreet(row.address);
+        const matches = properties.filter((p) => sameScopeKey(key,
+          normalizedStampedStreet(p.address_line1, p.address_line2, p.city, p.zip)));
+        row.address_property_id = matches.length === 1 ? matches[0].id : null;
+      }
+    } catch { failures.push('estimate_property'); }
+  }
   return { records, failures };
 }
 
@@ -152,13 +166,33 @@ function groundFulfillment(parsed, evidence, commitment) {
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
 }
 
-async function verifySmsFulfillment(commitment, evidence, { now = new Date() } = {}) {
-  const { fulfillment_check: previous, ...sms_context } = commitment.sms_context || {};
+function fulfillmentFingerprint(commitment, evidence) {
+  const { fulfillment_check: _previous, ...sms_context } = commitment.sms_context || {};
   const obligation = { party: commitment.party, kind: commitment.kind, description: commitment.description,
     evidence: commitment.evidence, due_at: commitment.due_at, sms_context };
-  const evidenceHash = hashExtractionSource(JSON.stringify({ version: VERSION, policy: MODELS.TEXT_POLICIES.highStakes,
+  return { obligation, evidenceHash: hashExtractionSource(JSON.stringify({ version: VERSION, policy: MODELS.TEXT_POLICIES.highStakes,
     obligation, records: [...evidence.records].sort((a, b) => a.ref.localeCompare(b.ref)),
-    failures: [...evidence.failures].sort() }));
+    failures: [...evidence.failures].sort() })) };
+}
+
+// The provider runs outside the transaction. Lock its actual witness and
+// re-read the same evidence before allowing a delayed verdict to close work.
+async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
+  const tables = { sms: 'sms_log', call: 'call_log', email_delivery: 'email_messages',
+    estimate: 'estimates', visit: 'scheduled_services' };
+  const table = tables[verdict.record_type];
+  if (!table || !verdict.record_id || !verdict.evidence_hash) return false;
+  const locked = await trx(table).where({ id: verdict.record_id }).forUpdate().first('id');
+  if (!locked) return false;
+  const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
+  if (fulfillmentFingerprint(commitment, evidence).evidenceHash !== verdict.evidence_hash) return false;
+  return groundFulfillment({ verdict: 'fulfilled', record_ref: `${verdict.record_type}:${verdict.record_id}`,
+    quote: verdict.quote }, evidence, commitment).verdict === 'fulfilled';
+}
+
+async function verifySmsFulfillment(commitment, evidence, { now = new Date() } = {}) {
+  const previous = commitment.sms_context?.fulfillment_check;
+  const { obligation, evidenceHash } = fulfillmentFingerprint(commitment, evidence);
   if (previous?.evidence_hash === evidenceHash && (!previous.retry_after || new Date(previous.retry_after) > now)) return previous;
   const verdict = await checkSmsFulfillment(obligation, evidence);
   // Retry provider/schema failures after a bounded pause. Semantic open or
@@ -198,4 +232,4 @@ ${stringifySmsEvidence({ obligation: commitment, records })}`,
   return groundFulfillment(result.json, evidence, commitment);
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment };

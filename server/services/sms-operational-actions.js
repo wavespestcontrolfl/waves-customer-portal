@@ -15,7 +15,7 @@ const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = requi
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const smsCommitmentsEnabled = () => enabled() && gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP');
@@ -227,7 +227,6 @@ const KIND_LABELS = {
 // Only the customer profile opts into SMS rows. Call queues and workers
 // continue using their call-scoped reader and implicit deadline rules.
 async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, now = new Date() }) {
-  if (!smsCommitmentsEnabled()) return [];
   const rows = await conn('call_commitments as cc')
     .join('sms_log as s', 's.id', 'cc.sms_log_id')
     .join('customers as c', 'c.id', 's.customer_id')
@@ -306,6 +305,8 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       if (!source || !eligibleMessage(source) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
       const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
       if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
+      const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
+      if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
       const dedupeKey = `sms-commitment:${row.id}`;
       if (live.sms_context.customer_id !== source.customer_id) {
         // Rolling dedupe only refreshes recent rows. Older bells must also

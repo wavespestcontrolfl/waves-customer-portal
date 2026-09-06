@@ -222,6 +222,7 @@ describe('admin feed role scoping (adminRoleOnly triggers)', () => {
     expect(sql).toContain(' IN (');
     // Tech-visible triggers are IN the allowlist; owner-only ones are not.
     expect(bindings).toContain('sms_reply');
+    expect(bindings).toContain('sms_operational_followup');
     expect(bindings).toContain('appointment_reschedule_intent');
     expect(bindings).not.toContain('new_job_application');
   });
