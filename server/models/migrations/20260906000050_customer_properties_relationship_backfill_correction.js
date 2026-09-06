@@ -33,6 +33,9 @@ exports.up = async function up(knex) {
   const backfilledAt = original?.migration_time ? new Date(original.migration_time) : null;
 
   await knex.transaction(async (trx) => {
+    // Snapshot BOTH sets before any write, locked, so `down` can restore each
+    // row's real prior value and a concurrent property PATCH cannot land
+    // between the SELECT and the UPDATE and be recorded with a stale prior.
     const inferred = trx('customer_properties')
       .where(function occupancyDerived() {
         this.where({ relationship: 'own_home', occupancy_type: 'owner_occupied' })
@@ -43,23 +46,44 @@ exports.up = async function up(knex) {
         this.whereNull('updated_at').orWhere('updated_at', '<=', backfilledAt);
       });
     }
-    // Lock the snapshot so a concurrent property PATCH cannot land between
-    // the SELECT and the UPDATE and be recorded with a stale prior value.
-    const before = await inferred.select('id', 'relationship').forUpdate();
-    const ids = before.map((r) => r.id);
-    let cleared = 0;
-    if (ids.length) {
-      cleared = await trx('customer_properties').whereIn('id', ids).update({ relationship: null });
+    const inferredRows = await inferred.select('id', 'relationship').forUpdate();
+    const inferredIds = inferredRows.map((r) => r.id);
+
+    // Manager-profile rows: those not already managed_for_client are
+    // snapshotted with their prior value; an inferred row on a manager profile
+    // goes straight to managed_for_client, its prior value recorded once above.
+    let managerRows = [];
+    let managerIds = [];
+    let inferredOnManager = [];
+    if (await trx.schema.hasColumn('customers', 'contact_role')) {
+      const managers = trx('customer_properties as cp')
+        .join('customers as c', 'c.id', 'cp.customer_id')
+        .where('c.contact_role', 'property_manager')
+        .whereRaw("cp.relationship IS DISTINCT FROM 'managed_for_client'");
+      if (inferredIds.length) managers.whereNotIn('cp.id', inferredIds);
+      managerRows = await managers.select('cp.id', 'cp.relationship').forUpdate('cp');
+      inferredOnManager = inferredIds.length
+        ? await trx('customer_properties as cp')
+          .join('customers as c', 'c.id', 'cp.customer_id')
+          .where('c.contact_role', 'property_manager')
+          .whereIn('cp.id', inferredIds)
+          .pluck('cp.id')
+        : [];
+      managerIds = managerRows.map((r) => r.id).concat(inferredOnManager);
     }
 
+    // Stamp AFTER the locked snapshots: a PATCH that held a row lock when this
+    // started commits before our SELECTs return and must read as "before the
+    // correction" so `down` still treats the row as untouched by the office.
+    const correctedAt = new Date();
+    const clearIds = inferredIds.filter((id) => !inferredOnManager.includes(id));
+    let cleared = 0;
+    if (clearIds.length) {
+      cleared = await trx('customer_properties').whereIn('id', clearIds).update({ relationship: null });
+    }
     let managed = 0;
-    if (await trx.schema.hasColumn('customers', 'contact_role')) {
-      const res = await trx.raw(
-        "UPDATE customer_properties cp SET relationship = 'managed_for_client' "
-        + "FROM customers c WHERE c.id = cp.customer_id AND c.contact_role = 'property_manager' "
-        + "AND cp.relationship IS DISTINCT FROM 'managed_for_client'",
-      );
-      managed = res?.rowCount || 0;
+    if (managerIds.length) {
+      managed = await trx('customer_properties').whereIn('id', managerIds).update({ relationship: 'managed_for_client' });
     }
 
     if (await trx.schema.hasTable('audit_log')) {
@@ -74,9 +98,10 @@ exports.up = async function up(knex) {
           reason: 'occupancy_type is not ownership evidence (Codex r4 on #3998); occupancy-derived relationship values cleared, manager-only backfill re-asserted',
           original_migration: ORIGINAL_MIGRATION,
           original_backfilled_at: backfilledAt ? backfilledAt.toISOString() : null,
+          corrected_at: correctedAt.toISOString(),
           cleared_count: cleared,
           managed_for_client_set_count: managed,
-          prior_values: before,
+          prior_values: inferredRows.concat(managerRows),
         },
       });
     }
@@ -98,11 +123,17 @@ exports.down = async function down(knex) {
   await knex.transaction(async (trx) => {
     let reverted = 0;
     for (const row of prior) {
-      // Restore only rows still NULL — an office edit since the correction wins.
-      reverted += await trx('customer_properties')
-        .where({ id: row.id })
-        .whereNull('relationship')
-        .update({ relationship: row.relationship });
+      // Restore only rows the office has not touched since the correction:
+      // the migration's UPDATEs do not restamp updated_at, every property
+      // PATCH does — so a later "Not recorded" (NULL) edit is distinguishable
+      // from the NULL this migration wrote and wins.
+      const query = trx('customer_properties').where({ id: row.id });
+      if (meta.corrected_at) {
+        query.where(function untouchedSinceCorrection() {
+          this.whereNull('updated_at').orWhere('updated_at', '<=', new Date(meta.corrected_at));
+        });
+      }
+      reverted += await query.update({ relationship: row.relationship === undefined ? null : row.relationship });
     }
     const { recordAuditEvent } = require('../../services/audit-log');
     await recordAuditEvent({
