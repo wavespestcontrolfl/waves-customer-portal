@@ -126,6 +126,13 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalled();
   });
 
+  test('an excluded source type discovered under lock cannot update the profile', async () => {
+    await mockPg('sms_log').where({ id: message.id }).update({ message_type: 'opt_out' });
+    expect(await recordMessageOperations(mockPg, message, result, context)).toEqual({ skipped: 'source_changed' });
+    expect(await mockPg('property_preferences')).toEqual([]);
+    expect((await mockPg('sms_log').first()).operational_analysis).toBeNull();
+  });
+
   test('intake does not hold SMS while waiting for a merge-owned customer lock', async () => {
     const merge = await mockPg.transaction();
     let signal;
