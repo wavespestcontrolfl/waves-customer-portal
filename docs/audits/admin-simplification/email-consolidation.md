@@ -249,3 +249,22 @@ matched both sidebar and bottom navigation Settings links; scoping it to the
 existing Primary navigation selects the intended mobile entry. No assertion
 was removed. The full 2,542-test local run above applies to `dbe2f5153` before
 this final mobile cleanup; GitHub CI checks the subsequent source.
+
+## Retained SMS navigation follow-up
+
+The next pre-push review identified a valid P1: retaining the SMS tab also
+retained its once-only deep-link initialization, so a later notification could
+leave the previous recipient selected. Communications now initializes SMS
+again for a changed explicit thread, phone or draft target when SMS opens.
+Ordinary channel switches and unrelated Email query changes retain the existing
+composer; targets received while hidden wait until SMS opens. A new explicit
+destination does not inherit text written for the previous recipient.
+
+The synthetic browser regression failed on the second notification before the
+fix (`.tmp/email-sms-navigation-red.log`) and now passes with all 13 scenarios,
+including a subsequent phone-plus-draft link, unchanged drafts after ordinary
+channel switches, and no hidden SMS fetch (`.tmp/email-sms-navigation-browser.log`).
+The production build and prebuild gates pass; scoped lint has zero errors and
+three pre-existing warnings inside the unchanged SMS implementation. Nine focused client suites / 88 tests pass, including the SMS link-prefill and usage-leaf contracts in addition
+to the seven Email/navigation/sign-out suites. No backend, provider or database
+operation was added.

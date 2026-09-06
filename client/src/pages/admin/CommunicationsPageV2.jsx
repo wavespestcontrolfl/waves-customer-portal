@@ -3450,6 +3450,16 @@ export default function CommunicationsPageV2() {
     [isAdminRole],
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
+  const smsParams = new URLSearchParams(location.search);
+  const smsTarget = ["thread", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
+  const smsTargetKey = smsTarget.some(Boolean) ? JSON.stringify(smsTarget) : "";
+  const [openedSmsTarget, setOpenedSmsTarget] = useState(smsTargetKey);
+  // Preserve the composer on channel switches, but initialize a new explicit
+  // SMS destination just as the previously unmounted tab did. Email query
+  // changes and targets received while SMS is hidden must not reset its draft.
+  useEffect(() => {
+    if (activeTab === "sms" && smsTargetKey) setOpenedSmsTarget(smsTargetKey);
+  }, [activeTab, smsTargetKey]);
   useEffect(() => { if (activeTab === "sms") setSmsVisited(true); }, [activeTab]);
   useEffect(() => { if (activeTab === "email") setEmailVisited(true); }, [activeTab]);
   const selectTab = (nextTab) => {
@@ -3512,7 +3522,7 @@ export default function CommunicationsPageV2() {
         secondaryNavGridClassName="grid-cols-2"
       />}
       {activeTab === "events" && <NotificationEventsTabV2 />}
-      {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab active={activeTab === "sms"} /></div>}
+      {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
       {activeTab === "calls" && <CallLogTabV2 />}
       {activeTab === "triage" && <TriageInboxTabV2 />}
       {activeTab === "owed" && <OwedTabV2 />}

@@ -21,6 +21,7 @@ async function main() {
   let releaseSend;
   let draftHold;
   let releaseDraft;
+  let smsMessages = [];
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
@@ -58,7 +59,7 @@ async function main() {
       else if (api === `/admin/email/message/${b.id}`) body = b;
       else if (api === '/admin/email/thread/thread-a') body = { thread: [a] };
       else if (api === '/admin/email/thread/thread-b') body = { thread: [b] };
-      else if (api === '/admin/communications/log') body = { messages: [], page: 1, hasMore: false };
+      else if (api === '/admin/communications/log') body = { messages: smsMessages, page: 1, hasMore: false };
       else if (api === '/admin/communications/stats') body = {};
       else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
@@ -165,6 +166,43 @@ async function main() {
       await channel(page, 'Email').click();
       await page.getByText(b.body_text, { exact: true }).waitFor();
       assert.equal(report.requests.filter((r) => r.path === `/admin/email/message/${b.id}`).length, before + 1);
+    });
+    await scenario('retained SMS follows new notification and compose targets without losing channel-switch drafts', async () => {
+      const sms = await openPage();
+      smsMessages = [
+        { id: 'fixture-sms-a', customerId: 'fixture-customer-a', from: '+19415550101', body: 'Synthetic first SMS' },
+        { id: 'fixture-sms-b', customerId: 'fixture-customer-b', from: '+19415550102', body: 'Synthetic second SMS' },
+      ].map((message) => ({ ...message, to: '+19413187612', direction: 'inbound', isRead: true, createdAt: new Date().toISOString() }));
+      const recipient = sms.getByPlaceholder('Search by name or enter phone number…', { exact: true });
+      const composer = sms.getByPlaceholder('Type your message…', { exact: true });
+      const navigate = (search, tab) => sms.evaluate(({ search, tab }) => {
+        history.pushState({}, '', `/admin/communications?${search}#tab=${tab}`);
+        dispatchEvent(new PopStateEvent('popstate'));
+      }, { search, tab });
+      await sms.goto(`${server.baseUrl}/admin/communications?thread=fixture-customer-a#tab=sms`);
+      await recipient.waitFor();
+      await sms.waitForFunction(() => document.querySelector('input[placeholder="Search by name or enter phone number…"]')?.value === '+19415550101');
+      await composer.fill('Synthetic draft for first recipient');
+      await channel(sms, 'Email').click();
+      await navigate('id=' + a.id, 'email');
+      await sms.getByText(a.body_text, { exact: true }).waitFor();
+      await channel(sms, 'SMS').click();
+      assert.equal(await recipient.inputValue(), '+19415550101');
+      assert.equal(await composer.inputValue(), 'Synthetic draft for first recipient');
+      await channel(sms, 'Email').click();
+      const reads = report.requests.filter((r) => r.path === '/admin/communications/log').length;
+      await navigate('thread=fixture-customer-b', 'email');
+      await sms.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(report.requests.filter((r) => r.path === '/admin/communications/log').length, reads);
+      await channel(sms, 'SMS').click();
+      await sms.waitForFunction(() => document.querySelector('input[placeholder="Search by name or enter phone number…"]')?.value === '+19415550102');
+      assert.equal(await composer.inputValue(), '', 'An explicit new SMS destination must not inherit the old recipient’s text');
+      await channel(sms, 'Email').click();
+      await navigate('phone=%2B19415550103&draft=Synthetic%20linked%20draft', 'sms');
+      await sms.waitForFunction(() => document.querySelector('input[placeholder="Search by name or enter phone number…"]')?.value === '+19415550103');
+      assert.equal(await composer.inputValue(), 'Synthetic linked draft');
+      await sms.close();
+      smsMessages = [];
     });
     const mobile = await openPage('admin', 390);
     await scenario('mobile Email keeps one header and a recoverable full-screen composer', async () => {
