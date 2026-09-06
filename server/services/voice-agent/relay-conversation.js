@@ -2387,6 +2387,16 @@ class RelayConversation {
     } catch (err) {
       logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
     } finally {
+      if (recoveryOn && !deferTranscript) {
+        // The resume snapshot may predate an older socket's append. Refresh
+        // after finalization from durable segments with the existing CAS fence.
+        try {
+          const fresh = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('metadata'), 2000, null);
+          if (fresh) await this._refreshCallSummary(typeof fresh.metadata === 'string' ? JSON.parse(fresh.metadata) : fresh.metadata);
+        } catch (err) {
+          logger.warn(`[voice-relay] final summary refresh failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
+      }
       if (deferTranscript && segmentWrite) {
         // Attach only after the outcome reconcile: a write that settled
         // during the capture floor must not check commitment eligibility
@@ -2416,6 +2426,7 @@ class RelayConversation {
           .whereRaw("metadata->>'relay_session_claim_owner' = ?", [this.sessionKey])
           .where((q) => q.whereNull('call_outcome').orWhereIn('call_outcome', ['ai_handled', 'relay_failed', 'ai_transferred']))
           .where((q) => q.whereNull('transcription_provider').orWhere('transcription_provider', TRANSCRIPTION_PROVIDER))
+          .whereRaw("transcription_metadata->'recorded_segment_rejected' IS NULL")
           .whereRaw('? IS NOT NULL', [segmentStore.composeSegmentsSql(db)])
           .update({ transcription: segmentStore.composeSegmentsSql(db), transcription_provider: TRANSCRIPTION_PROVIDER,
             transcription_status: 'completed', updated_at: new Date() });

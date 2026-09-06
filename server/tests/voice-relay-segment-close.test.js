@@ -70,6 +70,20 @@ describe('the conversation side', () => {
     expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [1725500001000]);
   });
 
+  test('a resumed close refreshes its stale summary from the durable earlier leg', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb({ firstRow: { metadata: { relay_segments: [
+      { generation: 1, session_key: 'old', text: 'Caller: insects in the garage' },
+      { generation: 2, session_key: 'nonce-1', text: 'Caller: my ants are back' },
+    ] } } });
+    const convo = convoWithTurns();
+    convo._resume = { callerTurns: [], segmentsText: '' };
+    await convo.end('ws_close');
+    const summaries = updates.filter((patch) => typeof patch.call_summary === 'string');
+    expect(summaries.at(-1).call_summary).toContain('insects in the garage');
+    expect(summaries.at(-1).call_summary).toContain('my ants are back');
+  });
+
   test("an UNVERIFIED socket (never held the claim) appends no segment — its text lands only through today's owner-fenced reconcile (hook P1)", async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { updates } = primeDb();

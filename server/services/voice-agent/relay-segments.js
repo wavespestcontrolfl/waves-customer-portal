@@ -209,10 +209,10 @@ function appendSegmentPatch(db, segment) {
 // An EMPTY, unowned transcript column on a row that RECONNECTED — the only
 // empty column a late segment may fill (hook r28 P1).
 const FILL_EMPTY_SQL = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
-// A RECORDING's own transcript, alone, on a row that reconnected: the
+// A recorded transcript on a reconnected call or a durably proven transfer: the
 // processor finished before this segment landed (a silent resumed leg wrote
 // no stash). The recording is preserved; the AI segment goes ahead of it.
-const RECORDED_ONLY_SQL = "(transcription_provider IS NOT NULL AND transcription_provider <> ? AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
+const RECORDED_ONLY_SQL = "((transcription_provider <> ? OR (transcription_provider IS NULL AND transcription_metadata->'recorded_segment_rejected' IS NOT NULL)) AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND (COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 OR call_outcome = 'ai_transferred' OR jsonb_typeof(metadata->'relay_handoff') = 'object' OR metadata->>'relay_transfer_ring_at' IS NOT NULL))";
 const RELAY_PROVIDER = require('./relay-transcript').TRANSCRIPTION_PROVIDER;
 // The recorded half of a processor composite, from its segment header to the end (non-capturing!).
 const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
