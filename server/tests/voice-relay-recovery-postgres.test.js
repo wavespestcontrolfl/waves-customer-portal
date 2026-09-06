@@ -4,7 +4,18 @@
  * Creates and drops only its own schema; never uses the app DATABASE_URL.
  */
 jest.mock('../models/db', () => {
-  const db = (...args) => mockPg(...args);
+  const db = (...args) => {
+    const query = mockPg(...args);
+    const update = query.update;
+    query.update = function(patch, ...rest) {
+      const result = update.call(this, patch, ...rest);
+      if (mockDelayRingResult && String(patch.metadata).includes("jsonb_build_object('relay_transfer_ring_at'")) {
+        return Promise.resolve(result).then((rows) => new Promise((resolve) => setTimeout(() => resolve(rows), 1600)));
+      }
+      return result;
+    };
+    return query;
+  };
   db.raw = (...args) => mockPg.raw(...args);
   db.transaction = (...args) => mockPg.transaction(...args);
   return db;
@@ -30,6 +41,7 @@ const { requestReserviceText } = require('../services/voice-agent/relay-reservic
 const connection = process.env.VOICE_RECOVERY_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
+let mockDelayRingResult = false;
 let admin;
 const schema = `relay_recovery_${randomUUID().replaceAll('-', '')}`;
 const callSid = 'CA-fixture';
@@ -165,7 +177,8 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     }
   });
 
-  test('second-failure ring compensation reaches voicemail when no staff numbers exist', async () => {
+  test.each([false, true])('second-failure ring compensation reaches voicemail; late result = %s', async (lateResult) => {
+    mockDelayRingResult = lateResult;
     const savedNumbers = process.env.WAVES_FALLBACK_FORWARD_NUMBERS;
     const savedTransfer = process.env.GATE_VOICE_RELAY_TRANSFER;
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
@@ -183,7 +196,9 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       const row = await mockPg('call_log').where('twilio_call_sid', callSid).first();
       expect(row.call_outcome).toBe('voicemail');
       expect(row.metadata.relay_transfer_ring_at).toBeTruthy();
+      if (lateResult) await new Promise((resolve) => setTimeout(resolve, 200));
     } finally {
+      mockDelayRingResult = false;
       if (savedNumbers === undefined) delete process.env.WAVES_FALLBACK_FORWARD_NUMBERS; else process.env.WAVES_FALLBACK_FORWARD_NUMBERS = savedNumbers;
       if (savedTransfer === undefined) delete process.env.GATE_VOICE_RELAY_TRANSFER; else process.env.GATE_VOICE_RELAY_TRANSFER = savedTransfer;
     }

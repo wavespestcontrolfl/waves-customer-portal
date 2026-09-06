@@ -1158,9 +1158,9 @@ With recovery enabled, an unconfirmed reconnect claim/state read returns
 claims are fenced to the proven reconnect generation; voicemail/failure
 writes also atomically refuse rows with a claimed staff ring or transferred
 outcome, even if the replacement socket never acquired a session claim.
-Compensation after this callback confirms its own ring claim retains the
-generation and owner fences while permitting that claimed transfer to fall
-back to voicemail; a predicate that loses
+The ring claim stamps a server-generated `relay_transfer_ring_claim` id;
+compensation matches that id plus the generation and owner fences, so its
+own late claim can fall back to voicemail without changing another ring; a predicate that loses
 to a newer reconnect returns a bare response instead of stale fallback TwiML.
 Any change to the claim, the owner fence, the reconnect fence, the sandbox
 branch or what the whisper may speak is security-critical).
