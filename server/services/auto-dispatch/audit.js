@@ -160,6 +160,9 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     .whereRaw("metadata->>'dedupeKey' LIKE ?", ['recurring-dispatch:%'])
     .whereNotExists(function stillUnplaced() {
       this.select('s.id').from('scheduled_services as s')
+        .join('customers as c', 'c.id', 's.customer_id')
+        .where('c.active', true)
+        .whereNull('c.deleted_at')
         .whereRaw("s.id::text = notifications.metadata->>'scheduledServiceId'")
         .whereRaw("s.recurring_dispatch_due_date::text = notifications.metadata->>'dueDate'")
         .whereNull('s.window_start')

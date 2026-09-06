@@ -17,9 +17,11 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
   let database;
   let trx;
   const customerId = randomUUID();
+  const inactiveCustomerId = randomUUID();
+  const archivedCustomerId = randomUUID();
   const due = '2099-02-01';
   const now = new Date('2099-01-20T16:00:00Z');
-  const cases = ['unplaced', 'placed', 'cancelled', 'old_due', 'missing', 'customer_notice', 'other_lane'];
+  const cases = ['unplaced', 'placed', 'cancelled', 'old_due', 'missing', 'inactive', 'archived', 'customer_notice', 'other_lane'];
   const ids = Object.fromEntries(cases.map((name) => [name, randomUUID()]));
 
   beforeAll(async () => {
@@ -39,11 +41,15 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
         SELECT recipient_type, category, title, body, metadata, read_at
         FROM public.notifications WITH NO DATA;
     `);
-    await trx('customers').insert({ id: customerId, active: true });
+    await trx('customers').insert([
+      { id: customerId, active: true },
+      { id: inactiveCustomerId, active: false },
+      { id: archivedCustomerId, active: true, deleted_at: now },
+    ]);
     await trx('scheduled_services').insert(cases.filter((name) => name !== 'missing').map((name) => ({
-      id: ids[name], customer_id: customerId,
+      id: ids[name], customer_id: name === 'inactive' ? inactiveCustomerId : name === 'archived' ? archivedCustomerId : customerId,
       status: name === 'cancelled' ? 'cancelled' : 'pending',
-      window_start: ['unplaced', 'old_due'].includes(name) ? null : '09:00',
+      window_start: ['unplaced', 'old_due', 'inactive', 'archived'].includes(name) ? null : '09:00',
       recurring_dispatch_due_date: name === 'old_due' ? '2099-02-02' : due,
     })));
     await trx('notifications').insert(cases.map((name) => ({
@@ -65,7 +71,7 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     await flagUnplacedVisits({ lockWindowDays: 14 }, now);
     const rows = await trx('notifications').select('*');
     const byService = Object.fromEntries(rows.map((row) => [row.metadata.scheduledServiceId, row]));
-    for (const name of ['placed', 'cancelled', 'old_due', 'missing']) {
+    for (const name of ['placed', 'cancelled', 'old_due', 'missing', 'inactive', 'archived']) {
       expect(byService[ids[name]].read_at).toEqual(now);
       expect(byService[ids[name]].title).toBe('Recurring placement alert resolved');
     }
