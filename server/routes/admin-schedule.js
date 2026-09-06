@@ -8538,13 +8538,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // provisional — the locked read below re-checks the key and aborts
       // the edit if the row's date moved in between (the row-lock rule:
       // never take a second date key mid-txn).
+      // Arrival routing also checks assignment/order-only saves.
       // Duration counts as a window edit: the shared predicate derives the
       // occupied block from estimated_duration_minutes when window_end is
       // NULL, so a longer duration can widen occupancy too.
-      const occupancyWindowTouched = updates.scheduled_date !== undefined
+      const occupancyRouteTouched = updates.scheduled_date !== undefined
         || updates.window_start !== undefined
         || updates.window_end !== undefined
-        || updates.estimated_duration_minutes !== undefined;
+        || updates.estimated_duration_minutes !== undefined
+        || (useArrivalWindows && (assignmentShouldRun || updates.route_order !== undefined));
       const occupancyDateKey = updates.scheduled_date !== undefined
         ? dateOnly(updates.scheduled_date)
         : dateOnly(commsPeek?.scheduled_date);
@@ -8566,7 +8568,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
       if (lockedRecurrenceDates.size > 0) {
         await acquireOccupancyLocks(trx, [...lockedRecurrenceDates]);
-      } else if (occupancyWindowTouched && occupancyDateKey) {
+      } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
       // Regrouping can adopt a destination partner's technician. Include all
@@ -8738,6 +8740,152 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         assignmentUpdatedJobIds = assignment.changedJobIds || [];
       }
 
+      // Shared occupancy probe for window, duration, and route edits — the
+      // same tech-blind predicate + status exclusions the rebooker's
+      // commit gate runs (terminal rows don't occupy —
+      // ADMIN_OCCUPANCY_EXCLUDE_STATUSES; the moving row excludes itself).
+      // A hit is advisory: the save commits and warns (owner ruling —
+      // admin writes never block on conflicts). Terminal rows are
+      // record corrections, not occupancy, and skip it. Runs on the
+      // LOCKED row, re-checking the provisional date key first. It sits
+      // outside detailsChanged so a technician-only edit also checks.
+      if (occupancyRouteTouched) {
+        const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+        if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
+          const occDate = updates.scheduled_date !== undefined
+            ? dateOnly(updates.scheduled_date)
+            : dateOnly(occRow.scheduled_date);
+          if (occDate !== occupancyDateKey) {
+            throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          // Scheduling-field CAS against the unlocked pre-read the window
+          // normalization above derived from: a concurrent window/date
+          // edit that committed first must not be overwritten with a
+          // pair built on the stale snapshot.
+          // estimated_duration_minutes is part of the compare: a start-only
+          // edit derives its end from it, so a concurrent duration-only
+          // edit must not be overwritten with a block built on the old one.
+          // Grouped-membership CAS (codex #3609 r10): the unlocked
+          // grouped-row refusal above read visit_id; a row grouped (or
+          // split) since must not have its slot written alone.
+          if (preReadVisitId !== undefined && String(occRow.visit_id || '') !== String(preReadVisitId || '')) {
+            throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          // Same visit_id is not the same membership: under the stop lock
+          // taken above, a one-member visit that gained another live
+          // member since the pre-read is a grouped stop this editor must
+          // not move alone (local codex audit).
+          if (preReadVisitId && occRow.visit_id) {
+            const vg = require('../services/visit-groups');
+            const liveMembers = await vg.openMembers(trx, occRow.visit_id);
+            if (liveMembers.length >= 2) {
+              throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
+            // One live member on a FROZEN / claimed / finalizing visit
+            // (codex #3609 r27 P1): a direct slot write would strand the
+            // parent and its issued link / records / payment at the old
+            // stop — the unit mover refuses the same case. Same verdict,
+            // under this stop lock, before the write.
+            const verdict = await vg.frozenVisitVerdict(trx, occRow.visit_id);
+            if (verdict.frozen) {
+              throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_FROZEN_MOVE_UNSUPPORTED',
+                reason: verdict.reason,
+              });
+            }
+          }
+          if (preReadWindowRow && (
+            dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
+            || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)
+            || normalizeHHMM(occRow.window_end) !== normalizeHHMM(preReadWindowRow.window_end)
+            || (parseInt(occRow.estimated_duration_minutes, 10) || null) !== (parseInt(preReadWindowRow.estimated_duration_minutes, 10) || null)
+          )) {
+            throw Object.assign(new Error('This appointment was moved or resized while saving — reload and save again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          const occStart = normalizeHHMM(updates.window_start !== undefined ? updates.window_start : occRow.window_start);
+          // A start-only edit leaves the stored end stale — derive the
+          // block from the effective duration like the rebooker does.
+          let occEnd = normalizeHHMM(updates.window_end !== undefined
+            ? updates.window_end
+            : (updates.window_start !== undefined ? null : occRow.window_end));
+          if (occStart && (!occEnd || occEnd <= occStart)) {
+            const [sh, sm] = occStart.split(':').map(Number);
+            const occDuration = parseInt(updates.estimated_duration_minutes ?? occRow.estimated_duration_minutes, 10) || 60;
+            const endMin = Math.min(sh * 60 + sm + occDuration, 23 * 60 + 59);
+            occEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+          }
+          // Presence is not change (Codex #3443 P2): the mobile edit
+          // modal echoes date/window/duration on every save, so a
+          // notes-only edit of an already-overlapping visit must not be
+          // refused. Compare the effective block with the locked row's
+          // and probe only when the slot actually moves.
+          const rowStart = normalizeHHMM(occRow.window_start);
+          let rowEnd = normalizeHHMM(occRow.window_end);
+          if (rowStart && (!rowEnd || rowEnd <= rowStart)) {
+            const [rh, rm] = rowStart.split(':').map(Number);
+            const rowMin = Math.min(rh * 60 + rm + (parseInt(occRow.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
+            rowEnd = `${String(Math.floor(rowMin / 60)).padStart(2, '0')}:${String(rowMin % 60).padStart(2, '0')}`;
+          }
+          const slotUnchanged = occDate === dateOnly(occRow.scheduled_date) && occStart === rowStart && occEnd === rowEnd;
+          // The end this save would leave stored; an end at/before the
+          // start is invalid (a submitted 08:00 end on a 09:00 start, or a
+          // legacy row already stored that way) and must never persist —
+          // findConflictingVisits falls back to the duration only for a
+          // NULL end, so an inverted stored end hides the visit from every
+          // later overlap check (pre-push audit P1).
+          const storedEndAfterSave = normalizeHHMM(updates.window_end !== undefined ? updates.window_end : occRow.window_end);
+          const storedEndInvalid = !!occStart && !!storedEndAfterSave && storedEndAfterSave <= occStart;
+          if (occEnd && (storedEndInvalid || (!slotUnchanged && updates.window_start !== undefined && updates.window_end === undefined))) {
+            // Persist the block that was probed: a start-only edit used
+            // to keep the OLD end (09:00-10:00 moved to 13:00 stored
+            // 13:00-10:00), which every later overlap query read as a
+            // non-null end and the visit went invisible to occupancy.
+            updates.window_end = occEnd;
+          }
+          // A longer job or a different technician/order can break arrival
+          // promises even when the nominal calendar block is unchanged.
+          const arrivalRouteChanged = useArrivalWindows && (assignmentNeedsChange
+            || (updates.estimated_duration_minutes !== undefined
+              && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes))
+            || (updates.route_order !== undefined && updates.route_order !== occRow.route_order));
+          if ((!slotUnchanged || arrivalRouteChanged) && occDate && occStart && occEnd) {
+            const adminMoveClash = await findConflictingVisits({
+              db: trx,
+              date: occDate,
+              windowStart: occStart,
+              windowEnd: occEnd,
+              excludeServiceIds: await adminMoveProbeExcludeIds(trx, {
+                id: req.params.id, parentBefore: recurringParentBefore, updates,
+              }),
+              excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+              arrivalWindow: { serviceId: req.params.id, changes: updates },
+            });
+            if (adminMoveClash.length) {
+              logger.warn(`[schedule/update-details] occupancy overlap on ${occDate} allowed (advisory — admin writes never block on conflicts)`);
+              editWarnings.push(adminMoveClash[0].warning || slotOverlapWarning(occDate));
+            }
+          }
+        }
+      }
+
       if (detailsChanged) {
         // Pre-FK legacy report records are found by a (customer, date, type)
         // soft-join — changing either join field orphans them for every later
@@ -8820,152 +8968,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // office edits notes/price, and wiping the live attempt would
         // orphan it. Completed/terminal rows keep their lifecycle: the
         // stamps ARE the service record.
-        // Global occupancy probe under rung 1 for a date/window move — the
-        // same tech-blind predicate + status exclusions the rebooker's
-        // commit gate runs (terminal rows don't occupy —
-        // ADMIN_OCCUPANCY_EXCLUDE_STATUSES; the moving row excludes itself).
-        // A hit is advisory: the save commits and warns (owner ruling —
-        // admin writes never block on conflicts). Terminal rows are
-        // record corrections, not occupancy, and skip it. Runs on the
-        // LOCKED row (reusing the tuple read above, else its own FOR
-        // UPDATE), re-checking the provisional date key first.
-        if (occupancyWindowTouched) {
-          const occRow = preTupleRow
-            || await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
-          if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
-            const occDate = updates.scheduled_date !== undefined
-              ? dateOnly(updates.scheduled_date)
-              : dateOnly(occRow.scheduled_date);
-            if (occDate !== occupancyDateKey) {
-              throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
-                statusCode: 409,
-                isOperational: true,
-                code: 'VISIT_CHANGED_RETRY',
-              });
-            }
-            // Scheduling-field CAS against the unlocked pre-read the window
-            // normalization above derived from: a concurrent window/date
-            // edit that committed first must not be overwritten with a
-            // pair built on the stale snapshot.
-            // estimated_duration_minutes is part of the compare: a start-only
-            // edit derives its end from it, so a concurrent duration-only
-            // edit must not be overwritten with a block built on the old one.
-            // Grouped-membership CAS (codex #3609 r10): the unlocked
-            // grouped-row refusal above read visit_id; a row grouped (or
-            // split) since must not have its slot written alone.
-            if (preReadVisitId !== undefined && String(occRow.visit_id || '') !== String(preReadVisitId || '')) {
-              throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
-                statusCode: 409,
-                isOperational: true,
-                code: 'VISIT_CHANGED_RETRY',
-              });
-            }
-            // Same visit_id is not the same membership: under the stop lock
-            // taken above, a one-member visit that gained another live
-            // member since the pre-read is a grouped stop this editor must
-            // not move alone (local codex audit).
-            if (preReadVisitId && occRow.visit_id) {
-              const vg = require('../services/visit-groups');
-              const liveMembers = await vg.openMembers(trx, occRow.visit_id);
-              if (liveMembers.length >= 2) {
-                throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
-                  statusCode: 409,
-                  isOperational: true,
-                  code: 'VISIT_CHANGED_RETRY',
-                });
-              }
-              // One live member on a FROZEN / claimed / finalizing visit
-              // (codex #3609 r27 P1): a direct slot write would strand the
-              // parent and its issued link / records / payment at the old
-              // stop — the unit mover refuses the same case. Same verdict,
-              // under this stop lock, before the write.
-              const verdict = await vg.frozenVisitVerdict(trx, occRow.visit_id);
-              if (verdict.frozen) {
-                throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), {
-                  statusCode: 409,
-                  isOperational: true,
-                  code: 'VISIT_FROZEN_MOVE_UNSUPPORTED',
-                  reason: verdict.reason,
-                });
-              }
-            }
-            if (preReadWindowRow && (
-              dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
-              || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)
-              || normalizeHHMM(occRow.window_end) !== normalizeHHMM(preReadWindowRow.window_end)
-              || (parseInt(occRow.estimated_duration_minutes, 10) || null) !== (parseInt(preReadWindowRow.estimated_duration_minutes, 10) || null)
-            )) {
-              throw Object.assign(new Error('This appointment was moved or resized while saving — reload and save again.'), {
-                statusCode: 409,
-                isOperational: true,
-                code: 'VISIT_CHANGED_RETRY',
-              });
-            }
-            const occStart = normalizeHHMM(updates.window_start !== undefined ? updates.window_start : occRow.window_start);
-            // A start-only edit leaves the stored end stale — derive the
-            // block from the effective duration like the rebooker does.
-            let occEnd = normalizeHHMM(updates.window_end !== undefined
-              ? updates.window_end
-              : (updates.window_start !== undefined ? null : occRow.window_end));
-            if (occStart && (!occEnd || occEnd <= occStart)) {
-              const [sh, sm] = occStart.split(':').map(Number);
-              const occDuration = parseInt(updates.estimated_duration_minutes ?? occRow.estimated_duration_minutes, 10) || 60;
-              const endMin = Math.min(sh * 60 + sm + occDuration, 23 * 60 + 59);
-              occEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-            }
-            // Presence is not change (Codex #3443 P2): the mobile edit
-            // modal echoes date/window/duration on every save, so a
-            // notes-only edit of an already-overlapping visit must not be
-            // refused. Compare the effective block with the locked row's
-            // and probe only when the slot actually moves.
-            const rowStart = normalizeHHMM(occRow.window_start);
-            let rowEnd = normalizeHHMM(occRow.window_end);
-            if (rowStart && (!rowEnd || rowEnd <= rowStart)) {
-              const [rh, rm] = rowStart.split(':').map(Number);
-              const rowMin = Math.min(rh * 60 + rm + (parseInt(occRow.estimated_duration_minutes, 10) || 60), 23 * 60 + 59);
-              rowEnd = `${String(Math.floor(rowMin / 60)).padStart(2, '0')}:${String(rowMin % 60).padStart(2, '0')}`;
-            }
-            const slotUnchanged = occDate === dateOnly(occRow.scheduled_date) && occStart === rowStart && occEnd === rowEnd;
-            // The end this save would leave stored; an end at/before the
-            // start is invalid (a submitted 08:00 end on a 09:00 start, or a
-            // legacy row already stored that way) and must never persist —
-            // findConflictingVisits falls back to the duration only for a
-            // NULL end, so an inverted stored end hides the visit from every
-            // later overlap check (pre-push audit P1).
-            const storedEndAfterSave = normalizeHHMM(updates.window_end !== undefined ? updates.window_end : occRow.window_end);
-            const storedEndInvalid = !!occStart && !!storedEndAfterSave && storedEndAfterSave <= occStart;
-            if (occEnd && (storedEndInvalid || (!slotUnchanged && updates.window_start !== undefined && updates.window_end === undefined))) {
-              // Persist the block that was probed: a start-only edit used
-              // to keep the OLD end (09:00-10:00 moved to 13:00 stored
-              // 13:00-10:00), which every later overlap query read as a
-              // non-null end and the visit went invisible to occupancy.
-              updates.window_end = occEnd;
-            }
-            // A longer job or a different technician/order can break arrival
-            // promises even when the nominal calendar block is unchanged.
-            const arrivalRouteChanged = useArrivalWindows && (assignmentNeedsChange
-              || (updates.estimated_duration_minutes !== undefined
-                && Number(updates.estimated_duration_minutes) !== Number(occRow.estimated_duration_minutes))
-              || (updates.route_order !== undefined && updates.route_order !== occRow.route_order));
-            if ((!slotUnchanged || arrivalRouteChanged) && occDate && occStart && occEnd) {
-              const adminMoveClash = await findConflictingVisits({
-                db: trx,
-                date: occDate,
-                windowStart: occStart,
-                windowEnd: occEnd,
-                excludeServiceIds: await adminMoveProbeExcludeIds(trx, {
-                  id: req.params.id, parentBefore: recurringParentBefore, updates,
-                }),
-                excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-                arrivalWindow: { serviceId: req.params.id, changes: updates },
-              });
-              if (adminMoveClash.length) {
-                logger.warn(`[schedule/update-details] occupancy overlap on ${occDate} allowed (advisory — admin writes never block on conflicts)`);
-                editWarnings.push(adminMoveClash[0].warning || slotOverlapWarning(occDate));
-              }
-            }
-          }
-        }
         const dateActuallyMoves = updates.scheduled_date !== undefined
           && preTupleRow
           && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(preTupleRow.status))

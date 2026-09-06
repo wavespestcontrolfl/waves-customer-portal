@@ -40,6 +40,11 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/dispatch-assignment', () => ({
+  ...jest.requireActual('../services/dispatch-assignment'),
+  assignDispatchJob: jest.fn(),
+  emitDispatchJobUpdate: jest.fn(),
+}));
 jest.mock('../services/scheduling/occupancy', () => {
   const actual = jest.requireActual('../services/scheduling/occupancy');
   const mocked = {
@@ -292,6 +297,50 @@ describe('PUT /:id/update-details — date/window move', () => {
 
   test('an edit that touches neither date nor window takes no date lock', async () => {
     await put('svc-1', { notes: 'gate code 1234' });
+    expect(acquireOccupancyLock).not.toHaveBeenCalled();
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /:id/update-details — arrival warnings for partial route edits', () => {
+  const savedGate = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = savedGate;
+  });
+
+  test.each([
+    { technicianId: '00000000-0000-4000-8000-000000000002' },
+    { routeOrder: 2 },
+  ])('a route-only edit %j commits with the route warning under the date lock', async (change) => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const row = { ...SVC };
+    trx.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...row } : undefined));
+    require('../services/dispatch-assignment').assignDispatchJob.mockImplementation(async ({ technicianId }) => {
+      row.technician_id = technicianId;
+      return { changed: true };
+    });
+    const warning = 'The route cannot keep every promised arrival window.';
+    findConflictingVisits.mockResolvedValue([{ id: SVC.id, warning }]);
+
+    const { status, body } = await put(SVC.id, change);
+
+    expect(status).toBe(200);
+    expect(body.warnings).toEqual([warning]);
+    expect(acquireOccupancyLock).toHaveBeenCalledWith(trx, SVC.scheduled_date);
+    expect(callOrder.indexOf(`occupancy:${SVC.scheduled_date}`)).toBeLessThan(callOrder.indexOf('comms'));
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      db: trx, date: SVC.scheduled_date, windowStart: '09:00', windowEnd: '10:00',
+      arrivalWindow: expect.objectContaining({ serviceId: SVC.id }),
+    }));
+    if (change.technicianId) expect(row.technician_id).toBe(change.technicianId);
+  });
+
+  test('the kill switch keeps route-only edits on the legacy path', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'false';
+    const { status, body } = await put(SVC.id, { routeOrder: 2 });
+    expect(status).toBe(200);
+    expect(body.warnings).toBeUndefined();
     expect(acquireOccupancyLock).not.toHaveBeenCalled();
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });
