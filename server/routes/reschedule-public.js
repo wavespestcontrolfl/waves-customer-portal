@@ -46,7 +46,7 @@
  */
 
 const express = require('express');
-const { gateEnvValue } = require('../config/feature-gates');
+const { isCustomerRecurringDispatchEnabled } = require('../services/auto-dispatch/config');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
@@ -142,6 +142,10 @@ function seriesScopeMismatch(svc, body) {
   const disclosed = body?.disclosed_collective;
   if (typeof disclosed !== 'boolean') return true;
   if (disclosed !== collectiveAnchorActive()) return true;
+  // Older pages omit this field: they can retain legacy behavior while dark,
+  // but must refresh before consenting to newly enabled future placement.
+  const placementDays = isCustomerRecurringDispatchEnabled() ? 3 : null;
+  if ((body?.disclosed_future_placement_days ?? null) !== placementDays) return true;
   const disclosedDate = String(body?.disclosed_current_date || '').slice(0, 10);
   if (!disclosedDate || disclosedDate !== apptDateStr(svc.scheduled_date)) return true;
   return false;
@@ -523,7 +527,7 @@ router.get('/:token', async (req, res, next) => {
       // recurring note to "your later visits shift to match" and drops the
       // legacy pull-forward warning (every date move re-anchors).
       collectiveAnchor: isSeriesVisit(svc) && collectiveAnchorActive(),
-      futurePlacementDays: isSeriesVisit(svc) && gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH') ? 3 : null,
+      futurePlacementDays: isSeriesVisit(svc) && isCustomerRecurringDispatchEnabled() ? 3 : null,
       // The visit's time already passed without service — the page renders
       // the "we missed each other" rebook framing instead of the standard
       // reschedule copy.
@@ -780,6 +784,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             technicianId: slot.technician_id,
             expectAnchor: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             sourceSurface: 'customer_web',
+            disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,

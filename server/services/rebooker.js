@@ -1705,8 +1705,16 @@ class SmartRebooker {
     const overlapWarnDates = new Set();
     // Customer intent reserves the selected visit only. Future cadence dates
     // are work for dispatch, not availability prerequisites for this booking.
-    const deferFuturePlacement = ['customer_self_serve', 'customer_sms'].includes(initiatedBy)
-      && require('../config/feature-gates').gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH');
+    // SMS has no pre-confirmation placement disclosure, so it keeps its
+    // existing series policy. Recheck web consent after the route's awaits.
+    const deferFuturePlacement = initiatedBy === 'customer_self_serve'
+      && require('./auto-dispatch/config').isCustomerRecurringDispatchEnabled();
+    if (initiatedBy === 'customer_self_serve'
+      && (options.disclosedFuturePlacementDays ?? null) !== (deferFuturePlacement ? 3 : null)) {
+      throw Object.assign(new Error('The scheduling details for your plan changed. Please reload and confirm again.'), {
+        statusCode: 409, code: 'SCOPE_CHANGED',
+      });
+    }
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
       : RESCHEDULABLE_STATUSES;

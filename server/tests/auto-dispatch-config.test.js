@@ -1,4 +1,4 @@
-const { getAutoDispatchConfig, isApplyAllowed } = require('../services/auto-dispatch/config');
+const { getAutoDispatchConfig, isApplyAllowed, isCustomerRecurringDispatchEnabled } = require('../services/auto-dispatch/config');
 
 describe('auto-dispatch config apply gate', () => {
   const saved = { ...process.env };
@@ -30,5 +30,45 @@ describe('auto-dispatch config apply gate', () => {
     expect(cfg.mode).toBe('dry_run');
     expect(cfg.lockWindowDays).toBe(14);
     expect(cfg.minScoreImprovement).toBe(15);
+  });
+});
+
+describe('customer recurring handoff prerequisites', () => {
+  const { gates } = require('../config/feature-gates');
+  const savedEnv = { ...process.env };
+  const savedGates = { cronJobs: gates.cronJobs, autoDispatch: gates.autoDispatch };
+  beforeEach(() => {
+    process.env.GATE_CUSTOMER_RECURRING_DISPATCH = 'true';
+    process.env.AUTO_DISPATCH_MODE = 'apply';
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    gates.cronJobs = true;
+    gates.autoDispatch = true;
+  });
+  afterEach(() => {
+    for (const key of ['GATE_CUSTOMER_RECURRING_DISPATCH', 'AUTO_DISPATCH_MODE', 'AUTO_DISPATCH_ALLOW_APPLY']) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+    Object.assign(gates, savedGates);
+  });
+
+  test('allows handoff only with an enabled cron and effective apply mode', () => {
+    expect(isCustomerRecurringDispatchEnabled()).toBe(true);
+  });
+  test.each(['cronJobs', 'autoDispatch'])('refuses handoff when %s is inactive', (gate) => {
+    gates[gate] = false;
+    expect(isCustomerRecurringDispatchEnabled()).toBe(false);
+  });
+  test.each([
+    ['GATE_CUSTOMER_RECURRING_DISPATCH', 'false'],
+    ['GATE_CUSTOMER_RECURRING_DISPATCH', undefined],
+    ['AUTO_DISPATCH_ALLOW_APPLY', 'false'],
+    ['AUTO_DISPATCH_ALLOW_APPLY', undefined],
+    ['AUTO_DISPATCH_MODE', 'dry_run'],
+    ['AUTO_DISPATCH_MODE', undefined],
+  ])('refuses handoff with %s=%s', (key, value) => {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+    expect(isCustomerRecurringDispatchEnabled()).toBe(false);
   });
 });

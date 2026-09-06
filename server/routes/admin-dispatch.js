@@ -4266,9 +4266,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           'schedule_conflict',
           preserved.length ? 'Recurring move needs a future visit review' : dueConflicts.length ? 'Series move left visits without a time window' : 'Series move overlaps other visits',
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
+          { bell: true, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
-        if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
+        if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');
       } catch (err) {
         logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);

@@ -385,7 +385,9 @@ describe('ReschedulePage Waves AI search', () => {
       expect(screen.getByText('You\'re all set')).toBeInTheDocument();
     });
     expect(screen.getByText(futurePlacementDays === 3
-      ? /We’ll arrange their days and times within 3 days/ : /shifted your upcoming visits to follow the new date/)).toBeInTheDocument();
+      ? /Existing appointment commitments stay unchanged until our team reviews them with you/ : /shifted your upcoming visits to follow the new date/)).toBeInTheDocument();
+    const post = fetch.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    expect(JSON.parse(post[1].body).disclosed_future_placement_days).toBe(futurePlacementDays);
   });
 
   it('a small move on a recurring visit shows no series warning', async () => {

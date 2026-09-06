@@ -517,8 +517,9 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update).not.toHaveBeenCalled();
   });
 
-  test.each(['staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_grouped', 'customer_anchor_taken'])('%s: quarterly future conflicts never block an available selected visit', async (actor) => {
+  test.each(['staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_grouped', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
     process.env.GATE_CUSTOMER_RECURRING_DISPATCH = 'true';
+    jest.spyOn(require('../services/auto-dispatch/config'), 'isCustomerRecurringDispatchEnabled').mockReturnValue(true);
     const anchor = {
       id: 'svc-1', customer_id: 'cust-1', technician_id: null,
       scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00',
@@ -597,16 +598,31 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       .mockResolvedValueOnce([{ id: 'another-job' }]); // fourth visit conflicts
     if (actor === 'customer_anchor_taken') {
       findConflictingVisits.mockReset().mockResolvedValue([{ id: 'occupied' }]);
-      await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve')).rejects.toMatchObject({ code: 'SLOT_TAKEN' });
+      await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', { disclosedFuturePlacementDays: 3 })).rejects.toMatchObject({ code: 'SLOT_TAKEN' });
       expect(anchorUpdate.update).not.toHaveBeenCalled();
+      expect(sibUpdate.update).not.toHaveBeenCalled();
+      return;
+    }
+
+    if (actor === 'customer_stale_disclosure') {
+      await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', { disclosedFuturePlacementDays: null })).rejects.toMatchObject({ code: 'SCOPE_CHANGED', statusCode: 409 });
+      expect(anchorUpdate.update).not.toHaveBeenCalled();
+      expect(sibUpdate.update).not.toHaveBeenCalled();
+      return;
+    }
+
+    if (actor === 'customer_sms') {
+      // Until SMS offers the new disclosure, accepting a reply retains its
+      // existing future-conflict check instead of clearing later windows.
+      await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_sms')).rejects.toMatchObject({ code: 'SLOT_TAKEN', subcode: 'SERIES_PROJECTION' });
       expect(sibUpdate.update).not.toHaveBeenCalled();
       return;
     }
 
     const result = await SmartRebooker.rescheduleSeries(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request',
-      actor === 'staff' ? 'admin' : actor === 'customer_sms' ? 'customer_sms' : 'customer_self_serve',
-      actor === 'staff' ? { overlapAdvisory: true } : {},
+      actor === 'staff' ? 'admin' : 'customer_self_serve',
+      actor === 'staff' ? { overlapAdvisory: true } : { disclosedFuturePlacementDays: 3 },
     );
     expect(result.success).toBe(true);
     if (actor === 'staff') {

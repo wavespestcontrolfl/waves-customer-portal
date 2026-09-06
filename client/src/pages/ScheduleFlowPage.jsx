@@ -665,7 +665,7 @@ function RescheduleSuccessCard({ result, service }) {
         <strong style={{ color: S.text }}>{formatDateLabel(result.newDate)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
         {result.seriesShifted ? (result.futurePlacementDays === 3
-          ? ' Your later visits will follow the new schedule. We’ll arrange their days and times within 3 days of each due date.'
+          ? ' We’ll arrange later visits within 3 days of their new due dates. Existing appointment commitments stay unchanged until our team reviews them with you.'
           : ' We also shifted your upcoming visits to follow the new date — your regular schedule now runs from this one.') : ''}
         {' '}We&apos;ll text you a confirmation shortly.
       </div>
@@ -843,6 +843,7 @@ const FLOWS = {
       // race between render and commit 409s (SCOPE_CHANGED) instead of
       // silently doing something the customer wasn't told.
       disclosed_collective: !!data?.collectiveAnchor,
+      disclosed_future_placement_days: data?.futurePlacementDays ?? null,
       disclosed_current_date: data?.current?.date || null,
     }),
     // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.

@@ -889,7 +889,9 @@ server-side):
     "only this visit moves" note for the series-shift warning before
     Confirm (the GET's threshold drives it; the POST decides
     authoritatively). The anchor keeps the offered tech under the same
-    advisory-lock overlap guard. With `GATE_CUSTOMER_RECURRING_DISPATCH`,
+    advisory-lock overlap guard. With `GATE_CUSTOMER_RECURRING_DISPATCH`
+    and the existing `cronJobs`/`autoDispatch` scheduler gates active plus
+    effective `AUTO_DISPATCH_MODE=apply` (`AUTO_DISPATCH_ALLOW_APPLY=true`),
     only the selected appointment must fit: later cadence visits keep their
     projected due dates with NULL time/display windows and a durable
     `recurring_dispatch_due_date`. Future overlap, blackout, and same-plan
@@ -900,7 +902,13 @@ server-side):
     customer-confirmed, reminder-frozen or committed/grouped visits stay
     unchanged and are flagged for staff review instead of blocking the
     selected appointment. GET/POST add optional `futurePlacementDays: 3`
-    for disclosure; no new request fields or authentication changes. Untimed
+    for disclosure. Web POST echoes `disclosed_future_placement_days`
+    (`3` or `null`); a mismatch with the effective mode returns 409
+    `SCOPE_CHANGED` before writing, including a rebooker recheck. Older
+    pages omitting it retain legacy behavior only while deferral is off;
+    otherwise they refresh and re-disclose. SMS retains its existing
+    series policy until it has a placement disclosure. Success copy keeps
+    the unchanged-commitment caveat. Authentication is unchanged. Untimed
     reminder windows are preclosed atomically until placement. Gate off
     preserves legacy conflict checks; already-recorded due dates remain
     dispatchable and bounded. Treat any widening of this
