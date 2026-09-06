@@ -3820,6 +3820,10 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
       expect(body).toContain('gpt-image-2 (cartoon, inside a residential garage, dusk)');
     }
     expect(admin).toContain('- body-1: gemini-image-pro (photo, a pool cage, noon) — screen clean');
+    // The label is the committed file name, not the list position: a draft that already carried body-1 gets its generated asset as body-2 (Codex r13 P2 on #3964).
+    const shifted = buildPrBody({ post: {}, slug: 'x', branch: 'b', content: 'a b', images: { hero: null, body: [{ ...clean, src: '/images/blog/x/body-2.webp' }] } });
+    expect(shifted).toContain('- body-2: gemini-image-pro');
+    expect(shifted).not.toContain('- body-1:');
     // No images → no section; the metadata lane never commits images and takes no `images` at all.
     expect(buildPrBody({ post: {}, slug: 'x', branch: 'b', content: 'a' })).not.toContain('### Images');
     expect(buildRefreshPrBody({ ...base, oldBody: 'a', newBody: 'a b', images: { hero: null, body: [] } })).not.toContain('### Images');

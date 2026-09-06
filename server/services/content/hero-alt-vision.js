@@ -109,7 +109,7 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 function buildScreenPrompt({ allowedText = [], avoidDepicting = [] } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
   const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
-  return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": string[], "notes": string}.
+  return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": number[], "notes": string}.
 - readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
 - logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.
 - forbidden_scenes: the NUMBERS of the FORBIDDEN items below the image clearly depicts (e.g. [1]). Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
@@ -151,6 +151,8 @@ const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g
 const STOP_WORDS = new Set(['a', 'an', 'the', 'of', 'or', 'and', 'any', 'scene', 'scenes']);
 const contentWords = (t) => normalizeText(t).split(' ').filter((w) => w && !STOP_WORDS.has(w)).map((w) => w.replace(/s$/, ''));
 function matchExclusion(detection, exclusions) {
+  // A quoted id ("1") is the id (Codex r13 P2 on #3964).
+  if (typeof detection === 'string' && /^\d+$/.test(detection.trim())) detection = Number(detection.trim());
   if (typeof detection === 'number') return Number.isInteger(detection) && detection >= 1 && detection <= exclusions.length ? exclusions[detection - 1] : null;
   const norm = normalizeText(detection);
   const words = new Set(contentWords(detection));

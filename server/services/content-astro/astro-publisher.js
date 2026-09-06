@@ -4398,7 +4398,11 @@ function liveUrlForPost(post) {
 // reviewer sees it before merging).
 function imageProvenanceSection(images) {
   if (!images) return [];
-  const lines = [describeImageProvenance('hero', images.hero), ...((images.body || []).map((img, i) => describeImageProvenance(`body-${i + 1}`, img)))].filter(Boolean);
+  // A body image is labelled by its committed file name (body-2 when the
+  // draft already carried body-1), not by its position in the generated
+  // list (Codex r13 P2 on #3964).
+  const labelFor = (img, i) => (String(img?.src || '').match(/\/(body-\d+)\.\w+$/) || [])[1] || `body-${i + 1}`;
+  const lines = [describeImageProvenance('hero', images.hero), ...((images.body || []).map((img, i) => describeImageProvenance(labelFor(img, i), img)))].filter(Boolean);
   return lines.length ? [``, `### Images`, ...lines] : [];
 }
 

@@ -253,6 +253,8 @@ describe('screenGeneratedImage', () => {
     expect(await run([2])).toMatchObject({ ok: false, forbidden: ['a competitor\'s branded vehicle'], violations: 1 });
     expect(await run(['an irrigation repair scene'])).toMatchObject({ ok: false, forbidden: ['irrigation repair scenes'] });
     expect(await run(['Irrigation Repair Scenes', 1])).toMatchObject({ ok: false, forbidden: ['irrigation repair scenes'], violations: 1 });
+    // A quoted id is the id (Codex r13 P2 on #3964).
+    expect(await run(['2', ' 1 '])).toMatchObject({ ok: false, forbidden: ['a competitor\'s branded vehicle', 'irrigation repair scenes'], violations: 2 });
     expect(await run([3, 0, 'a lawn mower', 'repair'])).toMatchObject({ ok: true, forbidden: [] });
   });
 
