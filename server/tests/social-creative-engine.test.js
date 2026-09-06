@@ -395,6 +395,23 @@ describe('diagnostic scenes apply only to matching topics (Codex r3 on #3990)', 
     expect(web).not.toContain('lawn-armyworm-caterpillar');
   });
 
+  test('keywords match whole words: "temperatures" is not a rat, chinch pressure never gets the peeled-sod (root loss) scene (Codex r4 on #3990)', () => {
+    expect(Engine.resolveSceneBucket({ service: 'general pest', topic: 'ants trailing indoors as temperatures climb' })).toBe('general');
+    expect(Engine.resolveSceneBucket({ service: 'termite', topic: 'Formosan termite swarmers' })).toBe('termite');
+    expect(Engine.resolveSceneBucket({ service: 'tree and shrub', topic: 'whiteflies on ficus hedges' })).toBe('tree_shrub');
+    expect(Engine.resolveSceneBucket({ service: 'rodent', topic: 'roof rats in attics' })).toBe('rodent');
+    const rodent = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.rodent, { service: 'general pest', topic: 'ants trailing indoors as temperatures climb' }).map((c) => c.key);
+    expect(rodent).not.toContain('rodent-citrus-hollow');
+    const chinch = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'chinch bug pressure starting early' }).map((c) => c.key);
+    expect(chinch).not.toContain('lawn-peeled-sod');
+    expect(chinch).toContain('lawn-edge-sidewalk');
+    const grub = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'grubs and root loss' }).map((c) => c.key);
+    expect(grub).toContain('lawn-peeled-sod');
+    // Stems in `only` lists still match at a word start.
+    const pellets = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.termite, { service: 'termite', topic: 'drywood termite pellets' }).map((c) => c.key);
+    expect(pellets).toContain('termite-pellet-pile');
+  });
+
   test('every bank keeps service-wide (unrestricted) concepts so a generic topic always has a scene', () => {
     for (const [bucket, bank] of Object.entries(Engine.SCENE_LIBRARY)) {
       const generic = Engine.conceptsApplicableTo(bank, { service: bucket, topic: 'seasonal pressure' });

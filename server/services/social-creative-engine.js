@@ -113,7 +113,7 @@ const SCENE_LIBRARY = {
     { key: 'lawn-armyworm-caterpillar', scene: 'macro of a striped green-brown caterpillar with a pale inverted Y on its head crawling along a St. Augustine grass blade, morning light', only: ['armyworm', 'caterpillar'] },
     { key: 'lawn-sedge-patch', scene: 'a cluster of bright yellow-green nutsedge shooting above a darker St. Augustine lawn in a low wet corner, midday sun', only: ['sedge', 'weed', 'soggy'] },
     { key: 'lawn-dollarweed-cluster', scene: 'close-up of round coin-shaped dollarweed leaves spreading through damp St. Augustine turf near a sprinkler head', only: ['dollarweed', 'weed', 'wet', 'irrigation'] },
-    { key: 'lawn-peeled-sod', scene: 'a corner of St. Augustine sod lifted back like carpet to show bare soil and roots beneath, bright Florida daylight', only: ['grub', 'root', 'chinch', 'peel'] },
+    { key: 'lawn-peeled-sod', scene: 'a corner of St. Augustine sod lifted back like carpet to show bare soil and roots beneath, bright Florida daylight', only: ['grub', 'root', 'peel'] },
     { key: 'lawn-mowing-stripes', scene: 'freshly mowed St. Augustine lawn with clean stripes in front of a stucco Florida home, late-afternoon light' },
     { key: 'lawn-edge-sidewalk', scene: 'the sunny edge of a Florida lawn along a concrete sidewalk with a band of straw-colored grass next to green turf', only: ['chinch', 'drought', 'edge', 'brown'] },
   ],
@@ -181,11 +181,11 @@ const SCENE_LIBRARY = {
 // engine has no studio import — the studio imports the engine, never the
 // reverse). First match wins; anything unmatched gets the general pest bank.
 const BUCKET_KEYWORDS = [
-  { bucket: 'termite', match: ['termite', 'swarm', 'wdo', 'wood destroying'] },
+  { bucket: 'termite', match: ['termite', 'swarm', 'swarmer', 'swarming', 'wdo', 'wood destroying'] },
   { bucket: 'mosquito', match: ['mosquito', 'standing water', 'no-see-um', 'crane fly', 'bromeliad', 'gutters'] },
-  { bucket: 'lawn', match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertil', 'chinch', 'st. augustine', 'webworm', 'armyworm', 'sedge', 'dollarweed', 'large patch', 'dollar spot', 'grub', 'mole cricket', 'irrigation'] },
+  { bucket: 'lawn', match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertilizer', 'fertilize', 'fertilizing', 'fertilization', 'chinch', 'st. augustine', 'webworm', 'armyworm', 'sedge', 'dollarweed', 'large patch', 'dollar spot', 'grub', 'mole cricket', 'irrigation'] },
   { bucket: 'rodent', match: ['rodent', 'rat', 'rats', 'mouse', 'mice'] },
-  { bucket: 'tree_shrub', match: ['tree', 'shrub', 'ornamental', 'palm', 'whitefly', 'mealybug', 'hibiscus', 'ixora', 'ficus', 'sooty mold'] },
+  { bucket: 'tree_shrub', match: ['tree', 'shrub', 'ornamental', 'palm', 'whitefly', 'whiteflies', 'mealybug', 'hibiscus', 'ixora', 'ficus', 'sooty mold'] },
 ];
 
 // Overlay the renderer composites for each run kind (photo = campaign).
@@ -195,13 +195,27 @@ const OVERLAY_VARIANTS = {
   milestone: 'photo_milestone',
 };
 
+// Whole-word keyword tests. Bucket routing takes the word or its English
+// plural ('rat' → rat/rats, never the middle of "temperatures"); an `only`
+// list matches at a word START so its stems keep working ('pellet' →
+// pellets, 'swarm' → swarmers) while 'rat' still cannot hit "temperatures".
+function escapeRe(kw) {
+  return kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function textHasWord(text, kw) {
+  return new RegExp(`\\b${escapeRe(kw)}(?:s|es)?\\b`).test(text);
+}
+function textHasWordStart(text, kw) {
+  return new RegExp(`\\b${escapeRe(kw)}`).test(text);
+}
+
 function resolveSceneBucket({ service, topic, variant } = {}) {
   // A milestone is a company-wide thank-you, so it takes the review bank's
   // calm home scenes rather than a pest close-up.
   if (variant === 'review' || variant === 'milestone') return 'review';
   const text = `${service || ''} ${topic || ''}`.toLowerCase();
   for (const group of BUCKET_KEYWORDS) {
-    if (group.match.some((keyword) => text.includes(keyword))) return group.bucket;
+    if (group.match.some((keyword) => textHasWord(text, keyword))) return group.bucket;
   }
   // A versus card compares two pests; the general bank's scenes each show ONE
   // specific pest (an ant trail under "Paper Wasp vs Mud Dauber" would read
@@ -218,7 +232,7 @@ function resolveSceneBucket({ service, topic, variant } = {}) {
 // Concepts without `only` are service-wide and always applicable.
 function conceptsApplicableTo(bank, { service, topic } = {}) {
   const text = `${service || ''} ${topic || ''}`.toLowerCase();
-  return bank.filter((concept) => !Array.isArray(concept.only) || concept.only.some((word) => text.includes(word)));
+  return bank.filter((concept) => !Array.isArray(concept.only) || concept.only.some((word) => textHasWordStart(text, word)));
 }
 
 // Deterministic rotation seed anchored to the Eastern business date (matches

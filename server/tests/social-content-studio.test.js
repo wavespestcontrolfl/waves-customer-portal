@@ -1032,6 +1032,24 @@ describe('campaign lane skips recently published cards (Codex r3 on #3990)', () 
     delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
   });
 
+  test('when every state is recent, the walk still never repeats the subject that posted last (Codex r4 on #3990)', () => {
+    // 24 daily campaign fires (reviews/versus dark) fill the whole July cycle.
+    const seasonal = Studio.SEASONAL_AUTONOMOUS_TOPICS[7];
+    const all = [];
+    for (let slot = 0; slot < 24; slot += 1) {
+      const c = Studio.campaignCardAt(seasonal, slot);
+      all.push(`${c.topic.topic}|${c.city}`);
+    }
+    for (let d = 20; d <= 30; d += 1) {
+      const last = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${d}`), { recent: new Set(all) });
+      // The next day's recent window starts with what just posted.
+      const recent = new Set([`${last.topic}|${last.city}`, ...all]);
+      const next = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${d + 1}`), { recent });
+      expect(next.topic).not.toBe(last.topic);
+      expect(seasonal.some((t) => t.topic === next.topic)).toBe(true);
+    }
+  });
+
   test('the skip walks forward to the next unpublished state and never leaves the month bank', () => {
     const first = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-01'));
     const next = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-01'), { recent: new Set([`${first.topic}|${first.city}`]) });

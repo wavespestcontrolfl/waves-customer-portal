@@ -1464,11 +1464,22 @@ function selectAutonomousCampaign(now = new Date(), { recent = new Set() } = {})
   const cycle = seasonal.length * WAVES_LOCATIONS.length;
   const slotsBefore = campaignSlotsBefore(year, month, day);
   const start = isCampaignSlotDay(day) ? slotsBefore : slotsBefore + Math.floor(cycle / 2) + 1;
-  let card = campaignCardAt(seasonal, start);
-  for (let step = 0; step < cycle; step += 1) {
+  let card = null;
+  for (let step = 0; step < cycle && !card; step += 1) {
     const candidate = campaignCardAt(seasonal, start + step);
-    if (!recent.has(`${candidate.topic.topic}|${candidate.city}`)) { card = candidate; break; }
+    if (!recent.has(`${candidate.topic.topic}|${candidate.city}`)) card = candidate;
   }
+  // Every state sits inside the recent window (daily fires with the other
+  // lanes dark fill all 24 in 24 days): walk again, but never repeat the
+  // subject that posted last. `recent` is newest-first (recentCampaignCards),
+  // so its first entry is that card.
+  const [latest] = recent;
+  const lastTopic = latest ? latest.slice(0, latest.lastIndexOf('|')) : null;
+  for (let step = 0; step < cycle && !card; step += 1) {
+    const candidate = campaignCardAt(seasonal, start + step);
+    if (candidate.topic.topic !== lastTopic) card = candidate;
+  }
+  if (!card) card = campaignCardAt(seasonal, start);
   return {
     ...card.topic,
     city: card.city,
@@ -3903,5 +3914,6 @@ module.exports = {
   saveCampaignDraft,
   serializeAutonomousRun,
   selectAutonomousCampaign,
+  campaignCardAt,
   validateDrafts,
 };
