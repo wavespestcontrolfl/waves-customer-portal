@@ -1,6 +1,6 @@
 # Waves Admin simplification audit
 
-Review baseline: `32de1dc5ccb5a2f9b6e5969db319df37b96a025d`, fetched `origin/main` on 2026-09-05 ET. This is a source revision, **not a verified deployed revision**. Review branch: `audit/admin-simplification-review-20260905`. No merge, deployment, production query, database migration, provider action, or live agent launch is authorized or performed.
+Review baseline: `32de1dc5ccb5a2f9b6e5969db319df37b96a025d`, fetched `origin/main` on 2026-09-05 ET. This is a source revision, **not a verified deployed revision**. Review branch: `audit/admin-simplification-review-20260905`. The initial audit and implementation were local. The approved PR follow-up triggered an automatic isolated Railway preview, recorded in [verification](verification.md); further publication is paused under the original no-deploy boundary. No merge, production query, local database migration, live message, payment or agent launch was performed by this session.
 
 ## Findings
 
