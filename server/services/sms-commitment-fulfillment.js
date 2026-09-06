@@ -5,6 +5,7 @@ const MODELS = require('../config/models');
 const { dispatch } = require('./llm/call');
 const { VERSION } = require('./sms-operational-extractor');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt } = require('./call-commitments');
 
 const LIMIT = 50;
 const SCHEMA = {
@@ -46,9 +47,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     email_delivery: conn('email_messages').where({ recipient_type: 'customer', recipient_id: customerId })
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'text_snapshot', 'subject_snapshot', 'sent_at', 'delivered_at', 'bounced_at', 'created_at'),
-    estimate: conn('estimates').where({ customer_id: customerId }).where('sent_at', '>', after)
-      .where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
-      .select('id', 'status', 'sent_at', 'property_id', 'service_interest', 'address'),
+    estimate: conn('estimates').where({ customer_id: customerId })
+      .modify((q) => handedOffWithin(q, after, now)).orderByRaw(handoffOrder(conn, after, now)).limit(LIMIT + 1)
+      .select(...HANDOFF_COLS(conn), 'property_id', 'service_interest', 'address'),
     invoice: conn('invoices').where({ customer_id: customerId }).where('sent_at', '>', after)
       .where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id'),
@@ -92,7 +93,8 @@ function admissibleWitness(record, commitment) {
       return ['sent', 'delivered', 'opened', 'clicked'].includes(record.status)
         && !!record.sent_at && !record.bounced_at;
     case 'estimate':
-      return !!record.sent_at && !!propertyId && record.property_id === propertyId;
+      return !!witnessAt(record, new Date(commitment.sms_context?.source_at))
+        && !!propertyId && record.property_id === propertyId;
     case 'visit':
       return !!propertyId && record.property_id === propertyId && VISIT_STATUSES[commitment.kind].includes(record.status);
     // An invoice send does not establish that an invoice QUESTION was answered.
@@ -110,7 +112,8 @@ function groundFulfillment(parsed, evidence, commitment) {
   const quote = normalized(parsed.quote);
   if (quote.length < 3 || !normalized(witness.text).includes(quote)) return { verdict: 'uncertain', reason: 'ungrounded_witness' };
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
-    matched_at: witness.sent_at || witness.received_at || witness.created_at, quote: parsed.quote,
+    matched_at: witness.type === 'estimate' ? witnessAt(witness, new Date(commitment.sms_context?.source_at))
+      : witness.sent_at || witness.received_at || witness.created_at, quote: parsed.quote,
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
 }
 

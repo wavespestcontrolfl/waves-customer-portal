@@ -12,7 +12,8 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
-const { recordMessageOperations, loadMessageContext } = require('../services/sms-operational-actions');
+const { recordMessageOperations, loadMessageContext, runSmsOperationalActions } = require('../services/sms-operational-actions');
+const numbers = require('../config/twilio-numbers');
 const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
 const { listOpenCommitments } = require('../services/call-commitments');
@@ -64,6 +65,7 @@ postgres('SMS operations on PostgreSQL', () => {
   });
   afterAll(async () => {
     delete process.env.GATE_SMS_OPERATIONAL_ACTIONS;
+    delete process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE;
     if (mockPg) await mockPg.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
@@ -129,6 +131,40 @@ postgres('SMS operations on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date());
     expect(evidence.failures).toEqual([]);
     expect(evidence.records).toEqual([]);
+  });
+
+  test('suppressed estimate sends and manual acceptance are not delivery witnesses', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const base = { customer_id: message.customer_id, property_id: context.properties[0].id,
+      status: 'sent', service_interest: 'Quarterly lawn', sent_at: after };
+    const [delivered] = await mockPg('estimates').insert({ ...base, sent_at: null,
+      estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    await mockPg('estimates').insert([
+      { ...base, price_locked_by: null, accepted_at: null, estimate_data: {} },
+      { ...base, price_locked_by: 'manual_accept', accepted_at: after, estimate_data: {} },
+      { ...base, price_locked_by: null, accepted_at: null,
+        estimate_data: { deliveryState: { lastDeliveredAt: new Date(message.created_at.getTime() - 1000).toISOString() } } },
+    ]);
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
+    expect(evidence.failures).toEqual([]);
+    expect(evidence.records.filter((r) => r.type === 'estimate').map((r) => r.id)).toEqual([delivered.id]);
+  });
+
+  test('thirty deleted-customer messages cannot block the next active customer', async () => {
+    await mockPg('customers').where({ id: message.customer_id }).update({ deleted_at: new Date() });
+    await mockPg('sms_log').insert(Array.from({ length: 29 }, () => ({ ...message, id: randomUUID() })));
+    const customerId = randomUUID();
+    await mockPg('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550103', address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236' });
+    const active = { ...message, id: randomUUID(), customer_id: customerId, from_phone: '+12025550103',
+      to_phone: numbers.locations.parrish.number, created_at: new Date(message.created_at.getTime() + 1000) };
+    await mockPg('sms_log').insert(active);
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = new Date(message.created_at.getTime() - 1000).toISOString();
+    const extract = jest.fn().mockResolvedValue({ facts: [], obligations: [], dropped: 0 });
+    const outcome = await runSmsOperationalActions({ conn: mockPg, extract, now: new Date(active.created_at.getTime() + 1000) });
+    expect(outcome).toEqual({ processed: 1, failed: 0, skipped: 0 });
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect((await mockPg('sms_log').where({ id: active.id }).first()).operational_analysis).not.toBeNull();
   });
 
   test('rollback refuses to destroy recorded SMS obligations and analysis', async () => {

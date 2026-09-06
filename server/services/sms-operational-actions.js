@@ -146,6 +146,9 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
   return runExclusive('sms-operational-actions', async () => {
     const candidates = await conn('sms_log as s').where('s.created_at', '>=', since).where('s.created_at', '<=', now)
       .whereNull('s.operational_analysis').whereNotNull('s.customer_id')
+      .whereExists(function availableCustomer() {
+        this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
+      })
       .where(function settledMessage() {
         this.where('s.direction', 'inbound').orWhereIn('s.status', ['sent', 'delivered', 'failed', 'undelivered']);
       })
@@ -156,6 +159,7 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
       }).orderBy('s.created_at').orderBy('s.id').limit(30).select('s.*');
     let processed = 0;
     let failed = 0;
+    let skipped = 0;
     for (const message of candidates) {
       if (!enabled()) break;
       const source = { source_type: 'message', source_id: message.id, extractor_version: VERSION,
@@ -164,7 +168,8 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
       try {
         const context = await loadMessageContext(conn, message);
         const extracted = await extract(context);
-        await recordMessageOperations(conn, message, extracted, context);
+        const outcome = await recordMessageOperations(conn, message, extracted, context);
+        if (outcome.skipped) { skipped += 1; continue; }
         processed += 1;
       } catch {
         failed += 1;
@@ -182,7 +187,7 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
         logger.warn(`[sms-operations] extraction failed for sms_log ${message.id}`);
       }
     }
-    return { processed, failed };
+    return { processed, failed, skipped };
   });
 }
 

@@ -161,9 +161,9 @@ describe('private profile writes', () => {
 });
 
 describe('fulfillment proof', () => {
-  const commitment = { kind: 'send_estimate', sms_context: { property_id: PROPERTY_ID } };
+  const commitment = { kind: 'send_estimate', sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
   const record = { id: 'estimate-id', ref: 'estimate:estimate-id', type: 'estimate', property_id: PROPERTY_ID,
-    text: 'Quarterly lawn estimate', sent_at: '2040-03-11T15:00:00Z', status: 'sent' };
+    text: 'Quarterly lawn estimate', sent_at: '2040-03-11T15:00:00Z', handed_off_at: '2040-03-11T15:00:00Z', status: 'sent' };
   const verdict = { verdict: 'fulfilled', record_ref: record.ref, quote: record.text };
 
   test('accepts a grounded relevant sent estimate and refuses an invented witness', () => {
@@ -178,6 +178,12 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ ...record, type: 'invoice' }, { kind: 'other' })).toBe(false);
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'appointment_reminder' }, commitment)).toBe(false);
     expect(admissibleWitness({ type: 'sms', status: 'queued', message_type: 'manual' }, commitment)).toBe(false);
+  });
+
+  test('a sent timestamp without a post-request delivery cannot fulfill an estimate promise', () => {
+    expect(admissibleWitness({ ...record, handed_off_at: null }, commitment)).toBe(false);
+    expect(admissibleWitness({ ...record, handed_off_at: '2040-03-09T15:00:00Z' }, commitment)).toBe(false);
+    expect(admissibleWitness({ ...record, sent_at: null }, commitment)).toBe(true);
   });
 
   test('a text cannot fulfill a promised phone call', () => {
