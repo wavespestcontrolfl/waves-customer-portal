@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
+const { accountPropertyIds } = require('../services/account-properties');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
@@ -419,17 +420,6 @@ async function ensurePrefs(customerId) {
   return prefs;
 }
 
-async function accountPropertyIds(req) {
-  const accountId = req.accountId || req.customer?.account_id || req.customerId;
-  const rows = await db('customers')
-    .where({ active: true })
-    .whereNull('deleted_at')
-    .where(function () {
-      this.where({ account_id: accountId }).orWhere({ id: accountId });
-    })
-    .select('id');
-  return rows.map(r => r.id);
-}
 
 // Resolve the customer id that owns the account-level channel preference — the
 // account's primary profile — so a customer switched to a secondary property
