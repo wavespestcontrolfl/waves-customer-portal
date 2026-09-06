@@ -466,11 +466,24 @@ describe('fulfillment proof', () => {
     const completed = { ...commitment, kind: 'technician_follow_up' };
     expect(admissibleWitness(visit, scheduled)).toBe(false);
     expect(admissibleWitness({ ...visit, created_at: after }, scheduled)).toBe(true);
-    expect(admissibleWitness({ ...visit, status: 'rescheduled', transitioned_at: after }, scheduled)).toBe(true);
+    expect(admissibleWitness({ ...visit, status: 'rescheduled', booked_at: after }, scheduled)).toBe(true);
     expect(admissibleWitness({ ...visit, status: 'completed', completed_at: before }, completed)).toBe(false);
     expect(admissibleWitness({ ...visit, status: 'completed', completed_at: after }, completed)).toBe(true);
     expect(admissibleWitness({ ...visit, status: 'completed', created_at: after, completed_at: before }, completed)).toBe(false);
   });
+  test.each(['en_route', 'on_site', 'completed', 'cancelled', 'skipped'])(
+    'schedule fulfillment uses post-request booking evidence when a visit is %s', (status) => {
+      const scheduled = { ...commitment, kind: 'schedule_visit' };
+      const before = '2040-03-09T15:00:00Z';
+      const after = '2040-03-11T15:00:00Z';
+      const visit = { type: 'visit', property_id: PROPERTY_ID, status, created_at: before, transitioned_at: after };
+      const active = ['en_route', 'on_site', 'completed'].includes(status);
+      expect(admissibleWitness(visit, scheduled)).toBe(false);
+      expect(admissibleWitness({ ...visit, created_at: after }, scheduled)).toBe(active);
+      expect(admissibleWitness({ ...visit, booked_at: after }, scheduled)).toBe(active);
+    },
+  );
+
   test('a staff claim of sending or completing work is not the deliverable itself', () => {
     const reply = { type: 'sms', status: 'delivered', message_type: 'manual', text: 'I sent the estimate' };
     expect(admissibleWitness(reply, { kind: 'send_estimate' })).toBe(false);

@@ -30,7 +30,7 @@ const REQUIRED_TYPES = {
 const ANSWER_TYPES = ['sms', 'call', 'email_delivery'];
 const HUMAN_SMS_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const SMS_TYPES = { send_appointment_confirmation: [...HUMAN_SMS_TYPES, 'confirmation'] };
-const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled'], technician_follow_up: ['completed'] };
+const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'], technician_follow_up: ['completed'] };
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
@@ -75,6 +75,9 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .select('id', 'status', 'created_at', conn.raw('scheduled_date::text as scheduled_date'), 'window_start', 'service_type', 'property_id',
         conn.raw('CASE WHEN completed_at <= ? THEN completed_at END as completed_at', [now]),
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
+          WHERE h.job_id = scheduled_services.id AND h.to_status IN ('confirmed', 'rescheduled')
+            AND h.transitioned_at > ? AND h.transitioned_at <= ?) as booked_at`, [after, now]),
+        conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status = scheduled_services.status
             AND h.transitioned_at > ? AND h.transitioned_at <= ?) as transitioned_at`, [after, now])),
   };
@@ -99,7 +102,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
 function visitWitnessAt(record, commitment) {
   const after = new Date(commitment.sms_context?.source_at);
   const activity = commitment.kind === 'technician_follow_up' ? record.completed_at : record.created_at;
-  const times = [activity, record.transitioned_at].filter(Boolean).map((v) => new Date(v))
+  // Progress alone does not prove a new booking. For scheduling requests,
+  // only creation or a confirmed/rescheduled transition establishes that act.
+  const transition = commitment.kind === 'technician_follow_up' ? record.transitioned_at : record.booked_at;
+  const times = [activity, transition].filter(Boolean).map((v) => new Date(v))
     .filter((v) => !Number.isNaN(v.getTime()) && v > after);
   return times.length ? new Date(Math.min(...times.map((v) => v.getTime()))) : null;
 }

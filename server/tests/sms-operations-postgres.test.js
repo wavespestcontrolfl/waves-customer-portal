@@ -333,6 +333,32 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(allowed('technician_follow_up')).toEqual([rows[3].id]);
   });
 
+  test('progressed visits preserve booking proof without inventing it from progress', async () => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const base = { customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Lawn', scheduled_date: etDateString(message.created_at),
+      window_start: '09:00:00', created_at: after };
+    const statuses = ['en_route', 'on_site', 'completed', 'cancelled', 'skipped'];
+    const rows = await mockPg('scheduled_services').insert([
+      ...statuses.map((status) => ({ ...base, status })),
+      { ...base, status: 'en_route', created_at: before },
+      { ...base, status: 'completed', created_at: before },
+    ]).returning('id');
+    await mockPg('job_status_history').insert([
+      { job_id: rows[5].id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after },
+      { job_id: rows[6].id, from_status: 'confirmed', to_status: 'rescheduled', transitioned_at: after },
+      { job_id: rows[6].id, from_status: 'on_site', to_status: 'completed', transitioned_at: new Date(after.getTime() + 100) },
+    ]);
+    const commitment = { kind: 'schedule_visit', sms_context: {
+      property_id: base.property_id, source_at: message.created_at.toISOString(),
+    } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
+    expect(evidence.failures).toEqual([]);
+    expect(evidence.records.filter((r) => admissibleWitness(r, commitment)).map((r) => r.id).sort())
+      .toEqual([rows[0].id, rows[1].id, rows[2].id, rows[6].id].sort());
+  });
+
   test('merge and merge undo retain open obligations on the source SMS’s current owner', async () => {
     result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
     await recordMessageOperations(mockPg, message, result, context);
