@@ -7,9 +7,17 @@ describe('bookingPropertyStamp (New Appointment service-address picker)', () => 
     latitude: '27.4900000', longitude: '-82.6300000',
   };
   const connReturning = (row) => {
-    const q = { where: jest.fn(() => q), first: jest.fn().mockResolvedValue(row) };
+    const q = { where: jest.fn(() => q), forShare: jest.fn(() => q), first: jest.fn().mockResolvedValue(row) };
     return Object.assign(jest.fn(() => q), { q });
   };
+  test('the transaction re-read takes a share lock only when asked', async () => {
+    const plain = connReturning(PROPERTY);
+    await bookingPropertyStamp({ customerId: 'cust-1', propertyId: PROPERTY.id }, plain);
+    expect(plain.q.forShare).not.toHaveBeenCalled();
+    const locked = connReturning(PROPERTY);
+    await bookingPropertyStamp({ customerId: 'cust-1', propertyId: PROPERTY.id }, locked, { lock: true });
+    expect(locked.q.forShare).toHaveBeenCalledTimes(1);
+  });
   test('no propertyId → null (caller falls through to the sole-property anchor)', async () => {
     const conn = connReturning(PROPERTY);
     expect(await bookingPropertyStamp({ customerId: 'cust-1', propertyId: undefined }, conn)).toBeNull();

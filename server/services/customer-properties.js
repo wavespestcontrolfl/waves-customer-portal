@@ -563,13 +563,18 @@ async function soleActivePropertyId(customerId, conn = db) {
  * customer's ACTIVE properties or the row has no complete street address —
  * a booking must never land on a half-recorded address.
  */
-async function bookingPropertyStamp({ customerId, propertyId }, conn = db) {
+async function bookingPropertyStamp({ customerId, propertyId }, conn = db, { lock = false } = {}) {
   if (propertyId === undefined || propertyId === null || propertyId === '') return null;
   const refuse = (message) => Object.assign(new Error(message), { statusCode: 422, isOperational: true, code: 'INVALID_BOOKING_PROPERTY' });
   if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
     throw refuse('Choose a saved customer address.');
   }
-  const property = await conn('customer_properties').where({ id: propertyId, customer_id: customerId, active: true }).first();
+  // `lock` (transaction re-read): FOR SHARE holds the row through commit so
+  // a concurrent edit / deactivation waits behind the booking instead of
+  // landing between this read and the insert.
+  const query = conn('customer_properties').where({ id: propertyId, customer_id: customerId, active: true });
+  if (lock) query.forShare();
+  const property = await query.first();
   if (!property || !['address_line1', 'city', 'state', 'zip'].every((field) =>
     typeof property[field] === 'string' && property[field].trim())) {
     throw refuse('Choose an active customer address with a street, city, state and ZIP code.');

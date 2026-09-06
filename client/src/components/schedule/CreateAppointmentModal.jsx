@@ -709,6 +709,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // must not hide a bookable secondary — the server's sole-property
         // anchor sees both rows and would fall back to the profile address).
         if (data?.canChangeAppointmentAddress === true && all.length > 1 && complete.length > 0) {
+          // Same invalidation as applyBookingProperty: a Find-a-Time search
+          // started before this list arrived was scored at the primary, and
+          // the default here may be a complete SECONDARY.
+          findTimesRequestRef.current += 1;
+          setTimeSlots(null);
           setSelectedPropertyId(defaultBookingPropertyId(complete));
           setBookingPropertyState('ready');
         } else {
@@ -757,8 +762,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Memoized: it is a dependency of the auto-apply effect below, so a fresh
   // array every render would re-run that effect on every keystroke.
   const visibleScheduleEstimates = useMemo(
-    () => filterScheduleEstimatesForProperty(scheduleEstimates, propertyPickerActive ? selectedPropertyId : ''),
-    [scheduleEstimates, propertyPickerActive, selectedPropertyId],
+    () => (bookingPropertyState === 'error'
+      // Addresses unknown → a property-scoped quote cannot be matched to the
+      // address being booked, and booking it without propertyId would skip
+      // the server's mismatch check. Only address-agnostic quotes stay.
+      ? scheduleEstimates.filter((e) => !e?.propertyId)
+      : filterScheduleEstimatesForProperty(scheduleEstimates, propertyPickerActive ? selectedPropertyId : '')),
+    [scheduleEstimates, propertyPickerActive, selectedPropertyId, bookingPropertyState],
   );
 
   // Find-a-Time state

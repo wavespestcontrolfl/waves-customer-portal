@@ -5441,7 +5441,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // restored loser's source_estimate_id onto a kept-customer visit.
         if (linkedEstimateId) {
           const freshLinkedEstimate = await trx('estimates')
-            .where({ id: linkedEstimateId }).first('id', 'customer_id');
+            .where({ id: linkedEstimateId }).forShare().first('id', 'customer_id', 'property_id');
           if (!freshLinkedEstimate
             || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
             const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
@@ -5449,6 +5449,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
             estErr.isOperational = true;
             estErr.code = 'CUSTOMER_CHANGED_RETRY';
             throw estErr;
+          }
+          // The preflight property compare re-runs under the fence (codex
+          // #4015 r2 P2): a quote re-pointed at another property while this
+          // booking waited on its locks must not be linked to a visit at the
+          // operator's chosen address.
+          if (bookingProperty && freshLinkedEstimate.property_id
+            && String(freshLinkedEstimate.property_id) !== String(bookingProperty.property_id)) {
+            throw Object.assign(httpError(422, 'This estimate was quoted for a different property. Choose that address or book without the estimate.'), { code: 'ESTIMATE_PROPERTY_MISMATCH' });
           }
         }
       }
@@ -5512,7 +5520,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // refuse here (422, rolls back) rather than commit a stale address
         // or a now-inactive property_id.
         const freshProperty = await require('../services/customer-properties')
-          .bookingPropertyStamp({ customerId, propertyId }, trx);
+          .bookingPropertyStamp({ customerId, propertyId }, trx, { lock: true });
+        // zone / tech match were derived from the preflight snapshot: any
+        // drift (address edited between the reads) is refused as a retry
+        // rather than committed with stale derived values.
+        if (JSON.stringify(freshProperty) !== JSON.stringify(bookingProperty)) {
+          throw Object.assign(httpError(409, 'The chosen address changed while saving. Reload and choose the address again.'), { code: 'PROPERTY_CHANGED_RETRY' });
+        }
         for (const [field, value] of Object.entries(freshProperty)) {
           if (cols[field]) insertData[field] = value;
         }
