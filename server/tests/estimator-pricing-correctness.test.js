@@ -102,6 +102,42 @@ describe('palm annual cents and historical quote preservation', () => {
     const replay = generateEstimate({ ...property, services, palmAnnualRounding: 'whole', ...savedFloorReplaySignals({ engineInputs: { palmAnnualRounding: 'whole' } }) });
     expect(replay.lineItems[0].annual).toBe(127.5);
   });
+
+  test.each([['whole', 128], ['cents', 127.5], ['legacy-event', 128]])('remove/restore preserves %s quote pricing across repeated cycles', async (mode, annual) => {
+    const optOut = require('../services/estimate-service-opt-out');
+    const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+    const engineInputs = { ...property, services: { ...services, lawn: { track: 'st_augustine' } } };
+    let data = { engineInputs, result: mapV1ToLegacyShape(generateEstimate({ ...engineInputs, palmAnnualRounding: mode === 'cents' ? 'cents' : 'whole' })) };
+    if (mode !== 'cents') delete data.result.results.injection.annualRounding;
+    const recompute = async () => {
+      const replay = await serverRecomputeFromEstimateData(data, {
+        replaySavedPricingKnobs: true,
+        needsSync: () => false,
+        generateEstimate,
+        mapV1ToLegacyShape,
+        translateV2CallToV1Input: null,
+      });
+      expect(replay.recomputed).toBe(true);
+      data.result = replay.serverResult;
+      data.engineResult = replay.rawEngineResult;
+      data = JSON.parse(JSON.stringify(data));
+    };
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const before = JSON.parse(JSON.stringify(data));
+      const provenance = optOut.captureServiceOptOutProvenance(data, 'palm_injection');
+      if (mode === 'legacy-event' && cycle === 0) delete provenance.floorSignals.palmAnnualRounding;
+      const removed = optOut.applyServiceOptOutToEstimateData(data, { serviceKey: 'palm_injection', included: false });
+      expect(removed.ok).toBe(true);
+      await recompute();
+      expect(data.result.results.injection).toBeFalsy();
+      optOut.recordServiceOptOutEvent(data, { serviceKey: 'palm_injection', included: false, removedInputs: removed.removedInputs, provenance }, before);
+      const event = data.serviceOptOut.events.at(-1);
+      expect(optOut.applyServiceOptOutToEstimateData(data, { serviceKey: 'palm_injection', included: true, removedInputs: optOut.readRemovedInputs(event), provenance: event.provenance }).ok).toBe(true);
+      await recompute();
+      expect(data.result.results.injection).toMatchObject({ ann: annual, perVisit: 255 });
+      optOut.recordServiceOptOutEvent(data, { serviceKey: 'palm_injection', included: true }, before);
+    }
+  });
 });
 
 describe('rodent agreements and package scope surface for staff review', () => {

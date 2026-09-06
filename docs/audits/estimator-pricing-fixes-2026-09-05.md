@@ -2,7 +2,7 @@
 
 Implementation worktree: `/Users/wavespestcontrol/wt-estimator-pricing-correctness`.
 Branch: `fix/estimator-pricing-correctness`, based on `a2bb0bc49b9f6a1ebb776af29ee58a3d1439c9cf`.
-User authorization: “ok go” following the full estimator audit. This is a local implementation; no push, merge, deployment, production DB connection, customer communication or money movement occurred. The original workspace's unrelated changes remain intact.
+User authorization: “ok go” following the full estimator audit. The subsequent instruction “create a pr and tag codex” authorizes publishing the branch for review. No merge, deployment, production DB connection, customer communication or money movement is part of this change. The original workspace's unrelated changes remain intact.
 
 ## Implemented
 
@@ -10,7 +10,7 @@ User authorization: “ok go” following the full estimator audit. This is a lo
 - Pricing validation errors use the existing `failClosed` mechanism, so the authoritative save path cannot persist a client-supplied price after the engine rejects the calculation. Other existing engine-error behavior is unchanged.
 - Numeric-nine Tree & Shrub fields use the existing service-specific cadence resolver for 42-day followups and annual-prepay coverage. Contradictory fields/counts refuse coverage. Count-only legacy T&S remains office-scheduled; inconsistent count-only nine prepay is rejected. Mosquito's seasonal calendar and generic numeric cadence inference remain intact.
 - Large-sanitation scope advisories now survive mapping via existing review reasons/warnings. The current over-50-cu-ft threshold and quoted amounts are preserved.
-- TreeAge annualized values retain cents on new estimates. An example three-palm event stays $255; its annualized amount is $127.50. Saved pre-fix quotes retain their $128 annual basis. The existing shared replay mechanism derives the rounding mode from saved output; new saves strip input-claimed rounding modes. Both raw and mapped historical shapes are tested. This is a calculation correction, not a table/configuration reprice.
+- TreeAge annualized values retain cents on new estimates. An example three-palm event stays $255; its annualized amount is $127.50. Saved pre-fix quotes retain their $128 annual basis. The existing shared replay mechanism derives the rounding mode from saved output; new saves strip input-claimed rounding modes. Both raw and mapped historical shapes are tested. Removal/restore reuses the server-recorded removal provenance, including pre-stamp events, so removing the palm result cannot erase its historical rounding basis. Repeated remove/restore cycles cover historical and cent-preserving quotes. This is a calculation correction, not a table/configuration reprice.
 - Pricing age modifiers now read the Eastern calendar year.
 - Trap-only retainers carry staff-review reasons for the payment schedule and monitoring appointments. This is an explicit limitation marker, **not automatic retainer billing or scheduling**; current quoted first charges are preserved.
 - A legacy rodent combo advertising more stations than its priced bracket allowance carries a scope-review reason. This does not invent an extra-station charge or alter existing package prices.
@@ -18,7 +18,7 @@ User authorization: “ok go” following the full estimator audit. This is a lo
 
 ## Verification
 
-- 23 Jest suites, **683 passed, zero failures/skips**, clean exit. Includes the pricing-engine family, new correctness/cadence regressions, per-application billing, saved-price replay, and authoritative save/persistence tests. No pricing baseline regeneration.
+- 25 Jest suites, **740 passed, zero failures/skips**, clean exit. Includes the pricing-engine family, new correctness/cadence regressions, per-application billing, saved-price replay, and authoritative save/persistence tests. No pricing baseline regeneration.
 - Full synthetic sweep: **115 baseline variants, 2,001 scenarios, zero nonfinite quote outputs**. Outcomes: 1,858 returned, 113 validation throws, 30 intentional/no-line outcomes. Every fully specified baseline still returns. The only baseline monetary change is the intended new TreeAge annualization; historical rounding replay is tested separately.
 - Independent calculator: **1,844 rows, 1,783 matches, 61 engine-only observations, zero mismatches or missing expected prices**, exit 0. One stale invariant finding no longer creates a discrepancy row. Its remaining P2 input/model observations are not claimed resolved.
 - `check:domain-rules`: clean, 1,925 files scanned.
@@ -28,7 +28,7 @@ User authorization: “ok go” following the full estimator audit. This is a lo
 Commands:
 
 ```sh
-env -u DATABASE_URL -u PROD_URL LOCAL=1 node_modules/.bin/jest --rootDir server --runInBand --silent --json --outputFile /tmp/waves-pricing-final-jest.json 'tests/pricing-engine' tests/estimator-pricing-correctness.test.js tests/estimate-tree-shrub-numeric-cadence.test.js tests/estimate-server-authoritative-pricing.test.js tests/admin-estimate-persistence.test.js tests/per-application-billing.test.js tests/estimate-floor-signal-replay.test.js
+env -u DATABASE_URL -u PROD_URL LOCAL=1 node_modules/.bin/jest --rootDir server --runInBand --silent --json --outputFile /tmp/waves-pricing-final-jest.json 'tests/pricing-engine' tests/estimator-pricing-correctness.test.js tests/estimate-tree-shrub-numeric-cadence.test.js tests/estimate-server-authoritative-pricing.test.js tests/admin-estimate-persistence.test.js tests/per-application-billing.test.js tests/estimate-floor-signal-replay.test.js tests/estimate-service-opt-out.test.js tests/estimate-service-opt-out-round1.test.js
 node scripts/audit-estimator-pricing.js --json /tmp/waves-pricing-fixed-independent.json --md /tmp/waves-pricing-fixed-independent.md
 node scripts/check-domain-rules.js
 ```
