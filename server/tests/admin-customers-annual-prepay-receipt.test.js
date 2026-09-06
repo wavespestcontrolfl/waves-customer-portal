@@ -3,6 +3,7 @@
 jest.mock('../models/db', () => {
   const db = jest.fn();
   db.fn = { now: () => new Date() };
+  db.raw = jest.fn((sql) => sql);
   db.schema = { hasTable: jest.fn(async () => true) };
   db.transaction = jest.fn();
   return db;
@@ -49,7 +50,8 @@ const db = require('../models/db');
 const { gates } = require('../config/feature-gates');
 const InvoiceService = require('../services/invoice');
 const { sendReceiptEmail } = require('../services/invoice-email');
-const { scheduleReceiptDeliveryDrain } = require('../services/receipt-delivery-queue');
+const { scheduleReceiptDeliveryDrain, processReceiptDeliveryJob } = require('../services/receipt-delivery-queue');
+const { checkSendWindow } = require('../services/messaging/validators/send-window');
 const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
 const { recordAuditEvent } = require('../services/audit-log');
 const router = require('../routes/admin-customers');
@@ -159,7 +161,7 @@ test.each(['cash', 'check', 'card_present', 'zelle', 'venmo', 'paypal', 'other']
     }));
     expect(committed.receipt_delivery_jobs).toEqual([expect.objectContaining({
       invoice_id: 'invoice-1', stripe_payment_intent_id: null, source: 'customer360_annual_prepay',
-      status: 'queued', customer_initiated: true,
+      status: 'queued', customer_initiated: false,
     })]);
     expect(events.indexOf('insert:payments')).toBeLessThan(events.indexOf('insert:receipt_delivery_jobs'));
     expect(events.indexOf('insert:receipt_delivery_jobs')).toBeLessThan(events.indexOf('commit'));
@@ -169,6 +171,41 @@ test.each(['cash', 'check', 'card_present', 'zelle', 'venmo', 'paypal', 'other']
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   },
 );
+
+test('an after-hours admin entry holds its receipt SMS until 8 AM ET without losing the email', async () => {
+  const originalSendWindow = gates.smsSendWindow;
+  gates.smsSendWindow = true;
+  jest.useFakeTimers().setSystemTime(new Date('2030-01-11T02:00:00Z')); // Jan 10, 9 PM ET
+  try {
+    await recordPrepay();
+    const job = committed.receipt_delivery_jobs[0];
+    committed.notification_prefs = [];
+    db.mockImplementation((name) => table(committed, name));
+    // Exercise the real queue and window validator; no provider is called.
+    InvoiceService.sendReceipt.mockImplementationOnce(async (_invoiceId, options) => {
+      const decision = checkSendWindow({
+        channel: 'sms', audience: 'customer', entryPoint: 'invoice_receipt_sms',
+        customerInitiated: options.customerInitiated,
+      });
+      return { ...decision, sent: decision.ok };
+    });
+    sendReceiptEmail.mockResolvedValueOnce({ ok: true });
+
+    await processReceiptDeliveryJob({ ...job, attempts: 1 });
+
+    expect(job).toMatchObject({
+      status: 'retry_scheduled',
+      sms_result: { sent: false, code: 'QUIET_HOURS_HOLD' },
+      email_result: { ok: true },
+      next_attempt_at: new Date('2030-01-11T13:00:00Z'), // Jan 11, 8 AM ET
+      attempts: 'GREATEST(attempts - 1, 0)',
+    });
+    expect(sendReceiptEmail).toHaveBeenCalledTimes(1);
+  } finally {
+    gates.smsSendWindow = originalSendWindow;
+    jest.useRealTimers();
+  }
+});
 
 test('gate off records the payment without a receipt job or delivery nudge', async () => {
   gates.recordedAnnualPrepayReceipt = false;

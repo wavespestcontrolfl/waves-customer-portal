@@ -5343,7 +5343,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         await ReceiptDeliveryQueue.enqueueReceiptDelivery({
           invoiceId: updatedInvoice.id,
           source: 'customer360_annual_prepay',
-          customerInitiated: true,
+          // Recording a past payment does not prove the customer acted now.
+          customerInitiated: false,
           database: trx,
         });
       }
