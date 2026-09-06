@@ -650,9 +650,60 @@ describe('supportsConverterFollowUpSeeding — tree & shrub series (six-visit ma
     )).toBe(false);
   });
 
-  test('non-T&S behavior unchanged: pest quarterly seeds, pest bimonthly does not', () => {
-    expect(supportsConverterFollowUpSeeding({ name: 'Quarterly Pest Control' }, {}, 'quarterly')).toBe(true);
-    expect(supportsConverterFollowUpSeeding({ name: 'Quarterly Pest Control' }, {}, 'bimonthly')).toBe(false);
+  test.each(['quarterly', 'bimonthly', 'monthly'])('residential pest seeds its sold %s cadence', (pattern) => {
+    expect(supportsConverterFollowUpSeeding({ name: 'Pest Control' }, {}, pattern)).toBe(true);
+  });
+
+  test('commercial and unsupported pest programs stay outside residential seeding', () => {
+    expect(supportsConverterFollowUpSeeding({ name: 'Commercial Pest Control' }, {}, 'monthly')).toBe(false);
+    expect(supportsConverterFollowUpSeeding({ service: 'pest_control', isCommercial: true }, {}, 'monthly')).toBe(false);
+    expect(supportsConverterFollowUpSeeding({ name: 'Pest Control' }, {}, 'weekly')).toBe(false);
+  });
+});
+
+describe('accepted pest cadence reaches the service schedule', () => {
+  const { buildRecurringFollowUpRows } = require('../services/recurring-appointment-seeder');
+  const staleLine = { service: 'pest_control', name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4 };
+  const parent = { id: 'synthetic-parent', customer_id: 'synthetic-customer', scheduled_date: '2027-01-07', service_type: 'Quarterly Pest Control' };
+
+  test.each([
+    ['monthly', 'monthly', 12, '2027-02-04', '2027-12-02'],
+    ['bi_monthly', 'bimonthly', 6, '2027-03-04', '2027-11-04'],
+    ['quarterly', 'quarterly', 4, '2027-04-01', '2027-10-07'],
+  ])('%s acceptance overrides quote cadence and yields the complete annual schedule', (selection, cadence, visits, first, last) => {
+    const line = { ...staleLine, visitsPerYear: 12 };
+    const pattern = EstimateConverter.converterFollowUpSeedingPattern(line, parent, selection, selection);
+    const coverageCadence = EstimateConverter.annualPrepayCoverageCadence(line, selection, selection);
+    expect(pattern).toBe(cadence);
+    expect(coverageCadence).toBe(cadence);
+    const count = EstimateConverter.annualPrepayCoverageVisits(line, pattern, selection);
+    expect(count).toBe(visits);
+    const rows = buildRecurringFollowUpRows(parent, { pattern, visitsPerYear: count, skipWeekends: true });
+    expect(rows).toHaveLength(visits - 1);
+    expect(rows[0].scheduled_date).toBe(first);
+    expect(rows[rows.length - 1].scheduled_date).toBe(last);
+    expect(new Set(rows.map(row => row.scheduled_date)).size).toBe(visits - 1);
+    expect(line).toEqual({ ...staleLine, visitsPerYear: 12 });
+  });
+
+  test('a matching bimonthly reservation activates even when its quote line says monthly', () => {
+    const line = { service: 'pest_control', name: 'Pest Control', frequency: 'monthly', visitsPerYear: 12 };
+    const reserved = { ...parent, service_type: 'Bi-Monthly Pest Control Service' };
+    expect(EstimateConverter.converterFollowUpSeedingPattern(line, reserved, 'bi_monthly', 'bi_monthly')).toBe('bimonthly');
+    expect(EstimateConverter.annualPrepayCoverageVisits(line, 'bimonthly', 'bi_monthly')).toBe(6);
+  });
+
+  test('without a final selection the line keeps its own cadence', () => {
+    expect(EstimateConverter.converterFollowUpSeedingPattern(staleLine, parent, 'monthly', null)).toBe('quarterly');
+    expect(EstimateConverter.annualPrepayCoverageCadence(staleLine, 'monthly', null)).toBe('quarterly');
+  });
+
+  test('commercial pest and lawn do not inherit residential pest selection rules', () => {
+    expect(EstimateConverter.converterFollowUpSeedingPattern({ service: 'commercial_pest', frequency: 'monthly' }, {}, 'monthly', 'monthly')).toBeNull();
+    expect(EstimateConverter.converterFollowUpSeedingPattern({ service: 'pest_control', isCommercial: true }, {}, 'monthly', 'monthly')).toBeNull();
+    const lawn = { service: 'lawn_care', visitsPerYear: 6 };
+    expect(EstimateConverter.converterFollowUpSeedingPattern(lawn, {}, 'monthly')).toBe('bimonthly');
+    expect(EstimateConverter.annualPrepayCoverageCadence(lawn, 'monthly')).toBe('bimonthly');
   });
 });
 
@@ -821,9 +872,9 @@ describe('annualPrepayCoverageVisits — prepay coverage inherits the accepted-s
     expect(annualPrepayCoverageVisits(staleQuarterlyPestLine, 'bimonthly', null)).toBe(4);
   });
 
-  test('accepted count applies only when it matches the resolved cadence — a contradicting line cadence FIELD keeps the line derivation', () => {
-    // The line's own field resolved quarterly; accepted bi_monthly (6)
-    // disagrees. Coverage must track the series the cadence will seed.
+  test('a mismatched caller cadence cannot mix accepted counts into a different series', () => {
+    // Defensive guard for callers supplying a cadence independently of the
+    // converter: never put six applications into a quarterly series.
     expect(annualPrepayCoverageVisits(staleQuarterlyPestLine, 'quarterly', 'bi_monthly')).toBe(4);
   });
 
