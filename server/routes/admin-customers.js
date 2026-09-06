@@ -597,7 +597,7 @@ function isSchedulableOneTimeEstimateLine(line) {
   return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
 }
 
-function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurringDiscounted = false }) {
+function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurringDiscounted = false, includeSourceLines = false }) {
   const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
   if (!name) return null;
   // Per-VISIT fields first; the monthly fields are a last resort and carry
@@ -786,13 +786,22 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // base — there is no per-application CHARGE to quote, and the
         // canonical helper would fall back to the LIST rate here (its
         // discountedAnnual > 0 test). Refuse: the net totals tell the truth.
-        if (acceptedAnnual === 0) return {};
+        if (acceptedAnnual === 0 && !includeSourceLines) return {};
         // The rodent billing-unit marker must ride the adapter objects
         // (codex #3591 r5 P1): rodentBaitLineBillsMonthly inside the
         // canonical helper reads it off the LINE it receives — a fresh
         // object without it reclassifies a new per-application rodent row
         // as legacy monthly and returns no provenance.
         const billingMarker = line?.perApplicationBilled === true ? { perApplicationBilled: true } : {};
+        // Completion can represent a fully discounted application. Prove
+        // its unit/cadence through the canonical mapper using the original
+        // per-application base; a monthly line must never become free work.
+        if (includeSourceLines && (acceptedAnnual === 0 || discountedPerApp === 0)) {
+          const basis = perApplicationForLine({ service: resolvedServiceKey,
+            perApp: moneyOrNull(line?.perApp, line?.perTreatment), perVisit: line?.perVisit,
+            ...cadenceFields, ...billingMarker });
+          return basis ? { perApplicationPrice: 0 } : {};
+        }
         const pa = perApplicationForLine(discountedPerApp != null
           ? {
             service: resolvedServiceKey,
@@ -817,12 +826,12 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   };
 }
 
-function scheduleLinesFromEstimate(estimate, serviceIndex) {
+function scheduleLinesFromEstimate(estimate, serviceIndex, { includeSourceLines = false } = {}) {
   const estData = parseJsonObject(estimate.estimate_data);
   let recurringSvcList = [];
   let oneTimeList = [];
   try {
-    const lists = acceptanceServiceLists(estData);
+    const lists = acceptanceServiceLists(estData, { preserveDuplicates: includeSourceLines });
     recurringSvcList = lists.recurringSvcList || [];
     oneTimeList = lists.oneTimeList || [];
   } catch {
@@ -866,9 +875,25 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
   const suppressFallback = onlyFilteredBillingRows && !hasRecurringEstimateTotal;
 
   const lines = [
-    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex, parentRecurringDiscounted })),
-    ...schedulableOneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
+    ...recurringSvcList.map((line, index) => {
+      const formatted = formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex, parentRecurringDiscounted, includeSourceLines });
+      return formatted && includeSourceLines
+        ? { ...formatted, sourceLine: line, sourceLineKey: `recurring:${index}`, parentRecurringDiscounted }
+        : formatted;
+    }),
+    ...schedulableOneTimeList.map((line, index) => {
+      const formatted = formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex });
+      return formatted && includeSourceLines
+        ? { ...formatted, sourceLine: line, sourceLineKey: `one_time:${index}` }
+        : formatted;
+    }),
   ].filter(Boolean);
+
+  // Completion must distinguish two otherwise identical sold lines and must
+  // never promote a quote-total fallback into this job's accepted price.
+  // Raw source lines remain server-internal; existing scheduling responses
+  // retain their display deduplication and fallback behavior below.
+  if (includeSourceLines) return lines;
 
   if (lines.length === 1 && lines[0].price == null) {
     lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);

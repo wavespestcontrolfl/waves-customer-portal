@@ -13135,6 +13135,12 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     if (!(await technicianOwnsScheduledService(req, req.params.id))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
+    if (req.query.completion === '1') {
+      if (!isEnabled('completionServicePricing')) return res.json({ completionPricing: null });
+      const { loadCompletionPricing } = require('../services/completion-pricing');
+      const result = await loadCompletionPricing(req.params.id, { role: req.techRole });
+      return res.json({ completionPricing: result.view });
+    }
     const svc = await db('scheduled_services')
       .where({ 'scheduled_services.id': req.params.id })
       .first('source_estimate_id');

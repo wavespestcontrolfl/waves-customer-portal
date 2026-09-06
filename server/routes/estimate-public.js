@@ -18074,7 +18074,7 @@ function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
   return oneTimePestChoiceAmountForEstimate(estimate, estData) > 0;
 }
 
-function acceptanceServiceLists(estData) {
+function acceptanceServiceLists(estData, { preserveDuplicates = false } = {}) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData && typeof estData === 'object' ? estData : {});
@@ -18100,22 +18100,31 @@ function acceptanceServiceLists(estData) {
         price: item.amount,
       }));
 
+  const sourceResult = estData?.result || estData?.engineResult || estData || {};
+  const recurringRows = [
+    ...recurringServicesWithSupplements(sourceResult),
+    ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
+  ];
+  if (preserveDuplicates && Array.isArray(sourceResult.lineItems)) {
+    // Supplementation coalesces engine rows by family for acceptance.
+    // Completion must still see that two original lines claimed the same
+    // identity; repeating its normalized identity makes that match ambiguous.
+    const seenKeys = new Set();
+    for (const row of sourceResult.lineItems) {
+      const key = recurringServiceKey(row);
+      const matched = recurringRows.find((candidate) => recurringServiceKey(candidate) === key);
+      if (key && seenKeys.has(key) && matched) recurringRows.push(matched);
+      seenKeys.add(key);
+    }
+  }
   return {
-    recurringSvcList: uniqueRecurringServiceRows([
-      // Engine-invocation estimates (quote wizard / IB agent drafts) persist the
-      // priced lines under estData.engineResult with no v1-mapped
-      // result.recurring.services, so source recurring rows from engineResult too
-      // (same `result || engineResult || estData` idiom used elsewhere in this
-      // file) — otherwise a foam-only engine-backed accept yields an empty
-      // recurring list and EstimateConverter schedules/seeds/invoices nothing.
-      ...recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
-      ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
-    ]),
+    recurringSvcList: uniqueRecurringServiceRows(recurringRows, { preserveDuplicates }),
     oneTimeList,
   };
 }
 
-function uniqueRecurringServiceRows(rows = []) {
+function uniqueRecurringServiceRows(rows = [], { preserveDuplicates = false } = {}) {
+  if (preserveDuplicates) return rows.filter(Boolean);
   const seen = new Set();
   return rows.filter((row) => {
     if (!row) return false;

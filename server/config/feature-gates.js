@@ -89,6 +89,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Complete Service: job-matched estimate evidence and reviewed discounts.
+  completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
   // OFF unless explicitly enabled, in dev AND prod (unlike the dev-open gates
   // below): flipping it on changes invoice behaviour for net15/net30 payers
