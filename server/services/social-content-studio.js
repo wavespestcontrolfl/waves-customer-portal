@@ -1758,7 +1758,9 @@ async function recentShowdownKeys(limit = 22) {
     const rows = await db('social_content_studio_runs')
       .where({ run_type: 'autonomous' })
       .whereIn('status', ['published', 'draft_created'])
-      .orderBy('started_at', 'desc')
+      // Recency is when the card reached the audience: a queued draft
+      // approved weeks later keeps its started_at, so order by completion.
+      .orderByRaw('COALESCE(finished_at, updated_at, started_at) DESC')
       // Showdown runs are one autonomous run in four (day % 4 === 2), so
       // five rows per requested key recovers the full window.
       .limit(Math.max(1, Math.min(200, Number(limit) * 5 || 110)))
