@@ -20,7 +20,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
-const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
+const { consumeCompletionSupplies, settleOwedCompletionSupplies, completionSuppliesOwed, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
 function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false, openLookupBell = false }) {
@@ -156,6 +156,34 @@ test('a visual Termite Inspection Service on the normal path posts no notice —
   const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'Termite Inspection Service', serviceLine: 'termite' });
   expect(res.skipped).toEqual([{ reason: 'inspection_service' }]);
   expect(inserts).toHaveLength(0);
+});
+
+// ---- owed-marker lifecycle shared by the recap route and the project close
+test('completionSuppliesOwed reads the marker off jsonb or text flags and fails closed on garbage', () => {
+  expect(completionSuppliesOwed({ field_flags: { completion_supplies_owed: true } })).toBe(true);
+  expect(completionSuppliesOwed({ field_flags: '{"completion_supplies_owed":true}' })).toBe(true);
+  expect(completionSuppliesOwed({ field_flags: { completion_supplies_owed: 'true' } })).toBe(false);
+  expect(completionSuppliesOwed({ field_flags: null })).toBe(false);
+  expect(completionSuppliesOwed({ field_flags: '{not json' })).toBe(false);
+  expect(completionSuppliesOwed(null)).toBe(false);
+});
+
+test('settleOwedCompletionSupplies consumes, then clears the owed marker on the record', async () => {
+  const { db, updates, inserts } = fakeDb({ products: [sign] });
+  const res = await settleOwedCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control', serviceLine: 'pest' });
+  expect(res.consumed).toHaveLength(1);
+  expect(inserts).toHaveLength(1);
+  const clear = updates.filter((u) => u.table === 'service_records');
+  expect(clear).toHaveLength(1);
+  expect(String(clear[0].row.field_flags)).toContain("- 'completion_supplies_owed'");
+});
+
+test('settleOwedCompletionSupplies keeps the marker when the hand-off bell was lost', async () => {
+  notifyAdmin.mockResolvedValueOnce(null); // the bell could not persist
+  const { db, updates } = fakeDb({ products: [sign], throwOnInsert: true });
+  const res = await settleOwedCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control', serviceLine: 'pest' });
+  expect(res.errors.some((e) => e.reason === 'failure_bell_not_sent')).toBe(true);
+  expect(updates.filter((u) => u.table === 'service_records')).toHaveLength(0);
 });
 
 test('a treatment service type is not an inspection', async () => {
@@ -508,18 +536,18 @@ describe('recap consumption hook — retry window (source contract)', () => {
 
   test('the retry signal is the durable completion_supplies_owed marker the recap transition wrote, read and cleared by the hook — never record age', () => {
     const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
-    expect(recapSrc.match(/completion_supplies_owed: true/g)).toHaveLength(2); // update branch + insert branch, both gated on !recapPriorCompleted
-    expect(recapSrc).toMatch(/\.\.\.\(recapPriorCompleted \? \{\} : \{ field_flags: trx\.raw/);
+    // update branch: the shared marker helper; insert branch: the literal inside the fresh field_flags object. Both gated on !recapPriorCompleted.
+    expect(recapSrc.match(/completion_supplies_owed: true/g)).toHaveLength(1);
+    expect(recapSrc).toMatch(/\.\.\.\(recapPriorCompleted \? \{\} : \{ field_flags: completionSuppliesOwedMarker\(trx\) \}\)/);
     expect(hook).toMatch(/if \(result\.priorCompleted !== true\) return true;/);
-    expect(hook).toMatch(/db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)/);
-    expect(hook).toMatch(/return flags\.completion_supplies_owed === true;/);
+    expect(hook).toMatch(/completionSuppliesOwed\(await db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)\)/);
     // A failed marker read is NOT owed (hook r27 P1): a historical completion edited today has no movement for the index to stop; the marker stays for the next recap.
     expect(hook).toMatch(/settlement deferred, marker kept/);
     expect(hook).not.toMatch(/consuming anyway:/); // the old warn-and-return-true branch
-    // Cleared unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must not deduct again.
-    expect(hook).toMatch(/const handoffLost = \(consumption\?\.errors \|\| \[\]\)\.some\(\(e\) => e\.reason === 'failure_bell_not_sent' \|\| e\.reason === 'bell_retire_failed'\);/); // a bell that could not be retired keeps the marker too (Codex r30 P1)
-    expect(hook).toMatch(/if \(result\.recordId && !handoffLost\) await db\('service_records'\)/);
-    expect(hook).toMatch(/- 'completion_supplies_owed'/); // cleared after the at-most-once consume
+    // Consume + clear-unless-bell-lost is the SHARED lifecycle (settleOwedCompletionSupplies, unit-tested above), not a route-local copy (GH codex #3996 r3 P1).
+    expect(hook).toMatch(/await settleOwedCompletionSupplies\(db, \{/);
+    expect(hook).toMatch(/serviceRecordId: result\.recordId \|\| null,/);
+    expect(hook).not.toMatch(/handoffLost|- 'completion_supplies_owed'/);
     expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);
     expect(hook).toMatch(/if \(!\(await recapSuppliesOwed\(result\)\)\) return;/);
     expect(route).toMatch(/await settleRecapSupplies\(req\.params\.serviceId, result\);/); // the recap route runs the settlement after submitRecap

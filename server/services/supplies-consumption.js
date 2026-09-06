@@ -345,4 +345,51 @@ async function retireLookupBellIfSettled(db, result, { scheduledServiceId, servi
   if (!(await clearMissedDeductionBells(db, { scheduledServiceId }))) failed('the obsolete visit lookup bell could not be retired');
 }
 
-module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE, INSPECTION_SERVICE_RE };
+// ---- Durable "this completion still owes the kit" marker -------------------
+// service_records.field_flags.completion_supplies_owed. The completing
+// TRANSACTION writes it (pest-recap.js recap, project-completion.js close) so
+// a process death between that commit and the post-commit hook is retried by
+// the next recap / close of the same record instead of lost; an edit or
+// re-close of a completion that never owed (no marker) never consumes — a
+// historical completion has no movement for the at-most-once index to match.
+// One lifecycle for both paths (GH codex #3996 r3 P1).
+const OWED_FLAG = 'completion_supplies_owed';
+
+// jsonb merge of the marker onto the current field_flags value.
+function completionSuppliesOwedMarker(db) {
+  return db.raw("COALESCE(field_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [OWED_FLAG]: true })]);
+}
+
+// Marker read off a service_records row. Malformed flags establish nothing.
+function completionSuppliesOwed(record = null) {
+  if (!record) return false;
+  try {
+    const flags = typeof record.field_flags === 'string' ? JSON.parse(record.field_flags) : (record.field_flags || {});
+    return flags[OWED_FLAG] === true;
+  } catch { return false; }
+}
+
+// Consume, then clear the marker — unless the hand-off bell was LOST (Codex
+// #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must
+// not deduct the same kit again on top of their correction; only a miss
+// nobody was told about (or an obsolete bell that could not be retired,
+// Codex r30 P1) keeps the marker for the next retry. Never throws past
+// consumeCompletionSupplies' own contract: the clear is a plain update.
+async function settleOwedCompletionSupplies(db, args = {}) {
+  const consumption = await consumeCompletionSupplies(db, args);
+  const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed');
+  if (args.serviceRecordId && !handoffLost) {
+    await db('service_records').where({ id: args.serviceRecordId }).update({ field_flags: db.raw(`COALESCE(field_flags, '{}'::jsonb) - '${OWED_FLAG}'`) });
+  }
+  return consumption;
+}
+
+module.exports = {
+  consumeCompletionSupplies,
+  settleOwedCompletionSupplies,
+  completionSuppliesOwed,
+  completionSuppliesOwedMarker,
+  appliesToLine,
+  COMPLETION_CONSUMABLE_SOURCE: SOURCE,
+  INSPECTION_SERVICE_RE,
+};

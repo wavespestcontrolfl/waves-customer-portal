@@ -528,7 +528,7 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
   test('completeProjectBackedService consumes completion supplies after the transaction commits', () => {
     const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
     const trxEnd = completion.indexOf('if (postCommitTrackServiceId) {');
-    const consumeAt = completion.indexOf('consumeCompletionSupplies(knex, {');
+    const consumeAt = completion.indexOf('settleOwedCompletionSupplies(knex, {');
     expect(trxEnd).toBeGreaterThan(-1);
     expect(consumeAt).toBeGreaterThan(trxEnd);
     expect(completion.slice(consumeAt, completion.indexOf('});', consumeAt))).toContain('projectType: project.project_type');
@@ -543,9 +543,9 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
     // The transition writes the recap flow's durable owed marker inside the
     // transaction, an unsettled re-close retries on it, and the hook clears
     // it after commit unless the hand-off bell was lost (pre-push P1).
-    expect(completion.slice(flipAt, scheduleAt)).toContain('completion_supplies_owed: true');
+    expect(completion.slice(flipAt, scheduleAt)).toContain('completionSuppliesOwedMarker(trx)');
     expect(completion.slice(flipEnd - 400, flipEnd)).toContain('else if (completionSuppliesOwed(serviceRecord))');
-    expect(completion.slice(consumeAt)).toContain("- 'completion_supplies_owed'");
-    expect(completion.slice(consumeAt)).toContain("e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed'");
+    // Settle + clear is the SHARED lifecycle, not a local copy (r3 P1).
+    expect(completion).not.toMatch(/- 'completion_supplies_owed'/);
   });
 });
