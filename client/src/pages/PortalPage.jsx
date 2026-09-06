@@ -7232,7 +7232,7 @@ function PillSelector({ options, value, onChange, multiple = false }) {
         return (
           // Active = gold accent surface; inactive = glass chip (the theme owns
           // both surfaces, so the inline background is the non-glass fallback).
-          <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
+          <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} className="pill-chip" key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
             ...PORTAL_BUTTON_BASE,
             minHeight: 44,
             padding: '8px 12px',
@@ -8250,7 +8250,7 @@ function PropertyTab({ customer }) {
               const active = days.includes(day);
               return (
                 // Same surfaces as PillSelector: gold accent when active, glass chip otherwise.
-                <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} key={day} type="button" aria-pressed={active} onClick={() => {
+                <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} className="pill-chip" key={day} type="button" aria-pressed={active} onClick={() => {
                   const next = active ? days.filter(d => d !== day) : [...days, day];
                   updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
                 }} style={{
