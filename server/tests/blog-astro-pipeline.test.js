@@ -46,7 +46,7 @@ jest.mock('../services/content-astro/author-service', () => ({
 }));
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
-  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })),
+  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), retryStyleFor: jest.fn(() => 'illustration'),
 }));
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),

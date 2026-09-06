@@ -214,10 +214,13 @@ function hashString(input) {
   return h >>> 0;
 }
 // planFor({ slug, mode, index, captions, subject, style }) — deterministic per
-// post + slot. index 0 is the hero; body slots are 1..n. `subject` (title +
-// keyword + section lead) picks the setting pool. A style the slot cannot
-// support (an infographic with no captions) degrades to the post's UNUSED
-// fourth style, so it still differs from the other slots.
+// post + slot. index 0 is the hero; body slots are 1..n. `subject` picks the
+// setting pool and must be what the image is ABOUT — the title plus the
+// keyword or section heading, never the lead or meta copy: a coastal-lawn post
+// whose thesis mentions irrigation is not an equipment post (Codex r2 P2 on
+// #3964). A style the slot cannot support (an infographic with no captions)
+// degrades to the post's UNUSED fourth style, so it still differs from the
+// other slots.
 function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject = '', style: forced } = {}) {
   const seed = hashString(`${slug || 'post'}:${mode}:${index}`);
   const pick = (list, salt) => list[(seed + salt * 7919) % list.length];
@@ -233,6 +236,20 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
     timeOfDay: pick(TIMES_OF_DAY, 2),
     vantage: pick(VANTAGES, 3),
   };
+}
+// The style a slot regenerates in after a failed text/logo screen: one no
+// sibling slot of the post uses (the permutation's unused fourth style, when
+// the slot can carry it), else the slot's own style under a fresh seed — a
+// fixed swap map put a retried hero into body-1's style (Codex r2 P2 on
+// #3964).
+function retryStyleFor({ slug, mode = 'blog-hero', index = 0, captions = [] } = {}) {
+  const perm = stylePermutation(slug);
+  const taken = new Set(perm.slice(0, 3));
+  if (taken.has('infographic')) taken.add(perm[3]); // a caption-less infographic slot degrades to perm[3]
+  const own = planFor({ slug, mode, index, captions }).style;
+  const hasCaptions = Array.isArray(captions) && captions.length > 0;
+  const free = STYLE_KEYS.filter((style) => !taken.has(style) && style !== own && (style !== 'infographic' || hasCaptions));
+  return free[0] || own;
 }
 // Relevance guards every image carries, plus caller-supplied "must not
 // depict" lines (a brief's rules — e.g. no repair scenes on a post that says
@@ -527,9 +544,11 @@ module.exports.ImageGenerator = ImageGenerator;
 // Codex P1 on e8b864170 — an _internals-only export would have thrown on
 // every autonomous publish).
 module.exports.planFor = planFor;
+module.exports.retryStyleFor = retryStyleFor;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
 module.exports._internals = {
   stylePermutation,
+  retryStyleFor,
   settingsFor,
   SETTINGS,
   DEFAULT_CHAIN,

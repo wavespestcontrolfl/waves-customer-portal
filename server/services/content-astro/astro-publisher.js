@@ -830,11 +830,6 @@ async function compressToWebp(buffer, { width = 1600 } = {}) {
 // commits it into the PR branch as /images/blog/<slug>/hero.<ext>. The data
 // URL is never written to the DB — featured_image_url is varchar(255) and the
 // blog list does SELECT *, so persisting it would break/bloat both.
-// Which styles the screen retry may fall back to: a photo that came back with
-// gibberish labels regenerates as an illustration, and vice versa — a fresh
-// style is the surest way to shake a repeated defect.
-const SCREEN_RETRY_STYLE = { photo: 'illustration', illustration: 'photo', cartoon: 'illustration', infographic: 'illustration' };
-
 // Generate one image under a variation plan, then screen it for readable text
 // and logos (hero-alt-vision.screenGeneratedImage). A failed screen
 // regenerates ONCE in the retry style; a second failure ships the image with
@@ -843,7 +838,10 @@ const SCREEN_RETRY_STYLE = { photo: 'illustration', illustration: 'photo', carto
 async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, captions = [], avoidDepicting = [] }) {
   const imageGenerator = require('../content/image-generator');
   const { screenGeneratedImage } = require('../content/hero-alt-vision');
-  const subject = [title, keyword, topic].filter(Boolean).join(' ');
+  // The plan's subject is what the picture is about — title + keyword (the
+  // section heading for a body slot) — not the lead, which may mention
+  // equipment in passing (Codex r2 P2).
+  const subject = [title, keyword].filter(Boolean).join(' ');
   let plan = imageGenerator.planFor({ slug, mode, index, captions, subject });
   let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -873,8 +871,11 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     last = { ...img, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
     if (screen.ok) return last;
     if (attempt === 0) {
-      logger.warn(`[astro-publisher] ${mode} image for ${slug} failed the text/logo screen (${screen.reasons.join('; ')}) — regenerating once as ${SCREEN_RETRY_STYLE[plan.style] || 'illustration'}`);
-      plan = imageGenerator.planFor({ slug, mode, index: index + 1000, captions, subject, style: SCREEN_RETRY_STYLE[plan.style] || 'illustration' });
+      // Retry in a style no sibling slot uses (a fresh style shakes a repeated
+      // defect) under a fresh seed — never a fixed swap into a sibling's style.
+      const retryStyle = imageGenerator.retryStyleFor({ slug, mode, index, captions });
+      logger.warn(`[astro-publisher] ${mode} image for ${slug} failed the text/logo screen (${screen.reasons.join('; ')}) — regenerating once as ${retryStyle}`);
+      plan = imageGenerator.planFor({ slug, mode, index: index + 1000, captions, subject, style: retryStyle });
     }
   }
   logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${last.screen.reasons.join('; ')}) — shipping with a reviewer note`);

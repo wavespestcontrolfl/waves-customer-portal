@@ -61,6 +61,25 @@ describe('planFor — deterministic variation per post and slot', () => {
     expect(photoHeroes).toBeGreaterThan(20); // the hero still leans photo for search thumbnails
   });
 
+  test('a screen retry lands on a style no sibling slot uses, or the slot\'s own style under a fresh seed (Codex r2 P2 on #3964)', () => {
+    for (let i = 0; i < 40; i += 1) {
+      const slug = `post-${i}`;
+      const siblings = [0, 1, 2].map((index) => gen.planFor({ slug, mode: index ? 'blog-body' : 'blog-hero', index, captions: index ? ['Step'] : [] }).style);
+      for (const index of [0, 1, 2]) {
+        const mode = index ? 'blog-body' : 'blog-hero';
+        const captions = index ? ['Step'] : [];
+        const retry = gen.retryStyleFor({ slug, mode, index, captions });
+        const others = siblings.filter((_, k) => k !== index);
+        expect(others).not.toContain(retry);
+        expect(Object.keys(gen.IMAGE_STYLES)).toContain(retry);
+        // A retried slot never lands on infographic without captions.
+        if (!captions.length) expect(retry).not.toBe('infographic');
+      }
+    }
+    const mod = require('../services/content/image-generator');
+    expect(mod.retryStyleFor).toBe(gen.retryStyleFor);
+  });
+
   test('the setting pool follows the subject: turf posts stay outdoors, equipment posts may use the garage, indoor pests may look out from the kitchen; no setting carries a time of day', () => {
     const all = Object.values(gen.SETTINGS).flat();
     for (const setting of all) expect(setting).not.toMatch(/\b(dusk|dawn|first light|noon|morning|afternoon|golden hour|night|day)\b/i);
