@@ -97,11 +97,12 @@ describe('isRecurringPlanActive', () => {
   function fakeDb({ alert = null, subs = [] }) {
     return (table) => {
       if (table === 'recurring_plan_alerts') {
+        let allowedType = null;
         return {
-          where: function () { return this; },
+          where: function (key, value) { if (key === 'alert_type') allowedType = value; return this; },
           whereIn: function () { return this; },
           whereNull: function () { return this; },
-          first: async () => alert,
+          first: async () => allowedType && alert?.alert_type !== allowedType ? null : alert,
         };
       }
       if (table === 'customer_subscriptions') {
@@ -121,6 +122,11 @@ describe('isRecurringPlanActive', () => {
   test('inactive when an unresolved plan_lapsed alert exists', async () => {
     const r = await isRecurringPlanActive(svc({ recurring_parent_id: 'p1' }), fakeDb({ alert: { id: 'a1', alert_type: 'plan_lapsed' } }));
     expect(r).toMatchObject({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE' });
+  });
+
+  test('a stale plan_ending reminder cannot block a live recurring visit', async () => {
+    const result = await isRecurringPlanActive(svc(), fakeDb({ alert: { id: 'a1', alert_type: 'plan_ending' } }));
+    expect(result).toMatchObject({ active: true });
   });
 
   test('does NOT veto on legacy paused/cancelled customer_subscriptions', async () => {

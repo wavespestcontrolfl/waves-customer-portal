@@ -78,7 +78,7 @@ function makeConn(handler, opts = {}) {
         const sub = {};
         // The occupancy probe's nested predicates (findConflictingVisits)
         // chain whereNull/orWhereRaw/etc. inside the callback too.
-        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw']) {
+        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw', 'orWhereNotIn']) {
           sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
         }
         args[0].call(sub, sub);
@@ -1100,6 +1100,10 @@ describe('renewal banner revalidates historical recurring alerts', () => {
         // fence makes the archived/former-customer regressions fail.
         for (const [op, key, value] of calls) {
           if (op === 'where' && typeof key === 'string' && row[key] !== value) return null;
+          if (op === 'where' && typeof key === 'object' && Object.entries(key).some(([k, v]) => row[k] !== v)) return null;
+          if (op === 'whereFn' && !key.some(([nestedOp, k, v]) =>
+            (nestedOp === 'whereNull' && row[k] == null)
+            || (nestedOp === 'orWhereNotIn' && row[k] != null && !v.includes(row[k])))) return null;
           if (op === 'whereNull' && row[key] != null) return null;
           if (op === 'whereIn' && !value.includes(row[key])) return null;
         }
@@ -1116,7 +1120,7 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   beforeEach(() => profileResolver.mockResolvedValue({ billingType: 'recurring' }));
   test.each([
     { is_recurring: false }, { recurring_pattern: 'one_time' },
-    { status: 'cancelled' }, { status: 'rescheduled' }, { annual_prepay_term_id: 'term-a' },
+    { annual_prepay_term_id: 'term-a' },
   ])('omits an ineligible series: %j', async (parent) => {
     expect(await refreshRecurringPlanAlert(scenario({ parent }), alert)).toBeNull();
   });
@@ -1126,6 +1130,15 @@ describe('renewal banner revalidates historical recurring alerts', () => {
     { pipeline_stage: 'dormant' },
   ])('omits former/deleted customers: %j', async (customer) => {
     expect(await refreshRecurringPlanAlert(scenario({ customer }), alert)).toBeNull();
+  });
+  test.each(['cancelled', 'rescheduled'])('keeps a %s anchor with an upcoming recurring child', async (status) => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { status } }), alert))
+      .toMatchObject({ remainingVisits: 1 });
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { status }, upcoming: 0 }), alert)).toBeNull();
+  });
+  test.each(['new_lead', null])('keeps a serviced recurring plan despite stale CRM stage %j', async (pipeline_stage) => {
+    expect(await refreshRecurringPlanAlert(scenario({ customer: { pipeline_stage } }), alert))
+      .toMatchObject({ remainingVisits: 1 });
   });
   test('keeps a separate non-prepaid series on an annual-prepay customer', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ customer: { billing_mode: 'annual_prepay' } }), alert))
