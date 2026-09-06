@@ -226,7 +226,7 @@ async function checkSmsFulfillment(commitment, evidence) {
 Match the requested property, service, recipient, scope, and deliverable. A generic acknowledgment, promise, unrelated call, reminder, invoice, or estimate does not fulfill it. Calls must contain evidence answering THIS request. "I'll send it" is still open. No proof means open; ambiguous evidence means uncertain. Drafts, queued/failed sends and cancelled appointments never prove completion. SMS answers require delivered status; email answers require an email_delivery record marked delivered/opened/clicked. Initial sent status and Gmail SENT labels do not prove receipt. An invoice send cannot answer an invoice dispute. An estimate must cover the requested service/property; the existence of another quote is insufficient. Report delivery must identify the requested report/revision and recipient. A requested recipient must be established by destination evidence; a customer id or subject alone never proves who received the message. Missing destination evidence is uncertain. Do not infer media contents.
 For fulfilled, cite one supplied record_ref and an exact quote from its text proving the requested outcome. Otherwise both can be null.
 ${stringifySmsEvidence({ obligation: commitment, records })}`,
-    jsonSchema: SCHEMA, maxTokens: 2048, laneId: 'sms-operational-actions', promptVersion: VERSION,
+    jsonSchema: SCHEMA, maxTokens: 2048, laneId: 'sms-commitment-fulfillment', promptVersion: VERSION,
   });
   if (!result.ok) return { verdict: 'uncertain', reason: 'provider_failed' };
   return groundFulfillment(result.json, evidence, commitment);

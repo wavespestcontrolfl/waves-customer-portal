@@ -8,7 +8,7 @@ const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-com
 const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
-const VERSION = 'sms-operations-v6';
+const VERSION = 'sms-operations-v7';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -152,9 +152,9 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   // Sentence punctuation cannot establish semantic independence: "And only
   // when ..." may qualify an earlier sentence. Retain the complete source
   // instead of maintaining an open-ended list of possible conjunctions.
-  const completeSource = message.message_body.trim().replace(/[.!?]+$/, '');
+  const completeSource = message.message_body.trim();
   const facts = message.direction !== 'inbound' ? [] : parsed.facts.filter((item) => {
-    if (!grounded(item) || item.quote.trim().replace(/[.!?]+$/, '') !== completeSource) return false;
+    if (!grounded(item) || item.quote.trim() !== completeSource || completeSource.includes('?')) return false;
     if (item.field === 'contact_preference') return explicitContactPreference(item.quote) === item.value;
     if (item.field.endsWith('_code')) return matchesExplicitAccessCode(item);
     return item.value === item.quote && message.message_body.includes(item.value);
@@ -166,6 +166,9 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
 }
 
 async function extractSmsOperations(context) {
+  // Whole-source facts must fit the narrowest schema field. Longer SMS
+  // go to the existing exception path, even if a provider would return [].
+  if (context.message.message_body.length > 600) return { obligations: [], facts: [], dropped: 1 };
   let prompt;
   try { prompt = buildPrompt(context); } catch (err) {
     if (err.message === 'sms_operations_source_boundary_changed') return { obligations: [], facts: [], dropped: 1 };

@@ -147,6 +147,23 @@ describe('SMS operational evidence and ownership', () => {
     })).toMatchObject({ obligations: [], dropped: 0 });
   });
 
+  test.each([
+    ['Lockbox code is #1234?', 'Lockbox code is #1234', 'lockbox_code', '#1234'],
+    ['Text only please?', 'Text only please', 'contact_preference', 'text'],
+    ['Keep the pets inside?', 'Keep the pets inside?', 'pet_details', 'Keep the pets inside?'],
+  ])('questions cannot become durable facts: %s', (body, quote, field, value) => {
+    expect(groundExtraction(extracted([], [fact({ quote, field, value })]), {
+      message: source(body), properties,
+    })).toMatchObject({ facts: [], dropped: 1 });
+  });
+
+  test('overlong sources create review exceptions without a provider call', async () => {
+    dispatchWithFallback.mockClear();
+    expect(await extractSmsOperations({ message: source('Keep the pets inside. '.repeat(30)), properties }))
+      .toMatchObject({ facts: [], dropped: 1 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('preserves access-code symbols and case exactly as supplied', () => {
     const message = source('Lockbox code is #aB12*');
     const result = groundExtraction(extracted([], [
