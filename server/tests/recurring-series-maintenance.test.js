@@ -1122,9 +1122,13 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   test.each([
     null, { active: false }, { deleted_at: 'archived' },
     { pipeline_stage: 'churned' }, { pipeline_stage: 'past_customer' },
-    { pipeline_stage: 'dormant' }, { billing_mode: 'annual_prepay' },
-  ])('omits former/deleted customers and the separate annual-prepay lane: %j', async (customer) => {
+    { pipeline_stage: 'dormant' },
+  ])('omits former/deleted customers: %j', async (customer) => {
     expect(await refreshRecurringPlanAlert(scenario({ customer }), alert)).toBeNull();
+  });
+  test('keeps a separate non-prepaid series on an annual-prepay customer', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ customer: { billing_mode: 'annual_prepay' } }), alert))
+      .toMatchObject({ id: 1, remainingVisits: 1 });
   });
   test('rejects catalog one-time work even with legacy recurring flags', async () => {
     profileResolver.mockResolvedValue({ billingType: 'one_time' });

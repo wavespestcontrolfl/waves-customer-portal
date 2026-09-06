@@ -16601,8 +16601,9 @@ async function refreshRecurringPlanAlert(conn, alert) {
       || parent.recurring_pattern === 'one_time'
       || ['cancelled', 'rescheduled'].includes(parent.status)) return null;
     const customer = await conn('customers').modify(whereLiveCustomer)
-      .where({ id: parent.customer_id }).first('billing_mode');
-    if (!customer || customer.billing_mode === 'annual_prepay' || parent.annual_prepay_term_id) return null;
+      .where({ id: parent.customer_id }).first('id');
+    // Annual coverage belongs to a service/series, not every plan on the account.
+    if (!customer || parent.annual_prepay_term_id) return null;
     const profile = await resolveCompletionProfileForScheduledService(parent, conn, { strict: true });
     if (profile.billingType === 'one_time') return null;
 
