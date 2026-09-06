@@ -14,6 +14,7 @@ const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, refreshSmsCommitments } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
+const { dispatch } = require('../services/llm/call');
 const { loadSmsFulfillmentEvidence, admissibleWitness } = require('../services/sms-commitment-fulfillment');
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
@@ -152,6 +153,69 @@ postgres('SMS operations on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date());
     expect(evidence.failures).toEqual([]);
     expect(evidence.records).toEqual([]);
+  });
+
+  test('an old email row retried after the request is selected by its delivery event', async () => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const base = { recipient_type: 'customer', recipient_id: message.customer_id,
+      recipient_email_snapshot: 'synthetic@example.invalid', created_at: before,
+      text_snapshot: 'Your appointment is confirmed', status: 'delivered' };
+    const [retried] = await mockPg('email_messages').insert({ ...base, sent_at: after, delivered_at: after }).returning('id');
+    await mockPg('email_messages').insert({ ...base, sent_at: before, delivered_at: before });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
+    expect(evidence.failures).toEqual([]);
+    expect(evidence.records.filter((r) => r.type === 'email_delivery').map((r) => r.id)).toEqual([retried.id]);
+    expect(admissibleWitness(evidence.records[0], { kind: 'send_appointment_confirmation' })).toBe(true);
+  });
+
+  test('persisted evidence checks avoid repeated LLM calls and rerun after a delivery changes', async () => {
+    result.obligations[0] = { ...result.obligations[0], kind: 'other',
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Still checking',
+      message_type: 'manual', status: 'sent', created_at: new Date(message.created_at.getTime() + 1000) }).returning('id');
+    dispatch.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const now = new Date(message.created_at.getTime() + 2000);
+    await refreshSmsCommitments({ conn: mockPg, now });
+    await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 300000) });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect((await mockPg('call_commitments').first()).sms_context.fulfillment_check.evidence_hash).toBeTruthy();
+    await mockPg('sms_log').where({ id: reply.id }).update({ status: 'delivered', message_body: 'The issue is resolved' });
+    dispatch.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `sms:${reply.id}`, quote: 'The issue is resolved' } });
+    await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 600000) });
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+  });
+
+  test('archived owners stop processing until restoration without losing the obligation', async () => {
+    result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const verify = jest.fn().mockResolvedValue({ verdict: 'open' });
+    const now = new Date(message.created_at.getTime() + 2000);
+    await mockPg('customers').where({ id: message.customer_id }).update({ deleted_at: now });
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    await mockPg('customers').where({ id: message.customer_id }).update({ deleted_at: null });
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('archiving during verification suppresses the result and bell', async () => {
+    result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const now = new Date(message.created_at.getTime() + 2000);
+    const verify = jest.fn(async () => {
+      await mockPg('customers').where({ id: message.customer_id }).update({ deleted_at: now });
+      return { verdict: 'fulfilled' };
+    });
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('visit witnesses distinguish old work from post-request creation and transitions', async () => {

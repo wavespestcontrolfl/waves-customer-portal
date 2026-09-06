@@ -4,6 +4,7 @@ const Ajv = require('ajv/dist/2020');
 const MODELS = require('../config/models');
 const { dispatch } = require('./llm/call');
 const { VERSION } = require('./sms-operational-extractor');
+const { hashExtractionSource } = require('./data-hygiene/source-extraction-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt } = require('./call-commitments');
 
@@ -46,7 +47,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .where('received_at', '<=', now).orderBy('received_at', 'desc').limit(LIMIT + 1)
       .select('id', 'label_ids', 'body_text', 'subject', 'has_attachments', 'received_at'),
     email_delivery: conn('email_messages').where({ recipient_type: 'customer', recipient_id: customerId })
-      .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
+      .where(function deliveryWindow() {
+        this.where((q) => q.where('sent_at', '>', after).where('sent_at', '<=', now))
+          .orWhere((q) => q.where('delivered_at', '>', after).where('delivered_at', '<=', now));
+      }).orderByRaw('COALESCE(delivered_at, sent_at) DESC').limit(LIMIT + 1)
       .select('id', 'status', 'text_snapshot', 'subject_snapshot', 'sent_at', 'delivered_at', 'bounced_at', 'created_at'),
     estimate: conn('estimates').where({ customer_id: customerId })
       .modify((q) => handedOffWithin(q, after, now)).orderByRaw(handoffOrder(conn, after, now)).limit(LIMIT + 1)
@@ -127,11 +131,27 @@ function groundFulfillment(parsed, evidence, commitment) {
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
     matched_at: witness.type === 'estimate' ? witnessAt(witness, new Date(commitment.sms_context?.source_at))
       : witness.type === 'visit' ? visitWitnessAt(witness, commitment)
-        : witness.sent_at || witness.received_at || witness.created_at, quote: parsed.quote,
+        : witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at, quote: parsed.quote,
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
 }
 
-async function verifySmsFulfillment(commitment, evidence) {
+async function verifySmsFulfillment(commitment, evidence, { now = new Date() } = {}) {
+  const { fulfillment_check: previous, ...sms_context } = commitment.sms_context || {};
+  const obligation = { party: commitment.party, kind: commitment.kind, description: commitment.description,
+    evidence: commitment.evidence, due_at: commitment.due_at, sms_context };
+  const evidenceHash = hashExtractionSource(JSON.stringify({ version: VERSION, model: MODELS.FLAGSHIP,
+    obligation, records: [...evidence.records].sort((a, b) => a.ref.localeCompare(b.ref)),
+    failures: [...evidence.failures].sort() }));
+  if (previous?.evidence_hash === evidenceHash && (!previous.retry_after || new Date(previous.retry_after) > now)) return previous;
+  const verdict = await checkSmsFulfillment(obligation, evidence);
+  // Retry provider/schema failures after a bounded pause. Semantic open or
+  // uncertain results remain valid until their evidence or contract changes.
+  return { ...verdict, evidence_hash: evidenceHash,
+    retry_after: ['provider_failed', 'invalid_model_output'].includes(verdict.reason)
+      ? new Date(now.getTime() + 3600000).toISOString() : null };
+}
+
+async function checkSmsFulfillment(commitment, evidence) {
   if (evidence.failures.length) return { verdict: 'uncertain', reason: 'incomplete_sources', failures: evidence.failures };
   if (!evidence.records.length) return { verdict: 'open' };
   const result = await dispatch({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.FLAGSHIP }, {

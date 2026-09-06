@@ -105,6 +105,28 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts.map((f) => f.value)).toEqual(['#aB12*']);
   });
 
+  test.each([
+    ['Garage code is #1234', 'garage_code'], ['Lockbox code: #1234', 'lockbox_code'],
+    ['Our property gate code is #1234', 'property_gate_code'],
+    ['The community gate code is #1234', 'neighborhood_gate_code'],
+    ['Gate code is #1234', null], ['Code is #1234', null],
+  ])('binds %s only to its explicit access field', (quote, field) => {
+    const facts = ['garage_code', 'lockbox_code', 'property_gate_code', 'neighborhood_gate_code']
+      .map((candidate) => fact({ field: candidate, quote, value: '#1234' }));
+    const result = groundExtraction(extracted([], facts), { message: source(quote), properties });
+    expect(result.facts.map((item) => item.field)).toEqual(field ? [field] : []);
+    for (const item of facts) expect(factVerdict(item, { properties, senderIsPrimary: true }))
+      .toBe(item.field === field ? 'apply' : 'code_uncertain');
+  });
+
+  test('a code quote cannot drop a preceding negation', () => {
+    const result = groundExtraction(extracted([], [fact({ field: 'garage_code',
+      quote: 'Garage code is #1234', value: '#1234' })]), {
+      message: source('Do not assume Garage code is #1234'), properties,
+    });
+    expect(result.facts).toEqual([]);
+  });
+
   test('generic report wording cannot create invented report subtypes or a callback', () => {
     const message = source('Please send the report');
     const result = groundExtraction(extracted([
@@ -282,12 +304,38 @@ describe('fulfillment proof', () => {
     })).toBe(false);
   });
 
+  test.each(['open', 'uncertain'])('unchanged evidence reuses %s while content and ownership changes recheck it', async (status) => {
+    dispatch.mockReset().mockResolvedValue({ ok: true, json: { verdict: status, record_ref: null, quote: null } });
+    const evidence = { records: [{ ref: 'sms:1', type: 'sms', text: 'Still checking', status: 'sent' }], failures: [] };
+    const first = await verifySmsFulfillment(commitment, evidence);
+    const cached = { ...commitment, sms_context: { ...commitment.sms_context, fulfillment_check: first } };
+    expect(await verifySmsFulfillment(cached, evidence)).toEqual(first);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    await verifySmsFulfillment(cached, { ...evidence, records: [{ ...evidence.records[0], status: 'delivered' }] });
+    await verifySmsFulfillment({ ...cached, sms_context: { ...cached.sms_context, customer_id: 'new-owner' } }, evidence);
+    await verifySmsFulfillment({ ...cached, evidence: [{ quote: 'Only the revised confirmation' }] }, evidence);
+    expect(dispatch).toHaveBeenCalledTimes(4);
+    expect(dispatch.mock.calls[3][1].text).toContain('Only the revised confirmation');
+  });
+
+  test('provider failures pause retries without permanently caching the outage', async () => {
+    dispatch.mockReset().mockResolvedValue({ ok: false });
+    const now = new Date('2040-03-12T15:00:00Z');
+    const evidence = { records: [{ ref: 'sms:1', type: 'sms', text: 'Still checking' }], failures: [] };
+    const first = await verifySmsFulfillment(commitment, evidence, { now });
+    const cached = { ...commitment, sms_context: { ...commitment.sms_context, fulfillment_check: first } };
+    await verifySmsFulfillment(cached, evidence, { now: new Date(now.getTime() + 300000) });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    await verifySmsFulfillment(cached, evidence, { now: new Date(now.getTime() + 3600000) });
+    expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
   test('missing sources and unsupported quotes remain unverified', async () => {
     expect(groundFulfillment(verdict, { records: [record], failures: ['email'] }, commitment))
       .toMatchObject({ verdict: 'uncertain', reason: 'incomplete_sources' });
     expect(groundFulfillment({ ...verdict, quote: 'I answered the invoice dispute' }, { records: [record], failures: [] }, commitment))
       .toMatchObject({ verdict: 'uncertain', reason: 'ungrounded_witness' });
-    await expect(verifySmsFulfillment(commitment, { records: [], failures: [] })).resolves.toEqual({ verdict: 'open' });
+    await expect(verifySmsFulfillment(commitment, { records: [], failures: [] })).resolves.toMatchObject({ verdict: 'open' });
   });
 });
 

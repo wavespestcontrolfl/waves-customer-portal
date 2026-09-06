@@ -12,7 +12,7 @@ const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
-const { VERSION, extractSmsOperations, explicitContactPreference } = require('./sms-operational-extractor');
+const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment } = require('./sms-commitment-fulfillment');
 
@@ -46,7 +46,7 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
   if (fact.duration !== 'durable') return 'temporary_instruction';
   if (fact.field === 'contact_preference'
     && explicitContactPreference(fact.quote) !== fact.value) return 'preference_uncertain';
-  if (fact.field.endsWith('_code') && !/^[#*\dA-Za-z -]{1,100}$/.test(fact.value)) return 'code_uncertain';
+  if (fact.field.endsWith('_code') && !matchesExplicitAccessCode(fact)) return 'code_uncertain';
   const maxLength = fact.field.endsWith('_code') ? 100 : fact.field === 'irrigation_controller_location' ? 200 : 600;
   if (fact.value.length > maxLength) return 'value_too_long';
   const before = current[fact.field] ?? null;
@@ -220,6 +220,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // One bounded page per tick, with a durable cursor. An old open item
   // cannot monopolize the first page and strand later customers forever.
   const rows = await conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
+    .join('customers as c', 'c.id', 's.customer_id').whereNull('c.deleted_at')
     .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
     .whereNotNull('cc.due_at').where('cc.due_at', '<=', now)
     .modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
@@ -233,16 +234,20 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     // is only a snapshot; never let its former owner strand the obligation.
     const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
     const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
-    const verdict = await verify(current, evidence);
+    const verdict = await verify(current, evidence, { now });
     if (verdict.verdict === 'uncertain') unverified += 1;
     await conn.transaction(async (trx) => {
       // Intake also locks SMS before commitment. A merge/relink while the
       // verifier runs must retry against the new owner, not publish stale proof.
       const source = await trx('sms_log').where({ id: message.id }).forUpdate().first();
       if (!source || !eligibleMessage(source) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
+      const customer = await trx('customers').where({ id: source.customer_id }).whereNull('deleted_at').forUpdate().first();
+      if (!customer) return;
       const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
       if (!enabled() || live?.status !== 'open' || live.human_state != null) return;
-      await trx('call_commitments').where({ id: row.id }).update({ sms_context: current.sms_context });
+      await trx('call_commitments').where({ id: row.id }).update({
+        sms_context: { ...current.sms_context, fulfillment_check: verdict },
+      });
       const dedupeKey = `sms-commitment:${row.id}`;
       if (verdict.verdict === 'fulfilled') {
         await trx('call_commitments').where({ id: row.id }).update({
