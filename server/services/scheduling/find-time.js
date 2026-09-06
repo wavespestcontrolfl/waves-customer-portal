@@ -20,6 +20,7 @@ const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable } = require('../technician-eligibility');
+const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement } = require('./arrival-route');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -55,6 +56,54 @@ function enumerateDates(from, to, { includeWeekends = false } = {}) {
     dates.push(toDateStr(d));
   }
   return dates;
+}
+
+// Staff existing-appointment pickers can use the slack in each promised
+// arrival window. Evaluate every on-the-hour promise against the COMPLETE
+// resulting route, not just the gap between two stored service-end blocks.
+async function findArrivalWindowSlots(opts) {
+  const { dateFrom, dateTo, durationMinutes = 60, technicianId, topN = 10 } = opts;
+  let query = applyAssignable(db('technicians'));
+  if (technicianId) query = query.where('technicians.id', technicianId);
+  const techs = await query.select('id', 'name');
+  const { ADMIN_DAY_END_MINUTES } = require('./window-rules');
+  const now = new Date();
+  const today = etDateString(now);
+  const parts = etParts(now);
+  const slots = [];
+  let evaluated = 0;
+  for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
+    if (date < today) continue;
+    for (const tech of techs) {
+      const context = await loadArrivalRouteContext({
+        serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
+        excludeServiceIds: opts.excludeServiceIds, now,
+      });
+      if (!context) continue;
+      const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
+      for (let start = Math.ceil(floor / 60) * 60; start + durationMinutes <= ADMIN_DAY_END_MINUTES; start += 60) {
+        evaluated++;
+        const windowStart = minutesToTime(start);
+        const windowEnd = minutesToTime(start + durationMinutes);
+        const fit = evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes });
+        if (!fit.feasible) continue;
+        const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
+        slots.push({
+          date, technician: { id: tech.id, name: tech.name },
+          start_time: windowStart, end_time: windowEnd,
+          detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
+          score: fit.detourMinutes + daysOut * 0.5,
+          waiting_minutes: fit.waitingMinutes, arrival_delay_minutes: fit.arrivalDelayMinutes,
+          estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+          route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
+          latest_start_min: start,
+        });
+      }
+    }
+  }
+  slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes
+    || a.arrival_delay_minutes - b.arrival_delay_minutes || a.start_time.localeCompare(b.start_time));
+  return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length };
 }
 
 /**
@@ -112,6 +161,10 @@ async function findAvailableSlots(opts) {
   }
   if (!dateFrom || !dateTo) {
     return { error: 'dateFrom and dateTo required', slots: [] };
+  }
+
+  if (opts.arrivalWindow?.serviceId && arrivalWindowRoutingEnabled()) {
+    return findArrivalWindowSlots(opts);
   }
 
   const newStop = { lat: parseFloat(lat), lng: parseFloat(lng) };
