@@ -56,7 +56,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
       visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [] };
     const date = etDateString();
     await mockPg('customers').insert({ id: fixture.customerId, first_name: 'Fixture', phone: '+12025550123',
-      email: `${fixture.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false });
+      email: `${fixture.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false,
+      billing_mode: 'per_application' });
     await mockPg('technicians').insert({ id: fixture.techId, name: 'Fixture Technician', role: 'technician', active: true });
     await mockPg('services').insert({ id: fixture.catalogId, name: 'Fixture General Pest Control',
       service_key: `fixture_${fixture.catalogId}`, is_active: true });
@@ -218,6 +219,43 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toEqual(fixture.serviceIds.map((id) => `scheduled_${id}_primary`));
     expect(invoice.visit_completion_packet_id).toBe(result.body.packetId);
     expect((await createVisitCompletionInvoice(result.body.packetId)).invoiceId).toBe(invoice.id);
+  });
+
+  test.each(['per_application', 'per_visit', 'one_time'])('an unflagged callback stays free in the %s lane', async (billingMode) => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: billingMode });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ is_callback: true });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+    expect(await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).whereNotNull('invoice_id'))
+      .toEqual([expect.objectContaining({ scheduled_service_id: fixture.serviceIds[0] })]);
+  });
+
+  test('the explicit invoice-on-complete callback override keeps its canonical charge', async () => {
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({
+      is_callback: true, create_invoice_on_complete: true,
+    });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
+  });
+
+  test('billing recovery recognizes the shared invoice for every linked member', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ completed_at: mockPg.fn.now() });
+    const router = require('../routes/admin-billing-recovery');
+    const handler = router.stack.find((layer) => layer.route?.path === '/leaks').route.stack.at(-1).handle;
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    await handler({ query: { days: 1 } }, res);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(JSON.stringify(res.json.mock.calls[0][0])).not.toContain(fixture.customerId);
+    // Positive control: without the packet's secondary-member link, this
+    // exact completed work really would enter the existing recovery queue.
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
+      scheduled_service_id: fixture.serviceIds[1] }).update({ invoice_id: null });
+    res.json.mockClear();
+    await handler({ query: { days: 1 } }, res);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0].needs_review)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ scheduled_service_id: fixture.serviceIds[1] })]));
   });
 
   test('commercial tax and an estimate deposit settle once on the same invoice', async () => {

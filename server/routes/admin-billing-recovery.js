@@ -75,7 +75,10 @@ const isReviewServiceType = (serviceType) => matchesPatterns(serviceType, REVIEW
 // Aliases: `sr` = service_records, `ss` = scheduled_services.
 const HAS_INVOICE_SQL = `EXISTS (
   SELECT 1 FROM invoices i
-  WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id)
+  WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id
+    OR EXISTS (SELECT 1 FROM visit_completion_packet_items pi
+      WHERE pi.invoice_id = i.id AND pi.scheduled_service_id = ss.id
+        AND pi.service_record_id = sr.id))
     AND COALESCE(i.status, '') <> 'void'
 )`;
 

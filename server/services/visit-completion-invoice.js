@@ -16,6 +16,7 @@ function office(reason, serviceId = null) {
 
 async function buildMemberLines(member, customer, trx) {
   const notes = member.record_notes || {};
+  const price = Number.parseFloat(member.estimated_price);
   if ([notes.backfill, notes.oneTimeRecapOnly, notes.invoiceAlreadySent].some(Boolean)) {
     return office('special_completion_billing', member.id);
   }
@@ -41,14 +42,24 @@ async function buildMemberLines(member, customer, trx) {
     perApplicationFee: customer.per_application_fee, monthlyRate: customer.monthly_rate,
     billingMode: customer.billing_mode,
   });
-  if (isAlwaysFreeServiceType(member.service_type) || (member.is_callback && !(amount > 0))) return { lineItems: [] };
+  const eligible = require('./complete-scheduled-service').shouldAutoInvoiceCompletion({
+    invoiceAmount: amount, createInvoiceOnComplete: member.create_invoice_on_complete,
+    perApplicationBilling: customer.billing_mode === 'per_application',
+    explicitPerVisitLane: ['per_visit', 'one_time'].includes(customer.billing_mode),
+    hasVisitPrice: price > 0, waveguardTier: customer.waveguard_tier,
+    serviceType: member.service_type, isCallback: member.is_callback,
+    backfillMintRequired: notes.backfillMintRequired === true,
+    autoInvoicePricedVisits: process.env.GATE_AUTOINVOICE_PRICED_VISITS === 'true',
+  });
+  if (isAlwaysFreeServiceType(member.service_type) || (member.is_callback && !eligible)) return { lineItems: [] };
   // A combined plan's customer-level fallback is not a price for each member.
   // Explicit zero is allowed only when the canonical lane also says zero.
-  if (member.estimated_price == null || !Number.isFinite(Number(member.estimated_price))) {
+  if (!Number.isFinite(price)) {
     return office('member_price_missing', member.id);
   }
-  if (Number(member.estimated_price) === 0 && amount === 0) return { lineItems: [] };
-  if (!(Number(member.estimated_price) > 0)) return office('member_price_ambiguous', member.id);
+  if (price === 0 && amount === 0) return { lineItems: [] };
+  if (!(price > 0)) return office('member_price_ambiguous', member.id);
+  if (!eligible) return office('member_billing_not_enabled', member.id);
   const built = await InvoiceService.buildLineItemsForScheduledService(member.id, {
     fallbackAmount: amount, fallbackDescription: member.service_type, database: trx,
   });
