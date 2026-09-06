@@ -511,10 +511,14 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
   });
 
   it('every extension writer overlays the template overrides over the parent row', () => {
-    // auto-extend, visit-count top-up, and the alert extend/convert loops all
-    // reassign their parent through the overlay before copying fields.
+    // Auto-extend and visit-count top-up overlay directly; renewal actions
+    // use the shared eligibility check, which returns the overlaid template.
     const overlays = src.match(/parent = overlayRecurringTemplateOverrides\(parent, cols\);/g) || [];
-    expect(overlays.length).toBeGreaterThanOrEqual(3);
+    expect(overlays.length).toBeGreaterThanOrEqual(2);
+    expect(src).toContain('parent = await recurringAlertTemplate(trx, parent, cols);');
+    const eligibility = src.slice(src.indexOf('async function recurringAlertTemplate('), src.indexOf('async function refreshRecurringPlanAlert('));
+    expect(eligibility).toContain('const template = overlayRecurringTemplateOverrides(parent, cols);');
+    expect(eligibility).toContain('return template;');
   });
 
   it('series-summary reports the gate so the modal can render the selector dark-safely', () => {

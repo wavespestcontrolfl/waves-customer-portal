@@ -46,7 +46,7 @@ function daysOut(n) {
 }
 
 const COLS = {
-  recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
+  recurring_template_overrides: {}, recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
   create_invoice_on_complete: {}, estimated_price: {}, is_callback: {}, discount_dollars: {},
   // Bill-To + stamped-service-address columns the refill must propagate.
   payer_id: {}, po_number: {}, self_pay_override: {},
@@ -709,12 +709,12 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
         if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: !!state.parent.recurring_ongoing };
         if (firstCall[1] === 'create_invoice_on_complete') return undefined;
         // Post-registration terminal re-check: visit still live.
-        if (firstCall[1] === 'status') return { status: 'pending' };
+        if (firstCall[1] === 'status' && !calls.some((c) => c[0] === 'orderBy')) return { status: 'pending' };
         if (calls.some((c) => c[0] === 'orderBy')) {
           // DB-honest anchor: honor the status filter, then latest date — so
           // these tests fail if the shared filtered anchor is dropped again.
-          const sorted = statusVisible(calls, liveRows()).map((r) => r.scheduled_date).sort();
-          return sorted.length ? { scheduled_date: sorted[sorted.length - 1] } : undefined;
+          const sorted = statusVisible(calls, liveRows()).sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date));
+          return sorted.at(-1);
         }
         return { ...state.parent };
       }
@@ -767,7 +767,16 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
       if (op === 'insert' || op === 'insertReturning') { state.auditInserts.push(data); return [1]; }
     }
     if (table === 'activity_log') { state.activityInserts.push(data); return [1]; }
-    if (table === 'customers') return op === 'first' ? customer : [];
+    if (table === 'customers') {
+      // Eligibility selects identity; financial reads below retain the
+      // separately supplied billing fixture for these extension scenarios.
+      if (calls.some((c) => c[0] === 'first' && c[1] === 'id')) {
+        if (customer?.active === false || customer?.deleted_at
+          || ['churned', 'past_customer', 'dormant'].includes(customer?.pipeline_stage)) return null;
+        return { id: 5 };
+      }
+      return op === 'first' ? customer : [];
+    }
     return null;
   };
   return { state, handler };
@@ -1024,6 +1033,50 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(state.alert.resolved_at).toBeNull();
   });
 
+  test.each(['extend', 'convert_ongoing', 'let_lapse'])('%s works when only the anchor was cancelled', async (action) => {
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { status: 'cancelled' },
+      seriesRows: [
+        { scheduled_date: '2098-04-15', status: 'completed' },
+        { scheduled_date: '2098-07-15', status: 'pending' },
+      ],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action, count: 2, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.alert.resolved_at).toBeTruthy();
+    expect(state.insertedVisits.length).toBe(action === 'let_lapse' ? 0 : 2);
+  });
+
+  test('a stale card cannot extend a series whose effective catalog service became one-time', async () => {
+    const resolver = require('../services/service-completion-profiles').resolveCompletionProfileForScheduledService;
+    const { gates } = require('../config/feature-gates');
+    const oldGate = gates.editApptPriceServiceScope;
+    gates.editApptPriceServiceScope = true;
+    resolver.mockImplementationOnce(async (row) => ({ billingType: row.service_id === 'one-time' ? 'one_time' : 'recurring' }));
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { recurring_template_overrides: { service_id: 'one-time' } },
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    try {
+      const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+      expect(out.status).toBe(409);
+      expect(state.insertedVisits).toHaveLength(0);
+      expect(state.alert.resolved_at).toBeNull();
+    } finally { gates.editApptPriceServiceScope = oldGate; }
+  });
+
+  test('a stale card cannot extend a former customer plan', async () => {
+    const { state, handler } = alertActionScenario({
+      customer: { id: 5, active: true, pipeline_stage: 'churned' },
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(409);
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_at).toBeNull();
+  });
+
   test('derived ids recompute the derived-scan condition under the lock — a concurrent refill makes the second click a no-op', async () => {
     // Ongoing plans derive (ongoing_plan_exhausted) only at ZERO upcoming
     // visits: a pending future visit — e.g. a concurrent click's insert or
@@ -1112,7 +1165,7 @@ describe('renewal banner revalidates historical recurring alerts', () => {
       }
       if (calls.some(([op, fields]) => op === 'where' && fields?.status === 'completed')) return completed ? { id: 'completed-a' } : null;
       if (calls.some(([op]) => op === 'count')) return { c: String(upcoming) };
-      if (calls.some(([op]) => op === 'orderBy')) return { id: 'last-visit', customer_id: 'customer-a', scheduled_date: lastDate, ...lastVisit };
+      if (calls.some(([op]) => op === 'orderBy')) return { id: 'last-visit', customer_id: 'customer-a', scheduled_date: lastDate, status: upcoming ? 'pending' : 'completed', ...lastVisit };
       return { id: 'series-a', customer_id: 'customer-a', is_recurring: true,
         recurring_pattern: 'quarterly', recurring_ongoing: false, status: 'completed',
         service_type: 'Quarterly Pest Control Service', ...parent };
@@ -1140,6 +1193,10 @@ describe('renewal banner revalidates historical recurring alerts', () => {
       .toMatchObject({ remainingVisits: 1 });
     expect(await refreshRecurringPlanAlert(scenario({ parent: { status }, upcoming: 0 }), alert))
       .toMatchObject({ remainingVisits: 0 });
+  });
+  test('omits a cancelled series even when older completed appointments remain', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { status: 'cancelled' }, upcoming: 0,
+      lastVisit: { status: 'cancelled' } }), alert)).toBeNull();
   });
   test.each(['new_lead', null])('keeps a serviced recurring plan despite stale CRM stage %j', async (pipeline_stage) => {
     expect(await refreshRecurringPlanAlert(scenario({ customer: { pipeline_stage } }), alert))

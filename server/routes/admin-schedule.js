@@ -16592,23 +16592,37 @@ router.get('/recommend-slots', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Shared read/action fence: the anchor is an appointment, so its cancellation
+// alone cannot stop a series whose later appointments continued.
+async function recurringAlertTemplate(conn, parent, cols) {
+  if (!parent?.is_recurring || !parent.recurring_pattern
+    || parent.recurring_pattern === 'one_time') return null;
+  const customer = await conn('customers')
+    .where({ id: parent.customer_id, active: true }).whereNull('deleted_at')
+    .where(function () {
+      this.whereNull('pipeline_stage').orWhereNotIn('pipeline_stage', FORMER_CUSTOMER_STAGES);
+    }).first('id');
+  if (!customer) return null;
+  const template = overlayRecurringTemplateOverrides(parent, cols);
+  const profile = await resolveCompletionProfileForScheduledService(template, conn, { strict: true });
+  if (profile.billingType === 'one_time') return null;
+  if (parent.status === 'cancelled') {
+    const latest = await conn('scheduled_services')
+      .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
+      .where('is_recurring', true).orderBy('scheduled_date', 'desc').first('status');
+    if (!latest || ['cancelled', 'rescheduled'].includes(latest.status)) return null;
+  }
+  return template;
+}
+
 // Queue rows are historical hints, not current plan eligibility. Revalidate
 // derived rows too, so both sources share the same customer/catalog fences.
 async function refreshRecurringPlanAlert(conn, alert) {
   try {
     const parent = await conn('scheduled_services').where({ id: alert.parentId }).first();
-    if (!parent?.is_recurring || !parent.recurring_pattern
-      || parent.recurring_pattern === 'one_time') return null;
-    const customer = await conn('customers')
-      .where({ id: parent.customer_id, active: true }).whereNull('deleted_at')
-      .where(function () {
-        this.whereNull('pipeline_stage').orWhereNotIn('pipeline_stage', FORMER_CUSTOMER_STAGES);
-      }).first('id');
-    if (!customer) return null;
     const cols = await conn('scheduled_services').columnInfo();
-    const template = overlayRecurringTemplateOverrides(parent, cols);
-    const profile = await resolveCompletionProfileForScheduledService(template, conn, { strict: true });
-    if (profile.billingType === 'one_time') return null;
+    const template = await recurringAlertTemplate(conn, parent, cols);
+    if (!template) return null;
 
     // An accepted estimate awaiting its first service is not a renewal.
     const completedVisit = await conn('scheduled_services')
@@ -16969,14 +16983,14 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       }
       parent = relocked;
     }
-    if (parent.status === 'cancelled') {
-      outcome = { status: 409, body: { error: 'series has been cancelled' } };
-      return;
-    }
     // Series-scope price/service overrides beat the parent's own columns for
     // everything the extend/convert spawn loops copy (allowlisted keys only;
     // no-op while the gate is off or nothing is stamped).
-    parent = overlayRecurringTemplateOverrides(parent, cols);
+    parent = await recurringAlertTemplate(trx, parent, cols);
+    if (!parent) {
+      outcome = { status: 409, body: { error: 'This plan is no longer eligible for renewal. Refresh the schedule.' } };
+      return;
+    }
     const parentOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
     if (!alert) {
       // Derived alerts have no row to claim, so recompute the derived-scan
