@@ -4,6 +4,7 @@ const SKIP = !process.env.DATABASE_URL;
 const describeWithDatabase = SKIP ? describe.skip : describe;
 jest.mock('../models/db', () => {
   const db = (...args) => db.connection(...args);
+  db.transaction = (run) => db.connection.transaction(run);
   return db;
 });
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
@@ -27,8 +28,11 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
 
   beforeAll(async () => {
     const connection = process.env.DATABASE_URL;
-    if (!['localhost', '127.0.0.1'].includes(new URL(connection).hostname)) {
-      throw new Error('This suite requires the disposable local CI database');
+    const url = new URL(connection);
+    const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+      && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+    if (!['localhost', '127.0.0.1'].includes(url.hostname) && !ownedQA) {
+      throw new Error('Use the disposable CI database or this managed worktree\'s private QA database');
     }
     database = require('knex')({ client: 'pg', connection });
     trx = await database.transaction();

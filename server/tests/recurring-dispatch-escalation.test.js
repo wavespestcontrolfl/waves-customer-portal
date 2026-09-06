@@ -14,10 +14,12 @@ beforeEach(() => {
   jest.clearAllMocks();
   retireStatements.length = 0;
   retire.mockResolvedValue(1);
-  for (const method of ['join', 'whereNotNull', 'whereNull', 'whereIn', 'where']) {
+  for (const method of ['join', 'whereNotNull', 'whereNull', 'whereIn', 'where', 'forNoKeyUpdate']) {
     query[method] = jest.fn(() => query);
   }
   query.select = jest.fn(async () => []);
+  query.first = jest.fn(async () => ({ id: 's1' }));
+  db.transaction = jest.fn(async (run) => run(db));
   db.mockImplementation((table) => {
     if (table !== 'notifications') return query;
     // Compile the real PostgreSQL update, including the correlated subquery;
@@ -41,11 +43,18 @@ test('unplaced visits are escalated before the lock window through the existing 
   expect(query.whereNull).toHaveBeenCalledWith('s.window_start');
   expect(notifications.notifyAdmin).toHaveBeenCalledWith(
     'schedule_conflict', expect.any(String), expect.stringContaining('2026-08-20'),
-    expect.objectContaining({ bell: true, dedupeKey: 'recurring-dispatch:s1:2026-08-20', refreshOnDedupe: true }),
+    expect.objectContaining({ bell: true, dedupeKey: 'recurring-dispatch:s1:2026-08-20', refreshOnDedupe: true, trx: db }),
   );
   // A failed notification must fail the pass, rather than reporting a clean run.
   notifications.notifyAdmin.mockResolvedValue(null);
   await expect(flagUnplacedVisits({ lockWindowDays: 14 })).rejects.toThrow('could not be recorded');
+});
+
+test('a visit placed after the scan raises no alert and is not counted as flagged', async () => {
+  query.select.mockResolvedValue([{ id: 's1', customer_id: 'c1', recurring_dispatch_due_date: '2026-08-20' }]);
+  query.first.mockResolvedValue(null);
+  expect(await flagUnplacedVisits({ lockWindowDays: 14 })).toBe(0);
+  expect(notifications.notifyAdmin).not.toHaveBeenCalled();
 });
 
 test('a pass with no pending placement still retires obsolete lane alerts', async () => {

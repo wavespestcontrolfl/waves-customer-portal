@@ -2107,6 +2107,13 @@ class SmartRebooker {
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
             ['recurring-series-maintenance', String(parentId)],
           );
+          if (deferFuturePlacement) {
+            // The reminder sender holds this same fence through SMS/email
+            // delivery. Take it before the freeze read and every row write:
+            // a sender already in flight finishes first and freezes its slot;
+            // a later sender re-reads our committed, pre-closed reminder.
+            await require('../utils/customer-comms-lock').lockCustomerComms(trx, service.customer_id);
+          }
           // The authoritative sibling read runs UNDER both locks; the
           // pre-lock read only named the dates rung 1 had to cover. What
           // the sweep writes must be what it locked and projected for: a

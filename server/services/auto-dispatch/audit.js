@@ -185,25 +185,43 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     .whereNull('c.deleted_at')
     .select('s.id', 's.customer_id', 's.recurring_dispatch_due_date');
   const notifications = require('../notification-service');
+  let flagged = 0;
   for (const row of rows) {
     const due = toDateStr(row.recurring_dispatch_due_date);
-    const notice = await notifications.notifyAdmin(
-      'schedule_conflict',
-      'Recurring visit still needs a time',
-      `A recurring visit due ${due} is still awaiting placement within three days of its due date. Review availability and customer preferences in dispatch.`,
-      {
-        bell: true,
-        link: `/admin/dispatch?tab=schedule&date=${due}`,
-        dedupeKey: `recurring-dispatch:${row.id}:${due}`,
-        // Reopen a previously resolved card if this due date becomes unplaced
-        // again; the shared deduper leaves acknowledged, unchanged cards alone.
-        refreshOnDedupe: true,
-        metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
-      },
-    );
-    if (!notice) throw new Error(`Recurring placement exception could not be recorded for ${row.id}`);
+    const notice = await db.transaction(async (trx) => {
+      // Pin placement through the shared notification dedupe/write. A staff
+      // placement that won the row lock makes this a no-op; one that follows
+      // us waits until the still-valid alert has committed.
+      const current = await trx('scheduled_services as s')
+        .join('customers as c', 'c.id', 's.customer_id')
+        .where({ 's.id': row.id, 's.customer_id': row.customer_id, 's.recurring_dispatch_due_date': due, 'c.active': true })
+        .whereNull('c.deleted_at')
+        .whereNull('s.window_start')
+        .whereIn('s.status', ['pending', 'confirmed'])
+        .forNoKeyUpdate('s')
+        .first('s.id');
+      if (!current) return null;
+      const inserted = await notifications.notifyAdmin(
+        'schedule_conflict',
+        'Recurring visit still needs a time',
+        `A recurring visit due ${due} is still awaiting placement within three days of its due date. Review availability and customer preferences in dispatch.`,
+        {
+          bell: true,
+          link: `/admin/dispatch?tab=schedule&date=${due}`,
+          dedupeKey: `recurring-dispatch:${row.id}:${due}`,
+          // Reopen a previously resolved card if this due date becomes unplaced
+          // again; the shared deduper leaves acknowledged, unchanged cards alone.
+          refreshOnDedupe: true,
+          metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
+          trx,
+        },
+      );
+      if (!inserted) throw new Error(`Recurring placement exception could not be recorded for ${row.id}`);
+      return inserted;
+    });
+    if (notice) flagged += 1;
   }
-  return rows.length;
+  return flagged;
 }
 
 module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits };

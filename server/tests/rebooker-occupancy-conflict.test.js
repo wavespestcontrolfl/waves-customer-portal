@@ -528,7 +528,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update).not.toHaveBeenCalled();
   });
 
-  test.each(['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker', 'staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
+  test.each(['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker', 'staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_reminder_race', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
     const existingHandoff = ['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker'].includes(actor);
     process.env.GATE_CUSTOMER_RECURRING_DISPATCH = actor === 'web_gate_off_deferred' ? 'false' : 'true';
     jest.spyOn(require('../services/auto-dispatch/config'), 'isCustomerRecurringDispatchEnabled').mockReturnValue(actor !== 'web_gate_off_deferred');
@@ -551,7 +551,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
         if (actor !== 'staff_timed_marker') { sibling.window_start = null; sibling.window_end = null; }
       }
     }
-    const preservesFuture = ['customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped'].includes(actor);
+    const preservesFuture = ['customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_reminder_race'].includes(actor);
     if (actor === 'customer_locked') siblings[1].auto_dispatch_locked = true;
     if (actor === 'customer_confirmed') siblings[1].customer_confirmed = true;
     if (actor === 'customer_rescheduled') siblings[1].status = 'rescheduled';
@@ -581,16 +581,33 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const logInsert = chain();
 
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, chain(), seriesClashProbe, anchorUpdate, sibUpdate, sibUpdate, sibUpdate];
+    const futureReminder = {
+      scheduled_service_id: 'svc-2', customer_id: 'cust-1', appointment_time: parseETDateTime(`${dayOffset(100)}T09:00`),
+      reminder_72h_sent: false, suppressed_by_sibling: false,
+    };
     const trx = jest.fn((table) => {
     if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
-      if (table === 'appointment_reminders') return chain({ first: jest.fn().mockResolvedValue(null), select: jest.fn().mockResolvedValue([]) });
+      if (table === 'appointment_reminders') return chain({ first: jest.fn().mockResolvedValue(null), select: jest.fn(async () => actor === 'customer_reminder_race' ? [futureReminder] : []) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
+    if (actor === 'customer_reminder_race') {
+      const raw = trx.raw.getMockImplementation();
+      trx.raw.mockImplementation(async (sql, values) => {
+        if (values?.[0] === 'customer-comms:cust-1') {
+          // A sender already owns the comms lock. Its completion becomes
+          // visible only after the rebooker waits for that lock; reading the
+          // freeze before this await would incorrectly clear its window.
+          await Promise.resolve();
+          futureReminder.reminder_72h_sent = true;
+        }
+        return raw(sql, values);
+      });
+    }
     if (actor === 'customer_grouped') {
       const raw = trx.raw.getMockImplementation();
       trx.raw.mockImplementation((sql, values) => sql.includes('count(*)::int AS n FROM scheduled_services WHERE visit_id')
