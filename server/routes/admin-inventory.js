@@ -62,6 +62,42 @@ router.use((req, res, next) => (
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Label review remains owner-only under STAFF_INVENTORY_REQUEST above.
+// Opening a product validates any active EPA source; only explicit extract calls AI.
+const { gateEnvValue } = require('../config/feature-gates');
+const labelReview = require('../services/product-label-review');
+const labelExtractLimiter = require('express-rate-limit')({
+  windowMs: 10 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => String(req.technicianId),
+  message: { error: 'Too many label reads. Try again in ten minutes.' },
+});
+router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE') }));
+router.use('/:id/label-review', (req, res, next) => {
+  if (!gateEnvValue('GATE_LABEL_PIPELINE')) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
+  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid product id.' });
+  next();
+});
+router.get('/:id/label-review', async (req, res, next) => {
+  try { res.json(await labelReview.getLabelReview(req.params.id)); } catch (err) { next(err); }
+});
+router.post('/:id/label-review/extract', labelExtractLimiter, async (req, res, next) => {
+  try { res.json(await labelReview.extractLabelReview(req.params.id, req.technicianId)); } catch (err) { next(err); }
+});
+router.post('/:id/label-review/decision', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.body.candidateId || '') || !['approve', 'reject'].includes(req.body.decision)) {
+      return res.status(400).json({ error: 'A candidate id and review decision are required.' });
+    }
+    res.json(await labelReview.decideLabelReview(req.params.id, req.technicianId, req.body));
+  } catch (err) { next(err); }
+});
+router.post('/:id/label-review/revoke', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.body.reviewId || '')) return res.status(400).json({ error: 'A review id is required.' });
+    res.json(await labelReview.revokeLabelReview(req.params.id, req.technicianId, req.body.reviewId));
+  } catch (err) { next(err); }
+});
+
 // Robust quantity → total oz: normalizeQuantityToOz handles simple "128 oz"
 // forms; parsePackSize additionally handles supported multipack/fraction
 // forms ("4 x 30g tubes", "2 1/2 gal") so approvals don't drop sizes the

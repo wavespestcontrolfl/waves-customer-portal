@@ -14,8 +14,51 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/epa-product-label', () => ({ ...jest.requireActual('../services/epa-product-label'), currentEpaSourceStatus: jest.fn() }));
 
 const jobCard = require('../services/job-card');
+
+describe('reviewed EPA weather evidence is separate from rate verification', () => {
+  afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; });
+  const { labelProductSnapshot } = require('../services/product-label-weather');
+  const absent = { status: 'not_stated', value: null, quote: '', page: null, note: '' };
+  function product() {
+    const p = { id: 'label-test', name: 'Synthetic product', epa_reg_number: '123-456', formulation: 'SC', label_verified_at: null };
+    p.label_weather_review = { active: { status: 'approved', productSnapshot: labelProductSnapshot(p), facts: {
+      minTempF: absent, maxTempF: absent, rainFreeHours: absent,
+      maxWindMph: { status: 'limit', value: 10, quote: 'Synthetic wind restriction.', page: 1, note: '' },
+    } } };
+    return p;
+  }
+  const now = new Date('2030-01-01T12:00:00Z');
+  const hourly = Array.from({ length: 4 }, (_, i) => ({ startTime: new Date(now.getTime() + i * 3600000).toISOString(), temperatureF: 80, windMph: 5, rainChance: 0 }));
+  const verdict = p => jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: 'current' } }).verdicts[0].verdict;
+  test('reviewed limits enable weather only; gate off preserves the existing unknown', () => {
+    const p = product(); expect(verdict(p)).toBe('unknown');
+    process.env.GATE_LABEL_PIPELINE = 'true'; expect(verdict(p)).toBe('ok'); expect(p.label_verified_at).toBeNull();
+    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+  });
+  test('conditional evidence stays unknown; a known breach still holds', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    p.label_weather_review.active.facts.maxTempF = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
+    expect(verdict(p)).toBe('unknown');
+    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+  });
+  test('conditional-only evidence keeps its actionable warning without numeric limits', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    p.label_weather_review.active.facts.maxWindMph = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
+    expect(jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: 'current' } }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: 'Conditional label restrictions need review' });
+  });
+  test.each(['superseded', 'unavailable', undefined])('reviewed limits require a current source check (%s)', source => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    expect(jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: source } }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: expect.stringContaining('EPA') });
+  });
+  test('revoked or identity-stale evidence never falls back to a previously trusted general stamp', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product(); p.label_verified_at = '2030-01-01';
+    p.label_weather_review.active.status = 'revoked'; expect(verdict(p)).toBe('unknown');
+    p.label_weather_review.active.status = 'approved'; p.formulation = 'WG'; expect(verdict(p)).toBe('unknown');
+  });
+});
 
 const baseFacts = () => ({
   pets: '', petsSecured: '', gates: [], entry: '', parking: '', instructions: '',
@@ -608,6 +651,24 @@ describe('mixForProduct', () => {
   const at = { now: new Date('2026-09-04T12:00:00Z') };
 
   const approve = () => jest.fn().mockResolvedValue({ blocks: [], warnings: [] });
+
+  test.each([
+    ['2026-09-05', 27.4, -82.5, false, 'Judged on the visit day'],
+    ['2026-09-04', null, null, false, 'No property pin on file — no forecast'],
+    ['2026-09-04', 27.4, -82.5, true, 'Current EPA label could not be verified — try again'],
+  ])('mix source checks run only when the verdict can use them (%s, %s)', async (date, lat, lng, shouldCheck, reason) => {
+    const sourceCheck = require('../services/epa-product-label').currentEpaSourceStatus;
+    sourceCheck.mockReset().mockResolvedValue('unavailable');
+    process.env.GATE_LABEL_PIPELINE = 'true';
+    try {
+      const reviewed = { ...product, name: 'Synthetic label product', epa_reg_number: '123-456', formulation: 'SC' };
+      reviewed.label_weather_review = { active: { status: 'approved', source: { registration: '123-456' }, productSnapshot: require('../services/product-label-weather').labelProductSnapshot(reviewed), facts: {} } };
+      const dbh = makeDb({ scheduled_services: [{ ...visit, scheduled_date: date, latitude: lat, longitude: lng }], products_catalog: [reviewed], equipment_calibrations: [live] });
+      const out = await jobCard.mixForProduct('p1', 1, { serviceId: 'svc1', dbh, ...at, deps: { getHourly: jest.fn().mockResolvedValue([]) } });
+      expect(sourceCheck).toHaveBeenCalledTimes(shouldCheck ? 1 : 0);
+      expect(out.sprayCheck).toMatchObject({ verdict: 'unknown', reason });
+    } finally { delete process.env.GATE_LABEL_PIPELINE; }
+  });
 
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
