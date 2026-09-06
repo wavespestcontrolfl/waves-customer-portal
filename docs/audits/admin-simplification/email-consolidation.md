@@ -216,3 +216,36 @@ document load event. Product assertions were retained.
 No live messages, AI requests, database access, merge or deployment was made
 in this continuation. Draft PR publication remains separate from local build
 completion because repository publication starts an automatic isolated preview.
+
+## Draft PR publication and mobile sign-out
+
+The owner subsequently authorized publishing the Email draft PR and its
+automatic isolated preview. PR #4004 targets the open cleanup branch from
+#3980. Its initial published head is `dbe2f5153`; four reviewed screenshots
+are attached natively. Merge and production deployment remain excluded.
+
+The pre-push auditor produced no verdict, so it does not count as a clean
+review. GitHub Codex review was requested. The standard
+`scripts/verify-pr-checks.sh` rejects a stacked draft's non-main base; direct
+checks verified the intended parent, published head, mergeability and fresh
+`tests` pull_request run. The main-branch merge gate is still required after
+retargeting. The initial Railway preview succeeded in the PR's own environment;
+configuration inspection confirmed cron and Twilio SMS disabled and SMS preview
+mode enabled, without printing credentials or connecting to the database.
+
+A follow-through pass found that mobile Settings' separate Sign Out handler
+did not invoke the draft cleanup already used by the desktop shell. MorePage
+now calls the same `clearEmailDrafts`. Its regression failed before the fix
+and verifies recovery removal, stale callback rejection and unload-warning
+cleanup (`.tmp/email-mobile-logout-red.log`). The browser runner also signs
+out through mobile Settings and verifies a fresh synthetic login cannot
+recover that account's signed-out draft.
+
+Follow-up local checks: seven focused suites / 67 tests, production build and
+prebuild checks, scoped lint, and all 12 synthetic browser scenarios pass
+(`.tmp/email-mobile-logout-focused.log`, `.tmp/email-mobile-logout-build.log`,
+`.tmp/email-mobile-logout-browser-verified.log`). The initial browser selector
+matched both sidebar and bottom navigation Settings links; scoping it to the
+existing Primary navigation selects the intended mobile entry. No assertion
+was removed. The full 2,542-test local run above applies to `dbe2f5153` before
+this final mobile cleanup; GitHub CI checks the subsequent source.

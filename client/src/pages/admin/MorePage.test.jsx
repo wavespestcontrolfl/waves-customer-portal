@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -12,6 +12,7 @@ vi.mock("../../hooks/useFeatureFlag", () => ({
 }));
 
 import MorePage from "./MorePage";
+import { clearEmailDrafts, loadEmailDrafts, setEmailSending, updateEmailDrafts } from "../../lib/emailDrafts";
 
 function renderMore(role = "admin") {
   return render(
@@ -20,12 +21,13 @@ function renderMore(role = "admin") {
         <Route element={<Outlet context={{ user: { role } }} />}>
           <Route path="/admin/more" element={<MorePage />} />
         </Route>
+        <Route path="/admin/login" element={<div>Signed out</div>} />
       </Routes>
     </MemoryRouter>,
   );
 }
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); });
 
 describe("MorePage — the mobile Settings tab", () => {
   it("is titled Settings and lists the Settings leaves inline instead of a Settings nav row", () => {
@@ -51,5 +53,21 @@ describe("MorePage — the mobile Settings tab", () => {
     expect(screen.getByRole("link", { name: /^Account$/ })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Blackout Days/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /KPI Targets/ })).not.toBeInTheDocument();
+  });
+
+  it("clears Email recovery and pending callbacks when signing out on mobile", () => {
+    localStorage.setItem("waves_admin_token", "fixture-token");
+    const session = loadEmailDrafts("fixture-owner");
+    updateEmailDrafts(session, (drafts) => ({ ...drafts, replies: { fixture: "Unsent mobile reply" } }));
+    setEmailSending(session, "reply", true);
+    renderMore();
+    fireEvent.click(screen.getByRole("button", { name: "Sign Out" }));
+    expect(screen.getByText("Signed out")).toBeInTheDocument();
+    expect(localStorage.getItem("waves_admin_token")).toBeNull();
+    expect(loadEmailDrafts("fixture-owner").drafts.replies).toEqual({});
+    expect(updateEmailDrafts(session, (drafts) => drafts)).toBeNull();
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving);
+    expect(leaving.defaultPrevented).toBe(false);
   });
 });

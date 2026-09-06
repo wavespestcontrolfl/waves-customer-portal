@@ -180,6 +180,19 @@ async function main() {
       await mobile.getByRole('button', { name: 'Resume draft', exact: true }).click();
       assert.equal(await mobile.getByLabel('Message *', { exact: true }).inputValue(), 'Synthetic mobile draft');
     });
+    await scenario('mobile Settings sign-out clears Email recovery', async () => {
+      await mobile.getByRole('button', { name: 'Close', exact: true }).first().click();
+      await mobile.getByRole('navigation', { name: 'Primary', exact: true }).getByRole('link', { name: 'Settings', exact: true }).click();
+      await mobile.getByRole('button', { name: 'Sign Out', exact: true }).click();
+      await mobile.getByLabel('Email address', { exact: true }).waitFor();
+      assert.equal(new URL(mobile.url()).pathname, '/admin/login');
+      assert.equal(await mobile.evaluate(() => sessionStorage.getItem('waves_admin_email_drafts_v1')), null);
+      // openPage's init script restores the synthetic account on navigation.
+      // A fresh session for that same account must not recover the signed-out draft.
+      await mobile.goto(`${server.baseUrl}/admin/communications?id=${a.id}#tab=email`);
+      await mobile.getByRole('button', { name: 'New Email', exact: true }).waitFor();
+      assert.equal(await mobile.getByRole('button', { name: 'Resume draft', exact: true }).count(), 0);
+    });
     const tech = await openPage('technician', 390);
     await scenario('verified technician role blocks Email despite a forged stored admin role', async () => {
       await tech.goto(`${server.baseUrl}/admin/communications#tab=email`);
