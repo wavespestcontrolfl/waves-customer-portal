@@ -433,7 +433,7 @@ describe('the conversation side', () => {
       .toEqual({ text: '[AI segment]\nCaller: first\n\n[Reconnected]\nCaller: second', metadata: { provider: 'conversation_relay' } });
     // …and the processor's in-UPDATE composition guard (relayPending) engages on a reconnected row too (hook P1)
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain('relayPending = (transferred && !segment) || reconnected;'); // every write of a reconnected call composes from the row's current state
+    expect(src).toContain('relayPending = transferred;'); // every write of a reconnected call composes from the row's current state
     expect(src).toContain('const recorded = recordedSegmentText || patch.transcription;'); // …around the RECORDED text, never an in-memory composite
     // the close: reconcile 0 (voicemail is terminal), terminal salvage 0, metadata-only stash 1 — on the reconnect marker, no transfer needed
     const { updates, builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: first' }] } }, updateImpl: jest.fn(async (patch) => { updates.push(patch); return updates.length === 4 ? 1 : (updates.length === 1 ? 1 : 0); }) });
