@@ -2066,6 +2066,7 @@ describe('Google Business review sync', () => {
       clickOffsetLabel: '2m before',
       rung: 'sole_click',
       evidence: 'only click in the window, same location',
+      locationTrusted: true,
     };
 
     function feedWithUnmatchedReview() {
@@ -2121,8 +2122,9 @@ describe('Google Business review sync', () => {
         clickedAt: new Date(Date.parse(createdAt) - 10 * 60000).toISOString(),
         clickOffsetMs: 10 * 60000,
         clickOffsetLabel: '10m before',
-        rung: 'click_near',
-        evidence: 'the nearest click at this location before the review; no other clicker at this location tapped before it in the window',
+        rung: 'click_name',
+        locationTrusted: false,
+        evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
       }));
       jest.doMock('../services/review-click-correlation', () => ({
         AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
@@ -2165,14 +2167,15 @@ describe('Google Business review sync', () => {
       expect(notifs[0].title).toBe('Auto-linked Google review from Pat O’Connor');
     });
 
-    test('a click_near match links with link_source click_auto and carries the matcher\'s own evidence into the bell', async () => {
+    test('a click_name match links with link_source click_auto and carries the matcher\'s own evidence into the bell', async () => {
       process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
       jest.doMock('../services/review-click-correlation', () => ({
         AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
         findConfidentClickMatch: jest.fn(async () => ({
           ...CONFIDENT_MATCH,
-          rung: 'click_near',
-          evidence: 'the nearest click at this location before the review; the next-nearest clicker at this location tapped 1d 15h before',
+          rung: 'click_name',
+          locationTrusted: false,
+          evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
         })),
         findLikelyReviewers: jest.fn(async () => []),
       }));
@@ -2191,21 +2194,23 @@ describe('Google Business review sync', () => {
       expect(notifs).toHaveLength(1);
       // The WHY is the matcher's evidence verbatim — no canned claim about
       // other clicks the rung never checked (GH codex r2 P2).
-      expect(notifs[0].body).toContain('(the nearest click at this location before the review; the next-nearest clicker at this location tapped 1d 15h before)');
+      expect(notifs[0].body).toContain("(the reviewer's last name matches this customer's; no other clicker at this location in the window)");
       expect(notifs[0].body).not.toContain('other clicks in the window were other names');
     });
 
-    test('one click, one review: a second unlinked review at the SAME location inside the click\'s forward window refuses; alone it links; a review at ANOTHER location never blocks (pre-push P1 r6, GH codex r2 P1)', async () => {
+    test('a location-less legacy click_name match refuses when a second unlinked review at ANOTHER location shares its forward window; alone it links; a trusted location keeps the guard scoped (GH codex r2 P1)', async () => {
       process.env.GATE_REVIEW_CLICK_AUTOLINK = 'true';
       const recent = Date.now() - 2 * 24 * 3600 * 1000;
       const clickedAt = new Date(recent - 10 * 60000).toISOString();
+      // Held by closure so the location trust can flip between runs.
       const match = {
         customerId: 'cust-clicker',
         clickedAt,
         clickOffsetMs: 10 * 60000,
         clickOffsetLabel: '10m before',
-        rung: 'click_near',
-        evidence: 'the nearest click at this location before the review; no other clicker at this location tapped before it in the window',
+        rung: 'click_name',
+        evidence: "the reviewer's last name matches this customer's; no other clicker at this location in the window",
+        locationTrusted: false,
       };
       jest.doMock('../services/review-click-correlation', () => ({
         AUTO_LINK_MAX_BEFORE_MS: 12 * 3600 * 1000,
@@ -2216,11 +2221,10 @@ describe('Google Business review sync', () => {
         id: 'cust-clicker', first_name: 'Sam', last_name: 'Northgate',
         has_left_google_review: false, review_marked_at: null,
       });
-      // Two unlinked reviews inside the click's forward window at the SAME
-      // GBP location: the click cannot say which one the customer wrote, so
-      // neither may claim it — whichever synced first would otherwise take
-      // the customer. Every match is stamped for the review's own location,
-      // so the guard scopes to that GBP.
+      // Two same-surname unlinked reviews inside the click's forward window,
+      // one per GBP location. The legacy click carries no location, so
+      // neither review can claim it — whichever location synced first
+      // would otherwise take the customer.
       const seedRival = (n, locationId) => db.__state.rows.google_reviews.push({
         id: `rival-${n}`,
         google_review_id: `accounts/1/locations/${n}/reviews/rival-${n}`,
@@ -2235,7 +2239,7 @@ describe('Google Business review sync', () => {
         review_reply: null,
       });
       seedRival(1, 'bradenton');
-      seedRival(2, 'bradenton');
+      seedRival(2, 'sarasota');
       global.fetch = jest.fn(async (url) => {
         if (String(url).includes('maps.googleapis.com')) {
           return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
@@ -2249,17 +2253,19 @@ describe('Google Business review sync', () => {
       expect(rivals().every(r => r.customer_id == null)).toBe(true);
       expect(db.__state.rows.customers[0].has_left_google_review).toBe(false);
 
-      // Alone in its forward window at its location: links.
+      // Alone in its forward window across every location: links.
       db.__state.rows.google_reviews = db.__state.rows.google_reviews.filter(r => r.id !== 'rival-2');
       await service.syncAllReviews();
       expect(rivals().map(r => [r.id, r.customer_id])).toEqual([['rival-1', 'cust-clicker']]);
       expect(db.__state.rows.customers[0].has_left_google_review).toBe(true);
 
-      // The guard is scoped to the review's own GBP: another location's
-      // review inside the window does not block.
+      // A trusted, location-matched click (sole_click / click_near / a
+      // stamped click_name pair) keeps the guard scoped to its own GBP: the
+      // other location's review does not block.
       db.__state.rows.google_reviews[db.__state.rows.google_reviews.findIndex(r => r.id === 'rival-1')].customer_id = null;
       db.__state.rows.customers[0].has_left_google_review = false;
-      seedRival(3, 'sarasota');
+      seedRival(2, 'sarasota');
+      match.locationTrusted = true;
       await service.syncAllReviews();
       expect(rivals().find(r => r.id === 'rival-1').customer_id).toBe('cust-clicker');
     });

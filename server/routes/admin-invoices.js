@@ -10,7 +10,7 @@ const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBefor
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
-const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
 const PaymentPlans = require('../services/payment-plans');
 const { generateInvoiceSummary, generateThankYouMessage } = require('../services/invoice-ai-summary');
@@ -2225,6 +2225,22 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
         const lockedDue = CustomerCredit.round2(lockedTotal - CustomerCredit.round2(locked.credit_applied || 0));
         if (lockedDue <= 0) {
           const err = new Error('Invoice is already fully covered by credit'); err.statusCode = 400; err.isOperational = true; throw err;
+        }
+        // Visit fence under the same lock (mirrors recordManualPayment): a
+        // cancelled / no-show / skipped visit's invoice takes no credit —
+        // the cancel voids it (restoring credit); consuming credit against
+        // it here would race that void (#3878 r2).
+        // Lock order customer → visit (same as recordManualPayment and the
+        // rest of the repo): postCreditMovement locks the customer below, so
+        // fencing the visit first would invert the order and deadlock against
+        // a customer→visit transaction (Codex r2 P2).
+        await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
+        {
+          const neverRan = await visitRefusesSettlement(trx, locked.scheduled_service_id);
+          if (neverRan) {
+            const err = new Error(`This invoice's visit is ${neverRan.replace('_', '-')} — no credit was applied. Void or reissue the invoice first.`);
+            err.statusCode = 409; err.isOperational = true; err.code = 'visit_never_ran'; throw err;
+          }
         }
 
         // Consume the credit (throws 400 on insufficient balance → rolls back).

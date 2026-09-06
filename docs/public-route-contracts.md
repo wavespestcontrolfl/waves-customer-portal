@@ -147,9 +147,17 @@ deliberate POST form submission (scanner-safe, mirrors confirm), answer/
 reaction keys validated against the server-side config allowlists
 (newsletter-quiz.js / newsletter-feedback.js), 30 req/min per IP, always
 returns 200 so it can't probe which tokens/answers are real),
-`/api/public/prep/:token` (read-only, 32-hex token format gate,
+`/api/public/prep/:token` (32-hex token format gate,
 60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
-filters email-only blocks, server-side interpolation, generic 404),
+filters email-only blocks, server-side interpolation, generic 404; the
+ONLY writes are its own view analytics, all after a successful render —
+for a scheduled-service token the visit's `prep_view_count` /
+`prep_first_viewed_at` stamp is fenced on the rendered template key (a
+miss = the key moved, so the page re-resolves and renders the new guide),
+which pairs with the manual prep sender's re-key / release fence on those
+view columns so an opened page never changes guide or 404s behind the
+customer; the `prep_guide_views` log row follows; response shape
+unchanged),
 `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
 action-bar Download parity with service reports; same 32-hex token format
 gate, same 60 req/min limiter, same privacy headers, generic 404; payload
@@ -620,6 +628,10 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+Overlapping annual coverage on public `/accept` returns 409
+`{ error, code: 'ANNUAL_PREPAY_OVERLAP' }` with the existing call-the-office
+explanation and no acceptance committed. Clients preserve the appointment
+selection and display that billing conflict instead of a slot-taken message.
 A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
 non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
 bedroom reply proves the row's address or dollars stale; lifted only by the
@@ -697,7 +709,9 @@ plan matching the frequency's visitsPerYear through the scheduler's own
 `buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
 with no catalog plan is omitted; the key is ABSENT when the gate is off or
 nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
-only buckets months into seasons — it never derives an interval itself.
+renders the count and fixed season copy from it and never derives an
+interval itself; since 2026-09-05 it shows neither `cadence` nor `months`
+(owner: education, not a schedule).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and a one-time-ONLY estimate whose billable rows all resolve to one copy
@@ -726,6 +740,16 @@ terminal-handoff burn rule in AGENTS.md).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).
+`/api/integrations/backlink-worker/claim` (GET) accepts `mode=draft|acquire`:
+`outreach` defaults to drafting and `signup` to acquisition. Drafting requires
+`GATE_OUTREACH_DRAFTER`; acquisition requests return an empty claim because
+execution is restricted to the in-process signup runner. That runner requires
+both authority/runner gates, a current executable free-path authority and a
+reserved daily slot; its citation executor claims signup lanes only. `/report` (POST) binds new leases
+to that authenticated provider and mode; a draft lease cannot report placement.
+The in-process browser must atomically begin the reserved submission before a
+placement report is accepted. Existing unstamped leases retain their report
+contract during rollout. Reports never establish `live` or `indexed` truth.
 `/api/integrations/*-worker` mounts (hermes workers; each authenticates
 via its own HMAC-signed header check inside the router — an
 unauthenticated internal route here is P0). `watchdog-worker` (GET
@@ -734,6 +758,20 @@ external agent watchdog a counts-only health snapshot — no customer data,
 no item titles, no error text (job_health.last_error is only digit-masked),
 no sub-read error messages; adding any free-text field is P0. `reasons` are
 count-free stable keys — a count inside a key re-pages one incident.
+`commitments-worker` (GET `/open`, key `hermes_commitments`, capability
+`commitments_read`, gate `GATE_HERMES_COMMITMENTS`) reads existing open Waves
+call commitments. HMAC only; backlink/watchdog keys and legacy bearer cannot
+read it. Dark gate precedes the 30/minute IP limiter and auth/audit. Privacy
+headers cover every response. Strict offset/limit-only query, max 100 rows
+plus a has-more probe. Response includes obligation description, bounded
+verbatim evidence with source anchors, identifiers, deadlines, record version,
+and selected fulfillment hints; no contact fields, raw transcript, recording
+URL, full customer row, or unrestricted JSON. Quotes may themselves contain
+customer information: private case evidence only, never a shared wiki/log.
+Reads never refresh/extract/fulfill or send; existing HMAC nonce/audit writes
+remain. Failed audit finalization returns 503, not data. Coverage is stored
+open call commitments, not SMS/email completeness or freshly verified state.
+Offset pages are not a snapshot; absence cannot establish completion.
 Customer authentication (`server/routes/auth.js`, mounted at `/api/auth`):
 `POST /send-code`, `/verify-code`, `/refresh`, `/logout` are unauthenticated
 by definition. send-code and verify-code sit behind the `server/index.js`
@@ -786,7 +824,13 @@ confirmation texts link to. Gated by `scheduled_services.reschedule_token`
 minting a second one — plus a 60 req/min router limit and 10 req/min on
 the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
 GET returns the visit summary (service type, date + window_start, the
-server-derived arrival range, plan/one-time flag, confirmed flag) plus
+server-derived arrival range, plan/one-time flag, confirmed flag, and
+`vanScene` — a boolean that is exactly `GATE_VAN_SCENE` in production
+(feature-gates `vanScene`: prod dark, unset = false; every other NODE_ENV
+— local, preview, test — returns true regardless of the variable, so the
+unset kill switch is a PRODUCTION statement) telling the page to render
+the "look for this van" scene under the header card; it carries no visit
+data and no other field changes with it) plus
 decorations that are each individually fail-open: assigned tech first name
 + TTL-presigned photo, a same-tech-as-last-visit flag, and the day's NWS
 rain chance. **NO customer name, and the page greets nobody** —
@@ -807,6 +851,11 @@ bless a replacement slot the customer never saw. It never touches
 date/window/tech and sends NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
 the same visit, UID-stable per visit so re-downloading updates rather
 than duplicates).
+`GET /api/booking/config` (the /book page's public config payload, no token)
+gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
+to show the van scene above the secure-card block. Unset gate = `false`
+in production (non-production envs return true, as above); no other field
+changes.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.
@@ -815,7 +864,15 @@ is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
 GET returns the appointment summary (customer first name, service type,
 current date/window, recurring flag, `missed` flag, and — series visits
 only — the `reanchorPullForwardDays` threshold) + live open slots from the
-/book availability engine. POST is a WRITE with two owner-authorized
+/book availability engine (`availability.days[].slots[]` — every slot
+carries its own `nearby` boolean, true when its detour is within
+`NEARBY_DETOUR_MINUTES`; `days[].nearby` and `availability.nearby` are the
+roll-ups. The per-slot flag is shared by every consumer of that engine:
+`/api/booking/availability`, this GET, re-service, and the find-slots
+searches — added in #3888 so the picker labels each time from its own
+route-fit, not the day's). Day lists contain all feasible starts; only the
+separate recommendations are curated. Moving an existing self-booked visit
+excludes that booking from its own day-cap count. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
@@ -1046,6 +1103,36 @@ the test number, can neither create dispatch work nor move a metric. The
 transcript, latency summary and version stamps land on the sandbox row
 exactly as in production; that record is the bake-off. Any change to the
 number gate or the dry-run invariant is security-critical).
+`/api/webhooks/twilio/relay-complete` (POST; machine-to-machine TwiML
+webhook — the `<Connect><ConversationRelay>` action Twilio calls when the
+AI receptionist's relay leg ends. Twilio-signature validated at the
+`/api/webhooks/twilio` mount like every Twilio inbound route. Payload:
+standard Twilio voice-webhook form fields (`CallSid`, `SessionStatus`,
+`ErrorCode`) plus `HandoffData` — the JSON string the relay's OWN end frame
+set (absent on a caller hang-up or a session failure), which the handler
+parses tolerantly and trusts for nothing beyond `reason`. Pre-PR-2A
+behaviour is unchanged: a failed session ⇒ voicemail (sandbox: a
+`relay_failed` stamp + hangup), otherwise a bare `<Response/>`. **Sandy PR
+2A adds `reason: 'transfer'`** (`GATE_VOICE_RELAY_TRANSFER` exactly 'true'
+— the gate lives at the `transfer_to_office` tool that emits the frame; the
+frame itself only exists when the tool ran, and only the server's own
+socket can send one): the handler claims ONE staff ring per CallSid
+atomically on the call_log row (`metadata.relay_transfer_ring_at`, stamped
+with `call_outcome = 'ai_transferred'` when the row is not already
+terminal) under a 1.5s deadline, OWNER-BOUND to the frame's
+`owner` (the socket's `relay_session_claim_owner` nonce; a superseded
+socket's frame matches 0 rows), and renders the same staff simul-ring
+`<Dial>` the live `/voice` backstop renders — identical screen / accept
+URLs, no summary, no id and no query string on any URL: the ≤20-word staff
+whisper is read from the persisted packet (`metadata.relay_handoff`) after
+press-1 only. A Twilio retry (ring already claimed ⇒ 0 rows) gets a bare
+response, never a second ring; an unconfirmed claim (timeout / error) and
+a call with no staff forward numbers are stamped `voicemail` (bounded,
+best-effort) and get the voicemail recorder; `?sandbox=1` (the signed
+query the sandbox route rendered) hangs up — a test call never rings
+staff. The caller's own text is never in the URL or the TwiML. Any change
+to the claim, the owner fence, the sandbox branch or what the whisper may
+speak is security-critical).
 `/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up

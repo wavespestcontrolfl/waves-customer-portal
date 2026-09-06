@@ -128,6 +128,21 @@ describe('deposit retirement (owner ruling 2026-08-10)', () => {
     expect(ensureDepositSatisfied).toBeUndefined();
     expect(createDepositIntentForEstimate).toBeUndefined();
   });
+
+  it('async policy resolution stays retired without querying membership, payer, or Stripe', async () => {
+    const db = require('../models/db');
+    await expect(resolveDepositPolicyForEstimate({
+      estimate: { id: 'estimate-fixture', customer_id: 'customer-fixture' },
+      membership: { isExistingCustomer: true },
+      oneTime: true, oneTimeUninvoiced: true, scheduledServiceId: 'visit-fixture',
+    })).resolves.toEqual({ enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled' });
+    expect(db).not.toHaveBeenCalled();
+    expect(mockTierLabelStatus).not.toHaveBeenCalled();
+    expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
+    expect(mockResolveForInvoice).not.toHaveBeenCalled();
+    expect(mockRetrievePaymentIntent).not.toHaveBeenCalled();
+    expect(mockCreateEstimateDepositIntent).not.toHaveBeenCalled();
+  });
 });
 
 describe('computeDepositAmount — flat per service class, never a percentage', () => {

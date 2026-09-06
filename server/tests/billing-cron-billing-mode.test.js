@@ -47,9 +47,11 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => P
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({}));
 jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+}));
 
-const PaymentRouter = require('../services/payment-router');
+const StripeService = require('../services/stripe');
 const { logAutopay } = require('../services/autopay-log');
 const BillingCron = require('../services/billing-cron');
 
@@ -63,6 +65,9 @@ beforeEach(() => {
   mockCustomers = [];
   mockTermRows = [];
   jest.clearAllMocks();
+  StripeService.charge.mockReset();
+  StripeService.chargeOneTime.mockReset();
+  StripeService.chargeMonthly.mockReset();
 });
 
 describe('processMonthlyBilling — billing_mode guard', () => {
@@ -71,7 +76,9 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
     const result = await BillingCron.processMonthlyBilling();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(logAutopay).toHaveBeenCalledWith('cust-PA', 'skipped_billing_mode', {
       details: { billing_mode: 'per_application' },
     });
@@ -82,8 +89,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
   test("annual_prepay mode skips even with NO live term — a naturally expired term must not fall into monthly dues (Codex round-5 P1); void/refund resets the mode at the term choke point instead", async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-AP', billing_mode: 'annual_prepay' }];
     mockTermRows = []; // expired/no coverage — renewal flow owns collection, never this cron
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_ap', amount: 55.3 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_ap', amount: 55.3 });
 
     const result = await BillingCron.processMonthlyBilling();
 
@@ -99,8 +105,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     // NULL (legacy monthly) — the cron must then treat them as before.
     mockCustomers = [{ ...baseCustomer, id: 'cust-AP', billing_mode: null }];
     mockTermRows = [];
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_ap', amount: 55.3 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_ap', amount: 55.3 });
 
     await BillingCron.processMonthlyBilling();
 
@@ -114,25 +119,25 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
     const result = await BillingCron.processMonthlyBilling();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(result.skipped).toBe(1);
   });
 
   test('NULL billing_mode (legacy/unclassified) keeps charging exactly as before', async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-L', billing_mode: null }];
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_1', amount: 55.3 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_1', amount: 55.3 });
 
     await BillingCron.processMonthlyBilling();
 
-    expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-L');
+    expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
     expect(chargeMonthly).toHaveBeenCalledWith('cust-L');
   });
 
   test("explicit 'monthly_membership' charges like legacy", async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-MM', billing_mode: 'monthly_membership' }];
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_2', amount: 55.3 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_2', amount: 55.3 });
 
     await BillingCron.processMonthlyBilling();
 
@@ -141,8 +146,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
   test('GUARD 3c: a tier-less NULL-mode row resolves per_visit and is never dues-charged (Codex r7 P1)', async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-TL', billing_mode: null, waveguard_tier: null }];
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_x', amount: 55.3 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_x', amount: 55.3 });
 
     const result = await BillingCron.processMonthlyBilling();
 
@@ -155,8 +159,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
   test('GUARD 3c: a sentinel-tier NULL-mode row (Commercial) is never dues-charged', async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-CM', billing_mode: null, waveguard_tier: 'Commercial' }];
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_y', amount: 55.3 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_y', amount: 55.3 });
 
     await BillingCron.processMonthlyBilling();
 
@@ -166,8 +169,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
 
   test("GUARD 3c: an explicit 'monthly_membership' row charges even when tier fields are gone", async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-EM', billing_mode: 'monthly_membership', waveguard_tier: null }];
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_z', amount: 55.3 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_z', amount: 55.3 });
 
     await BillingCron.processMonthlyBilling();
 

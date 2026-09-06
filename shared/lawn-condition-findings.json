@@ -1,0 +1,492 @@
+{
+  "locations": [
+    "Front yard",
+    "Back yard",
+    "Left side yard",
+    "Right side yard",
+    "Throughout inspected lawn"
+  ],
+  "extents": [
+    "Isolated spot",
+    "Scattered patches",
+    "Widespread"
+  ],
+  "groups": [
+    {
+      "label": "Disease and fungus-like conditions",
+      "findings": [
+        {
+          "label": "Gray leaf spot \u2014 suspected",
+          "statement": "Leaf spotting consistent with gray leaf spot was observed."
+        },
+        {
+          "label": "Large patch \u2014 suspected",
+          "statement": "Circular patches of yellowing and declining turf were consistent with possible large patch."
+        },
+        {
+          "label": "Take-all root rot \u2014 suspected",
+          "statement": "Irregular thinning and weakened, darkened roots were consistent with possible take-all root rot."
+        },
+        {
+          "label": "Cercospora leaf spot \u2014 suspected",
+          "statement": "Leaf lesions were consistent with possible Cercospora leaf spot; further identification is needed."
+        },
+        {
+          "label": "Other leaf spot",
+          "statement": "Leaf spotting was observed; the specific disease has not been confirmed."
+        },
+        {
+          "label": "Dollar spot \u2014 suspected",
+          "statement": "Small straw-colored patches and leaf lesions were consistent with possible dollar spot."
+        },
+        {
+          "label": "Rust \u2014 suspected",
+          "statement": "Orange, powdery spots on grass blades were consistent with rust disease."
+        },
+        {
+          "label": "Fairy ring \u2014 suspected",
+          "statement": "Circular or arc-shaped differences in growth and color were consistent with fairy ring activity."
+        },
+        {
+          "label": "Unidentified root decline",
+          "statement": "Inspected turf had weakened or discolored roots; the cause requires further evaluation."
+        },
+        {
+          "label": "Mosaic disease \u2014 suspected",
+          "statement": "Unusual yellow-and-green mottling was observed; testing is recommended to evaluate possible mosaic disease."
+        },
+        {
+          "label": "Slime mold",
+          "statement": "A removable, crusty coating consistent with slime mold was observed on grass blades."
+        },
+        {
+          "label": "Mushrooms",
+          "statement": "Mushrooms were observed; their presence alone does not confirm turf disease."
+        }
+      ]
+    },
+    {
+      "label": "Sedges",
+      "findings": [
+        {
+          "label": "Yellow nutsedge",
+          "statement": "Yellow nutsedge growth was observed in the lawn."
+        },
+        {
+          "label": "Purple nutsedge",
+          "statement": "Purple nutsedge growth was observed in the lawn."
+        },
+        {
+          "label": "Kyllinga",
+          "statement": "Kyllinga growth was observed in the lawn."
+        },
+        {
+          "label": "Annual sedge",
+          "statement": "Annual sedge growth was observed in the lawn."
+        },
+        {
+          "label": "Globe sedge",
+          "statement": "Globe sedge growth was observed in the lawn."
+        },
+        {
+          "label": "Sedge \u2014 unidentified",
+          "statement": "Sedge growth was observed; the species has not been confirmed."
+        }
+      ]
+    },
+    {
+      "label": "Broadleaf weeds",
+      "findings": [
+        {
+          "label": "Dollarweed",
+          "statement": "Dollarweed was observed in the lawn."
+        },
+        {
+          "label": "Doveweed",
+          "statement": "Doveweed was observed in the lawn."
+        },
+        {
+          "label": "Virginia buttonweed",
+          "statement": "Virginia buttonweed was observed in the lawn."
+        },
+        {
+          "label": "Pusley",
+          "statement": "Pusley was observed in the lawn."
+        },
+        {
+          "label": "Spurge",
+          "statement": "Spurge was observed in the lawn."
+        },
+        {
+          "label": "Creeping beggarweed",
+          "statement": "Creeping beggarweed was observed in the lawn."
+        },
+        {
+          "label": "Matchweed",
+          "statement": "Matchweed was observed in the lawn."
+        },
+        {
+          "label": "Chamberbitter",
+          "statement": "Chamberbitter was observed in the lawn."
+        },
+        {
+          "label": "Woodsorrel",
+          "statement": "Woodsorrel was observed in the lawn."
+        },
+        {
+          "label": "Old World diamondflower",
+          "statement": "Old World diamondflower was observed in the lawn."
+        },
+        {
+          "label": "Asiatic hawksbeard",
+          "statement": "Asiatic hawksbeard was observed in the lawn."
+        },
+        {
+          "label": "Dayflower",
+          "statement": "Dayflower was observed in the lawn."
+        },
+        {
+          "label": "Eclipta",
+          "statement": "Eclipta was observed in the lawn."
+        },
+        {
+          "label": "Clover",
+          "statement": "Clover was observed in the lawn."
+        },
+        {
+          "label": "Black medic",
+          "statement": "Black medic was observed in the lawn."
+        },
+        {
+          "label": "Lespedeza",
+          "statement": "Lespedeza was observed in the lawn."
+        },
+        {
+          "label": "Lawn burweed",
+          "statement": "Lawn burweed was observed in the lawn."
+        },
+        {
+          "label": "Carolina geranium",
+          "statement": "Carolina geranium was observed in the lawn."
+        }
+      ]
+    },
+    {
+      "label": "Grassy weeds",
+      "findings": [
+        {
+          "label": "Crabgrass",
+          "statement": "Crabgrass was observed growing within the lawn."
+        },
+        {
+          "label": "Goosegrass",
+          "statement": "Goosegrass was observed growing within the lawn."
+        },
+        {
+          "label": "Tropical signalgrass",
+          "statement": "Tropical signalgrass was observed growing within the lawn."
+        },
+        {
+          "label": "Crowfootgrass",
+          "statement": "Crowfootgrass was observed growing within the lawn."
+        },
+        {
+          "label": "Torpedograss",
+          "statement": "Torpedograss was observed growing within the lawn."
+        },
+        {
+          "label": "Smutgrass",
+          "statement": "Smutgrass was observed growing within the lawn."
+        },
+        {
+          "label": "Dallisgrass",
+          "statement": "Dallisgrass was observed growing within the lawn."
+        },
+        {
+          "label": "Sandbur",
+          "statement": "Sandbur was observed growing within the lawn."
+        },
+        {
+          "label": "Basketgrass",
+          "statement": "Basketgrass was observed growing within the lawn."
+        },
+        {
+          "label": "Annual bluegrass",
+          "statement": "Annual bluegrass was observed growing within the lawn."
+        },
+        {
+          "label": "Bermudagrass encroachment",
+          "statement": "Unwanted bermudagrass was observed within the established lawn."
+        },
+        {
+          "label": "Bahiagrass encroachment",
+          "statement": "Unwanted bahiagrass was observed within the established lawn."
+        }
+      ]
+    },
+    {
+      "label": "Insects and root-feeding pests",
+      "findings": [
+        {
+          "label": "Chinch bugs \u2014 observed",
+          "statement": "Live chinch bugs were observed in the inspected turf."
+        },
+        {
+          "label": "Chinch bug injury \u2014 suspected",
+          "statement": "Symptoms were consistent with possible chinch bug injury; live activity has not been confirmed."
+        },
+        {
+          "label": "Tropical sod webworms",
+          "statement": "Sod webworm larvae and associated leaf feeding were observed."
+        },
+        {
+          "label": "Armyworms",
+          "statement": "Armyworm caterpillars and associated feeding damage were observed."
+        },
+        {
+          "label": "White grubs",
+          "statement": "White grubs were found in the inspected root zone; their numbers and associated damage require assessment."
+        },
+        {
+          "label": "Mole crickets",
+          "statement": "Mole cricket activity was confirmed in the inspected lawn area."
+        },
+        {
+          "label": "Hunting billbugs \u2014 suspected",
+          "statement": "Stem damage was consistent with possible hunting billbug activity; further inspection is needed."
+        },
+        {
+          "label": "Fire ants",
+          "statement": "Active fire ant mounds were observed."
+        },
+        {
+          "label": "Turf scale or mealybugs",
+          "statement": "Scale-like or mealybug-like insects were observed; species identification is needed."
+        },
+        {
+          "label": "Nematodes \u2014 suspected",
+          "statement": "Persistent thinning and poor rooting warrant a nematode sample; nematode damage has not been confirmed."
+        }
+      ]
+    },
+    {
+      "label": "Irrigation and drainage",
+      "findings": [
+        {
+          "label": "Moisture stress",
+          "statement": "Folded blades and reduced recovery after foot traffic indicated moisture stress."
+        },
+        {
+          "label": "Dry root zone",
+          "statement": "Soil in the inspected root zone was dry at the time of service."
+        },
+        {
+          "label": "Uneven irrigation \u2014 tested",
+          "statement": "Irrigation testing showed uneven coverage."
+        },
+        {
+          "label": "Broken sprinkler head",
+          "statement": "A damaged sprinkler head was observed and requires repair."
+        },
+        {
+          "label": "Blocked sprinkler coverage",
+          "statement": "Grass or landscape growth was obstructing a sprinkler spray pattern."
+        },
+        {
+          "label": "Irrigation leak",
+          "statement": "An irrigation leak was observed during the system check."
+        },
+        {
+          "label": "Nonfunctioning zone \u2014 tested",
+          "statement": "An irrigation zone did not operate during testing."
+        },
+        {
+          "label": "Possible excessive watering",
+          "statement": "Conditions suggest excessive moisture; irrigation settings and recent rainfall should be reviewed."
+        },
+        {
+          "label": "Standing water",
+          "statement": "Standing water was observed."
+        },
+        {
+          "label": "Poor drainage \u2014 suspected",
+          "statement": "Saturated, low-lying lawn areas suggest a drainage problem requiring further evaluation."
+        },
+        {
+          "label": "Irrigation runoff",
+          "statement": "Water was observed running off the lawn during irrigation."
+        },
+        {
+          "label": "Evening watering \u2014 controller checked",
+          "statement": "The controller was programmed for evening watering; timing should be reviewed to limit prolonged leaf wetness."
+        }
+      ]
+    },
+    {
+      "label": "Mowing and thatch",
+      "findings": [
+        {
+          "label": "Mowing too low",
+          "statement": "The lawn was cut below the recommended height for the identified grass variety."
+        },
+        {
+          "label": "Scalping",
+          "statement": "Scalping with excessive removal of green leaf tissue was observed."
+        },
+        {
+          "label": "Frayed grass blades",
+          "statement": "Shredded or frayed blade tips were consistent with dull mower blades."
+        },
+        {
+          "label": "Overgrown lawn",
+          "statement": "Growth was excessive at the time of service; mowing frequency should be reviewed."
+        },
+        {
+          "label": "Heavy clipping buildup",
+          "statement": "Heavy clumps of grass clippings were covering portions of the lawn."
+        },
+        {
+          "label": "Mower ruts",
+          "statement": "Mower tire ruts and associated turf damage were observed."
+        },
+        {
+          "label": "Edging injury",
+          "statement": "Lawn edges showed excessive cutting or scalping consistent with trimming damage."
+        },
+        {
+          "label": "Excessive thatch \u2014 inspected",
+          "statement": "Inspection found an excessive thatch layer beneath the green turf."
+        }
+      ]
+    },
+    {
+      "label": "Soil, rooting and color",
+      "findings": [
+        {
+          "label": "Yellowing \u2014 cause unknown",
+          "statement": "Areas of yellowing were observed; the cause has not been confirmed."
+        },
+        {
+          "label": "Possible iron-related chlorosis",
+          "statement": "Chlorosis was consistent with possible limited iron availability; soil conditions require review."
+        },
+        {
+          "label": "Uneven color",
+          "statement": "Uneven color was observed across the serviced area."
+        },
+        {
+          "label": "Weak rooting \u2014 inspected",
+          "statement": "Inspected turf had shallow or poorly developed roots."
+        },
+        {
+          "label": "Compaction \u2014 suspected",
+          "statement": "Soil conditions suggest compaction; further assessment is recommended."
+        },
+        {
+          "label": "Soil pH \u2014 tested",
+          "statement": "Soil testing showed pH outside the recommended range for the identified turfgrass."
+        }
+      ]
+    },
+    {
+      "label": "Site conditions and other damage",
+      "findings": [
+        {
+          "label": "Heavy shade",
+          "statement": "The lawn was thin in heavily shaded areas."
+        },
+        {
+          "label": "Possible tree-root competition",
+          "statement": "Turf was thin around established tree roots; root competition and shade may be contributing factors."
+        },
+        {
+          "label": "Stress beside pavement",
+          "statement": "Turf beside pavement showed localized stress; heat exposure and soil moisture warrant review."
+        },
+        {
+          "label": "Cold-related discoloration",
+          "statement": "Discoloration was consistent with recent cold stress."
+        },
+        {
+          "label": "Traffic wear",
+          "statement": "Thinning and wear were observed along frequently traveled areas."
+        },
+        {
+          "label": "Possible pet urine injury",
+          "statement": "Localized spots were consistent with possible pet urine injury; the cause remains unconfirmed."
+        },
+        {
+          "label": "Animal digging",
+          "statement": "Digging and disturbed turf were observed; the responsible animal was not confirmed."
+        },
+        {
+          "label": "Possible herbicide injury",
+          "statement": "Unusual discoloration or distortion was observed; possible herbicide exposure requires investigation."
+        },
+        {
+          "label": "Possible fertilizer injury",
+          "statement": "Localized burn-like injury was observed; fertilizer application history should be reviewed."
+        },
+        {
+          "label": "Possible saltwater injury",
+          "statement": "Turf decline followed reported saltwater exposure; soil salinity testing is recommended."
+        },
+        {
+          "label": "Erosion",
+          "statement": "Soil erosion and loss of turf coverage were observed."
+        },
+        {
+          "label": "Poor new-sod establishment",
+          "statement": "Recently installed sod showed limited rooting and incomplete establishment."
+        }
+      ]
+    },
+    {
+      "label": "Progress and monitoring",
+      "findings": [
+        {
+          "label": "Improved color",
+          "statement": "Color improved compared with the previous documented visit."
+        },
+        {
+          "label": "Improved density",
+          "statement": "Previously thin areas showed new growth and improved coverage."
+        },
+        {
+          "label": "Reduced weeds",
+          "statement": "Weed coverage decreased compared with the previous documented inspection."
+        },
+        {
+          "label": "No live pests detected",
+          "statement": "No live lawn pests were detected in the areas inspected today."
+        },
+        {
+          "label": "No visible disease symptoms",
+          "statement": "No visible disease symptoms were observed in the areas inspected today."
+        },
+        {
+          "label": "Condition unchanged",
+          "statement": "The affected area appeared similar to the previous documented visit."
+        },
+        {
+          "label": "Condition worsening",
+          "statement": "The affected area expanded compared with the previous documented inspection."
+        },
+        {
+          "label": "Further diagnosis needed",
+          "statement": "The cause of decline remains uncertain; additional inspection or testing is recommended."
+        }
+      ]
+    }
+  ],
+  "actions": [
+    "Inspected affected turf and roots",
+    "Recorded close-up photographs of the affected area",
+    "Checked the lawn for live insect activity",
+    "Tested irrigation coverage",
+    "Inspected sprinkler heads and operating zones",
+    "Collected a soil sample for analysis",
+    "Collected a turf sample for further diagnosis",
+    "Compared the affected area with the previous documented visit"
+  ]
+}

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { applyAssignable, assertAssignableTechnician, isAssignable } = require('../services/technician-eligibility');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const TwilioService = require('../services/twilio');
@@ -65,6 +66,13 @@ const {
   resolveSeriesParentId,
   buildPrepaidSeriesContext,
 } = require('../services/prepaid-series');
+// Single-visit prepaid stamp: refuse only rows that are genuinely over.
+// NOT the series helper's TERMINAL_STATUSES — that set also skips
+// 'rescheduled' for fan-out (a replacement row usually exists), but a
+// customer's pending reschedule REQUEST parks the SAME row as 'rescheduled'
+// without a replacement (routes/schedule.js), and staff must still be able
+// to record its payment (pre-push hook on #3878).
+const PREPAID_STAMP_REFUSED_STATUSES = ['completed', 'cancelled', 'no_show', 'skipped'];
 const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
@@ -301,7 +309,7 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const isTechnicianRequest = (req) => req.techRole === 'technician';
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
 
 // Board/list scoping for technician tokens: the FULL current-assignment
 // predicate, not just technician_id — otherwise ?from=<years ago> or
@@ -311,34 +319,9 @@ function scopeToAssignedTech(req, q) {
   technicianCurrentVisitFilter(req, q);
 }
 
-// Assignment currency: a dead or ancient row must not keep authorizing.
-// Statuses below never authorize; everything else (pending/confirmed/
-// en_route/on_site/completed) additionally has to sit inside the ET date
-// window — completed visits stay accessible for post-visit paperwork, and
-// a stale never-actioned pending row from months ago grants nothing.
-const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
-const TECH_ACCESS_WINDOW_DAYS = 7;
-const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
-
-// READ access: a current-or-recent assignment (completed allowed in window).
-function technicianCurrentVisitFilter(req, q) {
-  if (isTechnicianRequest(req)) {
-    q.where('scheduled_services.technician_id', req.technicianId)
-      .whereNotIn('scheduled_services.status', TECH_DEAD_ASSIGNMENT_STATUSES)
-      .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
-  }
-  return q;
-}
-
-// MUTATION access (prepaid, invoice mint, status): a LIVE visit only — a
-// completed one is settled; corrections on it are office work.
-function technicianLiveVisitFilter(req, q) {
-  if (isTechnicianRequest(req)) {
-    technicianCurrentVisitFilter(req, q)
-      .whereNot('scheduled_services.status', 'completed');
-  }
-  return q;
-}
+// Assignment currency (dead statuses + the ET date window) is the shared
+// predicate in services/technician-visit-scope.js — the job-card routes
+// apply the same one.
 
 // Ownership gate for per-visit endpoints. Callers 404 (not 403) on failure
 // so an unowned id doesn't confirm the row exists. Money endpoints ALSO
@@ -1467,6 +1450,22 @@ function recurringTemplateTechnicianId(parent) {
   return parent?.recurring_technician_id || parent?.technician_id || null;
 }
 
+// The template tech for a NEW series child, fenced on the writing trx: if
+// the parent's tech is no longer assignable (offboarded, or field eligibility
+// removed) the child is seeded unassigned so auto-dispatch places it — never
+// onto a tech who cannot take it. FOR SHARE conflicts with the Team tab's
+// FOR UPDATE, so the change cannot commit underneath the insert.
+async function assignableRecurringTemplateTechnicianId(conn, parent) {
+  const techId = recurringTemplateTechnicianId(parent);
+  if (!techId) return null;
+  let q = conn('technicians').where({ id: techId });
+  if (conn.isTransaction) q = q.forShare();
+  const tech = await q.first('id', 'employment_status', 'field_dispatchable');
+  if (isAssignable(tech)) return techId;
+  logger.warn(`[recurring] parent=${parent?.id} technician ${techId} is not assignable; seeding child unassigned`);
+  return null;
+}
+
 // Statuses that mean a series visit is still ahead of us. Confirmed counts:
 // portal-confirm and the reschedule flows flip pending→confirmed, and a
 // pending-only count made a fully-confirmed plan read as empty — ongoing
@@ -1535,7 +1534,7 @@ async function getAssignmentTargetIds(conn, jobId, assignmentScope) {
   return { scope, job, parentId, targetIds: targetIds.length ? targetIds : [jobId] };
 }
 
-async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScope = 'this_only', trx }) {
+async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScope = 'this_only', trx, noticeSnapshot = null }) {
   const conn = trx || db;
   const { scope, job, parentId, targetIds } = await getAssignmentTargetIds(conn, jobId, assignmentScope);
   // Multi-visit series assignment under a caller transaction: pre-acquire
@@ -1598,6 +1597,9 @@ async function assignScheduleJobs({ jobId, technicianId, actorId, assignmentScop
       actorId,
       emit: false,
       trx: conn,
+      // The edited row's pending schedule applies to the anchor only —
+      // series siblings keep their own dates.
+      ...(noticeSnapshot && String(targetId) === String(jobId) ? { noticeSnapshot } : {}),
     });
     if (assignment.technicianName) technicianName = assignment.technicianName;
     if (assignment.changed) changedJobIds.push(targetId);
@@ -2515,7 +2517,7 @@ function computePriceServiceGroupChanges(before, updates) {
 
 // Non-edit provenance keys stored beside the edit overrides (see
 // recurring-appointment-seeder markParentRecurring).
-const PROVENANCE_OVERRIDE_KEYS = new Set(['anchored_split_per_visit']);
+const PROVENANCE_OVERRIDE_KEYS = new Set(['anchored_split_per_visit', 'appointment_address']);
 function readProvenanceOverrides(raw) {
   let value = raw;
   if (typeof value === 'string') {
@@ -2570,7 +2572,8 @@ async function stampRecurringTemplateOverrides(conn, parentId, fields, cols) {
   // so the provenance key is dropped rather than left to contradict it.
   const provenance = readProvenanceOverrides(row.recurring_template_overrides);
   const priceEdit = entries.some(([key]) => key === 'estimated_price');
-  const merged = { ...(priceEdit ? {} : provenance), ...existing };
+  const merged = { ...provenance, ...existing };
+  if (priceEdit) delete merged.anchored_split_per_visit;
   for (const [key, value] of entries) merged[key] = value === undefined ? null : value;
   const before = { ...provenance, ...existing };
   if (JSON.stringify(merged) === JSON.stringify(before)) return false;
@@ -3233,7 +3236,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   if (!fromAttachedInvoice && profileKnown
     && (['invoice', 'auto_charge'].includes(billingLane.prediction?.kind) || pricedPayer)) {
     try {
-      const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+      const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
       willMint = shouldAutoInvoiceCompletion({
         recapReviewOnly: false,
         alreadyPaid: false,
@@ -3354,7 +3357,7 @@ function recurringWithoutBillableAmount({
   // explicit lane/tier applies, and GATE_AUTOINVOICE_PRICED_VISITS is off.
   // Lazy require: admin-dispatch pulls admin-schedule helpers, so a
   // top-level import would close a cycle.
-  const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+  const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
   const { completionInvoiceAmount } = require('../services/billing-lane');
   const invoiceAmount = completionInvoiceAmount({
     estimatedPrice: Number(recurringFloorPrice) > 0 ? recurringFloorPrice : null,
@@ -3902,6 +3905,7 @@ router.get('/', async (req, res, next) => {
         customerId: s.customer_id, customerPhone: s.customer_phone,
         address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
+        state: s.state,
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
         serviceAddons,
@@ -3996,7 +4000,8 @@ router.get('/', async (req, res, next) => {
       tech.loadList = Object.keys(materials);
     });
 
-    const technicians = await db('technicians').select('id', 'name').where({ active: true }).orderBy('name');
+    // Assignment picker roster: assignable staff only (technician-eligibility.js).
+    const technicians = await applyAssignable(db('technicians')).select('technicians.id', 'technicians.name').orderBy('technicians.name');
 
     // Fetch live weather for Lakewood Ranch area
     let weather = {};
@@ -5442,6 +5447,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           throw dupErr;
         }
       }
+      // Save-time eligibility on the writing trx (422 TECH_NOT_ASSIGNABLE) —
+      // covers a stale picker and the auto-assign path alike; recurring
+      // children below inherit this row's tech, so one check fences both.
+      await assertAssignableTechnician(resolvedTechId, { conn: trx });
       const insertData = {
         customer_id: customerId, technician_id: resolvedTechId,
         scheduled_date: scheduledDate, window_start: windowStart, window_end: computedEnd,
@@ -6218,6 +6227,20 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // ── Post-commit side-effects (fire-and-forget; never fail the request) ──
     setImmediate(async () => {
       try {
+        // FIRST: a visit created straight onto a tech's route is a "new visit"
+        // to them (tech-visit-notifications.js: gate-dark, silent when the
+        // creator IS the tech). Queued before the slow Twilio/lead steps
+        // below so a reassignment seconds after creation cannot overtake it
+        // in the visit's notice queue. With the gate on it replaces the
+        // legacy opt-in `new_appointment` row further down.
+        const techNotices = require('../services/tech-visit-notifications');
+        const visitNoticeLive = !!resolvedTechId && techNotices.isEnabled();
+        if (visitNoticeLive) {
+          void techNotices.notifyTechVisitChange({
+            visitId: svc.id, kind: 'assigned', technicianId: resolvedTechId, actorId: req.technicianId || null,
+            snapshot: { date: scheduledDate, windowStart: windowStart || null, windowEnd: windowEnd || null },
+          });
+        }
         // Fire the deferred confirmation SMS for any appointment that wants one
         // (the reminder rows were already inserted durably above). This is the
         // slow, Twilio-bound step: landline lookup + send.
@@ -6324,7 +6347,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
         // Optional: push an in-app notification to the assigned tech's PWA queue
         // (honors the "Notify technician" checkbox — unchecked by default).
-        if (sendTechNotification && resolvedTechId) {
+        // Legacy opt-in `new_appointment` row (the tech feed never rendered
+        // it) — only while the visit-notice gate is off; on, the assigned
+        // card queued at the top of this block replaces it.
+        if (sendTechNotification && resolvedTechId && !visitNoticeLive) {
           try {
             const { sendTechNotification: pushTechNote } = require('../services/geofence-handler');
             const custName = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : 'Customer';
@@ -6602,6 +6628,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // 'confirmed' for a genuine live move; the row's unchanged
             // status for an evidence-only tracker rewind.
             let liveMoveRefreshStatus = 'confirmed';
+            let bulkTechMoveNotice = null;
             await db.transaction(async (trx) => {
               // Rung 1 (occupancy.js ORDERING CONTRACT): the date-wide lock
               // must precede every other lock in this trx — including the
@@ -6891,7 +6918,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // writers advance state, stamps, and SMS guards without
               // touching status. Any of it makes this miss; the batch
               // reports the conflict.
-              const updatedRows = await require('../services/rebooker').applyTrackLifecycleCas(
+              const bulkCommittedRows = await require('../services/rebooker').applyTrackLifecycleCas(
                 trx('scheduled_services')
                   .where({ id })
                   .where('status', String(svc.status))
@@ -6906,12 +6933,28 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   }),
                 svc,
               )
-                .update(updates);
-              if (updatedRows === 0) {
+                .update(updates)
+                // The technician on the COMMITTED row (the CAS does not pin
+                // technician_id): the move notice below goes to them.
+                .returning(['id', 'technician_id']);
+              if (bulkCommittedRows.length === 0) {
                 throw Object.assign(
                   new Error('the visit changed concurrently (status, date, window, or grouping) while the reschedule was pending — re-check and retry'),
                   { isValidation: true },
                 );
+              }
+              {
+                const committedTechId = bulkCommittedRows[0]?.technician_id || null;
+                const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;
+                const nextEndRaw = updates.window_end !== undefined ? updates.window_end : svc.window_end;
+                const slotMoved = prevDate !== bulkTargetDate
+                  || normalizeHHMM(nextStartRaw) !== normalizeHHMM(svc.window_start)
+                  || normalizeHHMM(nextEndRaw) !== normalizeHHMM(svc.window_end);
+                bulkTechMoveNotice = committedTechId && slotMoved ? {
+                  technicianId: committedTechId,
+                  previous: { date: prevDate, windowStart: svc.window_start, windowEnd: svc.window_end },
+                  snapshot: { date: bulkTargetDate, windowStart: nextStartRaw || null, windowEnd: nextEndRaw || null },
+                } : null;
               }
               // Rebooker-parity side effects of the live → confirmed flip.
               // ONLY the job_status_history audit row belongs on the trx (it
@@ -6955,6 +6998,19 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 bulkNoticeStart = normalizeHHMM(nextStart) || null;
               }
             });
+            // Tech-facing move notice (tech-visit-notifications.js): this
+            // writer moves the row itself, bypassing the rebooker. Queued
+            // FIRST after commit, before the awaited side effects below;
+            // best-effort, never awaited; the operator's own move stays silent.
+            if (bulkTechMoveNotice) {
+              void require('../services/tech-visit-notifications').notifyVisitRescheduled({
+                visitId: id,
+                technicianId: bulkTechMoveNotice.technicianId,
+                actorId: req.technicianId || null,
+                previous: bulkTechMoveNotice.previous,
+                snapshot: bulkTechMoveNotice.snapshot,
+              });
+            }
             // Post-commit only: the tech_status release writes on the global
             // db connection and the customer refresh emits a socket, so a
             // rolled-back trx must not have left either behind. Best-effort —
@@ -7034,6 +7090,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 parentServiceId: id,
                 fromDate: callFollowUpShiftFrom,
                 toDate: bulkTargetDate,
+                noticeActorId: req.technicianId || null,
               });
               if (shifted > 0) {
                 logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
@@ -7091,7 +7148,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // (visit 2) off the schedule too — shared with the track-
             // transitions cancel path; best-effort after the parent commit.
             try {
-              const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id });
+              const cancelled = await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: id, actorId: req.technicianId || null });
               if (cancelled > 0) {
                 logger.info(`[admin-schedule] bulk cancel cascaded to ${cancelled} call-created follow-up visit(s) of ${id}`);
               }
@@ -7405,6 +7462,7 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        actorId: req.technicianId || null,
         notifyRequested: notifyCustomer === true,
         // The acknowledged occurrence set, enforced against the locked sweep.
         expectOccurrenceIds: ackedIds,
@@ -7461,6 +7519,13 @@ async function planCollectiveEditDateMove(req) {
 
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
+    const propertyId = req.body.propertyId;
+    if (propertyId !== undefined) {
+      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
+      if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
+        throw httpError(422, 'Choose a saved customer address.');
+      }
+    }
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan) {
       // The series commit lands the date and the window (supplied, kept, or
@@ -8395,6 +8460,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // reschedule text after commit. start stays null for date-only visits
     // (no fabricated 08:00 goes into a customer text).
     let scheduleMoveForNotice = null;
+    let techMoveForNotice = null;
     // Live (or tracker-rewound) row moved to a new date through this edit —
     // captured inside the trx; drives the rebooker-parity post-commit
     // effects (tech_status release + customer tracker refresh) after commit.
@@ -8439,6 +8505,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       parsedPlannedCount,
     });
 
+    const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../services/appointment-address');
+    const addressPlan = propertyId !== undefined ? await planAppointmentAddress(db, req.params.id, propertyId) : null;
+    if (addressPlan) {
+      // The selected property replaces stale zone and route-position echoes.
+      delete updates.zone;
+      delete updates.route_order;
+    }
+    let addressUpdatedIds = [];
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
       // spawn recurring children (scheduled_services inserts) — lock
@@ -8477,54 +8551,50 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           ? [occupancyDateKey, ...plannedRecurrenceDates].filter(Boolean)
           : [],
       );
+      if (addressPlan) {
+        for (const row of addressPlan.rows) lockedRecurrenceDates.add(dateOnly(row.scheduled_date));
+        if (occupancyDateKey) lockedRecurrenceDates.add(occupancyDateKey);
+      }
       if (lockedRecurrenceDates.size > 0) {
         await acquireOccupancyLocks(trx, [...lockedRecurrenceDates]);
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
-      // Visit stop lock for a slot change on a row that sat in a ONE-member
-      // visit at the unlocked pre-read (local codex audit): a sibling can
-      // join that visit between the pre-read's member count and this
-      // transaction while the row's own visit_id stays unchanged, so the
-      // membership CAS below cannot see it. Taken right after rung 1 and
-      // BEFORE every row lock — the same relative position the rebooker's
-      // single-row path uses, so the two writers never invert — and the
-      // open member set is re-counted under it before any slot write.
-      if (preReadVisitId) {
-        // Lock order = the rebooker's (local gate r33): rung 1 → tech-day
-        // fence → visit stop lock → row locks. The fences this save takes
-        // later (assignment set, date-move pair) are pre-acquired here as a
-        // sorted union — reentrant, so the later calls never wait — so the
-        // stop lock can never be held while waiting on a tech-day key a
-        // rebooker holds in the opposite order.
-        {
-          const preFence = [];
-          if (assignmentShouldRun) {
-            const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
-            const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
-              .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-            for (const row of preRows) {
-              preFence.push({ techId: row.technician_id, date: row.day });
-              preFence.push({ techId: requestedTechnicianId, date: row.day });
-              if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
-                preFence.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
-                preFence.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
-              }
+      // Every save pre-acquires its complete tech-day fence before stop and
+      // maintenance locks, including same-slot assignment echoes from the modal.
+      // Otherwise an ordinary save and an address save can deadlock.
+      {
+        const preFence = addressPlan ? addressPlan.rows.flatMap((row) =>
+          [row.technician_id, requestedTechnicianId].flatMap((techId) =>
+            [row.scheduled_date, updates.scheduled_date].filter(Boolean).map((date) => ({ techId, date: dateOnly(date) })))) : [];
+        if (assignmentShouldRun) {
+          const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
+          const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
+            .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          for (const row of preRows) {
+            preFence.push({ techId: row.technician_id, date: row.day });
+            preFence.push({ techId: requestedTechnicianId, date: row.day });
+            if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
+              preFence.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
+              preFence.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
             }
-          }
-          if (updates.scheduled_date !== undefined) {
-            const prov = await trx('scheduled_services').where({ id: req.params.id })
-              .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-            if (prov) {
-              preFence.push({ techId: prov.technician_id, date: prov.day });
-              preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
-            }
-          }
-          if (preFence.length) {
-            const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-            await lockTechDays(trx, preFence);
           }
         }
+        if (updates.scheduled_date !== undefined) {
+          const prov = await trx('scheduled_services').where({ id: req.params.id })
+            .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+          if (prov) {
+            preFence.push({ techId: prov.technician_id, date: prov.day });
+            preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
+          }
+        }
+        if (preFence.length) {
+          const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+          await lockTechDays(trx, preFence);
+        }
+      }
+      if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
+      if (preReadVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
         } catch (lockErr) {
@@ -8560,7 +8630,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // overrides that auto-extend / top-up / alert-extend read, so it must
       // serialize against those writers (and against a concurrent scoped
       // save merging the same override JSON) — Codex #3505 r1 P1.
-      const wantsExistingPlanMutation = wantsVisitCountReconcile
+      const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
         || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
         || wantsPriceServiceScope
         // The no-scope override-coherence refresh (and the conversion
@@ -8592,41 +8662,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
         : null;
 
-      if (assignmentShouldRun) {
-        // COMPLETE tech-day lock set, ONCE, sorted (uncapped audit r20 P1):
-        // the assignment path locks each target row's day in its own
-        // lockTechDays call and the date-move fence below locks old+new day
-        // in another — sequential sorted-within-call acquisitions break the
-        // global sort order that keeps single-call lockers (bulk board move,
-        // nightly reorder) deadlock-free, so a backward date move could hold
-        // tech:newer while waiting on tech:older. Advisory xact locks are
-        // reentrant: the inner per-step calls re-acquire already-held keys
-        // without blocking, so this up-front union is the only acquisition
-        // that can ever wait. Keys are provisional (unlocked reads) — the
-        // locked reads/CAS guards downstream still decide correctness; a row
-        // that moves concurrently aborts there, it is never mis-fenced.
-        const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-        const { targetIds: fenceTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
-        const fenceRows = await trx('scheduled_services')
-          .whereIn('id', fenceTargetIds)
-          .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
-        const fencePairs = [];
-        for (const row of fenceRows) {
-          fencePairs.push({ techId: row.technician_id, date: row.day });
-          fencePairs.push({ techId: requestedTechnicianId, date: row.day });
-          if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
-            fencePairs.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
-            fencePairs.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
-          }
-        }
-        await lockTechDays(trx, fencePairs);
+      if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
+      if (assignmentShouldRun) {
         const assignment = await assignScheduleJobs({
           jobId: req.params.id,
           technicianId: requestedTechnicianId,
           actorId: req.technicianId,
           trx,
           assignmentScope: normalizedAssignmentScope,
+          // Tech + date/window in one save: the new tech's card must name
+          // the schedule this transaction is about to write, not the row as
+          // it stands before the update below.
+          noticeSnapshot: {
+            date: updates.scheduled_date,
+            windowStart: updates.window_start,
+            windowEnd: updates.window_end,
+          },
         });
         assignmentChanged = !!assignment.changed;
         assignmentUpdatedJobIds = assignment.changedJobIds || [];
@@ -8897,9 +8949,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // reminder row in the same transaction — otherwise the 72h/24h cron
         // texts the customer the old date/time. (Recurring children get the
         // same treatment via resetAppointmentReminderForScheduleRewrite below.)
-        const reminderFieldsTouched = updates.scheduled_date !== undefined || updates.window_start !== undefined;
+        const reminderFieldsTouched = updates.scheduled_date !== undefined || updates.window_start !== undefined || updates.window_end !== undefined;
         const reminderBefore = reminderFieldsTouched
-          ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start')
+          ? await trx('scheduled_services').where({ id: req.params.id }).first('scheduled_date', 'window_start', 'window_end', 'technician_id')
           : null;
         if (dateActuallyMoves) {
           // The fence was taken BEFORE the FOR UPDATE above (lock-order
@@ -9071,6 +9123,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
             scheduleMoveForNotice = { date: nextDate, start: nextStart || null };
+          }
+          // The tech's card covers any slot change — date, start, OR end
+          // (the customer reminder above keys on date/start only).
+          const prevEnd = normalizeHHMM(reminderBefore.window_end);
+          const nextEnd = updates.window_end !== undefined ? normalizeHHMM(updates.window_end) : prevEnd;
+          if (nextDate && (nextDate !== prevDate || nextStart !== prevStart || nextEnd !== prevEnd)) {
+            techMoveForNotice = {
+              technicianId: requestedTechnicianId !== undefined ? requestedTechnicianId : (reminderBefore.technician_id || null),
+              previous: { date: prevDate, windowStart: reminderBefore.window_start, windowEnd: reminderBefore.window_end },
+              snapshot: {
+                date: nextDate,
+                windowStart: updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
+                windowEnd: updates.window_end !== undefined ? updates.window_end : reminderBefore.window_end,
+              },
+            };
           }
         }
       }
@@ -9774,14 +9841,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           } catch { memberSeriesCovered = false; }
           // Make-this-recurring re-anchors the series on THIS row's current
-          // values — stale template overrides from an earlier series life
-          // must not shadow them for later extension writers. (Never
-          // overlaid here: the anchor row's columns carry this very save.)
+          // prices — stale pricing overrides must not shadow this save. Keep
+          // the independent future address default so completed history
+          // does not become the service location again.
           const spawnScopeCols = await trx('scheduled_services').columnInfo();
           if (spawnScopeCols.recurring_template_overrides && parent.recurring_template_overrides) {
+            const { appointment_address: futureAddress } = readProvenanceOverrides(parent.recurring_template_overrides);
             await trx('scheduled_services')
               .where({ id: parent.id })
-              .update({ recurring_template_overrides: null });
+              .update({ recurring_template_overrides: futureAddress
+                ? JSON.stringify({ appointment_address: futureAddress })
+                : null });
           }
           const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
           const spawnBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
@@ -9929,7 +9999,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             const childIdentity = await resolveSeriesChildIdentity(trx, parent);
             const childData = {
               customer_id: parent.customer_id,
-              technician_id: recurringTemplateTechnicianId(parent),
+              technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
@@ -10219,6 +10289,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     });
 
+    // Tech-facing notice for a same-tech date/time move (a tech change in the
+    // same edit already told both techs through assignScheduleJobs). Queued
+    // FIRST after commit, before the awaited seam repair / reminder /
+    // broadcast / prepay steps below: the per-visit notice queue preserves
+    // call order, so a later move that commits during those waits must not
+    // enqueue ahead of this one and leave the tech holding stale details.
+    if (techMoveForNotice && techMoveForNotice.technicianId && !assignmentNeedsChange) {
+      void require('../services/tech-visit-notifications').notifyVisitRescheduled({
+        visitId: req.params.id,
+        technicianId: techMoveForNotice.technicianId,
+        actorId: req.technicianId || null,
+        previous: techMoveForNotice.previous,
+        snapshot: techMoveForNotice.snapshot,
+      });
+    }
+
     // Visit-group seam (visit-group-scope.md §2; codex #3590 r4/r8): a
     // direct Edit-Appointment change must repair grouped membership like
     // every other writer — for the edited anchor AND every recurring
@@ -10344,6 +10430,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           parentServiceId: req.params.id,
           fromDate: callFollowUpShiftFrom,
           toDate: updates.scheduled_date,
+          noticeActorId: req.technicianId || null,
         });
         if (shifted > 0) {
           logger.info(`[schedule/update-details] shifted ${shifted} call-created follow-up visit(s) with parent ${req.params.id}`);
@@ -10382,9 +10469,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
-    if (assignmentChanged || detailsChanged || addonsReplaced) {
+    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length) {
       try {
         const broadcastJobIds = new Set((detailsChanged || addonsReplaced) ? [req.params.id] : []);
+        for (const id of addressUpdatedIds) broadcastJobIds.add(id);
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
@@ -10508,6 +10596,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
     res.json({
       success: true,
+      ...(addressPlan ? { addressUpdatedCount: addressUpdatedIds.length } : {}),
       recurringCreated,
       assignmentScope: normalizedAssignmentScope,
       assignmentUpdatedCount: assignmentUpdatedJobIds.length,
@@ -10963,8 +11052,13 @@ router.post('/:id/prepaid', async (req, res, next) => {
       );
       return res.json({ success: true, ...result });
     }
+    // Terminal rows never take a stamp (same set the series fan-out
+    // skips): a visit cancelled between the ownership read and this write
+    // — including by a concurrent series cancel — must not end up holding
+    // money for a visit that never runs (Codex #3878 r1 P1 / hook r2).
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
+      .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
@@ -10973,7 +11067,16 @@ router.post('/:id/prepaid', async (req, res, next) => {
         prepaid_at: db.fn.now(),
       })
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
-    if (!updated.length) return res.status(404).json({ error: 'Scheduled service not found' });
+    if (!updated.length) {
+      const current = await db('scheduled_services').where({ id: req.params.id }).first('status');
+      if (current && PREPAID_STAMP_REFUSED_STATUSES.includes(String(current.status || '').toLowerCase())) {
+        return res.status(409).json({
+          error: `This visit is already ${current.status} — it can't be marked prepaid. Refresh and try again.`,
+          code: 'visit_terminal',
+        });
+      }
+      return res.status(404).json({ error: 'Scheduled service not found' });
+    }
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);
 
     // Optional: mint the visit's invoice, apply this prepayment, and email/text
@@ -11513,11 +11616,33 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // in this file): this query gates a destructive action, so an unreadable
 // table must block the trim rather than wave it through. A pre-migration env
 // without the table is the one tolerated case — hasTable is checked first.
-async function findBillingCoveredVisits(conn, visits) {
+//
+// `feeRails: false` skips ONLY the two card-fee reads (estimate_card_holds,
+// appointment_card_requests) for callers that run the fee rails themselves
+// with a fee preview and waiver control — the dispatch series cancel — where
+// a live hold is handled, not a reason to refuse. Money already TAKEN (prepay
+// term, prepaid_amount, an invoice holding money) is checked either way.
+async function findBillingCoveredVisits(conn, visits, { feeRails = true } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
+  // The term LINK outlives the coverage: a voided/refunded prepay flips the
+  // term to cancelled/refunded and clearPrepaidStampsForTerm keeps
+  // annual_prepay_term_id on the visits for audit (annual-prepay-renewals).
+  // Only a term whose PAID coverage is still live is money held (Codex #3878
+  // r1 P2) — decided through the canonical reader, coveredTermsAsOf, not a
+  // status list: a 'cancelled' term with renewal_decision 'cancel' is a paid
+  // non-renewal riding out its window (still covered, pre-push P0), and a
+  // paid invoice can be clawed back by a dispute (no longer covered). A
+  // reader failure keeps every linked visit covered (fail-closed).
+  const termIds = [...new Set(visits.map((v) => v.annual_prepay_term_id).filter(Boolean))];
+  let liveTermIds = new Set(termIds);
+  if (termIds.length > 0) {
+    const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+    const liveTerms = await coveredTermsAsOf(conn).whereIn('t.id', termIds).select('t.id');
+    liveTermIds = new Set(liveTerms.map((t) => t.id));
+  }
   for (const v of visits) {
-    if (v.annual_prepay_term_id) mark(v.id, 'covered by an annual prepay term');
+    if (v.annual_prepay_term_id && liveTermIds.has(v.annual_prepay_term_id)) mark(v.id, 'covered by an annual prepay term');
     // Hand-collected prepayment (cash / phone card / Zelle), single-visit or
     // stamped across the series by POST /:id/prepaid. Cancelling one of these
     // silently is money taken for a visit that never happens (Codex #3337 P1).
@@ -11526,7 +11651,7 @@ async function findBillingCoveredVisits(conn, visits) {
     }
   }
   const ids = visits.map((v) => v.id);
-  if (ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
+  if (feeRails && ids.length > 0 && await conn.schema.hasTable('estimate_card_holds')) {
     const holds = await conn('estimate_card_holds')
       .whereIn('scheduled_service_id', ids)
       .whereNotIn('status', ['released', 'cancelled', 'charged', 'failed'])
@@ -11549,7 +11674,7 @@ async function findBillingCoveredVisits(conn, visits) {
   // terms, recorded consent and a charge target — and its fee event is either
   // absent or still in flight (charging / charge_review are unsettled, not
   // benign absence).
-  if (ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
+  if (feeRails && ids.length > 0 && await conn.schema.hasTable('appointment_card_requests')) {
     const requests = await conn('appointment_card_requests')
       .whereIn('scheduled_service_id', ids)
       .where('status', 'completed')
@@ -11791,7 +11916,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
       customer_id: parent.customer_id,
-      technician_id: recurringTemplateTechnicianId(parent),
+      technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
       scheduled_date: nd,
       window_start: parent.window_start,
       window_end: parent.window_end,
@@ -12098,7 +12223,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           const childIdentity = await resolveSeriesChildIdentity(conn, parent);
           const nextData = {
             customer_id: parent.customer_id,
-            technician_id: recurringTemplateTechnicianId(parent),
+            technician_id: await assignableRecurringTemplateTechnicianId(conn, parent),
             scheduled_date: nextStr,
             window_start: parent.window_start, window_end: parent.window_end,
             service_type: childIdentity.service_type, status: 'pending',
@@ -12408,6 +12533,9 @@ router.put('/:id/status', async (req, res, next) => {
       && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
 
+    // The transition's committed payload — the voice-confirm card below
+    // must name the holder as WRITTEN, not as read.
+    let transition = null;
     try {
       await db.transaction(async (trx) => {
         // Re-validate technician ownership INSIDE the transaction, row-
@@ -12455,7 +12583,7 @@ router.put('/:id/status', async (req, res, next) => {
           await trx('scheduled_services').where({ id: svc.id }).update(lifecycleUpdates);
         }
 
-        await transitionJobStatus({
+        transition = await transitionJobStatus({
           jobId: svc.id,
           fromStatus,
           toStatus,
@@ -12493,6 +12621,28 @@ router.put('/:id/status', async (req, res, next) => {
     // best-effort with try/catch + log + continue; a failure in one
     // doesn't block the others.
 
+    // A voice-agent booking is inserted SILENT (relay-booking.js: a pending
+    // office-review row is not yet real); the office confirm is when it
+    // becomes a visit on the tech's route, and no assignment write follows —
+    // so the "new visit" card fires here, post-commit, exactly as it does on
+    // the admin-dispatch status route (the other surface staff confirm
+    // from). Call-created office-review rows were announced at insert
+    // (call-proc) and stay quiet. A technician confirming their own visit is
+    // the actor AND the recipient, so that stays silent too.
+    // Recipient and schedule come from the COMMITTED row the transition
+    // returned (codex r9 P1): the status CAS pins only the status, so a
+    // reassignment that lands between this route's `svc` read and the
+    // transition confirms the NEW holder's row — the earlier read would
+    // name a technician the write-time guard then drops, leaving the real
+    // holder with no card at all.
+    const confirmedRow = transition?.adminPayload || null;
+    if (isOfficeReviewConfirm && fromStatus === 'pending' && confirmedRow?.tech_id
+      && svc.source_action === require('../services/call-booking-source-actions').VOICE_AGENT_BOOKING_SOURCE_ACTION) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: svc.id, kind: 'assigned', technicianId: confirmedRow.tech_id, actorId: req.technicianId || null,
+        snapshot: { date: confirmedRow.scheduled_date, windowStart: confirmedRow.window_start || null, windowEnd: confirmedRow.window_end || null },
+      });
+    }
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
@@ -16864,7 +17014,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
@@ -16954,7 +17104,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
-          technician_id: recurringTemplateTechnicianId(parent),
+          technician_id: await assignableRecurringTemplateTechnicianId(trx, parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
           service_type: childIdentity.service_type, status: 'pending',
@@ -17412,6 +17562,11 @@ module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
 // lazily by the IB move_stops_to_day tool so its opt-in customer texts go
 // through the exact same path as update-details and the bulk reschedule.
 module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
+// Shared "is money already taken for this visit" guard — the plan-length
+// trim's refusal contract, consumed lazily by the admin-dispatch series
+// cancel so a 'following' / 'series' cancel refuses prepaid visits the same
+// way the trim does instead of silently dropping paid visits off the books.
+module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;

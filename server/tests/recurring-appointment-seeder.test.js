@@ -1,6 +1,34 @@
 const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
 
 describe('recurring appointment seeder', () => {
+  test.each([false, true])('future rows inherit the separate address default (JSON string: %s)', (asString) => {
+    const address = {
+      property_id: 'property-next', service_address_line1: '200 Example Street',
+      service_address_line2: null, service_address_city: 'Test City',
+      service_address_state: 'FL', service_address_zip: '00000',
+      lat: null, lng: null, zone: null,
+    };
+    const overrides = { appointment_address: address, estimated_price: 99 };
+    const parent = {
+      id: 'parent-1', customer_id: 'customer-1', scheduled_date: '2026-06-05',
+      property_id: 'property-old', service_address_line1: '100 Example Street',
+      lat: 27, lng: -82, zone: 'old-zone', estimated_price: 40,
+      recurring_template_overrides: asString ? JSON.stringify(overrides) : overrides,
+    };
+    const rows = RecurringAppointmentSeeder.buildRecurringFollowUpRows(parent, {
+      pattern: 'quarterly', plannedCount: 4,
+    });
+    expect(rows).toHaveLength(3);
+    for (const row of rows) expect(row).toMatchObject(address);
+    const target = {};
+    require('../services/booking/visit-financial-stamps').copyStampedServiceAddressFields(
+      target, parent, Object.fromEntries(Object.keys(address).map((field) => [field, {}])),
+    );
+    expect(target).toEqual(address);
+    expect(parent.property_id).toBe('property-old');
+    expect(parent.service_address_line1).toBe('100 Example Street');
+  });
+
   test('infers pest control cadence from labels and frequency fields', () => {
     expect(RecurringAppointmentSeeder.inferRecurringPattern({
       service: { service: 'pest_control', label: 'Quarterly Pest Control' },

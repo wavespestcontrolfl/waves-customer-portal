@@ -51,6 +51,7 @@ const path = require('path');
 const router = require('../routes/admin-dispatch');
 const { TIPS } = require('../services/service-report/tip-library');
 
+const completionSource = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
 function routeLayer(method, routePath) {
@@ -135,7 +136,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.statusCode).toBe(404);
   });
 
-  test('gate on: the whole registry, grouped for the visit line and season, with sent dates and conditions', async () => {
+  test('gate on: only visit-line tips, with sent dates and conditions', async () => {
     process.env.GATE_TECH_TIPS = 'true';
     const calls = [];
     mockDbCurrent = scriptedDb({
@@ -154,7 +155,7 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(res.body.available).toBe(true);
     expect(res.body.line).toBe('mosquito');
     expect(res.body.season).toBe('wet');
-    expect(res.body.groups.flatMap((g) => g.tips).length).toBe(TIPS.length);
+    expect(res.body.groups.flatMap((g) => g.tips).map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes('mosquito')).map((tip) => tip.id).sort());
     expect(res.body.groups[0].primary).toBe(true);
     // newest send wins per id
     expect(res.body.lastSent).toEqual({ water_bromeliads: '2026-08-03', light_warm_bulbs: '2026-07-01' });
@@ -200,10 +201,10 @@ describe('GET /:serviceId/tech-tips', () => {
 
 describe('completion freeze contract', () => {
   test('the complete route freezes the picks through freezeTechTips into structured_notes.techTips', () => {
-    const start = source.indexOf("router.post('/:serviceId/complete'");
+    const start = completionSource.indexOf('async function completeScheduledService(');
     expect(start).toBeGreaterThan(-1);
-    const block = source.slice(start, source.indexOf("\nrouter.", start + 1));
-    expect(block).toContain('freezeTechTips(req.body?.techTips)');
+    const block = completionSource.slice(start);
+    expect(block).toContain('freezeTechTips(completionInput.body?.techTips)');
     expect(block).toMatch(/techTips: techTipsFreeze\.tips/);
     // a rejected pick is an actionable 400 for a FRESH attempt, never a silent drop —
     // deferred past replay/conflict handling so a same-key retry keeps replaying
@@ -214,7 +215,7 @@ describe('completion freeze contract', () => {
     expect(reject).toBeGreaterThan(block.indexOf("if (claim.action === 'replay') {"));
     const rejectBlock = block.slice(reject, reject + 2400);
     expect(rejectBlock).toMatch(/markCompletionAttemptFailed\([\s\S]*tech_tip_rejected/);
-    expect(rejectBlock).toMatch(/return res\.status\(400\)\.json\(\{[\s\S]*TECH_TIP_UNKNOWN[\s\S]*TECH_TIP_COPY_REJECTED/);
+    expect(rejectBlock).toMatch(/return \(\{ status: 400, body: \{[\s\S]*TECH_TIP_UNKNOWN[\s\S]*TECH_TIP_COPY_REJECTED/);
     // …and still before the completion transaction's first write
     expect(reject).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
     // the kill switch holds on the write path too
@@ -247,8 +248,8 @@ describe('route wiring contracts', () => {
     }
     // parked [Next] lines arrive as internalRecommendations: merged into the
     // internal list, never the form-provenance list the report prints verbatim
-    const cstart = source.indexOf("router.post('/:serviceId/complete'");
-    const cblock = source.slice(cstart, source.indexOf('\nrouter.', cstart + 1));
+    const cstart = completionSource.indexOf('async function completeScheduledService(');
+    const cblock = completionSource.slice(cstart);
     const internalMerge = cblock.indexOf('const reportRecommendations = normalizeCompletionTextArray([');
     expect(cblock.slice(internalMerge, internalMerge + 600)).toContain('internalRecommendations');
     const formBlock = cblock.slice(cblock.indexOf('const formRecommendations = normalizeCompletionTextArray('), cblock.indexOf('const formRecommendations = normalizeCompletionTextArray(') + 200);

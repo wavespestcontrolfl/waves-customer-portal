@@ -219,6 +219,25 @@ const TRIGGER_REGISTRY = {
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
+  // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
+  // (the handoff packet write failed or timed out). The staff member who
+  // pressed 1 heard the generic whisper; this is the only record that a
+  // summary existed. Written directly by relay-transfer.js (notifyAdmin with
+  // a per-CallSid dedupeKey and bell: true, the watchdog pattern);
+  // registered here so the persisted rows carry a known trigger key and
+  // `build` mirrors the shape it writes.
+  sandy_transfer_no_context: {
+    label: 'Sandy transfer arrived without its summary',
+    category: 'alert',
+    priority: 'high',
+    group: 'Communication',
+    techVisible: true, // the calls tab is staff-wide; whoever pressed 1 must see it
+    build: (p) => ({
+      title: 'Sandy transfer without context',
+      body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
+      link: '/admin/communications#tab=calls',
+    }),
+  },
   // Written directly by call-commitments-watchdog (notifyAdmin with its own
   // per-commitment per-ET-day dedupeKey and bell: true — the 'alert'
   // category is silenced under the bell policy and a pager must page);

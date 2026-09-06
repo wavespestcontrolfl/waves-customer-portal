@@ -1,6 +1,7 @@
 // Guards the shared cross-provider LLM dispatch (server/services/llm/call.js):
 // the extracted parsers + the fail-closed (no-network) behavior when a key is
 // missing, and that dispatch routes by provider. No live API calls.
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockAnthropicCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
   messages: { create: (...args) => mockAnthropicCreate(...args) },
@@ -55,6 +56,22 @@ describe('llm/call parsers', () => {
     expect(parseLooseJson('{"a": 1,\n  "b": 2,\n}')).toEqual({ a: 1, b: 2 });
     // truly broken (truncated) JSON still returns null
     expect(parseLooseJson('{"a": [1, 2')).toBeNull();
+  });
+
+  test.each([
+    ['object text', '{"text":"Keep comma,}","items":[1,],}', { text: 'Keep comma,}', items: [1] }],
+    ['array text', '["Keep comma,]",2,]', ['Keep comma,]', 2]],
+    ['quoted keys and whitespace', '{"key,}":"Keep comma, ]","items":[1, \n\t],}', { 'key,}': 'Keep comma, ]', items: [1] }],
+    ['escaped quotes', String.raw`{"text":"quote: \",} and \",]","items":[1,],}`, { text: 'quote: ",} and ",]', items: [1] }],
+    ['escaped backslash before closing quote', String.raw`{"text":"path\\","items":[1,],}`, { text: 'path\\', items: [1] }],
+    ['control-character repair only', '{"text":"Keep comma,}\nand comma,]"}', { text: 'Keep comma,}\nand comma,]' }],
+  ])('parseLooseJson preserves %s during repair', (_label, input, expected) => {
+    expect(parseLooseJson(input)).toEqual(expected);
+  });
+
+  test('parseLooseJson still rejects an unterminated string containing a closing bracket', () => {
+    expect(parseLooseJson('{"text":"Keep comma,}')).toBeNull();
+    expect(parseLooseJson('["Keep comma,]')).toBeNull();
   });
 
   // Codex 07-18: multiline string fields (newsletter htmlBody/textBody through
@@ -400,6 +417,45 @@ describe('dispatchWithFallback', () => {
     jest.restoreAllMocks();
     if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedOpenAI;
     if (savedAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = savedAnthropic;
+  });
+
+  test('repair preserves primary JSON for validation without calling the fallback', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ output_text: '{"text":"Keep comma,}","items":[1,],}' }),
+    });
+    const validate = jest.fn();
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true }, { validate });
+
+    expect(result).toMatchObject({
+      ok: true, fallbackUsed: false, json: { text: 'Keep comma,}', items: [1] }, failures: [],
+    });
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(validate.mock.calls[0][0].json).toEqual({ text: 'Keep comma,}', items: [1] });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
+  test('unrepairable primary JSON still falls back and preserves repaired backup text', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ output_text: '{"text":"Keep comma,}' }),
+    });
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{ type: 'text', text: '{"text":"Backup comma,]",}' }],
+    });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true });
+
+    expect(result).toMatchObject({
+      ok: true, provider: PROVIDER.ANTHROPIC, fallbackUsed: true, json: { text: 'Backup comma,]' },
+      failures: [{ provider: PROVIDER.OPENAI, reason: 'empty_json' }],
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
   });
 
   test('uses the other provider when primary is unavailable', async () => {

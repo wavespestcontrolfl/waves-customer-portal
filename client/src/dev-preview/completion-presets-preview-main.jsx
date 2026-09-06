@@ -2,6 +2,7 @@
  * Synthetic technician-closeout harness. No API or customer data is used.
  * Run the client Vite server and open /preview-completion-presets.html.
  */
+import '../fonts.css';
 import React, { useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import ProjectFindingFieldInput from '../components/tech/ProjectFindingFieldInput';

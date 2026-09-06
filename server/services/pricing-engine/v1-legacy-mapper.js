@@ -11,7 +11,7 @@
 // when EstimatePage migrates off the legacy shape.
 // ============================================================
 
-const { priceTopDressing, priceTreeShrub } = require('./service-pricing');
+const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -441,6 +441,7 @@ function perkRateOf(li = {}) {
 function mapV1ToLegacyShape(v1Result) {
   const R = {};
   const lineItems = v1Result.lineItems || [];
+  assertFinitePriceFields(lineItems);
   const wg = v1Result.waveGuard || {};
   const summary = v1Result.summary || {};
   const isRecurringCustomer = !!(
@@ -634,6 +635,7 @@ function mapV1ToLegacyShape(v1Result) {
       palmSize: palmLI.palmSize,
       perVisit: palmLI.perVisit,
       annualBeforeCredits: palmAnnualBeforeCredits,
+      annualRounding: palmLI.annualRounding,
       flatCreditAnnual: palmFlatCreditAnnual,
       annualAfterCredits: palmAnnualAfterCredits,
       monthlyAfterCredits: palmMonthlyAfterCredits,

@@ -217,20 +217,12 @@ describe('registryLineFor', () => {
 });
 
 describe('tipsForVisit', () => {
-  test('returns every tip, grouped, with the visit line leading', () => {
-    const { line, season, groups } = tipsForVisit({ serviceLine: 'mosquito', date: new Date('2026-08-15T16:00:00Z') });
-    expect(line).toBe('mosquito');
-    expect(season).toBe('wet');
-    const all = groups.flatMap((g) => g.tips);
-    expect(all.length).toBe(TIPS.length);
-    // primary groups first, then the fold
-    const primaries = groups.map((g) => g.primary);
-    const firstFold = primaries.indexOf(false);
-    expect(primaries.slice(firstFold === -1 ? primaries.length : firstFold)).not.toContain(true);
-    expect(groups[0].primary).toBe(true);
-    // the wet-season order leads with moisture and standing water among primaries
-    const primaryIds = groups.filter((g) => g.primary).map((g) => g.id);
-    expect(primaryIds.indexOf('water')).toBeLessThan(primaryIds.indexOf('lighting'));
+  test.each(SERVICE_LINES)('only offers tips relevant to %s, including search results', (serviceLine) => {
+    const { line, groups } = tipsForVisit({ serviceLine, date: '2026-08-15' });
+    const all = groups.flatMap((group) => group.tips);
+    expect(line).toBe(serviceLine);
+    expect(all.map((tip) => tip.id).sort()).toEqual(TIPS.filter((tip) => tip.lines.includes(serviceLine)).map((tip) => tip.id).sort());
+    expect(groups.every((group) => group.tips.length > 0)).toBe(true);
   });
 
   test('dry season leads with lighting and exclusion for a pest visit', () => {
@@ -243,7 +235,8 @@ describe('tipsForVisit', () => {
   test('never hides an out-of-season tip; it sorts after in-season tips in its group', () => {
     const { groups } = tipsForVisit({ serviceLine: 'pest', date: new Date('2026-01-20T16:00:00Z') });
     const water = groups.find((g) => g.id === 'water');
-    expect(water.tips.map((t) => t.id)).toContain('water_weekly_dump');
+    expect(water.tips.map((t) => t.id)).toContain('water_gutters');
+    expect(water.tips.map((t) => t.id)).not.toContain('water_weekly_dump');
     const allTip = water.tips.findIndex((t) => t.season === 'all');
     const wetTip = water.tips.findIndex((t) => t.season === 'wet');
     expect(allTip).toBeLessThan(wetTip);

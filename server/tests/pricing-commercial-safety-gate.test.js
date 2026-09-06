@@ -301,8 +301,8 @@ describe('commercial safety gate in generateEstimate', () => {
       // CEILs; pinned in lawn-pricing-followup.test.js.)
       recurringAnnualAfterDiscount: 932.4,
       recurringMonthlyAfterDiscount: 77.7,
-      year1Total: 932,
-      year2Annual: 932,
+      year1Total: 932.4,
+      year2Annual: 932.4,
       year2Monthly: 77.7,
     });
     expect(estimate.waveGuard).toMatchObject({

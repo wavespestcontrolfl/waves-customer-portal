@@ -98,13 +98,13 @@ describe('TrackPage fetch ordering (F-037)', () => {
     await act(async () => {
       fetchQueue[2].resolve(jsonResponse(trackBody('complete')));
     });
-    expect(await screen.findByText(/Service complete/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Thanks for choosing Waves/i)).toBeInTheDocument();
 
     // The stale en_route response arrives late — it must be discarded.
     await act(async () => {
       fetchQueue[1].resolve(jsonResponse(trackBody('en_route')));
     });
-    expect(screen.getByText(/Service complete/i)).toBeInTheDocument();
+    expect(screen.getByText(/Thanks for choosing Waves/i)).toBeInTheDocument();
     expect(screen.queryByText(/TEXT ADAM/i)).not.toBeInTheDocument();
   });
 });

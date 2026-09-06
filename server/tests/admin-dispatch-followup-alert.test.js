@@ -26,7 +26,7 @@ const {
   KNOCKDOWN_FOLLOWUP_WINDOW_DAYS,
 } = require('../services/typed-followup-obligation');
 
-const dispatchSource = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const dispatchSource = (fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8'));
 const jobStatusSource = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
 
 const BED_BUG_PROFILE = {
@@ -251,7 +251,13 @@ describe('/schedule-followup (source contracts)', () => {
     const winnerBlock = routeTail.slice(winnerIdx, routeTail.indexOf('});', winnerIdx));
     expect(winnerBlock).toContain('await resolveOpenFollowupAlerts();');
     const bookedIdx = routeTail.indexOf('follow-up ${appointment.id} booked');
-    expect(routeTail.slice(bookedIdx, bookedIdx + 300)).toContain('await resolveOpenFollowupAlerts();');
+    const bookedTail = routeTail.slice(bookedIdx, bookedIdx + 1400);
+    expect(bookedTail).toContain('await resolveOpenFollowupAlerts();');
+    // The tech's "new visit" card is queued BEFORE that await (and the
+    // reminder registration): a reassignment during them must not overtake it.
+    const noticeIdx = bookedTail.indexOf("notifyTechVisitChange({\n        visitId: appointment.id, kind: 'assigned', technicianId: appointment.technician_id, actorId: req.technicianId || null,");
+    expect(noticeIdx).toBeGreaterThan(-1);
+    expect(noticeIdx).toBeLessThan(bookedTail.indexOf('await resolveOpenFollowupAlerts();'));
   });
 });
 
@@ -338,6 +344,14 @@ describe('codex r3 — double-card, no_show coverage, storage-level dedupe, IB w
     expect(migration).toContain("status NOT IN ('cancelled', 'skipped', 'no_show')");
     // Pre-index cleanup mirrors 20260521000007 (keeps rows, stamps migration).
     expect(migration).toContain('dedupedByMigration');
+  });
+
+  test('IB cancel_appointment names the acting staff row as transitionedBy (audit + the tech cancel notice stays silent for the actor)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    expect(src).toContain("case 'cancel_appointment': return await cancelAppointment(input, actionContext);");
+    const fn = src.slice(src.indexOf('async function cancelAppointment(input, actionContext = {})'));
+    const block = fn.slice(fn.indexOf('transitionJobStatus({'), fn.indexOf('notes: reason ?'));
+    expect(block).toContain('transitionedBy: actionContext.technicianId || null,');
   });
 
   test('Intelligence Bar cancel_appointment routes through the shared status writer', () => {

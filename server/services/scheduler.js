@@ -908,25 +908,59 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 6:10AM ET — Supplies auto-reorder sweep. Low-stock auto-reorder
-  // products → one open restock request each + one deduped bell (no order
-  // is placed; PR 2 adds the adapters). Gate GATE_AUTO_REORDER is checked
+  // products → one open restock request each + one deduped bell, then the
+  // order dispatcher places the ones whose vendor has an adapter. Gate GATE_AUTO_REORDER is checked
   // INSIDE the sweep at call time; kill = unset. runExclusive: a deploy
   // overlap must not raise the same request twice.
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
-    if (!gateEnvValue('GATE_AUTO_REORDER')) return;
-    logger.info('Running: Supplies auto-reorder sweep');
+    // Order dispatch (PR 2): places the requests the sweep just raised, for
+    // vendors with an adapter, under the env spend caps. Invoked on EVERY
+    // tick, gates or not: GATE_AUTO_ORDER + per-vendor gates are re-read
+    // inside and govern NEW orders only (kill = unset), while the run always
+    // reconciles first — a 'placing' claim the dispatcher died on, or a park
+    // whose bell never landed, is a possibly-submitted order that a flipped
+    // switch must not hide. Own job_health row (nested runExclusive): a
+    // failed order goes red on ITS row, not the sweep's.
+    // Sweep → dispatch as ONE cross-replica sequence under the sweep's lease
+    // (Codex r3 P2 / r4 P2): the dispatcher's lease is only ever taken NESTED
+    // here — gate on or off — so no replica can hold it outside the sequence
+    // and a request raised by one pod is never left for another pod's
+    // already-running dispatcher to miss. A sweep failure is retained, the
+    // dispatcher still runs (reconciliation), then the failure is rethrown so
+    // the sweep's job_health goes red (Codex r4 P1). The dispatcher's own
+    // failures go red on ITS row, inside runVendorOrderDispatch.
     try {
       await runExclusive('supplies-auto-reorder', async () => {
-        const { runSuppliesAutoReorderSweep, sweepFailureError } = require('./procurement/auto-reorder');
-        // A contained per-product failure still fails the RUN (job_health
-        // red) — the sweep returns normally so the other products get their
-        // requests, then the failure is surfaced here (pre-push P1).
-        const failure = sweepFailureError(await runSuppliesAutoReorderSweep());
-        if (failure) throw failure;
+        let sweepError = null;
+        if (gateEnvValue('GATE_AUTO_REORDER')) {
+          logger.info('Running: Supplies auto-reorder sweep');
+          try {
+            const { runSuppliesAutoReorderSweep, sweepFailureError } = require('./procurement/auto-reorder');
+            // A contained per-product failure still fails the RUN (job_health
+            // red) — the sweep returns normally so the other products get
+            // their requests, then the failure is surfaced here (pre-push P1).
+            const failure = sweepFailureError(await runSuppliesAutoReorderSweep());
+            if (failure) throw failure;
+          } catch (err) {
+            sweepError = err;
+            logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+          }
+        }
+        try {
+          const dispatched = await runExclusive('vendor-order-dispatch', () =>
+            require('./procurement/order-dispatch').runVendorOrderDispatch());
+          // Nested under the sequence lease this cannot be held elsewhere; a
+          // skip is an error to surface, not a silent day's delay.
+          if (dispatched?.skipped === true) throw new Error(`vendor order dispatch skipped (${dispatched.reason || 'lease held'})`);
+        } catch (err) {
+          logger.error(`Vendor order dispatch failed: ${err.message}`);
+          if (!sweepError) sweepError = err;
+        }
+        if (sweepError) throw sweepError;
       });
     } catch (err) {
-      logger.error(`Supplies auto-reorder sweep failed: ${err.message}`);
+      logger.error(`Supplies auto-reorder sequence failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4533,25 +4567,8 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WaveGuard lawn readiness — route-morning protocol preflight snapshot.
-  // Stores the readiness ledger and opens an admin alert when appointments
-  // are blocked by assignment, calibration, inventory, or property gates.
-  // =========================================================================
-  cron.schedule('30 5 * * *', async () => {
-    try {
-      const { runReadinessSnapshot } = require('./lawn-protocol-readiness-cron');
-      const result = await runReadinessSnapshot({ days: 14, limit: 100, source: 'scheduled_daily' });
-      if (!result.skipped) {
-        logger.info(`[lawn-protocol-readiness] ready=${result.ready || 0} warning=${result.warning || 0} blocked=${result.blocked || 0} appointments=${result.appointmentCount || 0}`);
-      }
-    } catch (err) {
-      logger.error(`Lawn protocol readiness snapshot failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // WaveGuard inventory forecast — proactive product shortage warning before
-  // readiness starts blocking dispatch.
+  // the scheduled treatments need the products.
   // =========================================================================
   cron.schedule('45 5 * * *', async () => {
     try {

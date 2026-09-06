@@ -42,17 +42,24 @@ Rules:
   inside `.where(...)` is a finding until proven offset-aware.
 - The trap runs the other way too: a `timestamptz` column takes a SINGLE
   `AT TIME ZONE` — reviewers have falsely flagged correct timestamptz SQL
-  as naive. Verify the column's `udt_name` against prod before complying
-  with a timezone finding.
+  as naive. Verify the column's `udt_name` in the target environment before
+  accepting the finding; production access still requires §3 authorization.
 
-## 3. Local DB access — dev/preview by default, prod is break-glass
+## 3. Local DB access — Codex uses dev/preview only
 
 Default for agent sessions (per the AGENTS.md database policy): use a
 Railway **dev or preview Postgres branch** as `DATABASE_URL`. Do not point a
 session at production for routine work, and never run migrations or other
 writes against prod from a local machine.
 
-Prod access is **break-glass**: owner-authorized for the specific task,
+**Codex sessions never connect to production databases**, including for
+read-only verification. The AGENTS.md prohibition applies throughout this
+skill. Codex must not obtain or use production database credentials; when
+production evidence is needed, request it from an authorized operator and
+continue independent work against dev/preview.
+
+For other operators whose applicable policy permits it, prod access is
+**break-glass**: owner-authorized for the specific task,
 read-only (SELECT), and through a restricted role when one exists for the
 domain (e.g. `newsletter_verifier`) instead of the full-write URL. This
 skill deliberately ships no copy/paste prod connection command — get the
@@ -83,6 +90,18 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   edit is a silent no-op in every environment that already ran it. Ship a
   NEW migration instead, and re-check the PR's live merge state before
   pushing follow-up commits to it.
+- **Never delete, rename, or re-stamp a migration file once ANY deploy ran
+  it — Railway PR previews included.** Every push to an open PR deploys a
+  preview environment with its own Postgres that runs the branch's
+  migrations; if a later push removes or renames that file, knex fails
+  every subsequent deploy of that environment with "The migration
+  directory is corrupt, the following files are missing" (the merge state
+  shows UNSTABLE from the Railway check). Superseding a migration mid-PR
+  means a NEW file with a fresh stamp whose `up` reverses the old one; the
+  old file stays. If the damage is already done, prove prod never ran the
+  file (`knex_migrations` read-only), then clean the PREVIEW database
+  (delete its `knex_migrations` row and undo the DDL by hand) so the
+  preview deploys again (#3869, 2026-09-05).
 - House style: `exports.up = async function up(knex)` with a symmetric
   `down`; guard with `hasTable` on the first line and per-column
   `hasColumn` before `alterTable` — idempotent in both directions.
@@ -138,16 +157,18 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
 
 ## 5. Raw SQL verification
 
-- Any new raw SQL destined for prod is executed read-only against prod
-  BEFORE the PR merges. Never trust column names/types from migration
-  files — verify against the live schema (see traps below).
-- This covers knex column identifiers too, not just `db.raw()`: jest mock
-  builders accept ANY string in `.select()`/`.where()`/joins, so a fully
-  green suite proves nothing about column names. Every new column reference
-  on a table gets its query shape run once against a real Postgres (local
-  `waves_portal` or read-only prod) — `.select('sv.service_name')` against
-  a column named `name` shipped green through 33k mocked tests and 500'd
-  live cancel flows (#3671 r6, six files).
+- Execute new query shapes and column references against a verified
+  dev/preview PostgreSQL database with the relevant schema before claiming
+  database verification. Mock builders do not verify SQL identifiers,
+  types, constraints, or transaction behavior.
+- For a task whose acceptance criteria concern the deployed schema, obtain
+  deployment evidence or production evidence supplied by an authorized
+  operator. Codex must not connect to production to collect it. Other
+  operators may use restricted read-only access only under §3 and their
+  applicable policy. Dev verification alone does not establish production state.
+- Without the required safe database or authorization, report verification
+  blocked and continue independent implementation or static checks.
+  Never substitute production credentials for missing development access.
 - `db.raw()` with request-derived input must use `?` placeholders; string
   interpolation is a SQL-injection P0 (AGENTS.md).
 
@@ -243,7 +264,7 @@ by the real-DB ui-verify walkthrough (the step 4 PR 2b "Acquire anyway" 500).
   never written.
 - The uuid-vs-integer split is PER-TABLE: `referrals.id` is UUID but
   `referral_invites.promoter_id` / `referral_promoters.id` ARE integer —
-  verify each table against prod.
+  verify each table in the target environment under §5.
 - `scheduled_services.scheduled_date` is a plain DATE (`::text` to
   inspect; no timestamptz comparisons), and any direct SQL date move must
   sync `appointment_reminders` too.

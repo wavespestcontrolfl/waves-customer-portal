@@ -22,6 +22,22 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const effectiveActionSql = require('./opportunity-action-sql');
+
+// Keep read-only catch-up probes and atomic claims on the same eligibility.
+// A failed status write may leave a published run's row pending. Fence every
+// blog claim, not just legacy approval holds. Only a verified closed PR with
+// its branch removed can cease blocking; published URLs never do.
+const claimableStatusSql = `((status = 'pending' OR (
+           ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
+           AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
+             OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
+         )) AND (${effectiveActionSql} <> 'new_supporting_blog' OR NOT EXISTS (
+           SELECT 1 FROM autonomous_runs r WHERE r.opportunity_id = opportunity_queue.id
+             AND (r.published_url IS NOT NULL
+               OR (r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL))
+         )))`;
+
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
@@ -88,7 +104,7 @@ class OpportunityQueue {
   async peek({ limit = DEFAULT_FETCH_LIMIT, minScore = null, bucket = null, actionType = null } = {}) {
     try {
       let q = db('opportunity_queue')
-        .where('status', 'pending')
+        .whereRaw(claimableStatusSql)
         // Same availability window as claimNext, so previews show exactly
         // what the runner could claim (operator-seeded rows may carry a
         // future available_at — see migration 20260611000016).
@@ -98,7 +114,7 @@ class OpportunityQueue {
         // catch-up; previewTop drives dashboards), so an exhausted pending
         // row awaiting the janitor sweep must not trigger a catch-up batch
         // that claimNext will immediately return empty from.
-        .where('attempt_count', '<', maxClaimAttempts())
+        .whereRaw("(attempt_count < ?::int OR status = 'pending_review')", [maxClaimAttempts()])
         .orderBy('score', 'desc')
         .limit(limit);
       // Same lane fence as claimNext (peek is consumed as "what the runner
@@ -109,12 +125,12 @@ class OpportunityQueue {
         // listicle_family blog-floor ride), so previews show exactly what
         // the runner would claim.
         q = q.whereRaw(
-          `score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND action_type = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END`,
+          `score >= CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' OR (bucket = 'listicle_family' AND ${effectiveActionSql} = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND ${effectiveActionSql} = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN ${effectiveActionSql} = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END`,
           [blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore],
         );
       }
       if (bucket) q = q.where('bucket', bucket);
-      if (actionType) q = q.where('action_type', actionType);
+      if (actionType) q = q.whereRaw(`${effectiveActionSql} = ?`, [actionType]);
       const rows = await q.select('*');
       return rows.map(parseRow);
     } catch (err) {
@@ -142,7 +158,7 @@ class OpportunityQueue {
     // appended a `notes` audit string, but opportunity_queue has no
     // `notes` column (the migration in #1021 only defines status /
     // skip_reason / timestamps). Audit lives in the logger instead.
-    const whereActionType = actionType ? `AND action_type = ?` : '';
+    const whereActionType = actionType ? `AND ${effectiveActionSql} = ?` : '';
     // excludeIds lets the daily batch skip opportunities that already failed
     // this run. A failed runNext() releases its claim back to 'pending', so
     // without this the highest-scored failing row would just be re-claimed
@@ -156,19 +172,21 @@ class OpportunityQueue {
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
-             attempt_count = attempt_count + 1,
+             claim_id = gen_random_uuid(),
+             attempt_count = CASE WHEN status = 'pending_review' THEN 1 ELSE attempt_count + 1 END,
              updated_at = now()
        WHERE id = (
          SELECT id FROM opportunity_queue
-         WHERE status = 'pending'
+         WHERE ${claimableStatusSql}
            -- Availability window: operator-seeded rows (intercept briefs) may
            -- carry a future available_at; they stay invisible to the claim
            -- until their window opens. NULL = available immediately (every
            -- miner row).
            AND (available_at IS NULL OR available_at <= now())
-           -- Lifetime claim budget — see maxClaimAttempts(). Exhausted rows
-           -- are swept to skipped/attempts_exhausted by the janitor.
-           AND attempt_count < ?::int
+           -- New policy gives a former approval hold one fresh attempt budget.
+           -- New runs cannot enter those approval states, so this resets once.
+           -- Ordinary retries keep the existing lifetime budget.
+           AND (attempt_count < ?::int OR status = 'pending_review')
            -- ::numeric casts are load-bearing: inside a CASE, Postgres types
            -- bare parameters as text (no comparison context), and
            -- integer >= text has no operator — this exact line failed in
@@ -184,7 +202,7 @@ class OpportunityQueue {
            -- link_boost companion DERIVED from a ctr_rewrite parent rides
            -- it too — the companion inherits the parent's score, so a
            -- separate floor would strand it persisted-but-unclaimable.
-           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND action_type = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN action_type = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
+           AND score >= CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' OR (bucket = 'listicle_family' AND ${effectiveActionSql} = 'refresh_existing_page') OR (bucket IN ('no_content_yet', 'local_gap') AND ${effectiveActionSql} = 'create_or_refresh_city_service_page') THEN ?::numeric WHEN ${effectiveActionSql} = 'rewrite_title_meta' OR (bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite') THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}
@@ -192,7 +210,7 @@ class OpportunityQueue {
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
-       RETURNING *`,
+       RETURNING *, ${effectiveActionSql} AS effective_action_type`,
       [new Date(), maxClaimAttempts(), blogMinScoreFor(minScore), rewriteMinScoreFor(minScore), minScore]
         .concat(actionType ? [actionType] : [])
         .concat(exclude.length ? [exclude] : [])
@@ -389,32 +407,56 @@ class OpportunityQueue {
     return result;
   }
 
+  // Repair only bookkeeping failures with durable final-run evidence. Never
+  // reclaim/redraft an external publish or overwrite a newer lifecycle.
+  async reconcilePublishedClaims() {
+    await db.raw(`UPDATE opportunity_queue q
+      SET status = CASE WHEN r.outcome = 'completed_published' THEN 'done' ELSE 'pending_review' END,
+          skip_reason = CASE WHEN r.outcome = 'completed_published' THEN NULL ELSE 'astro_pr_pending_merge' END,
+          completed_at = CASE WHEN r.outcome = 'completed_published' THEN now() ELSE NULL END,
+          updated_at = now()
+      FROM autonomous_runs r
+      WHERE (q.status IN ('claimed', 'pending', 'expired') AND q.claim_id = r.queue_claim_id
+          OR q.status = 'pending_review' AND q.skip_reason IN ('astro_pr_pending_merge', 'astro_pr_queue_transition_failed', 'published_queue_complete_failed') AND (
+            q.claim_id = r.queue_claim_id OR q.claim_id IS NULL AND r.queue_claim_id IS NULL))
+        AND r.id = (SELECT latest.id FROM autonomous_runs latest
+          WHERE latest.opportunity_id = q.id ORDER BY latest.claimed_at DESC, latest.id DESC LIMIT 1)
+        AND r.action_type = 'new_supporting_blog'
+        AND (q.status IS DISTINCT FROM CASE WHEN r.outcome = 'completed_published' THEN 'done' ELSE 'pending_review' END
+          OR q.skip_reason IS DISTINCT FROM CASE WHEN r.outcome = 'completed_published' THEN NULL ELSE 'astro_pr_pending_merge' END)
+        AND (((q.claim_id = r.queue_claim_id OR q.skip_reason = 'astro_pr_queue_transition_failed')
+          AND r.outcome = 'completed_pending_review' AND r.skip_reason = 'astro_pr_pending_merge'
+          AND r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL)
+        OR ((q.claim_id = r.queue_claim_id OR q.skip_reason = 'published_queue_complete_failed')
+          AND r.outcome = 'completed_published' AND r.published_url IS NOT NULL))`);
+  }
+
   /**
-   * Park pending rows that have used up their lifetime claim budget at a
-   * VISIBLE pending_review/attempts_exhausted. claimNext already refuses
-   * them, but without this sweep they'd sit pending forever as invisible
-   * zombies — never claimable, never surfaced.
-   *
-   * pending_review, NOT skipped: the review queue only offers requeue
-   * (which resets attempt_count — the deliberate way back in) on
-   * pending_review rows, and the miner upsert keeps skipped sticky, so an
-   * exhausted row swept to skipped was PERMANENT short of a DB edit or an
-   * operator seeder path. pending_review is equally mine-proof (the
-   * upsert's status CASE preserves it) while keeping the operator flow
-   * alive; skipped stays the shape of an operator DISMISSAL.
-   * Janitor cron task, paired with expireStale().
+   * Finish exhausted retries and legacy unpublished blog holds automatically. Other content lanes retain
+   * their existing review/requeue workflow. Paired with expireStale().
    */
   async sweepExhaustedAttempts() {
+    await this.reconcilePublishedClaims();
     const result = await db('opportunity_queue')
-      .where('status', 'pending')
-      .where('attempt_count', '>=', maxClaimAttempts())
+      .whereRaw(`(status = 'pending' AND attempt_count >= ?) OR (
+        ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
+        -- A failed audit insert can leave no run evidence despite an external publish.
+        -- Reconciliation holds must survive until that external state is resolved.
+        AND COALESCE(skip_reason, '') NOT IN ('named_competitor_review', 'affiliate_review',
+          'astro_pr_audit_failed', 'published_audit_failed',
+          'astro_pr_queue_transition_failed', 'published_queue_complete_failed')
+        AND COALESCE(skip_reason, '') !~ '^trust_build_[0-9]+_of_[0-9]+$'
+        AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
+          WHERE r.opportunity_id = opportunity_queue.id
+            AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
+      )`, [maxClaimAttempts()])
       .update({
-        status: 'pending_review',
-        skip_reason: 'attempts_exhausted',
+        status: db.raw(`CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END`),
+        skip_reason: db.raw("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END"),
         completed_at: new Date(),
         updated_at: new Date(),
       });
-    if (result > 0) logger.warn(`[opportunity-queue] parked ${result} opportunit${result === 1 ? 'y' : 'ies'} at pending_review/attempts_exhausted (claimed ${maxClaimAttempts()}+ times without completing; operator requeue resets the budget)`);
+    if (result > 0) logger.warn(`[opportunity-queue] parked ${result} opportunit${result === 1 ? 'y' : 'ies'} with attempts_exhausted (blogs skipped; other lanes available for review)`);
     return result;
   }
 

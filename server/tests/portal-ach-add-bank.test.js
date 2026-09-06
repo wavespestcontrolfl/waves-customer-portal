@@ -20,7 +20,6 @@ jest.mock('../middleware/auth', () => ({
   isCancelledCustomerRow: (c) => !!c && c.active === false && c.pipeline_stage === 'churned',
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/payment-router', () => ({}));
 jest.mock('../config/stripe-config', () => ({ publishableKey: 'pk_test_mock', secretKey: null }));
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendAutopayEnabled: jest.fn(async () => {}),
