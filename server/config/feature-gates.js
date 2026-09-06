@@ -340,6 +340,10 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Creation only: stamped reservations retain their full service capacity
+  // through acceptance even after this gate is disabled. Strict opt-in.
+  visitCombinedCapacity: process.env.GATE_VISIT_COMBINED_CAPACITY === 'true',
+
   // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
   // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
   // address + service, 30 days) files as status 'duplicate' carrying
