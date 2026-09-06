@@ -352,3 +352,46 @@ describe('generateVideoVariant', () => {
     expect(VideoGenerator.generate).not.toHaveBeenCalled();
   });
 });
+
+describe('versus + milestone runs on the engine (2026-09-06)', () => {
+  test('milestone scenes come from the review (calm home) bank', () => {
+    expect(Engine.resolveSceneBucket({ variant: 'milestone', service: 'Google reviews', topic: '300 Google reviews' })).toBe('review');
+  });
+
+  test.each([
+    ['versus', 'photo_versus'],
+    ['milestone', 'photo_milestone'],
+    ['campaign', 'photo'],
+  ])('%s runs composite the %s overlay', async (variant, overlay) => {
+    const renderSpy = jest.fn().mockResolvedValue('SkpQRw==');
+    ImageGenerator.mockImplementation(() => ({
+      generate: jest.fn().mockResolvedValue({ dataUrl: 'data:image/png;base64,QUJD', model: 'gemini-image-best' }),
+    }));
+    Renderer.renderPhotoCardJpegBase64.mockImplementation(renderSpy);
+    uploadImageToS3.mockResolvedValue('https://cdn.test/x.jpg');
+
+    await Engine.generateVariants({
+      cardInput: { city: 'Venice' },
+      topic: 'Paper Wasp vs Mud Dauber',
+      variant,
+      count: 1,
+      now: NOW,
+    });
+
+    expect(renderSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: overlay, city: 'Venice' }),
+      expect.objectContaining({ platform: 'square' })
+    );
+  });
+});
+
+describe('versus scene selection (Codex r2 on #3987)', () => {
+  test('general-pest comparisons take the pest-neutral ID bank, service pairs keep their bank', () => {
+    expect(Engine.resolveSceneBucket({ variant: 'versus', service: 'general pest', topic: 'Paper Wasp vs Mud Dauber' })).toBe('pest_id');
+    expect(Engine.resolveSceneBucket({ variant: 'versus', service: 'lawn care', topic: 'Chinch Bug Damage vs Drought Stress' })).toBe('lawn');
+    expect(Engine.resolveSceneBucket({ variant: 'versus', service: 'termite', topic: 'Subterranean Termite vs Drywood Termite' })).toBe('termite');
+    // Campaign runs are unchanged: general pest still gets the general bank.
+    expect(Engine.resolveSceneBucket({ variant: 'campaign', service: 'general pest', topic: 'ants moving around lanais' })).toBe('general');
+    for (const c of Engine.SCENE_LIBRARY.pest_id) expect(c.scene).not.toMatch(/\b(?:ant|ants|roach|wasp|spider|termite|rat|mosquito)\b/i);
+  });
+});
