@@ -287,3 +287,15 @@ test('address saves take maintenance and comms before customer and stop locks', 
   expect(comms).toBeGreaterThan(maintenance);
   expect(customerAndStops).toBeGreaterThan(comms);
 });
+
+test('combined-payment locking precedes address customer and stop locks on payer edits', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const handler = source.slice(source.indexOf("router.put('/:id/update-details'"));
+  const comms = handler.indexOf('await lockCustomerComms(trx,');
+  const combined = handler.indexOf('lockCombinedCustomers(trx,');
+  const addressLocks = handler.indexOf('await lockAppointmentAddress(trx,');
+  expect(combined).toBeGreaterThan(comms);
+  expect(combined).toBeLessThan(addressLocks);
+  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id");
+  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override");
+});
