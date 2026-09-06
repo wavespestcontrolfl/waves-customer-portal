@@ -9,7 +9,7 @@ const PDF_BASE = 'https://www3.epa.gov/pesticides/chem_search/ppls/';
 const MAX_PDF_BYTES = 8 * 1024 * 1024;
 
 function labelError(message, statusCode = 422) {
-  return Object.assign(new Error(message), { statusCode });
+  return Object.assign(new Error(message), { statusCode, isOperational: true });
 }
 
 async function readBounded(url, maxBytes) {

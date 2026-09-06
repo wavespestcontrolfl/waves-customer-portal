@@ -9,11 +9,13 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const reviews = require('../services/product-label-review');
 const router = require('../routes/admin-inventory');
+const { errorHandler } = require('../middleware/errors');
+const { labelError } = require('../services/epa-product-label');
 const PRODUCT = '11111111-2222-4333-8444-555555555555';
 let server, base;
 beforeAll(async () => {
   const app = express(); app.use(express.json()); app.use('/api/admin/inventory', router);
-  app.use((err, _req, res, _next) => res.status(err.statusCode || 500).json({ error: err.message }));
+  app.use(errorHandler);
   server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve));
   base = `http://127.0.0.1:${server.address().port}/api/admin/inventory`;
 });
@@ -22,6 +24,16 @@ beforeEach(() => { jest.clearAllMocks(); process.env.GATE_LABEL_PIPELINE = 'true
 afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; });
 const call = (path, { method = 'GET', role = 'admin', body } = {}) => fetch(base + path, {
   method, headers: { ...(role ? { Authorization: role } : {}), 'Content-Type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}),
+});
+test.each([404, 409, 422, 502])('production error handler preserves expected label error %s', async status => {
+  const prior = process.env.NODE_ENV;
+  process.env.NODE_ENV = 'production';
+  try {
+    reviews.getLabelReview.mockRejectedValueOnce(labelError('Review must be refreshed.', status));
+    const response = await call(`/${PRODUCT}/label-review`);
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: 'Review must be refreshed.' });
+  } finally { process.env.NODE_ENV = prior; }
 });
 test.each(['', 'technician'])('requires authenticated admin for label reads and mutations (%s)', async role => {
   for (const [path, method] of [['/label-pipeline', 'GET'], [`/${PRODUCT}/label-review`, 'GET'], [`/${PRODUCT}/label-review/extract`, 'POST'], [`/${PRODUCT}/label-review/decision`, 'POST'], [`/${PRODUCT}/label-review/revoke`, 'POST']]) {

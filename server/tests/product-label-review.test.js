@@ -11,7 +11,7 @@ const db = require('../models/db');
 const { recordAuditEvent } = require('../services/audit-log');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { findEpaLabel, downloadEpaLabel } = require('../services/epa-product-label');
-const { extractionError, extractLabelReview, decideLabelReview, revokeLabelReview } = require('../services/product-label-review');
+const { extractionError, getLabelReview, extractLabelReview, decideLabelReview, revokeLabelReview } = require('../services/product-label-review');
 const { labelProductSnapshot, reviewedWeather } = require('../services/product-label-weather');
 
 const PRODUCT_ID = '11111111-2222-4333-8444-555555555555';
@@ -67,6 +67,19 @@ test('an existing pending candidate is returned without another model call', asy
   const second = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   expect(second.review.draft.id).toBe(first.review.draft.id);
   expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+});
+test('review responses distinguish stored approval from currently effective evidence', async () => {
+  const candidate = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  expect(candidate.activeCurrent).toBe(false);
+  const approved = await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: candidate.review.draft.id, decision: 'approve', identityConfirmed: true });
+  expect(approved.activeCurrent).toBe(true);
+  row.formulation = 'WG';
+  const stale = await getLabelReview(PRODUCT_ID);
+  expect(stale.review.active.status).toBe('approved');
+  expect(stale.activeCurrent).toBe(false);
+  const next = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  expect(next.activeCurrent).toBe(false);
+  expect((await extractLabelReview(PRODUCT_ID, ACTOR_ID)).activeCurrent).toBe(false);
 });
 
 test('source changes or product changes block approval', async () => {

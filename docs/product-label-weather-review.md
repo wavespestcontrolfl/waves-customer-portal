@@ -44,6 +44,8 @@ weather columns, protocol data, or pricing. The general verification stamp also
 authorizes mixing, so using it here would accidentally certify unrelated rates.
 The Job Card's one spray-check builder consumes the scoped weather evidence.
 An identity/formulation or legacy weather edit invalidates the active snapshot.
+Inventory marks that stored approval STALE / INACTIVE and prompts source review
+again; product refreshes also clear the source-confirmation checkbox.
 No active review (or a disabled gate) retains existing behavior. A revoked or
 stale active review stays UNKNOWN instead of falling back to an older stamp.
 

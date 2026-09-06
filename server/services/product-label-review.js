@@ -8,7 +8,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { recordAuditEvent } = require('./audit-log');
 const { findEpaLabel, downloadEpaLabel, labelError } = require('./epa-product-label');
-const { WEATHER_FIELDS, labelProductSnapshot, sameLabelProduct } = require('./product-label-weather');
+const { WEATHER_FIELDS, labelProductSnapshot, sameLabelProduct, reviewedWeather } = require('./product-label-weather');
 
 const PROMPT_VERSION = 'epa_weather_v1';
 const REVIEW_MAX_AGE_MS = 7 * 86400000;
@@ -80,6 +80,10 @@ async function productById(id, handle = db, lock = false) {
   return product;
 }
 
+function reviewResponse(product) {
+  return { enabled: true, review: product.label_weather_review || null, activeCurrent: reviewedWeather(product)?.verified === true };
+}
+
 async function saveReview(trx, product, review, actorId, action) {
   assertEnabled();
   await trx('products_catalog').where({ id: product.id }).update({ label_weather_review: review, updated_at: new Date() });
@@ -88,13 +92,13 @@ async function saveReview(trx, product, review, actorId, action) {
     resource_type: 'product', resource_id: product.id,
     metadata: { previous: product.label_weather_review || null, review }, critical: true, trx,
   });
-  return { enabled: true, review };
+  return reviewResponse({ ...product, label_weather_review: review });
 }
 
 async function getLabelReview(productId) {
   assertEnabled();
   const product = await productById(productId);
-  return { enabled: true, review: product.label_weather_review || null };
+  return reviewResponse(product);
 }
 
 async function extractLabelReview(productId, actorId) {
@@ -104,7 +108,7 @@ async function extractLabelReview(productId, actorId) {
   const priorRevision = product.label_weather_review?.revision || null;
   const existing = product.label_weather_review?.draft;
   if (existing && sameLabelProduct(product, existing.productSnapshot) && Date.now() - Date.parse(existing.createdAt) < REVIEW_MAX_AGE_MS) {
-    return { enabled: true, review: product.label_weather_review };
+    return reviewResponse(product);
   }
   const document = await findEpaLabel(product.epa_reg_number);
   assertEnabled();

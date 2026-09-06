@@ -43,6 +43,11 @@ describe('reviewed EPA weather evidence is separate from rate verification', () 
     expect(verdict(p)).toBe('unknown');
     p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
   });
+  test('conditional-only evidence keeps its actionable warning without numeric limits', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    p.label_weather_review.active.facts.maxWindMph = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
+    expect(jobCard.buildSprayCheck({ products: [p], hourly, now }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: 'Conditional label restrictions need review' });
+  });
   test('revoked or identity-stale evidence never falls back to a previously trusted general stamp', () => {
     process.env.GATE_LABEL_PIPELINE = 'true'; const p = product(); p.label_verified_at = '2030-01-01';
     p.label_weather_review.active.status = 'revoked'; expect(verdict(p)).toBe('unknown');

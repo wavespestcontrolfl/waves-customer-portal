@@ -784,7 +784,7 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
     if (review && !review.verified) return { productId: product.id, verdict: 'unknown', reason: 'Label review revoked or product changed' };
     const limits = review?.limits || productLimits(product);
     const hasLimits = [limits.minTempF, limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
-    if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: 'No limit on file' };
+    if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: review?.unresolved ? 'Conditional label restrictions need review' : 'No limit on file' };
     // The catalog contract: unverified label values are not judged against.
     if (!review && !product.label_verified_at) return { productId: product.id, verdict: 'unknown', reason: 'Label limits not yet verified' };
     if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
