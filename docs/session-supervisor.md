@@ -23,7 +23,9 @@ use **pause** before closing a terminal if you want the work to stay stopped.
 No npm/pip dependencies, server startup, database, API key copying, or Railway
 service is needed. Requires Python 3.9+, `git`, `gh`, `lsof`, and signed-in
 `codex` and `claude` CLIs on PATH. CLI permissions and model configuration remain
-in force; this does not install permission allowlists or bypass flags.
+in force; this does not install permission allowlists or bypass flags. SSH agent
+authentication is preserved: launchd supplies its current per-login socket, and
+an explicitly customized `SSH_AUTH_SOCK` is retained during installation.
 
 From the reviewed checkout:
 
@@ -99,9 +101,9 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.waves.session-superv
 
 Jobs remain paused until explicitly retried. Closing a PR without merging
 completes its job; a merged PR gets a continuation for post-merge verification.
-The resumed agent can continue already-authorized lane work using the existing
-handoff rules. Enrollment is per PR: a next PR needs its own enrollment after
-the previous job finishes or is paused. The worker retains worktrees so a
+Background continuations stop after the enrolled PR. Remaining authorized lane
+work is recorded in the saved session; the next PR needs its own enrollment
+from the live owning session after the previous worker has exited. The worker retains worktrees so a
 stopped run cannot erase its own recovery path.
 When the original session finishes its own PR, run `finish` after merge and
 deployment verification, then perform the normal worktree cleanup. `finish`
@@ -111,7 +113,8 @@ Only one resumed model process runs at a time. A run lasts at most 30 minutes,
 with at least five minutes between starts, at most three starts for unchanged
 PR evidence (including human comments and reviews) and twelve starts per job per rolling day. A permission denial,
 owner question, quota error, invalid final result, or failed CLI invocation
-parks the job. Reaching a resume limit keeps watching: new PR evidence resets
+parks the job. Blocking reasons are enforced even if the model reports an
+inconsistent state. Reaching a resume limit keeps watching: new PR evidence resets
 the unchanged-evidence count, and rolling daily slots become available as they
 expire. These are conservative limits, not guarantees about token use.
 The two CLI commands are `codex exec --cd WORKTREE resume SESSION_UUID` and

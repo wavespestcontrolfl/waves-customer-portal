@@ -28,7 +28,7 @@ class SupervisorTests(unittest.TestCase):
         self.job = {'provider': 'codex', 'session': '00000000-0000-4000-8000-000000000001',
                     'worktree': str(self.root), 'repo': 'example/project', 'branch': 'feat/task',
                     'pr': 7, 'owner_pid': 987654, 'owner_stamp': 'original', 'transcript': str(self.record),
-                    'status': 'watching', 'revision': 'one', 'reason': 'waiting',
+                    'status': 'watching', 'revision': 'one', 'launch_id': 'launch-one', 'reason': 'waiting',
                     'attempts': 0, 'runs': [], 'last_run': 0, 'fingerprint': 'stable', 'changed_at': 1}
         self.fresh = {'fingerprint': 'stable', 'head': 'a' * 40, 'closed': False,
                       'merged': False, 'draft': False, 'ready': True}
@@ -281,11 +281,34 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotEqual(empty['fingerprint'], comment['fingerprint'])
         self.assertNotEqual(comment['fingerprint'], review['fingerprint'])
 
+    def test_same_result_ci_rerun_changes_wake_fingerprint(self):
+        info = {'head': {'repo': {'full_name': 'example/project'}, 'ref': 'feat/task', 'sha': 'a' * 40},
+                'state': 'open', 'merged': False, 'draft': False}
+        check = {'name': 'tests', 'conclusion': 'FAILURE', 'status': 'COMPLETED',
+                 'detailsUrl': 'https://example.invalid/job/1', 'completedAt': 'first'}
+        with patch.object(supervisor, 'gh_json', side_effect=lambda repo, ep: [info] if ep == 'pulls/7' else [[]]), \
+                patch.object(supervisor, 'command', side_effect=lambda *a, **k: json.dumps({'statusCheckRollup': [check]})):
+            first = supervisor.snapshot(self.job)
+            check['completedAt'] = 'rerun'
+            second = supervisor.snapshot(self.job)
+        self.assertNotEqual(first['fingerprint'], second['fingerprint'])
+
     def test_codex_intermediate_commentary_does_not_break_final_disposition(self):
         rows = [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Working on it'}},
                 {'type': 'item.completed', 'item': {'type': 'agent_message',
                  'text': '{"state":"waiting","reason":"waiting_review"}'}}]
         self.assertEqual(supervisor.disposition('\n'.join(map(json.dumps, rows)), 'codex')['state'], 'waiting')
+
+    def test_blocking_reasons_override_inconsistent_model_states_for_both_clis(self):
+        for provider in ['codex', 'claude']:
+            for state in ['waiting', 'complete']:
+                for reason in ['permission', 'owner_decision', 'quota', 'infrastructure']:
+                    value = {'state': state, 'reason': reason}
+                    raw = json.dumps({'structured_output': value}) if provider == 'claude' else json.dumps({
+                        'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(value)}})
+                    self.assertEqual(supervisor.disposition(raw, provider), {'state': 'blocked', 'reason': reason})
+        with self.assertRaises(ValueError):
+            supervisor.disposition(json.dumps({'structured_output': {'state': 'complete', 'reason': 'waiting_ci'}}), 'claude')
 
     def test_claude_permission_denial_overrides_successful_final_claim(self):
         raw = json.dumps({'permission_denials': [{}], 'structured_output': {'state': 'complete', 'reason': 'completed'}})
@@ -337,6 +360,34 @@ class SupervisorTests(unittest.TestCase):
                 job = supervisor.read_jobs(self.root)[self.key]
                 self.assertEqual(job['status'], 'blocked')
                 self.assertFalse(job['launch_pending'])
+
+    def test_pause_before_worker_identity_is_saved_clears_only_its_launch_fence(self):
+        self.job.update({'status': 'launching', 'launch_pending': True})
+        self.store()
+        popen = subprocess.Popen
+        process = popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                        stdin=subprocess.PIPE, start_new_session=True)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        stamp = supervisor.process_stamp(process.pid)
+        def pause_before_identity(pid):
+            supervisor.control(self.root, argparse.Namespace(job=self.key, action='pause', execute=True))
+            return stamp
+        with patch.object(supervisor.subprocess, 'Popen', side_effect=lambda argv, **kw:
+                          process if argv[0] == 'codex' else popen(argv, **kw)), \
+                patch.object(supervisor, 'process_stamp', side_effect=pause_before_identity):
+            result = supervisor.resume(self.root, self.key, self.job)
+        self.assertEqual(result['state'], 'blocked')
+        self.assertFalse(supervisor.group_active(process.pid))
+        jobs = supervisor.read_jobs(self.root)
+        self.assertEqual(jobs[self.key]['status'], 'paused')
+        self.assertFalse(jobs[self.key]['launch_pending'])
+        self.assertTrue(supervisor.reconcile_workers(self.root, jobs, False))
+
+    def test_stale_cleanup_cannot_clear_a_replacement_launch(self):
+        self.job.update({'launch_id': 'replacement', 'launch_pending': True})
+        self.store()
+        supervisor.clear_worker(self.root, self.key, 'launch-one')
+        self.assertTrue(supervisor.read_jobs(self.root)[self.key]['launch_pending'])
 
     def test_unconfirmed_cleanup_retains_launch_fence(self):
         self.store()
@@ -436,7 +487,8 @@ class SupervisorTests(unittest.TestCase):
         launch_home.mkdir()
         state = launch_home / '.local/share/waves-session-supervisor'
         with patch.dict(os.environ, {'CODEX_HOME': str(launch_home / 'codex-custom'),
-                                     'CLAUDE_CONFIG_DIR': str(launch_home / 'claude-custom')}), \
+                                     'CLAUDE_CONFIG_DIR': str(launch_home / 'claude-custom'),
+                                     'SSH_AUTH_SOCK': '/custom/ssh-agent.sock'}), \
                 patch.object(supervisor.sys, 'platform', 'darwin'), \
                 patch.object(supervisor.Path, 'home', return_value=launch_home), \
                 patch.object(supervisor.shutil, 'which', return_value='/usr/bin/tool'), \
@@ -450,7 +502,8 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(data['StartInterval'], 60)
             self.assertEqual(data['EnvironmentVariables']['CODEX_HOME'], str(launch_home / 'codex-custom'))
             self.assertEqual(data['EnvironmentVariables']['CLAUDE_CONFIG_DIR'], str(launch_home / 'claude-custom'))
-            run.assert_called_once()
+            self.assertEqual(data['EnvironmentVariables']['SSH_AUTH_SOCK'], '/custom/ssh-agent.sock')
+            self.assertEqual(sum(c.args[0][:2] == ['launchctl', 'bootstrap'] for c in run.call_args_list), 1)
             with patch.object(supervisor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
                 with self.assertRaises(ValueError):
                     supervisor.install(state, execute=True)
@@ -459,13 +512,27 @@ class SupervisorTests(unittest.TestCase):
             with patch.object(supervisor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 113)):
                 supervisor.install(state, execute=True)
             self.assertEqual(supervisor.read_jobs(state), preserved)
-            self.assertEqual(run.call_count, 2)
+            self.assertEqual(sum(c.args[0][:2] == ['launchctl', 'bootstrap'] for c in run.call_args_list), 2)
+
+    def test_default_launchd_ssh_socket_is_inherited_instead_of_pinned_across_logins(self):
+        home = self.root / 'home'
+        state = home / 'state'
+        with patch.dict(os.environ, {'SSH_AUTH_SOCK': '/per-login/socket'}), \
+                patch.object(supervisor.sys, 'platform', 'darwin'), \
+                patch.object(supervisor.Path, 'home', return_value=home), \
+                patch.object(supervisor.shutil, 'which', return_value='/usr/bin/tool'), \
+                patch.object(supervisor, 'command', return_value='/per-login/socket'):
+            supervisor.install(state, execute=True)
+        data = supervisor.plistlib.loads((home / 'Library/LaunchAgents/com.waves.session-supervisor.plist').read_bytes())
+        self.assertNotIn('SSH_AUTH_SOCK', data['EnvironmentVariables'])
 
     def test_child_environment_drops_production_and_integration_credentials(self):
         with patch.dict(os.environ, {'DATABASE_URL': 'do-not-inherit', 'ANTHROPIC_API_KEY': 'do-not-inherit',
-                                     'STRIPE_SECRET_KEY': 'do-not-inherit', 'NODE_OPTIONS': 'do-not-inherit'}):
+                                     'STRIPE_SECRET_KEY': 'do-not-inherit', 'NODE_OPTIONS': 'do-not-inherit',
+                                     'SSH_AUTH_SOCK': '/current/ssh-agent.sock'}):
             self.assertFalse(set(['DATABASE_URL', 'ANTHROPIC_API_KEY', 'STRIPE_SECRET_KEY', 'NODE_OPTIONS'])
                              & set(supervisor.environment()))
+            self.assertEqual(supervisor.environment()['SSH_AUTH_SOCK'], '/current/ssh-agent.sock')
 
 
 if __name__ == '__main__':
