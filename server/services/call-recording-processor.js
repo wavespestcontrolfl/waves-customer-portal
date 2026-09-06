@@ -8699,6 +8699,7 @@ const CallRecordingProcessor = {
           .update({
             ai_extraction: JSON.stringify(extracted),
             call_summary: extracted.call_summary || null,
+            transcription_metadata: trx.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
             sentiment: extracted.sentiment || null,
             lead_quality: extracted.lead_quality || null,
             processing_status: extracted.is_spam ? 'spam' : 'processed',
@@ -9862,6 +9863,7 @@ const CallRecordingProcessor = {
       } : {}),
       ai_extraction: JSON.stringify(extracted),
       call_summary: extracted.call_summary || null,
+      transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
       updated_at: new Date(),
