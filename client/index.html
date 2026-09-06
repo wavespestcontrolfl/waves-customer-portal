@@ -41,11 +41,7 @@
       :where(html:not(.admin-app)) h1 { font-family: 'Anton', 'Luckiest Guy', cursive; letter-spacing: 0.02em; }
       :where(html:not(.admin-app)) h2, :where(html:not(.admin-app)) h3, :where(html:not(.admin-app)) h4 { font-family: 'Montserrat', 'Inter', sans-serif; }
       h5, h6 { font-family: 'Inter', system-ui, sans-serif; }
-      /* Placeholders read as hints, never as entered values (owner 2026-09-06,
-         customer feedback): italic at slate-500 (#64748B, 4.8:1 on white — WCAG AA
-         for 14px text; a lighter grey fell to 2.6:1), full opacity so Firefox
-         does not dim them further. */
-      input::placeholder, textarea::placeholder { color: #64748B; font-style: italic; opacity: 1; }
+      input::placeholder, textarea::placeholder { color: #64748B; }
     </style>
   </head>
   <body>

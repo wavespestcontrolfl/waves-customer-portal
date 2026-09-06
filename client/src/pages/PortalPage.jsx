@@ -8249,7 +8249,8 @@ function PropertyTab({ customer }) {
                 .filter(Boolean);
               const active = days.includes(day);
               return (
-                <button data-glass-accent={active ? '' : undefined} key={day} type="button" aria-pressed={active} onClick={() => {
+                // Same surfaces as PillSelector: gold accent when active, glass chip otherwise.
+                <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} key={day} type="button" aria-pressed={active} onClick={() => {
                   const next = active ? days.filter(d => d !== day) : [...days, day];
                   updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
                 }} style={{
