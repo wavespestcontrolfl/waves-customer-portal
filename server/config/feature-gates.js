@@ -2431,6 +2431,9 @@ const gates = {
   // (default, dev AND prod): the pre-gate five-fact mapping, byte-identical.
   // Read-only, no comms, no bell-policy change. Kill switch: unset. This
   // entry is for logGateStatus; the service reads gateEnvValue at CALL time.
+  // EPA label weather review; request-time checks use gateEnvValue.
+  labelPipeline: gateEnvValue('GATE_LABEL_PIPELINE'),
+
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
 };
 

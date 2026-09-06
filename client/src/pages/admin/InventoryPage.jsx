@@ -13,6 +13,7 @@ import {
   Store,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import ProductLabelReview from "../../components/admin/ProductLabelReview";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -1956,6 +1957,15 @@ function ProductsTab({
   // the authoring affordances rather than rendering doomed forms.
   canAuthor = false,
 }) {
+  const [labelPipelineEnabled, setLabelPipelineEnabled] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setLabelPipelineEnabled(false);
+    if (canAuthor) adminFetch("/admin/inventory/label-pipeline")
+      .then((data) => { if (!cancelled) setLabelPipelineEnabled(data.enabled === true); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [canAuthor]);
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [search, setSearch] = useState("");
@@ -2690,6 +2700,7 @@ function ProductsTab({
                         product={p}
                         vendors={vendors}
                         canAuthor={canAuthor}
+                        labelPipelineEnabled={labelPipelineEnabled}
                         onSave={savePrice}
                         onInventoryChanged={load}
                         showToast={showToast}
@@ -3195,6 +3206,7 @@ function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) 
 }
 
 function ExpandedProduct({
+  labelPipelineEnabled = false,
   product,
   vendors,
   canAuthor = false,
@@ -3333,6 +3345,7 @@ function ExpandedProduct({
       {canAuthor && (
         <AutoReorderEditor product={product} vendors={vendors} showToast={showToast} onInventoryChanged={onInventoryChanged} />
       )}
+      {canAuthor && labelPipelineEnabled && <ProductLabelReview key={product.id} product={product} />}
       {product.vendorPricing.length > 0 && (
         <div style={{ marginBottom: 12 }}>
           {" "}

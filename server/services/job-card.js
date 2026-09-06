@@ -22,6 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
+const { reviewedWeather } = require('./product-label-weather');
 const { dispatchWithFallback } = require('./llm/call');
 const { getHourlyRainOutlook } = require('./weather-forecast');
 // The classifier that stamps service_records.service_line — a callback
@@ -779,11 +780,13 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
   };
 
   const verdicts = products.map((product) => {
-    const limits = productLimits(product);
+    const review = reviewedWeather(product);
+    if (review && !review.verified) return { productId: product.id, verdict: 'unknown', reason: 'Label review revoked or product changed' };
+    const limits = review?.limits || productLimits(product);
     const hasLimits = [limits.minTempF, limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
     if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: 'No limit on file' };
     // The catalog contract: unverified label values are not judged against.
-    if (!product.label_verified_at) return { productId: product.id, verdict: 'unknown', reason: 'Label limits not yet verified' };
+    if (!review && !product.label_verified_at) return { productId: product.id, verdict: 'unknown', reason: 'Label limits not yet verified' };
     if (!window.length) return { productId: product.id, verdict: 'unknown', reason: 'No forecast' };
     const reasons = [];
     const missing = [];
@@ -812,6 +815,7 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
     }
     if (reasons.length) return { productId: product.id, verdict: 'hold', reason: reasons.join(', ') };
     if (missing.length) return { productId: product.id, verdict: 'unknown', reason: `No ${missing.join(' / ')} forecast` };
+    if (review?.unresolved) return { productId: product.id, verdict: 'unknown', reason: 'Conditional label restrictions need review' };
     return { productId: product.id, verdict: 'ok', reason: null };
   });
 
@@ -832,7 +836,7 @@ const PRODUCT_COLUMNS = [
   'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz',
   'mixing_order_category', 'mixing_instructions', 'rainfast_minutes', 'rei_hours',
   'labeled_turf_species', 'excluded_turf_species', 'requires_surfactant', 'allows_surfactant',
-  'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
+  'label_url', 'sds_url', 'epa_reg_number', 'manufacturer', 'formulation', 'label_weather_review',
   'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'signal_word', 'ppe_text', 'ppe_required', 'reentry_text',
   'customer_safety_summary', 'pet_kid_guidance_text', 'service_report_summary',
   'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
@@ -1479,7 +1483,7 @@ function unselectedBaseBlock(plan, product) {
 
 async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
   const [product, svc] = await Promise.all([
-    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'rainfast_minutes').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
+    dbh('products_catalog').where({ id: productId }).where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); }).select('id', 'name', 'epa_reg_number', 'formulation', 'label_weather_review', 'category', 'application_method', 'analysis_n', 'analysis_p', 'analysis_k', 'default_rate_per_1000', 'rate_unit', 'default_rate', 'default_unit', 'inventory_on_hand', 'inventory_unit', 'best_price_amount_cached', 'label_verified_at', 'min_temp_f', 'max_temp_f', 'max_wind_mph', 'rain_free_hours', 'rainfast_minutes').first().catch((err) => { throw unavailable('Product catalog unavailable', err); }),
     serviceId
       ? dbh('scheduled_services as ss')
         .join('customers as c', 'ss.customer_id', 'c.id')

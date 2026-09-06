@@ -17,6 +17,39 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const jobCard = require('../services/job-card');
 
+describe('reviewed EPA weather evidence is separate from rate verification', () => {
+  afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; });
+  const { labelProductSnapshot } = require('../services/product-label-weather');
+  const absent = { status: 'not_stated', value: null, quote: '', page: null, note: '' };
+  function product() {
+    const p = { id: 'label-test', name: 'Synthetic product', epa_reg_number: '123-456', formulation: 'SC', label_verified_at: null };
+    p.label_weather_review = { active: { status: 'approved', productSnapshot: labelProductSnapshot(p), facts: {
+      minTempF: absent, maxTempF: absent, rainFreeHours: absent,
+      maxWindMph: { status: 'limit', value: 10, quote: 'Synthetic wind restriction.', page: 1, note: '' },
+    } } };
+    return p;
+  }
+  const now = new Date('2030-01-01T12:00:00Z');
+  const hourly = Array.from({ length: 4 }, (_, i) => ({ startTime: new Date(now.getTime() + i * 3600000).toISOString(), temperatureF: 80, windMph: 5, rainChance: 0 }));
+  const verdict = p => jobCard.buildSprayCheck({ products: [p], hourly, now }).verdicts[0].verdict;
+  test('reviewed limits enable weather only; gate off preserves the existing unknown', () => {
+    const p = product(); expect(verdict(p)).toBe('unknown');
+    process.env.GATE_LABEL_PIPELINE = 'true'; expect(verdict(p)).toBe('ok'); expect(p.label_verified_at).toBeNull();
+    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+  });
+  test('conditional evidence stays unknown; a known breach still holds', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    p.label_weather_review.active.facts.maxTempF = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
+    expect(verdict(p)).toBe('unknown');
+    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+  });
+  test('revoked or identity-stale evidence never falls back to a previously trusted general stamp', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product(); p.label_verified_at = '2030-01-01';
+    p.label_weather_review.active.status = 'revoked'; expect(verdict(p)).toBe('unknown');
+    p.label_weather_review.active.status = 'approved'; p.formulation = 'WG'; expect(verdict(p)).toBe('unknown');
+  });
+});
+
 const baseFacts = () => ({
   pets: '', petsSecured: '', gates: [], entry: '', parking: '', instructions: '',
   contactPreference: 'text', chemicalSensitivity: '', awayUntil: null, visitNotes: '',

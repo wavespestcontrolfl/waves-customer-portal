@@ -1,0 +1,44 @@
+const { PDFDocument } = require('pdf-lib');
+const { findEpaLabel, selectEpaSource, downloadEpaLabel } = require('../services/epa-product-label');
+const row = () => ({ eparegno: '123-456', productname: 'Synthetic product', product_status: 'Active', cancel_flag: 'No', pdffiles: [
+  { epa_reg_num: '123-456', pdffile: '000123-00456-20250101.pdf' },
+  { epa_reg_num: '123-456', pdffile: '000123-00456-20260101.pdf' },
+  { epa_reg_num: '987-654', pdffile: '000987-00654-20270101.pdf' },
+] });
+afterEach(() => jest.restoreAllMocks());
+test('selects latest exact-registration PDF and never persists company contacts', () => {
+  const entry = row(); entry.companyinfo = [{ contact_person: 'Synthetic contact' }];
+  const source = selectEpaSource({ items: [entry] }, '123-456');
+  expect(source.filename).toBe('000123-00456-20260101.pdf');
+  expect(JSON.stringify(source)).not.toContain('contact_person');
+});
+test.each(['../123-456', 'https://example.invalid', '123-456-789', 'N/A', '00123-456'])('rejects unsupported registration %s before fetch', async registration => {
+  const fetchMock = jest.spyOn(global, 'fetch');
+  await expect(findEpaLabel(registration)).rejects.toMatchObject({ statusCode: 422 });
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+test('rejects cancelled, duplicate, and mismatched registrations', () => {
+  expect(() => selectEpaSource({ items: [{ ...row(), cancel_flag: 'Yes' }] }, '123-456')).toThrow();
+  expect(() => selectEpaSource({ items: [row(), row()] }, '123-456')).toThrow();
+  expect(() => selectEpaSource({ items: [row()] }, '123-457')).toThrow();
+});
+test('cannot follow a response-provided arbitrary PDF URL', async () => {
+  const fetchMock = jest.spyOn(global, 'fetch');
+  await expect(downloadEpaLabel({ filename: '000123-00456-20260101.pdf', url: 'https://example.invalid/private' })).rejects.toThrow('Invalid EPA document');
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+test('downloads a bounded actual PDF, checks pages and hashes bytes', async () => {
+  const pdf = await PDFDocument.create(); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
+  const source = selectEpaSource({ items: [row()] }, '123-456');
+  const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(bytes));
+  const result = await downloadEpaLabel(source);
+  expect(result.pageCount).toBe(1); expect(result.sha256).toMatch(/^[a-f0-9]{64}$/);
+  expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
+});
+test('rejects HTML and oversized PDFs', async () => {
+  const source = selectEpaSource({ items: [row()] }, '123-456');
+  const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('<html>not a label</html>'));
+  await expect(downloadEpaLabel(source)).rejects.toThrow('did not return a PDF');
+  fetchMock.mockResolvedValue(new Response('%PDF-test', { headers: { 'content-length': String(9 * 1024 * 1024) } }));
+  await expect(downloadEpaLabel(source)).rejects.toThrow('exceeds the supported size');
+});
