@@ -500,7 +500,7 @@ describe('autonomous versus lane (pest showdown)', () => {
         }
       }
     }
-    const combos = Studio.PEST_VERSUS_PAIRS.length * 4; // 24 pairs x 4 cities
+    const combos = Studio.SHOWDOWN_BANK.length * 4; // 44 cards x 4 cities
     const lastSeen = new Map();
     let minGap = Infinity;
     cards.forEach((c, i) => {
@@ -1061,6 +1061,76 @@ describe('campaign lane skips recently published cards (Codex r3 on #3990)', () 
     const next = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-01'), { recent: new Set([`${first.topic}|${first.city}`]) });
     expect(`${next.topic}|${next.city}`).not.toBe(`${first.topic}|${first.city}`);
     expect(Studio.SEASONAL_AUTONOMOUS_TOPICS[7].some((t) => t.topic === next.topic)).toBe(true);
+  });
+});
+
+describe('showdown bank formats: myth vs fact + three signs (PR 3)', () => {
+  const etNoon = (iso) => new Date(`${iso}T16:00:00Z`);
+  const V = require('../services/social-media').validateContent;
+
+  test('the bank holds the 24 pairs plus 10 myths and 10 signs, unique keys, pairs in their original order, no two format cards adjacent', () => {
+    expect(Studio.PEST_MYTHS).toHaveLength(10);
+    expect(Studio.PEST_SIGNS).toHaveLength(10);
+    expect(Studio.SHOWDOWN_BANK).toHaveLength(44);
+    expect(new Set(Studio.SHOWDOWN_BANK.map((e) => e.key)).size).toBe(44);
+    expect(Studio.SHOWDOWN_BANK.filter((e) => !e.format).map((e) => e.key)).toEqual(Studio.PEST_VERSUS_PAIRS.map((p) => p.key));
+    const marks = Studio.SHOWDOWN_BANK.map((e) => (e.format ? 'F' : 'P')).join('');
+    expect(marks).not.toContain('FF');
+    expect(marks.slice(0, 8)).toContain('F'); // a follower sees a format change within the first month
+    for (const m of Studio.PEST_MYTHS) {
+      expect(m.format).toBe('myth');
+      expect(m.myth.length).toBeLessThanOrEqual(95);
+      expect(m.fact.length).toBeLessThanOrEqual(100);
+      expect(m.verdict.length).toBeLessThanOrEqual(90);
+    }
+    for (const g of Studio.PEST_SIGNS) {
+      expect(g.format).toBe('signs');
+      expect(g.signs).toHaveLength(3);
+      expect(g.verdict.length).toBeLessThanOrEqual(90);
+    }
+  });
+
+  test('every format draft passes the publish validator and carries the copy without the card', () => {
+    for (const entry of [...Studio.PEST_MYTHS, ...Studio.PEST_SIGNS]) {
+      const drafts = Studio.buildVersusDrafts(entry, 'Bradenton');
+      for (const [platform, text] of Object.entries(drafts)) {
+        expect({ key: entry.key, platform, issues: V(text, platform).issues }).toEqual({ key: entry.key, platform, issues: [] });
+        expect(text).toContain(entry.verdict);
+        if (entry.format === 'myth') expect(text).toContain(entry.myth);
+        else for (const sign of entry.signs) expect(text).toContain(sign);
+      }
+      expect(drafts.gbp).toContain('Bradenton');
+      expect(drafts.gbp).toContain('Schedule an inspection');
+      expect(drafts.instagram).toContain('#wavespestcontrol');
+    }
+  });
+
+  test('the lane fires format cards through the same plan shape: topic, sources, booking link, never season-gated', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const seen = { myth: null, signs: null };
+    for (let m = 1; m <= 12 && !(seen.myth && seen.signs); m++) {
+      for (const d of [2, 6, 10, 14, 18, 22, 26, 30]) {
+        if (m === 2 && d === 30) continue;
+        const plan = Studio.selectAutonomousVersusPlan(etNoon(`2026-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`));
+        if (plan?.versusPair?.format && !seen[plan.versusPair.format]) seen[plan.versusPair.format] = plan;
+      }
+    }
+    expect(seen.myth).not.toBeNull();
+    expect(seen.signs).not.toBeNull();
+    expect(seen.myth.topic).toBe(`Myth vs fact: ${seen.myth.versusPair.title}`);
+    expect(seen.signs.topic).toBe(seen.signs.versusPair.title);
+    for (const plan of [seen.myth, seen.signs]) {
+      expect(plan.angle).toBe('pest showdown');
+      expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/book/');
+      expect(plan.preview.sources[0].detail).toContain(plan.versusPair.verdict);
+      expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-01-02'))).toBeNull();
+      expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-08-02'))).toBeNull();
+    }
+    const card = Studio.buildVersusCardInput(seen.signs.versusPair, seen.signs);
+    expect(card.variant).toBe('versus');
+    expect(card.format).toBe('signs');
+    expect(card.signs).toHaveLength(3);
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
   });
 });
 

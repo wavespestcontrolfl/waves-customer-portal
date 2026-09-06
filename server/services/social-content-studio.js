@@ -509,6 +509,127 @@ const PEST_VERSUS_PAIRS = [
   },
 ];
 
+// "Myth vs fact" — one everyday belief, one plain correction. Same rules as
+// the pairs: visible facts only, no safety / timing / pricing language, and
+// nothing framed as a field observation. Myth and fact each ≤ ~90 chars so
+// both tiles hold them without eliding (the renderer copy-budget test walks
+// the whole bank).
+const PEST_MYTHS = [
+  { key: 'myth_bug_zappers_mosquitoes', service: 'mosquito', format: 'myth', title: 'Bug zappers and mosquitoes',
+    myth: 'A bug zapper on the lanai clears out the mosquitoes.',
+    fact: 'Zappers mostly catch moths and beetles; mosquitoes follow your breath and body heat.',
+    verdict: 'Skip the zapper. Dump standing water and run a fan instead.' },
+  { key: 'myth_citronella_plants', service: 'mosquito', format: 'myth', title: 'Citronella plants',
+    myth: 'A citronella plant by the door keeps mosquitoes away.',
+    fact: 'The living plant releases very little oil; the scent only works when leaves are crushed.',
+    verdict: 'Pretty plant, weak repellent. Water management does the heavy lifting.' },
+  { key: 'myth_clean_house_no_roaches', service: 'general pest', format: 'myth', title: 'Clean homes and roaches',
+    myth: 'Roaches only show up in dirty homes.',
+    fact: 'Florida roaches come in from outside for water and shelter; a spotless kitchen can still see them.',
+    verdict: 'Roaches follow moisture and gaps, not just crumbs.' },
+  { key: 'myth_termites_only_old_homes', service: 'termite', format: 'myth', title: 'Termites and new construction',
+    myth: 'A newer home does not need to think about termites.',
+    fact: 'Subterranean termites reach wood through soil; the age of the house does not matter to them.',
+    verdict: 'New build or old, termites follow the moisture and the wood.' },
+  { key: 'myth_brown_lawn_more_water', service: 'lawn care', format: 'myth', title: 'Brown spots and watering',
+    myth: 'A brown patch always means the lawn needs more water.',
+    fact: 'Chinch bugs, fungus, and mower stress all brown turf; overwatering feeds the fungus.',
+    verdict: 'Check the edge of the patch before you turn up the sprinklers.' },
+  { key: 'myth_palmetto_bug_not_roach', service: 'general pest', format: 'myth', title: 'The palmetto bug',
+    myth: 'A palmetto bug is a different insect from a roach.',
+    fact: 'Palmetto bug is the Florida nickname for the American cockroach and its big outdoor cousins.',
+    verdict: 'Same insect, friendlier name.' },
+  { key: 'myth_daddy_longlegs', service: 'general pest', format: 'myth', title: 'Daddy longlegs',
+    myth: 'Daddy longlegs are the most venomous spiders around.',
+    fact: 'The ones in your garage are harvestmen, not spiders, and they do not bite people.',
+    verdict: 'A lanai regular that earns its keep eating small insects.' },
+  { key: 'myth_rats_only_dirty', service: 'rodent', format: 'myth', title: 'Roof rats and tidy homes',
+    myth: 'Roof rats only bother homes with clutter and trash.',
+    fact: 'Roof rats climb palms, fruit trees, and utility lines into any attic with a gap.',
+    verdict: 'Trim branches off the roof and seal the gaps; tidiness alone does not stop them.' },
+  { key: 'myth_mowing_short', service: 'lawn care', format: 'myth', title: 'Mowing height',
+    myth: 'Cutting the lawn short means mowing less often.',
+    fact: 'St. Augustine scalped short loses shade on the soil, dries faster, and invites weeds.',
+    verdict: 'Keep St. Augustine tall; it shades out most weeds on its own.' },
+  { key: 'myth_dryer_sheets_wasps', service: 'general pest', format: 'myth', title: 'Dryer sheets and wasps',
+    myth: 'Dryer sheets under the patio table keep wasps off.',
+    fact: 'Paper wasps choose nest sites by shelter and sun, not by the smell of laundry.',
+    verdict: 'Knock down starter nests early in spring while they are the size of a quarter.' },
+];
+
+// "Three signs of …" — the checklist format. Every sign is something a
+// homeowner can see from the lanai or the driveway; the verdict says what to
+// do with it. Three signs, each ≤ ~60 chars.
+const PEST_SIGNS = [
+  { key: 'signs_roof_rats_attic', service: 'rodent', format: 'signs', title: 'Three signs of roof rats in the attic',
+    signs: ['Scratching or scurrying overhead after dark', 'Hollowed-out oranges or avocados under the tree', 'Greasy rub marks along a beam or pipe'],
+    verdict: 'Two of the three? Time to check the roofline for gaps.' },
+  { key: 'signs_subterranean_termites', service: 'termite', format: 'signs', title: 'Three signs of subterranean termites',
+    signs: ['Pencil-width mud tubes on the foundation', 'Paint that bubbles or looks water-stained', 'Discarded wings on a windowsill in spring'],
+    verdict: 'Mud tubes are the giveaway. Do not knock them down before someone looks.' },
+  { key: 'signs_chinch_bugs', service: 'lawn care', format: 'signs', title: 'Three signs of chinch bugs',
+    signs: ['Yellow-to-brown patches along hot, sunny edges', 'Patches grow outward week over week', 'Tiny black bugs with white wings at the patch edge'],
+    verdict: 'Float-test the green edge of the patch to confirm.' },
+  { key: 'signs_drywood_termites', service: 'termite', format: 'signs', title: 'Three signs of drywood termites',
+    signs: ['Small piles of sand-like pellets under a pinhole', 'Wood trim that sounds hollow when tapped', 'Swarmers at a window on a warm evening'],
+    verdict: 'Pellet piles that return after you sweep them mean an active gallery.' },
+  { key: 'signs_german_roaches', service: 'general pest', format: 'signs', title: 'Three signs of German roaches',
+    signs: ['Pepper-like specks inside cabinet corners', 'Small tan roaches near the fridge motor or dishwasher', 'Tiny brown egg cases tucked in cracks'],
+    verdict: 'They stay close to warmth and water. Check the appliances first.' },
+  { key: 'signs_large_patch', service: 'lawn care', format: 'signs', title: 'Three signs of large patch fungus',
+    signs: ['Round yellow-orange rings that widen', 'Blades pull free easily at the base', 'Shows up in cool, wet stretches'],
+    verdict: 'Water in the morning only and let the turf dry between cycles.' },
+  { key: 'signs_ghost_ants', service: 'general pest', format: 'signs', title: 'Three signs of ghost ants',
+    signs: ['Barely visible ants that appear to float', 'Trails along the counter to the sink', 'Numbers spike after a dry spell'],
+    verdict: 'They are chasing water. Fix the drip and the trail thins out.' },
+  { key: 'signs_mosquito_breeding', service: 'mosquito', format: 'signs', title: 'Three signs mosquitoes are breeding at home',
+    signs: ['Wrigglers in a plant saucer or bird bath', 'Bites in the shade in the middle of the day', 'Water sitting in gutters or a tarp after rain'],
+    verdict: 'Tip and toss every container once a week.' },
+  { key: 'signs_whitefly', service: 'tree & shrub', format: 'signs', title: 'Three signs of whitefly on ficus and gumbo limbo',
+    signs: ['A white cloud rises when you shake a branch', 'Sticky leaves and black sooty mold below', 'Leaves yellowing and dropping from the inside out'],
+    verdict: 'Check the underside of the leaves for spiral egg patterns.' },
+  { key: 'signs_paper_wasps', service: 'general pest', format: 'signs', title: 'Three signs paper wasps are settling in',
+    signs: ['A grey comb the size of a coin under an eave', 'Wasps hovering at the same corner every morning', 'Wasps chewing on a wooden fence or deck rail'],
+    verdict: 'Starter nests are easiest to deal with in early spring.' },
+];
+
+// The showdown lane's fire bank. Pairs are the backbone; myth and signs cards
+// (alternating) are spread evenly between them so a follower sees a format
+// change every second or third fire instead of a run of one format. Order is
+// part of the contract: the lane indexes this bank with a fixed modulus (see
+// selectAutonomousVersusPlan), so lists only ever grow at their END — a new
+// entry in the middle would remap every card that follows it.
+const SHOWDOWN_BANK = (() => {
+  const formats = [];
+  for (let i = 0; i < Math.max(PEST_MYTHS.length, PEST_SIGNS.length); i += 1) {
+    if (PEST_MYTHS[i]) formats.push(PEST_MYTHS[i]);
+    if (PEST_SIGNS[i]) formats.push(PEST_SIGNS[i]);
+  }
+  const bank = [];
+  let p = 0;
+  let q = 0;
+  while (p < PEST_VERSUS_PAIRS.length || q < formats.length) {
+    const pairIsBehind = q >= formats.length
+      || (p < PEST_VERSUS_PAIRS.length && p * formats.length <= q * PEST_VERSUS_PAIRS.length);
+    bank.push(pairIsBehind ? PEST_VERSUS_PAIRS[p++] : formats[q++]);
+  }
+  return bank;
+})();
+
+// What a showdown entry is called in the run record, the caption hook, and
+// the hashtag picker.
+function showdownTopic(entry = {}) {
+  if (entry.format === 'myth') return `Myth vs fact: ${entry.title}`;
+  if (entry.format === 'signs') return entry.title;
+  return `${entry.left?.name} vs ${entry.right?.name}`;
+}
+
+function showdownSourceDetail(entry = {}) {
+  if (entry.format === 'myth') return `Myth: ${entry.myth} Fact: ${entry.fact} ${entry.verdict}`;
+  if (entry.format === 'signs') return `${entry.signs.join('. ')}. ${entry.verdict}`;
+  return `${entry.verdict} ${entry.left.name}: ${entry.left.points.join('; ')}. ${entry.right.name}: ${entry.right.points.join('; ')}.`;
+}
+
 function toJson(value, fallback) {
   if (value == null) return fallback;
   if (Array.isArray(value) || typeof value === 'object') return value;
@@ -1145,6 +1266,11 @@ function buildVersusCardInput(pair = {}, input = {}) {
     // roach, flea, honey bee) belong to specialty services, and stamping
     // "General Pest" on them would imply the recurring program covers them.
     service: pair.label || ((input.service || pair.service) === 'general pest' ? 'Pest ID' : titleCase(input.service || pair.service || 'Pest ID')),
+    format: pair.format,
+    title: pair.title,
+    myth: pair.myth,
+    fact: pair.fact,
+    signs: pair.signs,
     left: pair.left,
     right: pair.right,
     verdict: pair.verdict,
@@ -1540,7 +1666,33 @@ async function selectAutonomousReviewPlan(now = new Date()) {
   };
 }
 
+function buildMythDrafts(entry, city) {
+  const hook = `Myth or fact? "${entry.myth}"`;
+  const fact = `Fact: ${entry.fact}`;
+  return {
+    facebook: `${hook}\n\n${fact}\n\n${entry.verdict} ${city} homeowners: not sure what you are seeing? A quick inspection settles it.`,
+    instagram: `${hook}\n\n${fact}\n\n${entry.verdict} Heard this one before?\n\n${hashtags({ topic: entry.title, city, service: entry.service })}`,
+    linkedin: `Pest myth, corrected. "${entry.myth}" ${entry.fact} ${entry.verdict} Waves turns local pest pressure and service data into practical homeowner guidance.`,
+    // GBP can publish text-only (media retry path), so the post carries the
+    // myth AND the fact without the card.
+    gbp: `${city} homeowners, myth or fact? "${entry.myth}" ${fact} ${entry.verdict} ${ctaText('book inspection')}.`,
+  };
+}
+
+function buildSignsDrafts(entry, city) {
+  const numbered = entry.signs.map((sign, i) => `${i + 1}. ${sign}`);
+  const sentence = `${entry.signs.join('. ')}.`;
+  return {
+    facebook: `${entry.title}, ${city} edition:\n\n${numbered.join('\n')}\n\n${entry.verdict} Seeing one of these? A quick inspection settles it.`,
+    instagram: `${entry.title}:\n\n${numbered.join('\n')}\n\n${entry.verdict} Which one have you noticed?\n\n${hashtags({ topic: entry.title, city, service: entry.service })}`,
+    linkedin: `${entry.title}. ${sentence} ${entry.verdict} Waves turns local pest pressure and service data into practical homeowner guidance.`,
+    gbp: `${city} homeowners: ${entry.title.toLowerCase()}. ${sentence} ${entry.verdict} ${ctaText('book inspection')}.`,
+  };
+}
+
 function buildVersusDrafts(pair, city) {
+  if (pair.format === 'myth') return buildMythDrafts(pair, city);
+  if (pair.format === 'signs') return buildSignsDrafts(pair, city);
   const leftName = pair.left.name;
   const rightName = pair.right.name;
   // Neutral comparison hook — never assert the two LOOK similar (some pairs
@@ -1586,16 +1738,16 @@ function selectAutonomousVersusPlan(now = new Date()) {
   // yield to the (already seasonal) campaign lane. Filtering the bank first
   // would shrink the modulus and shift the survivors' indices at every season
   // boundary, replaying the prior month's cards within days.
-  const pair = PEST_VERSUS_PAIRS[seq % PEST_VERSUS_PAIRS.length];
+  const pair = SHOWDOWN_BANK[seq % SHOWDOWN_BANK.length];
   if (pair.months && !pair.months.includes(month)) return null;
   // The city also advances every fire, phase-shifted one slot per full pair
   // cycle: bare seq % 4 shares a factor with the pair bank (6 then, 24 now),
   // so most pair+city combinations could never occur and identical cards
   // would recur early; the shift walks every pair×city combination (24 pairs
   // × 4 cities = 96 fires, about a year) before any repeat.
-  const pairCycle = Math.floor(seq / PEST_VERSUS_PAIRS.length);
+  const pairCycle = Math.floor(seq / SHOWDOWN_BANK.length);
   const city = WAVES_LOCATIONS[(seq + pairCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
-  const topic = `${pair.left.name} vs ${pair.right.name}`;
+  const topic = showdownTopic(pair);
   const drafts = buildVersusDrafts(pair, city);
   const channels = AUTONOMOUS_FLAGS.channels;
   return {
@@ -1616,7 +1768,7 @@ function selectAutonomousVersusPlan(now = new Date()) {
       sources: [{
         type: 'versus_pair',
         label: topic,
-        detail: `${pair.verdict} ${pair.left.name}: ${pair.left.points.join('; ')}. ${pair.right.name}: ${pair.right.points.join('; ')}.`,
+        detail: showdownSourceDetail(pair),
       }],
       fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
     },
@@ -1637,7 +1789,7 @@ function selectAutonomousVersusPlan(now = new Date()) {
 function versusPublishBlocker(input, now = new Date()) {
   const key = input?.versusPair?.key;
   if (!key) return null;
-  const months = PEST_VERSUS_PAIRS.find((p) => p.key === key)?.months;
+  const months = SHOWDOWN_BANK.find((p) => p.key === key)?.months;
   if (!Array.isArray(months) || !months.length) return null;
   if (months.includes(etParts(now).month)) return null;
   return 'versus pair is out of season — reject this draft so the lane can regenerate';
@@ -3867,6 +4019,10 @@ module.exports = {
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,
   PEST_VERSUS_PAIRS,
+  PEST_MYTHS,
+  PEST_SIGNS,
+  SHOWDOWN_BANK,
+  showdownTopic,
   SEASONAL_AUTONOMOUS_TOPICS,
   buildVersusCardInput,
   buildVersusDrafts,
