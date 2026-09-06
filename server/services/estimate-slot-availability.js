@@ -344,12 +344,9 @@ function selectedGeneratedLawnFrequency(estimate = {}, estData = {}, selectedFre
 }
 
 function storedRecurringRowsForEstimate(estimate = {}, estData = {}) {
-  const lists = [
-    estData.result?.recurring?.services,
-    estData.recurring?.services,
-    Array.isArray(estData.services) ? estData.services.filter((svc) => svc.recurring || svc.frequency || svc.visitsPerYear || svc.visits) : null,
-  ];
-  const rows = lists.find((list) => Array.isArray(list) && list.length) || [];
+  // Use the acceptance reader so nested/engine rows and deduplicated aliases
+  // describe the same service mix here and during conversion.
+  const rows = require('./estimate-converter').recurringServicesFromEstimateData(estData);
   if (rows.length) return rows.map((row) => ({ ...row }));
 
   if (estimate.service_interest) {
@@ -431,11 +428,16 @@ function selectedPricingFrequency(estimate = {}, estData = {}, selectedFrequency
 
 function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '') {
   const frequency = selectedPricingFrequency(estimate, estData, selectedFrequency);
-  if (Array.isArray(frequency?.perServiceTreatments) && frequency.perServiceTreatments.length) {
-    return frequency.perServiceTreatments.map((row) => ({ ...row }));
-  }
+  const stored = storedRecurringRowsForEstimate(estimate, estData);
+  if (!Array.isArray(frequency?.perServiceTreatments) || !frequency.perServiceTreatments.length) return stored;
 
-  return storedRecurringRowsForEstimate(estimate, estData);
+  // A generated lawn tier describes only lawn. Apply its selected cadence
+  // without interpreting omitted companions as customer removals. Keep the
+  // converter's precise identities: bait, rental and bond are distinct rows.
+  const { recurringServiceKey } = require('./estimate-converter');
+  const selected = frequency.perServiceTreatments.map((row) => ({ ...row }));
+  const selectedKeys = new Set(selected.map(recurringServiceKey));
+  return [...selected, ...stored.filter((row) => !selectedKeys.has(recurringServiceKey(row)))];
 }
 
 function compactServiceLabel(label) {

@@ -67,7 +67,13 @@ already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
-`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*` (the
+`/api/public/estimates/:token/find-slots`,
+`/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
+service profile uses the converter's canonical stored/engine service rows.
+Generated or saved tier selections replace the listed service cadences and
+retain omitted companion programs; choosing a tier is not a service removal.
+Existing request fields, token/signature guards, rate limits, privacy headers,
+and booking duration policy apply), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
 the queued PDF / report-email renders that share `buildReportV1Data` —
 renders the report's IDENTITY facts from the completion-time snapshot on
