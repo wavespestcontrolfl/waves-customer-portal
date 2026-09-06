@@ -172,6 +172,26 @@ describe('the conversation side', () => {
     expect(builder.whereRaw.mock.calls.some(([sql]) => String(sql).includes('relay_reconnect_ms'))).toBe(false);
   });
 
+  test.each(['ai_transferred', 'voicemail'])('a silent resumed close records prior promises after the outcome becomes %s', async (callOutcome) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const row = { call_outcome: callOutcome, transcription: null, metadata: {
+      relay_session_claim_owner: 'nonce-2', relay_reconnects: 1,
+      relay_segments: [{ generation: 1, session_key: 'nonce-1', text: 'Agent: I will send you an estimate.',
+        promises: [{ kind: 'send_estimate', verdict: true }] }],
+    } };
+    primeDb({ firstRow: row, updateImpl: jest.fn(async () => 0) });
+    const convo = convoWithTurns({ sessionKey: 'nonce-2' });
+    convo._transcript = [];
+    convo._resume = { reconnects: 1, callerTurns: [] };
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    await convo.end('ws_close');
+    // The production writer reads the durable segments and eligibility under
+    // its row lock even though this close has no transcript of its own.
+    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      callSid: 'CA-rec', sessionKey: 'nonce-2',
+    }));
+  });
+
   test('a superseded socket still appends its segment (recomposing a finalized call), resyncs the message row, then skips every column write', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { syncVoiceMessageForCall } = require('../services/conversations');

@@ -51,7 +51,8 @@ describe('relay session → owed commitments', () => {
     expect(reconcileAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(reconcileAt);
     const site = conversation.slice(recordAt - 1500, recordAt + 200);
-    expect(site).toContain('if ((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) {'); // the transfer's salvage qualifies too (PR 2A codex r2 P2); a resumed socket's row-only composition too (PR 2B)
+    // Close-time eligibility is exercised by voice-relay-segment-close and
+    // the PostgreSQL segment suite, including a silent resumed transfer.
     expect(site).toContain('let commitmentsTranscript = transcriptUpdate ? transcriptUpdate.transcription : null;'); // the scrubbed transcript the reconcile wrote… or, on a reconnected call, the persisted composed one (PR 2B)
     const helperAt = conversation.indexOf('async _recordCommitments({ transcript, sessionKey, promises = this._promises }) {');
     expect(helperAt).toBeGreaterThan(-1);

@@ -1524,7 +1524,6 @@ class RelayConversation {
    * foreign owner.
    */
   async _recordCommitments({ transcript, sessionKey, promises = this._promises }) {
-    if (!transcript) return;
     try {
       const { isEnabled } = require('../../config/feature-gates');
       if (!isEnabled('callCommitments')) return;
@@ -2183,7 +2182,10 @@ class RelayConversation {
         // and the sandbox record nothing, as before.
         const transferSalvaged = salvaged > 0 && this.sandbox !== true
           && (this._transferRequested === true || (resume.reconnects > 0));
-        if ((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) {
+        if (((updated || transferSalvaged) && (hasTranscript || composedFromRowOnly)) || (recoveryOn && this._resume)) {
+          // A silent resumed leg can finalize a transfer without writing any
+          // transcript. The locked writer still consumes earlier durable
+          // segments and checks their now-final outcome for eligibility.
           // PR 2B: on a reconnected call the persisted transcript is the
           // composed one (all segments); the commitments pass reads THAT
           // under the same owner fence, so segment 1's promises reach Owed

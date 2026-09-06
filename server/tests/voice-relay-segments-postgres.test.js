@@ -182,7 +182,7 @@ postgres('atomic relay segment append and composition', () => {
       promises: [{ kind: 'send_estimate', verdict: true }] });
     await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: outcome,
       metadata: { relay_session_claim_owner: 'a', relay_segments: [segment], ...evidence } });
-    expect(await recordRelayCommitments(db, { callSid: 'CA-fixture', sessionKey: 'a', transcript: segment.text }))
+    expect(await recordRelayCommitments(db, { callSid: 'CA-fixture', sessionKey: 'a', transcript: null }))
       .toMatchObject({ written: expected });
     expect(await db('call_commitments').select()).toHaveLength(expected);
   });
