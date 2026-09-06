@@ -714,7 +714,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
         const confirmed = await require('../services/seo/link-execution-authority').reconcileOwnerPlacement(trx, { prospectId: current.id, status: patch.status, attemptId: req.body.submission_attempt_id || null, notSubmitted: negativeVerdict, liveUrl: patch.live_url || current.live_url, targetPage: patch.target_page, actorId: req.technician?.id || null });
         if (!confirmed.ok) return { reconciliationError: confirmed.error };
         if (verdict === 'placed') patch.status = confirmed.status;
-        if (negativeVerdict) await require('../services/seo/link-registry').settleRetiredPlacements(trx, { prospectIds: [current.id] });
+        await require('../services/seo/link-registry').settleRetiredPlacements(trx, { prospectIds: [current.id] });
       }
       const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
       return { row };

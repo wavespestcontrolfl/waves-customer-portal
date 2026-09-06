@@ -276,6 +276,35 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       assert.equal(moved.prospect.location_key, p.location_key);
     } finally { await moving.rollback(); active = trx; }
     console.log('PASS exact/canonical restored-location collisions and simultaneous page move return 409 without writes');
+    for (const status of ['prospect', 'live', 'indexed']) {
+      const check = await trx.transaction(); active = check;
+      try {
+        const successorId = randomUUID();
+        const predecessor = await check('seo_link_acquisition_paths').where({ id: pathId }).first();
+        await check('seo_link_acquisition_paths').insert({ ...predecessor, id: successorId, path_key: `successor:${successorId}`, submission_url: `https://${domain}/successor` });
+        await check('seo_link_acquisition_paths').where({ id: pathId }).update({ superseded_by: successorId });
+        await check('seo_link_domains').where({ id }).update({ best_path_id: successorId });
+        await check('seo_link_prospects').where({ id: p.id }).update({ status, outreach_status: 'drafted', outreach_sent_at: null, outreach_subject: 'Retired path draft', outreach_body: 'Retired path body' });
+        const beforeAttempt = await check('seo_link_attempts').where({ id: rejectedAttempt }).first();
+        const response = await confirm({ live_url: `https://www.${domain}/confirmed` });
+        const placed = await check('seo_link_prospects').where({ id: p.id }).first();
+        assert.deepEqual(response.prospect, placed);
+        assert.equal(placed.path_id, successorId);
+        assert.equal(placed.target_url, `https://${domain}/successor`);
+        assert.equal(placed.status, status === 'prospect' ? 'placed' : status);
+        assert.equal(placed.live_url, `https://www.${domain}/confirmed`);
+        assert.equal(placed.outreach_status, 'none');
+        assert.equal(placed.outreach_body, null);
+        const afterAttempt = await check('seo_link_attempts').where({ id: rejectedAttempt }).first();
+        assert.equal(afterAttempt.outcome, 'placed');
+        assert.equal(afterAttempt.path_id, pathId);
+        assert.deepEqual(afterAttempt.detail.citation, beforeAttempt.detail.citation);
+        assert.equal((await check('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_reason, 'placed');
+        assert.equal((await check('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 1);
+        await assert.rejects(confirm(), /409/);
+      } finally { await check.rollback(); active = trx; }
+    }
+    console.log('PASS positive owner verdict settles retired paths, clears stale drafts and preserves submitted evidence and lifecycle');
     assert.equal((await confirm({ live_url: `https://www.${domain}/confirmed` })).prospect.status, 'live');
     assert.equal((await trx('seo_link_domains').where({ id }).first()).agent_state, 'rejected');
     assert.equal((await Q.listOwnerQueue(proxy)).cards.length, 0);
