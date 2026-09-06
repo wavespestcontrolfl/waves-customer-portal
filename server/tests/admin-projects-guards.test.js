@@ -540,5 +540,12 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
     expect(scheduleAt).toBeGreaterThan(flipAt);
     expect(scheduleAt).toBeLessThan(flipEnd);
     expect(completion.slice(flipAt, scheduleAt)).toContain("!== 'rescheduled'");
+    // The transition writes the recap flow's durable owed marker inside the
+    // transaction, an unsettled re-close retries on it, and the hook clears
+    // it after commit unless the hand-off bell was lost (pre-push P1).
+    expect(completion.slice(flipAt, scheduleAt)).toContain('completion_supplies_owed: true');
+    expect(completion.slice(flipEnd - 400, flipEnd)).toContain('else if (completionSuppliesOwed(serviceRecord))');
+    expect(completion.slice(consumeAt)).toContain("- 'completion_supplies_owed'");
+    expect(completion.slice(consumeAt)).toContain("e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed'");
   });
 });

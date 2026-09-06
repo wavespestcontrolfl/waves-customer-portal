@@ -557,6 +557,17 @@ function buildServiceRecordProjectCompletionUpdate({
   };
 }
 
+// The recap flow's durable "this completion still owes the kit" marker
+// (pest-recap.js / admin-dispatch.js recapSuppliesOwed), read off the locked
+// service_records row. A malformed column establishes nothing: fail closed.
+function completionSuppliesOwed(serviceRecord = null) {
+  if (!serviceRecord) return false;
+  try {
+    const flags = typeof serviceRecord.field_flags === 'string' ? JSON.parse(serviceRecord.field_flags) : (serviceRecord.field_flags || {});
+    return flags.completion_supplies_owed === true;
+  } catch { return false; }
+}
+
 async function completeProjectBackedService({
   projectId,
   actorId = null,
@@ -920,11 +931,21 @@ async function completeProjectBackedService({
         trx,
       });
       postCommitTrackServiceId = scheduledService.id;
-      // Identity from the frozen record + locked project, not the mutable
-      // scheduled_services row / live profile (GH codex #3996 r2 P2).
+      // This transition owes the kit: the same durable service_records
+      // marker the recap flow writes (pest-recap.js), so a process death
+      // between this commit and the post-commit hook is retried by the next
+      // close of this project instead of lost (pre-push codex P1).
       if (String(scheduledService.status || '').toLowerCase() !== 'rescheduled') {
+        if (serviceRecordCols.field_flags) {
+          await trx('service_records').where({ id: serviceRecord.id }).update({
+            field_flags: trx.raw("COALESCE(field_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ completion_supplies_owed: true })]),
+          });
+        }
         postCommitConsumption = { scheduledService, serviceRecord, project };
       }
+    } else if (completionSuppliesOwed(serviceRecord)) {
+      // Re-close of a visit an earlier close completed but never settled.
+      postCommitConsumption = { scheduledService, serviceRecord, project };
     }
 
     const projectUpdate = {
@@ -985,7 +1006,7 @@ async function completeProjectBackedService({
     const serviceType = serviceRecord?.service_type || scheduledService.service_type || null;
     try {
       const { consumeCompletionSupplies } = require('./supplies-consumption');
-      await consumeCompletionSupplies(knex, {
+      const consumption = await consumeCompletionSupplies(knex, {
         scheduledServiceId: scheduledService.id,
         serviceRecordId: serviceRecord?.id || null,
         customerId: scheduledService.customer_id || null,
@@ -994,6 +1015,14 @@ async function completeProjectBackedService({
         serviceType,
         projectType: project.project_type || null,
       });
+      // Clear the owed marker once settled — unless the hand-off bell was
+      // LOST: a landed bell means staff adjust by hand, so a retry must not
+      // deduct on top of their correction; only a miss nobody heard about
+      // keeps the marker for the next close (same rule as the recap route).
+      const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed');
+      if (serviceRecord?.id && !handoffLost) {
+        await knex('service_records').where({ id: serviceRecord.id }).update({ field_flags: knex.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
+      }
     } catch (err) {
       logger.error(`[project-completion] completion supplies consumption failed for ${scheduledService.id}: ${err.message}`);
     }
