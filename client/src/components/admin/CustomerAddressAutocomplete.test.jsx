@@ -125,3 +125,8 @@ it('initializes after a Maps download takes longer than eight seconds', () => {
   expect(Autocomplete).toHaveBeenCalledTimes(1);
   script.remove();
 });
+
+it('retains Enter submission for existing autocomplete consumers', () => {
+  render(<AddressAutocomplete aria-label="Legacy street" value="typed address" onChange={() => {}} />);
+  expect(fireEvent.keyDown(screen.getByLabelText('Legacy street'), { key: 'Enter' })).toBe(true);
+});

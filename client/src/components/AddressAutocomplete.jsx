@@ -182,7 +182,7 @@ export default function AddressAutocomplete({
       }}
       onKeyDown={(e) => {
         // Google handles selection itself; Enter must not also submit the form.
-        if (e.key === 'Enter' && acRef.current) e.preventDefault();
+        if (!geocodeOnBlur && e.key === 'Enter' && acRef.current) e.preventDefault();
       }}
       onChange={(e) => onChange?.(e.target.value)}
       onBlur={() => {
