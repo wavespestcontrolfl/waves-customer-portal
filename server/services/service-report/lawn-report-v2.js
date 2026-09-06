@@ -587,7 +587,13 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       const predicate = match[0].startsWith('under') && match[0].endsWith('ing')
         ? after.replace(/^\s+(?:and|or|nor)\s+(?:[a-z'’-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ')
         : after;
+      // Monitoring/prevention instructions and conditional diagnoses are not
+      // present moisture evidence. Scope these qualifiers to this occurrence;
+      // a separate observed diagnosis must still produce the coverage warning.
+      const nonCurrent = /\b(?:monitor(?:ing)?|watch(?:ing)?|check(?:ing)?|look(?:ing)?)\s+(?:out\s+)?for\b|\b(?:prevent(?:ing)?|avoid(?:ing)?|risk|potential|possible|if|unless|could|may|might|would|will|should)\b/.test(before)
+        || /^\s+(?:(?:symptoms?|signs?)\s+)?(?:(?:can|could|may|might|would|will|should)\s+(?:\w+\s+)?(?:be|become|develop|occur|emerge|appear|arise|return|cause|explain)\b|(?:is|remains?)\s+(?:possible|potential|expected|a risk)\b)/.test(predicate);
       return !/\b(?:no|not|never|neither|nor|without|[a-z]+n['’]t|cannot|free of|absence of|exclude[ds]?|ruled out|inconsistent with)\b/.test(before)
+        && !nonCurrent
         && !/^\s+(?:(?!(?:and|or|nor|with|without|because|due|from|not|never|neither)\b)[a-z'’-]+\s+)*?(?:absent|unlikely|excluded|inconsistent with|ruled out|no longer|(?:not|never|neither|[a-z]+n['’]t|cannot)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
     }));
   const drySignal = explicitMoistureSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)

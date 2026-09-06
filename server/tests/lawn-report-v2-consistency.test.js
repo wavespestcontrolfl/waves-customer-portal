@@ -276,6 +276,21 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Underwatering was considered but not observed.',
     'Underwatering was considered, but not currently evident.',
     'Underwatering was considered, but it hasn’t been observed.',
+    'No visible moisture stress. Continue monitoring for underwatering during hot weather.',
+    'Monitor for under-watering during hot weather.',
+    'Watch for signs of underwatering next week.',
+    'Check for underwatering if hot weather continues.',
+    'Maintain watering to prevent underwatering.',
+    'There is a risk of underwatering during hot weather.',
+    'If underwatering develops, check the sprinklers.',
+    'The lawn could become under-watered next week.',
+    'The lawn may be under-watered if hot weather continues.',
+    'Underwatering could develop during hot weather.',
+    'Underwatering may become visible next week.',
+    'Underwatering will occur if watering stops.',
+    'Underwatering is possible during hot weather.',
+    'Underwatering would explain future curling.',
+    'Monitor for sprinklers not reaching the pavement edge.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(false);
@@ -313,6 +328,9 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Tan blades suggest the sprinkler does not reach that zone.',
     'We observed underwatering but excluded disease.',
     'We observed underwatering but not disease.',
+    'Monitor for underwatering in the center; underwatering is visible along the pavement.',
+    'Underwatering is visible along the pavement. Monitor for additional symptoms.',
+    'Visible underwatering may require a sprinkler adjustment.',
   ])('preserves moisture evidence in %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(true);
