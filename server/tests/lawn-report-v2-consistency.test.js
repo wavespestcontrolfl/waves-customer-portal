@@ -293,6 +293,19 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Monitor for sprinklers not reaching the pavement edge.',
     'Underwatering, disease, and insect damage were not observed.',
     'Underwatering symptoms, such as curling, were not observed.',
+    'Previously under-watered turf has recovered.',
+    'Formerly under-watered turf is now healthy.',
+    'Underwatering has resolved.',
+    'Underwatering symptoms have cleared.',
+    'Underwatering was corrected after the last visit.',
+    'It is unclear whether underwatering is present.',
+    'There is insufficient evidence to conclude the lawn is under-watered.',
+    'It is uncertain whether the lawn is under-watered.',
+    'Underwatering cannot be confirmed.',
+    'Underwatering is unconfirmed.',
+    'Evidence for underwatering is inconclusive.',
+    'No evidence that the sprinkler heads are not reaching the edge.',
+    'Monitor for sprinkler heads not reaching the pavement edge.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(false);
@@ -333,6 +346,13 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Monitor for underwatering in the center; underwatering is visible along the pavement.',
     'Underwatering is visible along the pavement. Monitor for additional symptoms.',
     'Visible underwatering may require a sprinkler adjustment.',
+    'Tan blades and curling suggest the sprinkler heads aren’t reaching that zone.',
+    'Tan blades suggest the sprinkler head is not reaching that zone.',
+    'Tan blades suggest the irrigation heads do not cover that zone.',
+    'Previously under-watered turf has recovered, but underwatering is visible along the pavement.',
+    'Underwatering has resolved in the center; the edges remain under-watered.',
+    'It is unclear whether disease is present, but the turf is under-watered.',
+    'Underwatering is visible. There is insufficient evidence of disease.',
   ])('preserves moisture evidence in %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(true);
