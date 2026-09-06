@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-due');
 /**
  * Intelligence Bar — Schedule & Dispatch Tools
  * server/services/intelligence-bar/schedule-tools.js
@@ -1110,6 +1111,7 @@ async function moveStopsToDay(input, actionContext = {}) {
       )
         .update({
           scheduled_date: dateStr,
+          ...recurringDispatchDuePatch(s, { scheduled_date: dateStr }),
           ...(c.observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
           // Old day's sequence number is meaningless on the new date — NULL
           // appends the stop after the target day's ordered run.

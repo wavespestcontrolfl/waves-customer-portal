@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const crypto = require('crypto');
 const db = require('../models/db');
@@ -1161,8 +1162,9 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: landedStatus,
-      ...(service.recurring_dispatch_due_date && initiatedBy !== 'auto_dispatch'
-        ? { recurring_dispatch_due_date: (win.start || service.window_start) ? null : newDate } : {}),
+      ...(initiatedBy !== 'auto_dispatch' ? recurringDispatchDuePatch(service, {
+        scheduled_date: newDate, window_start: win.start || service.window_start,
+      }) : {}),
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
       // A this-visit-only DATE move of a cadence visit is a deliberate
       // exception to the series — see dateExceptionStamp.
@@ -2643,9 +2645,8 @@ class SmartRebooker {
         // its dispatch obligation. Use the final window after clash handling.
         const awaitingPlacement = !updateData.window_start
           && (deferOccurrence || !!sib.recurring_dispatch_due_date);
-        if (deferFuturePlacement || sib.recurring_dispatch_due_date) {
-          updateData.recurring_dispatch_due_date = awaitingPlacement ? date : null;
-        }
+        if (deferOccurrence) updateData.recurring_dispatch_due_date = date;
+        else Object.assign(updateData, recurringDispatchDuePatch(sib, updateData));
         if (awaitingPlacement) {
           updateData.time_window = null;
           updateData.window_display = null;
