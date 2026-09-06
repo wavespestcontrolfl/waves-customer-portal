@@ -247,6 +247,9 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Underwatering has not been observed.',
     'Underwatering hasn’t been observed.',
     'Underwatering was ruled out.',
+    'Underwatering has been ruled out.',
+    'Underwatering is not indicated.',
+    'Underwatering was not detected.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(false);
