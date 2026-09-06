@@ -7232,7 +7232,9 @@ function PillSelector({ options, value, onChange, multiple = false }) {
       {options.map(o => {
         const active = isActive(o.value);
         return (
-          <button data-glass-accent={active ? '' : undefined} key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
+          // Active = gold accent surface; inactive = glass chip (the theme owns
+          // both surfaces, so the inline background is the non-glass fallback).
+          <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} className="pill-chip" key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
             ...PORTAL_BUTTON_BASE,
             minHeight: 44,
             padding: '8px 12px',
@@ -8097,15 +8099,18 @@ function PropertyTab({ customer }) {
                 updateField('petsStructured', arr);
               };
               return (
-                <div key={idx} style={{
+                // Glass sub-panel, not a flat white box inside a glass card
+                // (owner 2026-09-06: the pet cards were "not glass UI").
+                <div key={idx} data-glass="soft" style={{
                   marginBottom: 14,
-                  padding: 14,
-                  borderRadius: 8,
-                  background: '#fff',
+                  padding: 16,
+                  borderRadius: 12,
+                  background: subtle,
                   border: '1px solid #E7E2D7',
                 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 12 }}>
-                    Pet {idx + 1}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                    <GlassTile name="paw" size={32} />
+                    <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Pet {idx + 1}</div>
                   </div>
                   <div style={fieldGrid}>
                     <div>
@@ -8143,7 +8148,7 @@ function PropertyTab({ customer }) {
                       <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={['Dog', 'Cat', 'Other'].map(t => ({ value: t, label: t }))} />
                     </div>
                     <div>
-                      <label style={labelStyle}><Icon name="map" size={14} strokeWidth={2} />Location</label>
+                      <label style={labelStyle}><Icon name="map" size={14} strokeWidth={2} style={{ marginRight: 6 }} />Location</label>
                       <PillSelector value={pet.indoor} onChange={v => updatePet('indoor', v)} options={['Indoor', 'Outdoor', 'Both'].map(t => ({ value: t, label: t }))} />
                     </div>
                     <div>
@@ -8246,7 +8251,8 @@ function PropertyTab({ customer }) {
                 .filter(Boolean);
               const active = days.includes(day);
               return (
-                <button data-glass-accent={active ? '' : undefined} key={day} type="button" aria-pressed={active} onClick={() => {
+                // Same surfaces as PillSelector: gold accent when active, glass chip otherwise.
+                <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} className="pill-chip" key={day} type="button" aria-pressed={active} onClick={() => {
                   const next = active ? days.filter(d => d !== day) : [...days, day];
                   updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
                 }} style={{

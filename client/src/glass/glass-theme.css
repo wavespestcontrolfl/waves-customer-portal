@@ -460,8 +460,18 @@ html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
 html[data-glass-theme] button:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
 html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
 html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
+/* Pill pickers (PillSelector + the Watering Days loop) keep one 44px row
+   height in BOTH states — the generic 40px chip minimum would otherwise make
+   rows without a selected pill 4px shorter and jump when the selection moves
+   (codex #3983 r3). */
+html[data-glass-theme] .pill-chip[data-glass="chip"] { min-height: 44px !important; }
 html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
-html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::placeholder { font-size: 14px !important; font-weight: 400 !important; color: #64748B !important; opacity: 1; }
+/* Placeholders read as hints, never as entered values (owner 2026-09-06,
+   customer feedback): italic, slate-500 (#64748B, 4.8:1 on white — WCAG AA for
+   14px text; a lighter grey fell to 2.6:1). This is the
+   authoritative rule on glass surfaces; client/index.html carries the same
+   values as the non-glass fallback. */
+html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::placeholder { font-size: 14px !important; font-weight: 400 !important; font-style: italic !important; color: #64748B !important; opacity: 1; }
 
 /* ===== Estimate = the template (ruling 2026-09-03): every customer glass page
    takes the estimate card grammar — warm-tinted outer card, soft inner boxes,
