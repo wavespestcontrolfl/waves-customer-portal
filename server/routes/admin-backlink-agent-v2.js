@@ -770,8 +770,12 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     const domainIds = [...new Set(drafts.map((p) => p.domain_id).filter(Boolean))];
     const eligibleDomains = new Set((domainIds.length ? await db('seo_link_domains').whereIn('id', domainIds)
       .whereIn('agent_state', BRIDGE_STATES).select('id') : []).map((d) => d.id));
+    const executions = drafts.length ? await db('seo_link_placement_authorities').whereIn('prospect_id', drafts.map((p) => p.id))
+      .where({ dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').select('prospect_id', 'path_id', 'satisfied_at') : [];
+    const executionById = new Map(executions.map((r) => [r.prospect_id, r]));
     const items = drafts.filter((p) => Outreach.SENDABLE_STATUSES.includes(p.status)
-      || (eligibleDomains.has(p.domain_id) && Outreach.lateSend(p, pathById.get(p.path_id))));
+      || (eligibleDomains.has(p.domain_id) && Outreach.lateSend(p, pathById.get(p.path_id))
+        && !Outreach.submitStepOwed(pathById.get(p.path_id), executionById.get(p.id))));
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
     // WHATEVER the lifecycle status reads: an ambiguous send holds its recipient's inbox until it is reconciled

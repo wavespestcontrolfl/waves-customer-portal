@@ -58,7 +58,7 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     assert.equal((await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution' }).first()).satisfied_reason, 'placed');
     console.log('PASS bridge → one capped lease → kill/replay/provider refusals → pending placement and authority settlement');
     await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ acquisition_type: 'content_submission', link_type: 'editorial', execution_after_send: false });
-    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live', link_type: 'editorial', attempts: 2 });
+    await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live', live_url: `https://www.${domain}/confirmed`, link_type: 'editorial', attempts: 2 });
     const [draftLease] = await W.claim({ type: 'outreach', mode: 'draft', provider: 'hermes', domains: [domain] });
     assert.ok(draftLease);
     assert.equal((await W.report({ prospect_id: p.id, provider: 'hermes', lease_token: draftLease.lease_token, outcome: 'skipped' })).ok, true);
@@ -103,6 +103,28 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     assert.equal((await pendingIds()).includes(p.id), false);
     await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live' });
     console.log('PASS late draft approval queue includes placed/live/indexed submit-first rows and excludes send-first/terminal rows');
+    const executionStep = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'execution', instance_kind: '-' }).first();
+    const lateQueue = require(`${root}/server/services/seo/link-owner-queue`);
+    for (const status of ['placed', 'live', 'indexed']) {
+      const check = await trx.transaction(); active = check;
+      try {
+        await check('seo_link_prospects').where({ id: p.id }).update({ status });
+        const bridged = await B.runAuthorityBridge(check, { domainIds: [id], autoSend: false, exclusive: (_key, fn) => fn(), notify: async () => {} });
+        assert.equal(bridged.errors.length, 0);
+        assert.ok((await pendingIds()).includes(p.id));
+        assert.ok((await lateQueue.listOwnerQueue(proxy)).cards.some(card => card.placement.id === p.id));
+        await check('seo_link_placement_authorities').where({ id: executionStep.id }).update({ satisfied_at: null, satisfied_reason: null });
+        assert.equal((await pendingIds()).includes(p.id), false);
+        assert.equal((await lateQueue.listOwnerQueue(proxy)).cards.some(card => card.placement.id === p.id), false);
+        await check('seo_link_placement_authorities').where({ id: executionStep.id }).update({ satisfied_at: new Date(), satisfied_reason: 'placed' });
+        assert.ok((await pendingIds()).includes(p.id));
+        assert.ok((await lateQueue.listOwnerQueue(proxy)).cards.some(card => card.placement.id === p.id));
+        await check('seo_link_placement_authorities').where({ id: executionStep.id }).update({ ended_at: new Date(), end_outcome: 'superseded' });
+        assert.equal((await pendingIds()).includes(p.id), false);
+        assert.equal((await lateQueue.listOwnerQueue(proxy)).cards.some(card => card.placement.id === p.id), false);
+      } finally { await check.rollback(); active = trx; }
+    }
+    console.log('PASS both late-send approval views require current completed execution across placed/live/indexed');
     const rejectedLease = new Date(), rejectedAttempt = randomUUID();
     await trx('seo_link_prospects').where({ id: p.id }).update({ claimed_at: rejectedLease, lease_mode: 'acquire', leased_provider: 'deterministic_runner' });
     await trx('seo_link_attempts').insert({ id: rejectedAttempt, prospect_id: p.id, path_id: pathId, provider: 'deterministic_runner', action: 'submit', outcome: 'submitting', lease_token: rejectedLease.toISOString(), detail: { authority_id: 'synthetic-authority' } });
@@ -151,7 +173,7 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     await trx('seo_link_prospects').where({ id: p.id }).update({ status: 'live' });
     await trx('seo_link_domains').where({ id }).update({ agent_state: 'rejected' });
     console.log('PASS held submission remains visible outside acquisition states without approval/assignment actions');
-    const confirm = (overrides = {}) => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { submission_attempt_id: rejectedAttempt, submission_verdict: 'placed', live_url: `https://${domain}/confirmed`, ...overrides } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
+    const confirm = (overrides = {}) => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { submission_attempt_id: rejectedAttempt, submission_verdict: 'placed', live_url: `https://www.${domain}/confirmed`, ...overrides } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
     await assert.rejects(confirm({ submission_attempt_id: randomUUID() }), /409/);
     await assert.rejects(confirm({ live_url: 'javascript:alert(1)' }), /400/);
     for (const live_url of ['https://unrelated.example/listing', `https://${domain}.unrelated.example/listing`]) {
@@ -160,6 +182,19 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_at, null);
       assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
     }
+    for (const status of ['live', 'indexed']) {
+      const check = await trx.transaction(); active = check;
+      try {
+        await check('seo_link_prospects').where({ id: p.id }).update({ status, indexing_status: 'indexed', last_index_check: new Date(), last_live_check: new Date() });
+        const beforePlacement = await check('seo_link_prospects').where({ id: p.id }).first();
+        const beforeAttempt = await check('seo_link_attempts').where({ id: rejectedAttempt }).first();
+        await assert.rejects(confirm({ live_url: `https://${domain}/different-page` }), /409.*verified publisher URL/);
+        assert.deepEqual(await check('seo_link_prospects').where({ id: p.id }).first(), beforePlacement);
+        assert.deepEqual(await check('seo_link_attempts').where({ id: rejectedAttempt }).first(), beforeAttempt);
+        assert.equal((await check('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
+      } finally { await check.rollback(); active = trx; }
+    }
+    console.log('PASS confirmation cannot replace a live/indexed publisher URL or reuse its verification evidence');
     await trx('seo_link_prospects').where({ id: p.id }).update({ location_key: '-', target_page: '/sarasota-pest-control/' });
     await new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { target_page: '/venice-pest-control/' } }, { json: resolve }, reject));
     const beforeRefusal = await trx('seo_link_prospects').where({ id: p.id }).first();

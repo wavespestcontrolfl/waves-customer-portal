@@ -197,7 +197,7 @@ test('a hold with unknown provider identity remains unresolved', async () => {
 
 
 test.each(['prospect', 'live', 'indexed'])('confirmation preserves %s lifecycle and original submission boundary', async (status) => {
-  const s = scenario({ placement: { status, location_key: '-', target_page: '/venice-pest-control/' } });
+  const s = scenario({ placement: { status, live_url: 'https://publisher.example/confirmed', location_key: '-', target_page: '/venice-pest-control/' } });
   s.db._tables.audit_log = [];
   const submitted_at = new Date(Date.now() - 5 * 86400000).toISOString();
   const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', lease_token: s.token, detail: { authority_id: s.authority.id, execution_revision: 1, submitted_at, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } } };
@@ -278,4 +278,20 @@ test.each([
   expect(JSON.stringify(s.db._tables)).toBe(before);
   sibling.location_key = 'venice';
   expect(await E.reconcileOwnerPlacement(s.db, args)).toMatchObject({ ok: true });
+});
+
+
+test.each(['live', 'indexed'])('held confirmation cannot replace the URL backing a %s placement', async (status) => {
+  const liveUrl = 'https://publisher.example/verified';
+  const s = scenario({ placement: { status, live_url: liveUrl, indexing_status: 'indexed', last_index_check: new Date(), last_live_check: new Date(), backlink_id: uid() } });
+  s.db._tables.audit_log = [];
+  s.db._tables.seo_link_prospects[0].claimed_at = null;
+  const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, action: 'submit', outcome: 'submit_ambiguous', lease_token: s.token, detail: { authority_id: s.authority.id, execution_revision: 1, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } } };
+  s.db._tables.seo_link_attempts.push(attempt);
+  const args = { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed' };
+  const before = JSON.stringify(s.db._tables);
+  expect(await E.reconcileOwnerPlacement(s.db, { ...args, liveUrl: 'https://publisher.example/unverified' })).toMatchObject({ ok: false, error: expect.stringMatching(/verified publisher URL/) });
+  expect(JSON.stringify(s.db._tables)).toBe(before);
+  expect(await E.reconcileOwnerPlacement(s.db, { ...args, liveUrl })).toMatchObject({ ok: true, status });
+  expect(s.db._tables.seo_link_prospects[0]).toMatchObject({ live_url: liveUrl, indexing_status: 'indexed', backlink_id: s.placement.backlink_id });
 });

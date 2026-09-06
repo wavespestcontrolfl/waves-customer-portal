@@ -144,6 +144,9 @@ async function reconcileOwnerPlacement(trx, { prospectId, status, attemptId = nu
     || canonicalProspectDomain(publisher.hostname) !== canonicalProspectDomain(prospect.target_domain)) {
     return { ok: false, error: 'Confirmed URL must belong to this publisher' };
   }
+  if (['live', 'indexed'].includes(prospect.status) && liveUrl !== prospect.live_url) {
+    return { ok: false, error: 'This placement has a verified publisher URL; use that existing URL to confirm the held submission' };
+  }
   for (const attempt of held) {
     // Only the attempt snapshot establishes what reached the publisher; board fields can change during a hold.
     const citation = attempt.detail?.citation;

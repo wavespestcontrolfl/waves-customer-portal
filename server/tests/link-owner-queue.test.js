@@ -891,6 +891,8 @@ test.each(['placed', 'live', 'indexed'])('exhausted %s drafts require a submit-f
   expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: false });
   rows(s.db).pop();
   storedPath(s.db).execution_after_send = false;
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  rows(s.db).push({ id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'execution', instance_kind: '-', satisfied_at: NOW });
   const result = await Q.listOwnerQueue(s.db);
   expect(result.cards).toHaveLength(1);
   expect(result.cards[0]).toMatchObject({ outreach_draft_exhausted: true, placement: { status } });
@@ -910,7 +912,24 @@ test.each(['placed', 'live', 'indexed'])('late initial %s cards require submit-f
   await expect(Q.sendRow(s.db, { authorityId: row.id, actor: ACTOR, draftHash: 'synthetic', send })).rejects.toMatchObject({ status: 409 });
   expect(send).not.toHaveBeenCalled();
   storedPath(s.db).execution_after_send = false;
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  const execution = { id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'execution', instance_kind: '-', satisfied_at: null };
+  rows(s.db).push(execution);
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  await expect(Q.sendRow(s.db, { authorityId: row.id, actor: ACTOR, draftHash: 'synthetic', send })).rejects.toMatchObject({ status: 409 });
+  expect(send).not.toHaveBeenCalled();
+  execution.satisfied_at = NOW;
   expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(1);
+  execution.ended_at = NOW;
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  execution.ended_at = null;
+  execution.path_id = uid();
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  execution.path_id = s.p.id;
+  // An independent payment decision retains the card without enabling its initial send.
+  execution.satisfied_at = null;
+  rows(s.db).push({ id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'payment', instance_kind: '-', level: 'OWNER_PAYMENT', satisfied_at: null });
+  expect((await Q.listOwnerQueue(s.db)).cards[0].rows.find((r) => r.id === row.id).approvable).toBe(false);
   storedPath(s.db).execution_after_send = true;
   row.instance_kind = 'followup';
   expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(1);
