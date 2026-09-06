@@ -103,7 +103,7 @@ function groundExtraction(parsed, { message, properties = [] }) {
       // A literal substring is insufficient if it drops the preceding
       // "do not" or a following condition from the same sentence.
       if (before.trim() && !/[.!?;\n]\s*$/.test(before)) return false;
-      if (after.trim() && !/^\s*[.!?;\n]/.test(after)) return false;
+      if (after.trim() && !/[.!?;\n]\s*$/.test(item.quote) && !/^\s*[.!?;\n]/.test(after)) return false;
     }
     return message.message_body.includes(item.value) && item.quote.includes(item.value);
   });

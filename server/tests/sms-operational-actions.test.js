@@ -116,6 +116,16 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.dropped).toBe(2);
   });
 
+  test('a complete punctuated sentence stays valid when another sentence follows', () => {
+    const message = source('Do not treat the barn. The dog stays inside.');
+    const note = 'Do not treat the barn.';
+    const result = groundExtraction(extracted([], [
+      fact({ field: 'special_instructions', quote: note, value: note }),
+    ]), { message, properties });
+    expect(result.facts.map((f) => f.value)).toEqual([note]);
+    expect(result.dropped).toBe(0);
+  });
+
   test('unknown fields fail schema validation and provider failures are retryable', async () => {
     expect(() => groundExtraction(extracted([], [fact({ field: 'payment_method' })]), {
       message: source(fact().quote), properties,
