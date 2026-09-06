@@ -150,7 +150,7 @@ describe('bookingPropertyStamp (New Appointment service-address picker)', () => 
   const { bookingPropertyStamp } = require('../services/customer-properties');
   const PROPERTY = {
     id: '0f8c1e4a-2b3d-4c5e-8f90-1a2b3c4d5e6f', customer_id: 'cust-1', active: true,
-    address_line1: '4410 Palma Sola Blvd', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34209',
+    address_line1: '20 Oak St', address_line2: null, city: 'Naples', state: 'FL', zip: '34103',
     latitude: '27.4900000', longitude: '-82.6300000',
   };
   const connReturning = (row) => {
@@ -184,11 +184,11 @@ describe('bookingPropertyStamp (New Appointment service-address picker)', () => 
     const conn = connReturning(PROPERTY);
     expect(await bookingPropertyStamp({ customerId: 'cust-1', propertyId: PROPERTY.id }, conn)).toEqual({
       property_id: PROPERTY.id,
-      service_address_line1: '4410 Palma Sola Blvd',
+      service_address_line1: '20 Oak St',
       service_address_line2: '',
-      service_address_city: 'Bradenton',
+      service_address_city: 'Naples',
       service_address_state: 'FL',
-      service_address_zip: '34209',
+      service_address_zip: '34103',
       lat: '27.4900000',
       lng: '-82.6300000',
     });

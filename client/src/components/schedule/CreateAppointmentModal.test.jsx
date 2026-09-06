@@ -171,8 +171,8 @@ describe('quick-add phone-match confirm helpers', () => {
 });
 
 describe('multi-property booking helpers', () => {
-  const HOME = { id: 'p-home', is_primary: true, address_line1: '6176 46th St East' };
-  const RENTAL = { id: 'p-rental', is_primary: false, address_line1: '4410 Palma Sola Blvd' };
+  const HOME = { id: 'p-home', is_primary: true, address_line1: '10 Palm Ave' };
+  const RENTAL = { id: 'p-rental', is_primary: false, address_line1: '20 Oak St' };
 
   it('defaults the picker to the primary property, else the first, else nothing', () => {
     expect(defaultBookingPropertyId([RENTAL, HOME])).toBe('p-home');
@@ -193,9 +193,9 @@ describe('multi-property booking helpers', () => {
 });
 
 describe('service-address picker guards', () => {
-  const COMPLETE = { id: 'p1', is_primary: true, address_line1: '6176 46th St East', city: 'Bradenton', state: 'FL', zip: '34203', latitude: '27.4400000', longitude: '-82.5200000' };
-  const STREET_ONLY = { id: 'p2', is_primary: false, address_line1: '4410 Palma Sola Blvd', city: '', state: 'FL', zip: null };
-  const RENTAL = { id: 'p3', is_primary: false, address_line1: '4410 Palma Sola Blvd', city: 'Bradenton', state: 'FL', zip: '34209' };
+  const COMPLETE = { id: 'p1', is_primary: true, address_line1: '10 Palm Ave', city: 'Naples', state: 'FL', zip: '34102', latitude: '27.4400000', longitude: '-82.5200000' };
+  const STREET_ONLY = { id: 'p2', is_primary: false, address_line1: '20 Oak St', city: '', state: 'FL', zip: null };
+  const RENTAL = { id: 'p3', is_primary: false, address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103' };
 
   it('offers only properties with a complete street address (the server refuses the rest)', () => {
     expect(bookableProperties([COMPLETE, STREET_ONLY, RENTAL]).map((p) => p.id)).toEqual(['p1', 'p3']);
@@ -204,10 +204,15 @@ describe('service-address picker guards', () => {
   });
 
   it('routes slot searches to the chosen property: coords when present, else its address', () => {
-    expect(bookingPropertyTarget(COMPLETE)).toEqual({ address: '6176 46th St East, Bradenton, FL 34203', lat: 27.44, lng: -82.52 });
-    expect(bookingPropertyTarget(RENTAL)).toEqual({ address: '4410 Palma Sola Blvd, Bradenton, FL 34209', lat: undefined, lng: undefined });
+    expect(bookingPropertyTarget(COMPLETE)).toEqual({ address: '10 Palm Ave, Naples, FL 34102', lat: 27.44, lng: -82.52 });
+    expect(bookingPropertyTarget(RENTAL)).toEqual({ address: '20 Oak St, Naples, FL 34103', lat: undefined, lng: undefined });
+    // Not-yet-geocoded rows carry NULL — never a 0,0 pair the server would trust.
+    expect(bookingPropertyTarget({ ...RENTAL, latitude: null, longitude: null })).toMatchObject({ lat: undefined, lng: undefined });
+    expect(bookingPropertyTarget({ ...RENTAL, latitude: '', longitude: '' })).toMatchObject({ lat: undefined, lng: undefined });
+    // A half pair is no pair.
+    expect(bookingPropertyTarget({ ...RENTAL, latitude: '26.1', longitude: null })).toMatchObject({ lat: undefined, lng: undefined });
     expect(bookingPropertyTarget(null)).toEqual({});
     const body = buildFindTimeRequestBody({ customerId: 'c', ...bookingPropertyTarget(COMPLETE), serviceName: 's', durationMinutes: 60, dateFrom: 'a', dateTo: 'b' });
-    expect(body).toMatchObject({ customerId: 'c', lat: 27.44, lng: -82.52, address: '6176 46th St East, Bradenton, FL 34203' });
+    expect(body).toMatchObject({ customerId: 'c', lat: 27.44, lng: -82.52, address: '10 Palm Ave, Naples, FL 34102' });
   });
 });

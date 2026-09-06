@@ -443,13 +443,20 @@ export function bookableProperties(properties = []) {
 // over the customer's primary in resolveFindTimeTarget.
 export function bookingPropertyTarget(property) {
   if (!property) return {};
-  const lat = Number(property.latitude);
-  const lng = Number(property.longitude);
+  // NULL / '' coordinates (not yet geocoded) stay ABSENT — Number(null) is 0,
+  // and a 0,0 pair would be accepted by the server as a real location.
+  const coord = (value) => {
+    if (value === null || value === undefined || value === '') return undefined;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const lat = coord(property.latitude);
+  const lng = coord(property.longitude);
   const { street, locality } = formatBookingPropertyAddress(property);
   return {
     address: [street, locality].filter(Boolean).join(', ') || undefined,
-    lat: Number.isFinite(lat) ? lat : undefined,
-    lng: Number.isFinite(lng) ? lng : undefined,
+    lat: lat !== undefined && lng !== undefined ? lat : undefined,
+    lng: lat !== undefined && lng !== undefined ? lng : undefined,
   };
 }
 
@@ -723,8 +730,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       setLinkedEstimate(null);
       setServices((arr) => arr.filter((line) => !line.sourceEstimateId));
     }
-    // Slot suggestions were scored at the previous address.
+    // Slot suggestions were scored at the previous address — drop what is
+    // shown AND invalidate any search still in flight (handleFindTimes checks
+    // this counter before applying its response).
+    findTimesRequestRef.current += 1;
     setTimeSlots(null);
+    setFindingTimes(false);
   };
   // Memoized: it is a dependency of the auto-apply effect below, so a fresh
   // array every render would re-run that effect on every keystroke.
@@ -735,6 +746,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
+  const findTimesRequestRef = useRef(0);
   const [timeSlots, setTimeSlots] = useState(null); // null = hidden, [] = searched but none, [...] = results
   const [slotError, setSlotError] = useState('');
   const [findTimeHorizonDays, setFindTimeHorizonDays] = useState(7);
@@ -1280,6 +1292,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Find best times — calls /api/admin/schedule/find-time
   const handleFindTimes = async ({ horizonDays = 7 } = {}) => {
     if (!selectedCustomer || !selectedService) return;
+    // Version the request: a property switch (or a newer search) while this
+    // one is in flight bumps the counter, and the stale response is dropped
+    // instead of repopulating slots scored at the previous address.
+    const requestId = findTimesRequestRef.current + 1;
+    findTimesRequestRef.current = requestId;
     setFindTimeHorizonDays(horizonDays);
     setFindingTimes(true);
     setSlotError('');
@@ -1304,11 +1321,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           horizonDays,
         })),
       });
+      if (findTimesRequestRef.current !== requestId) return;
       setTimeSlots((r.slots || [])
         .filter((slot) => isHourTime(slot.start_time))
         .slice(0, 8)
         .map((slot, index) => ({ ...slot, rank: index + 1 })));
     } catch (e) {
+      if (findTimesRequestRef.current !== requestId) return;
       setSlotError(e.message || 'Failed to find times');
       setTimeSlots(null);
     }
