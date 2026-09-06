@@ -39,10 +39,15 @@ jest.mock('../services/scheduling/occupancy', () => ({
   ...jest.requireActual('../services/scheduling/occupancy'),
   findConflictingVisits: jest.fn().mockResolvedValue([]),
 }));
+jest.mock('../services/scheduling/day-stops', () => ({
+  ...jest.requireActual('../services/scheduling/day-stops'),
+  preloadServiceLocations: jest.fn().mockResolvedValue(undefined),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
+const { preloadServiceLocations } = require('../services/scheduling/day-stops');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 // Dynamic future dates — hardcoded fixtures time-bomb the suite.
@@ -1058,6 +1063,9 @@ describe('staff arrival-window save opt-in', () => {
     const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' },
       'admin', 'admin', { overlapAdvisory: true, adminWindowRules: true });
     expect(result.success).toBe(true);
+    expect(preloadServiceLocations).toHaveBeenCalledWith(db, ['svc-1']);
+    expect(preloadServiceLocations.mock.invocationCallOrder[0])
+      .toBeLessThan(db.transaction.mock.invocationCallOrder[0]);
     expect(result.warnings).toBeUndefined();
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
       db: trx, date: TARGET, windowStart: '09:00', windowEnd: '11:00',

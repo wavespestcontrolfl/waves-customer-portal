@@ -29,7 +29,7 @@ const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./ca
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
 const { arrivalWindowRoutingEnabled } = require('./scheduling/arrival-route');
-const { guardedCoordSelects } = require('./scheduling/day-stops');
+const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
@@ -1202,6 +1202,7 @@ class SmartRebooker {
     let overlapWarned = false;
     let arrivalWarning = null;
     const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
+    if (useArrivalWindows && updates.window_start) await preloadServiceLocations(db, [serviceId]);
     // The technician on the COMMITTED row (RETURNING off the CAS write).
     let committedTechId = null;
 
@@ -1876,6 +1877,14 @@ class SmartRebooker {
       delta_days: deltaDays,
       notify_requested: options.notifyRequested === true,
     };
+    if (useArrivalWindows) {
+      const arrivalRows = await db('scheduled_services')
+        .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
+        .where('customer_id', service.customer_id)
+        .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
+        .whereNotIn('status', TERMINAL).select('id');
+      await preloadServiceLocations(db, arrivalRows.map(row => row.id));
+    }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       const preservedFutureIds = new Set();
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
