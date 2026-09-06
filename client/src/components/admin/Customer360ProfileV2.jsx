@@ -5571,7 +5571,7 @@ export default function Customer360ProfileV2({
   // mobile Edit pill, and the ⋯ menu item must prefill identical fields (the
   // menu copy once dropped profileLabel, so the mobile modal showed it blank).
   const openEditModal = () => {
-    editAddressRef.current = c.address || null;
+    editAddressRef.current = c.address;
     const form = {
       firstName: c.firstName || "",
       lastName: c.lastName || "",
