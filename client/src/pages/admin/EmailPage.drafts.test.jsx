@@ -143,4 +143,38 @@ describe("Email draft and navigation preservation", () => {
     await act(async () => finish(response({ success: true })));
     expect(screen.getByRole("button", { name: "New Email" })).toBeInTheDocument();
   });
+
+  it("keeps a pending compose disabled after remount and warns before leaving", async () => {
+    let finish;
+    sendResponse = () => new Promise((resolve) => { finish = resolve; });
+    const view = mount(); const dialog = await compose();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    view.unmount();
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving); expect(leaving.defaultPrevented).toBe(true);
+    mount(); fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));
+    const send = within(screen.getByRole("dialog")).getByRole("button", { name: "Sending…", exact: true });
+    expect(send).toBeDisabled(); fireEvent.click(send);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
+    await act(async () => finish(response({ error: "Synthetic failure" }, 503)));
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+    expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
+    const settled = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(settled); expect(settled.defaultPrevented).toBe(false);
+  });
+
+  it("keeps a pending reply disabled after remount without submitting twice", async () => {
+    let finish;
+    sendResponse = () => new Promise((resolve) => { finish = resolve; });
+    const view = mount();
+    fireEvent.change(await open(a), { target: { value: "Pending reply" } });
+    fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
+    view.unmount(); mount();
+    await screen.findByRole("textbox", { name: "Reply" });
+    const send = screen.getByRole("button", { name: /Sending/ });
+    expect(send).toBeDisabled(); fireEvent.click(send);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
+    await act(async () => finish(response({ success: true })));
+    expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("");
+  });
 });

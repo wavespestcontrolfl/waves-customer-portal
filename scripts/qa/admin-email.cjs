@@ -17,6 +17,8 @@ async function main() {
   let browser;
   let stage = 'startup';
   let failSend = false;
+  let sendHold;
+  let releaseSend;
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
@@ -47,7 +49,7 @@ async function main() {
       else if (api === '/admin/email/stats') body = { total: 1, unread: 0 };
       else if (api === '/admin/email/daily-digest') body = { total_received: 0 };
       else if (api === '/admin/email/blocked') body = { blocked: [] };
-      else if (api === '/admin/email/send' && request.method() === 'POST') { body = failSend ? { error: 'Synthetic send failure' } : { success: true }; status = failSend ? 503 : 200; }
+      else if (api === '/admin/email/send' && request.method() === 'POST') { await sendHold; body = failSend ? { error: 'Synthetic send failure' } : { success: true }; status = failSend ? 503 : 200; }
       else if (api === `/admin/email/message/${a.id}`) body = a;
       else if (api === `/admin/email/message/${b.id}`) body = b;
       else if (api === '/admin/email/thread/thread-a') body = { thread: [a] };
@@ -122,6 +124,21 @@ async function main() {
       assert.equal(await page.getByRole('button', { name: 'Resume draft', exact: true }).count(), 0);
       assert.equal(report.requests.filter((r) => r.path === '/admin/email/send').length, 2);
     });
+    await scenario('pending reply survives channel switching without allowing another send', async () => {
+      sendHold = new Promise((resolve) => { releaseSend = resolve; });
+      const before = report.requests.filter((r) => r.path === '/admin/email/send').length;
+      await page.getByRole('button', { name: 'Send Reply', exact: true }).click();
+      await page.getByRole('button', { name: /Sending/ }).waitFor();
+      await channel(page, 'SMS').click();
+      await channel(page, 'Email').click();
+      const pending = page.getByRole('button', { name: /Sending/ });
+      await pending.waitFor();
+      assert.equal(await pending.isDisabled(), true);
+      assert.equal(report.requests.filter((r) => r.path === '/admin/email/send').length, before + 1);
+      releaseSend(); sendHold = undefined; releaseSend = undefined;
+      await page.getByRole('button', { name: 'Send Reply', exact: true }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply' }).inputValue(), '');
+    });
     await scenario('blocked senders remains in the Email sub-section', async () => {
       await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked Senders' }).click();
       await page.getByPlaceholder('Block domain or email (e.g. spammer.com or bad@example.com)').waitFor();
@@ -156,6 +173,7 @@ async function main() {
     report.failure = { stage, message: error.message };
     throw error;
   } finally {
+    releaseSend?.();
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
     try { for (const context of browser?.contexts() || []) await context.setOffline(true); await browser?.close(); }
     finally { await server?.close(); }

@@ -3,9 +3,11 @@
 const STORAGE_KEY = "waves_admin_email_drafts_v1";
 const emptyDrafts = () => ({ compose: { to: "", subject: "", body: "" }, replies: {} });
 let activeSession = null;
+const warnBeforePendingSendUnload = (event) => { event.preventDefault(); event.returnValue = ""; };
 
 export function loadEmailDrafts(userId) {
   if (activeSession?.userId === userId) return activeSession;
+  window.removeEventListener("beforeunload", warnBeforePendingSendUnload);
   let drafts = emptyDrafts();
   try {
     const stored = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
@@ -18,7 +20,7 @@ export function loadEmailDrafts(userId) {
         .filter(([id, value]) => id && typeof value === "string" && value));
     }
   } catch { /* An unavailable/corrupt store must not prevent opening the inbox. */ }
-  activeSession = { userId, drafts, saved: true, listeners: new Set() };
+  activeSession = { userId, drafts, saved: true, sending: { compose: false, reply: false }, listeners: new Set() };
   return activeSession;
 }
 
@@ -45,7 +47,19 @@ export function subscribeEmailDrafts(session, listener) {
   return () => session.listeners.delete(listener);
 }
 
+export function setEmailSending(session, kind, sending) {
+  if (session !== activeSession || !session.userId || session.sending[kind] === sending) return false;
+  session.sending[kind] = sending;
+  // Channel navigation may unmount the editor while its request still runs.
+  // Keep both the duplicate-submit guard and unload warning with that request.
+  if (Object.values(session.sending).some(Boolean)) window.addEventListener("beforeunload", warnBeforePendingSendUnload);
+  else window.removeEventListener("beforeunload", warnBeforePendingSendUnload);
+  for (const notify of session.listeners) notify();
+  return true;
+}
+
 export function clearEmailDrafts() {
   activeSession = null;
+  window.removeEventListener("beforeunload", warnBeforePendingSendUnload);
   try { sessionStorage.removeItem(STORAGE_KEY); } catch { /* storage unavailable */ }
 }

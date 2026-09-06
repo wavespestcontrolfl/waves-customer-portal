@@ -3484,11 +3484,8 @@ export default function CommunicationsPageV2() {
     return () => window.removeEventListener("hashchange", applyHashTab);
   }, [tabs, location.hash]);
 
-  // Usage beacon for the leaf that actually RENDERS. Tab state here never
-  // reaches the router — header clicks are state-only, and cross-tab deep
-  // links arrive via raw window.location.hash (#tab=…, hashTo in
-  // NotificationEventsTabV2), which react-router (and so the layout's
-  // raw-URL beacon) never observes (Codex #2961 r14).
+  // Record the leaf that actually renders, including role fallbacks and the
+  // raw hash links from NotificationEventsTabV2 that bypass router navigation.
   useRenderedTabBeacon("/admin/communications", usageLeafFor(activeTab, templateKind));
 
   const navigation = {

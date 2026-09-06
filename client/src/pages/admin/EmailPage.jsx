@@ -5,7 +5,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import { Ban, Inbox, Plus, Send } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { loadEmailDrafts, subscribeEmailDrafts, updateEmailDrafts } from "../../lib/emailDrafts";
+import { loadEmailDrafts, setEmailSending, subscribeEmailDrafts, updateEmailDrafts } from "../../lib/emailDrafts";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path, options = {}) {
@@ -149,6 +149,8 @@ export default function EmailPage({ navigation }) {
   useEffect(() => subscribeEmailDrafts(draftSession, () => {
     setDrafts(draftSession.drafts);
     setStorageError(!draftSession.saved);
+    setSending(draftSession.sending.reply);
+    setComposeSending(draftSession.sending.compose);
   }), [draftSession]);
   const composeForm = drafts.compose;
   const changeDrafts = (update) => updateEmailDrafts(draftSession, update);
@@ -165,7 +167,7 @@ export default function EmailPage({ navigation }) {
   const selectedIdRef = useRef(null);
   selectedIdRef.current = selectedEmail?.id;
   const setReplyDraft = (id, text) => changeDrafts((current) => ({ ...current, replies: { ...current.replies, [id]: text } }));
-  const [sending, setSending] = useState(false);
+  const [sending, setSending] = useState(draftSession.sending.reply);
   const [showArchived, setShowArchived] = useState(false);
   const [digest, setDigest] = useState(null);
   const [tab, setTab] = useState("inbox"); // inbox | blocked
@@ -175,7 +177,7 @@ export default function EmailPage({ navigation }) {
   const [draftResult, setDraftResult] = useState(null);
   const [showCompose, setShowCompose] = useState(false);
   const setComposeForm = (update) => changeDrafts((current) => ({ ...current, compose: update(current.compose) }));
-  const [composeSending, setComposeSending] = useState(false);
+  const [composeSending, setComposeSending] = useState(draftSession.sending.compose);
   const composeRef = useModalFocus(showCompose, () => { if (!composeSending) setShowCompose(false); });
   const [connecting, setConnecting] = useState(false);
   // Customer search for the compose "To" field — type a name (or partial
@@ -186,11 +188,11 @@ export default function EmailPage({ navigation }) {
   const toFieldRef = useRef(null);
   const hasDrafts = Object.values(composeForm).some(Boolean) || Object.values(drafts.replies).some(Boolean);
   useEffect(() => {
-    if (!(storageError && hasDrafts) && !sending && !composeSending) return undefined;
+    if (!storageError || !hasDrafts) return undefined;
     const warnBeforeReload = (event) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", warnBeforeReload);
     return () => window.removeEventListener("beforeunload", warnBeforeReload);
-  }, [storageError, hasDrafts, sending, composeSending]);
+  }, [storageError, hasDrafts]);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -406,7 +408,7 @@ export default function EmailPage({ navigation }) {
 
   const handleReply = async () => {
     if (!replyText.trim() || !selectedEmail) return;
-    setSending(true);
+    if (!setEmailSending(draftSession, "reply", true)) return;
     try {
       const r = await adminFetch("/api/admin/email/send", {
         method: "POST",
@@ -429,8 +431,9 @@ export default function EmailPage({ navigation }) {
       if (selectedIdRef.current === selectedEmail.id) setThread(d.thread || []);
     } catch (err) {
       window.alert("Failed to send reply: " + err.message);
+    } finally {
+      setEmailSending(draftSession, "reply", false);
     }
-    setSending(false);
   };
 
   const handleAiDraft = async () => {
@@ -455,7 +458,7 @@ export default function EmailPage({ navigation }) {
 
   const handleComposeSend = async () => {
     if (!composeForm.to.trim() || !composeForm.body.trim()) return;
-    setComposeSending(true);
+    if (!setEmailSending(draftSession, "compose", true)) return;
     try {
       const r = await adminFetch("/api/admin/email/send", {
         method: "POST",
@@ -476,7 +479,7 @@ export default function EmailPage({ navigation }) {
     } catch (err) {
       window.alert("Failed to send: " + err.message);
     } finally {
-      setComposeSending(false);
+      setEmailSending(draftSession, "compose", false);
     }
   };
 

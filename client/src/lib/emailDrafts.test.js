@@ -27,9 +27,14 @@ describe("local email editor recovery", () => {
   it("sign-out invalidates outstanding callbacks so they cannot resurrect discarded session data", async () => {
     const store = await import("./emailDrafts");
     const oldSession = store.loadEmailDrafts("fixture-owner");
+    expect(store.setEmailSending(oldSession, "compose", true)).toBe(true);
     store.clearEmailDrafts();
     const current = store.loadEmailDrafts("fixture-owner");
     expect(store.updateEmailDrafts(oldSession, (d) => ({ ...d, replies: { a: "Late AI answer" } }))).toBeNull();
+    expect(store.setEmailSending(oldSession, "compose", false)).toBe(false);
+    expect(current.sending.compose).toBe(false);
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving); expect(leaving.defaultPrevented).toBe(false);
     expect(current.drafts.replies).toEqual({});
   });
 });

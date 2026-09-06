@@ -2,8 +2,9 @@
 
 Approved follow-up: establish draft recovery, then reuse the existing Email
 inbox inside Communications. This branch starts at cleanup commit
-`205f7b5ec6f3d7dc97d190b3e898fed958b30ab3` and is reviewed separately from
-the cleanup PR. The earlier workspace proposal is not imported.
+`205f7b5ec6f3d7dc97d190b3e898fed958b30ab3`, then incorporates the cleanup
+review fixes through `da9e18b19`. It is reviewed separately from cleanup
+PR #3980. The earlier workspace proposal is not imported.
 
 Implementation contract:
 
@@ -55,6 +56,11 @@ survive a reload; a quota/privacy failure retains SPA memory, shows a warning
 and warns before reload. Explicit sign-out clears recovery and invalidates
 outstanding callbacks. Discard and confirmed sends clear only the relevant
 draft. A late successful send updates even an editor reopened while waiting.
+Pending compose/reply requests retain their disabled send state across channel
+navigation; the shared local draft session rejects a second submission until
+the request settles. A pending request warns before leaving the page, including
+while a different channel is open. This does not add provider idempotency or
+claim recovery of an unknown send outcome after a forced reload.
 
 No extra inbox or approval queue was created. EmailPage remains the only inbox
 implementation and uses the same routes and provider contract. The previous
