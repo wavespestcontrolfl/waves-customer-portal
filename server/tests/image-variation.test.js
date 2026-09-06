@@ -85,9 +85,13 @@ describe('planFor — deterministic variation per post and slot', () => {
     for (const setting of all) expect(setting).not.toMatch(/\b(dusk|dawn|first light|noon|morning|afternoon|golden hour|night|day)\b/i);
     expect(gen.settingsFor('Tropical sod webworm damage in St. Augustine lawns')).toEqual(gen.SETTINGS.yard);
     expect(gen.settingsFor('Ficus whitefly on hedges in Sarasota')).toEqual(gen.SETTINGS.yard);
-    expect(gen.settingsFor('Rain Bird sprinkler timer: run it by hand')).toEqual(expect.arrayContaining(gen.SETTINGS.equipment));
-    expect(gen.settingsFor('Ghost ants in the kitchen')).toEqual(expect.arrayContaining(gen.SETTINGS.indoor));
-    expect(gen.settingsFor('Ghost ants in the kitchen')).not.toEqual(expect.arrayContaining(gen.SETTINGS.equipment));
+    // An equipment or indoor subject SELECTS its pool — no outdoor leftovers (Codex r3 P2 on #3964).
+    expect(gen.settingsFor('Rain Bird sprinkler timer: run it by hand')).toEqual(gen.SETTINGS.equipment);
+    expect(gen.settingsFor('Which Tiny Ant Is in Your Kitchen?')).toEqual(gen.SETTINGS.indoor);
+    for (let i = 0; i < 30; i += 1) {
+      expect(gen.SETTINGS.indoor).toContain(gen.planFor({ slug: `ant-${i}`, mode: 'blog-hero', index: 0, subject: 'Which Tiny Ant Is in Your Kitchen?' }).setting);
+      expect(gen.SETTINGS.equipment).toContain(gen.planFor({ slug: `timer-${i}`, mode: 'blog-body', index: 1, subject: 'Hunter sprinkler timer guide' }).setting);
+    }
     for (let i = 0; i < 30; i += 1) {
       const plan = gen.planFor({ slug: `turf-${i}`, mode: 'blog-hero', index: 0, subject: 'Chinch bug damage in a St. Augustine lawn' });
       expect(gen.SETTINGS.yard).toContain(plan.setting);
@@ -175,12 +179,15 @@ describe('screenGeneratedImage', () => {
     expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL', '3 OFF'] })).toMatchObject({ ok: true });
     // Extra words around an allowed caption are stray text, not the caption.
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF SALE", "2 MANUAL"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: 1 OFF SALE/)] });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL'] })).toMatchObject({ ok: false, reasons: expect.arrayContaining([expect.stringMatching(/readable text: 1 OFF SALE/), expect.stringMatching(/missing caption: "1 OFF"/)]) });
     // A reordered caption is stray text; a partial one is an incomplete caption (Codex r1 P2 on #3964).
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants Stop How To"], "logos_or_brand_marks": []}' });
-    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: Ants Stop How To/)] });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: expect.arrayContaining([expect.stringMatching(/readable text: Ants Stop How To/)]) });
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/incomplete caption: "How to Stop Ants"/)] });
+    // No caption read back at all is a missing caption (Codex r3 P2 on #3964).
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/missing caption: "How to Stop Ants"/)] });
     // Split fragments that together cover the caption, in order, still pass.
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["How to", "Stop Ants"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: true });

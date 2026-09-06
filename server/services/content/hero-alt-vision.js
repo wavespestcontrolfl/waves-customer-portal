@@ -178,13 +178,16 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       });
       return !matched;
     });
-    const incomplete = allowedSeqs
-      .map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null))
-      .filter(Boolean);
+    // Every allowed caption must be read back in full: a partial read is an
+    // incomplete caption and no read at all is a missing one — the provider
+    // dropped the lettering the prompt required (Codex r3 P2 on #3964).
+    const incomplete = allowedSeqs.map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null)).filter(Boolean);
+    const missing = allowedSeqs.map((seq, c) => (covered[c].size === 0 ? allowedText[c] : null)).filter(Boolean);
     const reasons = [];
     if (parsed.logos.length) reasons.push(`logo or brand mark: ${parsed.logos.slice(0, 3).join(', ')}`);
     if (strayText.length) reasons.push(`readable text: ${strayText.slice(0, 3).join(', ')}`);
     if (incomplete.length) reasons.push(`incomplete caption: ${incomplete.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
+    if (missing.length) reasons.push(`missing caption: ${missing.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
     return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, reasons };
   } catch (err) {
     logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);

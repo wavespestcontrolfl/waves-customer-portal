@@ -166,11 +166,11 @@ function stylePermutation(slug) {
   return out;
 }
 // Settings carry NO time-of-day wording (time is chosen separately below), and
-// they are grouped by what the article is about: a yard/turf/plant post stays
-// outdoors, an equipment post may sit in the garage or at a workbench, an
-// indoor-pest post may look out from a kitchen. A sod-webworm post at a
-// workbench and a whitefly post in a kitchen were the off-topic cases (Codex
-// r1 P2 on #3964).
+// the pool is chosen by what the article is ABOUT: a yard/turf/plant post
+// stays outdoors, an equipment post sits where the equipment lives, an
+// indoor-pest post stays indoors. Augmenting the yard pool was not enough — a
+// kitchen-ant post still planned a lanai (Codex r3 P2 on #3964), so an indoor
+// or equipment subject SELECTS its pool instead.
 const SETTINGS = Object.freeze({
   yard: [
     'on a screened lanai looking out at the yard',
@@ -186,21 +186,24 @@ const SETTINGS = Object.freeze({
     'inside a residential garage, controller and tools on the wall, light through the open door',
     'at a workbench with parts laid out on a towel',
     'beside an outdoor utility wall with a control box and a hose bib',
+    'on the driveway apron with gear laid out beside an open garage',
+    'in a shaded side yard by the irrigation valve box',
   ],
   indoor: [
     'in a kitchen looking out through a window at the lawn',
     'in a laundry room doorway, baseboards and a threshold in view',
     'in a garage looking out toward the driveway',
+    'along a hallway baseboard with a doorway to the yard',
+    'at a pantry shelf with a window to the yard behind',
   ],
 });
 const EQUIPMENT_SUBJECT = /\b(controller|timer|clock|irrigation|sprinkler|spreader|mower|trimmer|sprayer|blower|hose|nozzle|equipment|tools?)\b/i;
 const INDOOR_SUBJECT = /\b(kitchen|pantry|bathroom|bedroom|attic|garage|indoors?|inside|baseboard|roach|cockroach|ants?|spiders?|rodents?|mice|mouse|rats?|bed bugs?|fleas?|silverfish|termites?)\b/i;
 function settingsFor(subject) {
   const text = String(subject || '');
-  const pool = [...SETTINGS.yard];
-  if (EQUIPMENT_SUBJECT.test(text)) pool.push(...SETTINGS.equipment);
-  if (INDOOR_SUBJECT.test(text)) pool.push(...SETTINGS.indoor);
-  return pool;
+  if (INDOOR_SUBJECT.test(text)) return [...SETTINGS.indoor];
+  if (EQUIPMENT_SUBJECT.test(text)) return [...SETTINGS.equipment];
+  return [...SETTINGS.yard];
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
