@@ -302,6 +302,20 @@ describe('GATE ON — caller recognition', () => {
       expect(await relayContext.resolveCallerContext(FROM, { callSid: CALL_SID })).toBeNull();
     });
 
+    test('a RECONNECTED call older than the window still verifies while its reconnect stamp is inside it — a stale stamp does not (hook r29 P1)', async () => {
+      const fifteenMinAgo = new Date(Date.now() - 15 * 60 * 1000);
+      const meta = (over) => ({ ...JSON.parse(VERIFIED_CALL_ROW.metadata), ...over });
+      primeDb({ customers: [CUSTOMER], callLog: [{ ...VERIFIED_CALL_ROW, created_at: fifteenMinAgo, metadata: meta({ relay_reconnects: 1, relay_reconnect_ms: Date.now() - 5000 }) }] });
+      expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM, sessionKey: 'nonce-2', sessionGeneration: 2 }))
+        .toEqual({ verified: true, attestation: 'TN-Validation-Passed-A' });
+      primeDb({ customers: [CUSTOMER], callLog: [{ ...VERIFIED_CALL_ROW, created_at: fifteenMinAgo, metadata: meta({ relay_reconnects: 1, relay_reconnect_ms: Date.now() - 60 * 60 * 1000 }) }] });
+      expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM, sessionKey: 'nonce-2', sessionGeneration: 2 }))
+        .toEqual({ verified: false, reason: 'call_not_current' });
+      primeDb({ customers: [CUSTOMER], callLog: [{ ...VERIFIED_CALL_ROW, created_at: fifteenMinAgo, metadata: meta({}) }] });
+      expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
+        .toEqual({ verified: false, reason: 'call_not_current' });
+    });
+
     test('a row with no created_at at all fails closed', async () => {
       primeDb({ customers: [CUSTOMER], callLog: [{ ...VERIFIED_CALL_ROW, created_at: null }] });
       expect(await relayContext.verifyInboundCaller({ callSid: CALL_SID, from: FROM }))
@@ -346,6 +360,8 @@ describe('GATE ON — caller recognition', () => {
       // one bounded flip, never a seesaw; a delayed old socket is strictly
       // older on both axes).
       expect(raws.some((sql) => sql.includes("relay_session_claim_gen')::bigint, 0) < ?"))).toBe(true);
+      // …and a claimant minted BEFORE the row's latest reconnect stamp is refused (codex #3884 r5 P1)
+      expect(raws.some((sql) => sql.includes("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?"))).toBe(true);
       expect(raws.some((sql) => sql.includes("COALESCE(metadata->>'relay_session_claim_owner', '') < ?"))).toBe(true);
       const updateSql = String(builders.call_log.update.mock.calls[0][0].metadata.__raw || builders.call_log.update.mock.calls[0][0].metadata.sql || '');
       expect(updateSql).toContain('relay_session_claim_owner');

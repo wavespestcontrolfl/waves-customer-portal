@@ -593,6 +593,10 @@ test('vendorOrderQuantity: packages by pack size in the same dimension; counts f
   expect(q(s1, '40', 'lb', '16 lb')).toEqual({ quantity: 3, packSize: '16 lb', orderedQuantity: 48 });
   expect(q(s1, '250', 'each', '100 each')).toEqual({ quantity: 3, packSize: '100 each', orderedQuantity: 300 });
   expect(q(s1, '250', 'each', '100')).toEqual({ quantity: 3, packSize: '100 each', orderedQuantity: 300 });
+  // noun-bearing count packs parse through the SHARED parsePackCount (Codex #3974 r6 P1); a container noun is not an item count
+  expect(q(s1, '25', 'each', '10 stations')).toEqual({ quantity: 3, packSize: '10 each', orderedQuantity: 30 });
+  expect(q(s1, '30', 'each', '20 tablets')).toEqual({ quantity: 2, packSize: '20 each', orderedQuantity: 40 });
+  expect(q(s1, '5', 'each', '1 case').error).toBe('no_pack_size');
   expect(q(s1, '128', 'fl_oz', '16 lb').error).toBe('pack_unit_mismatch');
   expect(q(s1, '128', 'fl_oz', '').error).toBe('no_pack_size');
   expect(q(s1, '250', 'each', '1 gal').error).toBe('no_pack_size');

@@ -1370,22 +1370,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // deliberately gets NO lead (leadId null), but a HOT call from them still
       // owes the owner a page — the obligation marker must not depend on a lead
       // existing, or a crashed page for an existing customer never sweeps.
-      if (capturedLeadId && ctx.callSid) {
-        try {
-          const db = require('../../models/db');
-          const linkage = { relay_lead_id: String(capturedLeadId) };
-          await db('call_log')
-            .where({ twilio_call_sid: ctx.callSid })
-            .update({
-              metadata: db.raw(
-                "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-                [JSON.stringify(linkage)],
-              ),
-            });
-        } catch (linkErr) {
-          logger.warn(`[voice-relay] call→lead linkage stamp failed callSid=${ctx.callSid}: ${linkErr.message}`);
-        }
-      }
+      if (capturedLeadId && ctx.callSid) await require('./relay-context').stampCallLeadLinkage(ctx.callSid, capturedLeadId, { sessionKey: ctx.sessionKey || null });
       // capture_lead usually runs AFTER request_booking (the prompt says so),
       // so back-fill the card that was already written for this call.
       if (capturedLeadId && typeof ctx.bookingRequested === 'function' && ctx.bookingRequested()) {

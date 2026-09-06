@@ -67,7 +67,9 @@ export default function ProductLabelReview({ product }) {
   const draft = review?.draft;
   const active = review?.active;
   const disabled = busy || loading;
-  return <section aria-label="Label weather review" style={{ background: "#FFFFFF", border: `1px solid ${D.border}`, borderRadius: 6, padding: 16, margin: "16px 0", color: D.ink, fontSize: 14, lineHeight: 1.6 }}>
+  // Inventory's table can be wider than the phone viewport. Keep the review
+  // and its confirmation controls within the page and expanded-row gutters.
+  return <section aria-label="Label weather review" style={{ maxWidth: "calc(100vw - 64px)", boxSizing: "border-box", overflowWrap: "anywhere", background: "#FFFFFF", border: `1px solid ${D.border}`, borderRadius: 6, padding: 16, margin: "16px 0", color: D.ink, fontSize: 14, lineHeight: 1.6 }}>
     <h3 style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 16, fontWeight: 500, margin: "0 0 8px" }}><FileText size={18} /> Label weather evidence</h3>
     <p style={{ margin: "0 0 12px", color: D.muted }}>Read the EPA label, check the source pages, then approve weather facts for the Job Card. This review does not verify mixing rates.</p>
     {loading && <p role="status">Loading label review…</p>}

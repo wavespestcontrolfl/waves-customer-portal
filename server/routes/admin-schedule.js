@@ -21,6 +21,7 @@ const { openInvoiceFacts } = require('../services/visit-context/balance');
 const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
+const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -16641,6 +16642,70 @@ router.get('/recommend-slots', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Shared read/action fence: only an explicit plan decision stops a series;
+// individually cancelled appointments do not establish that decision.
+async function recurringAlertTemplate(conn, parent, cols) {
+  if (!parent?.is_recurring || !parent.recurring_pattern
+    || parent.recurring_pattern === 'one_time') return null;
+  const customer = await conn('customers')
+    .where({ id: parent.customer_id, active: true }).whereNull('deleted_at')
+    .where(function () {
+      this.whereNull('pipeline_stage').orWhereNotIn('pipeline_stage', FORMER_CUSTOMER_STAGES);
+    }).first('id');
+  if (!customer) return null;
+  const template = overlayRecurringTemplateOverrides(parent, cols);
+  const profile = await resolveCompletionProfileForScheduledService(template, conn, { strict: true });
+  if (profile.billingType === 'one_time') return null;
+  const decision = await conn('recurring_plan_alerts')
+    .where({ recurring_parent_id: parent.id, customer_id: parent.customer_id })
+    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc').orderBy('id', 'desc').first();
+  if (decision?.resolved_action === 'cancel_series') return null;
+  if (decision?.resolved_action === 'let_lapse'
+    && await countUpcomingSeriesVisits(conn, parent.id) === 0) return null;
+  return template;
+}
+
+// Queue rows are historical hints, not current plan eligibility. Revalidate
+// derived rows too, so both sources share the same customer/catalog fences.
+async function refreshRecurringPlanAlert(conn, alert, cols) {
+  const parent = await conn('scheduled_services').where({ id: alert.parentId }).first();
+  cols ||= await conn('scheduled_services').columnInfo();
+  const template = await recurringAlertTemplate(conn, parent, cols);
+  if (!template || String(alert.customerId) !== String(parent.customer_id)) return null;
+  // A lapse is an explicit operational hold, not an ending reminder. Keep
+  // its resolution available even after visits are added or prepaid.
+  if (alert.alertType === 'plan_lapsed') {
+    const latest = await latestLiveSeriesVisit(conn, parent.id);
+    return { ...alert, lastVisitDate: dateOnly(latest?.scheduled_date),
+      remainingVisits: await countUpcomingSeriesVisits(conn, parent.id),
+      serviceType: template.service_type, pattern: template.recurring_pattern };
+  }
+
+  // An accepted estimate awaiting its first service is not a renewal.
+  const completedVisit = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
+    .where({ is_recurring: true, status: 'completed' }).first('id');
+  if (!completedVisit) return null;
+
+  const remainingVisits = await countUpcomingSeriesVisits(conn, parent.id);
+  if (remainingVisits > (parent.recurring_ongoing ? 0 : 1)) return null;
+  const lastVisit = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
+    .where('is_recurring', true)
+    .modify((query) => remainingVisits > 0
+      ? query.whereIn('status', UPCOMING_VISIT_STATUSES)
+      : query.whereNotIn('status', ['cancelled', 'rescheduled']))
+    .orderBy('scheduled_date', 'desc').first();
+  // Use the current end of the series, not the historical anchor's paid
+  // allocation. A term ID can survive refunds or a switch to per-application.
+  const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+  if (await annualPrepayCoversVisit(lastVisit, conn, { throwOnError: true })) return null;
+  const lastVisitDate = dateOnly(lastVisit?.scheduled_date);
+  if (remainingVisits > 0 && lastVisitDate > etDateString(addETDays(new Date(), 14))) return null;
+  return { ...alert, remainingVisits, lastVisitDate, serviceType: template.service_type, pattern: template.recurring_pattern };
+}
+
+
 // GET /api/admin/schedule/recurring-alerts — end-of-plan alerts + upcoming fixed plans ending soon
 router.get('/recurring-anomalies', requireAdmin, async (req, res, next) => {
   try {
@@ -16721,9 +16786,9 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
           const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
           if (pendingCount > 1) continue;
 
-          // Skip if already queued
+          // An old owner's queue row cannot suppress this owner's derived alert.
           const q = await db('recurring_plan_alerts')
-            .where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first();
+            .where({ recurring_parent_id: plan.id, customer_id: plan.customer_id }).whereNull('resolved_at').first();
           if (q) continue;
 
           alerts.push({
@@ -16755,7 +16820,6 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
           .where('s.is_recurring', true)
           .where('s.recurring_ongoing', true)
           .whereNull('s.recurring_parent_id')
-          .whereNotIn('s.status', ['cancelled', 'rescheduled'])
           .whereNotExists(function () {
             this.select(db.raw('1'))
               .from('scheduled_services as u')
@@ -16773,9 +16837,9 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
           // what counts as "upcoming") before alerting.
           const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
           if (pendingCount > 0) continue;
-          // Skip if already queued
+          // An old owner's queue row cannot suppress this owner's derived alert.
           const q = await db('recurring_plan_alerts')
-            .where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first();
+            .where({ recurring_parent_id: plan.id, customer_id: plan.customer_id }).whereNull('resolved_at').first();
           if (q) continue;
           // Last date that actually occupied a slot = the plan's last activity.
           const lastRow = await db('scheduled_services')
@@ -16801,12 +16865,26 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
       }
     } catch (e) { logger.warn(`[recurring-alerts] derived scan failed: ${e.message}`); }
 
+    const currentAlerts = [];
+    const alertCols = alerts.length ? await db('scheduled_services').columnInfo().catch(() => {
+      logger.warn('[recurring-alerts] schema lookup failed; skipping recurring alerts');
+      return null;
+    }) : {};
+    for (let offset = 0; alertCols && offset < alerts.length; offset += 5) {
+      const batch = await Promise.all(alerts.slice(offset, offset + 5)
+        .map(alert => refreshRecurringPlanAlert(db, alert, alertCols).catch(() => {
+          logger.warn(`[recurring-alerts] revalidation failed for alert ${alert.id}`);
+          return null;
+        })));
+      currentAlerts.push(...batch.filter(Boolean));
+    }
+
     // 3. Annual prepay terms: surface renewal/cancel/switch-plan touchpoints
     // when either the term end or the last scheduled service is close.
     try {
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const annualAlerts = await AnnualPrepayRenewals.getOpenRenewalAlerts({ daysAhead: 30 });
-      alerts.push(...annualAlerts.map((a) => ({
+      currentAlerts.push(...annualAlerts.map((a) => ({
         id: `annual-${a.id}`,
         source: 'annual_prepay',
         parentId: null,
@@ -16828,7 +16906,7 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
       })));
     } catch (e) { logger.warn(`[recurring-alerts] annual prepay scan failed: ${e.message}`); }
 
-    res.json({ alerts, total: alerts.length });
+    res.json({ alerts: currentAlerts, total: currentAlerts.length });
   } catch (err) { next(err); }
 });
 
@@ -16935,11 +17013,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     if (alert) {
       const alertNow = await trx('recurring_plan_alerts')
         .where({ id: alert.id })
-        .first('id', 'resolved_at');
+        .first();
       if (!alertNow) {
         outcome = { status: 404, body: { error: 'alert not found' } };
         return;
       }
+      alert = alertNow;
       if (alertNow.resolved_at) {
         outcome = { status: 200, body: { success: true, action, created: 0, alreadyResolved: true } };
         return;
@@ -16963,10 +17042,6 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       }
       parent = relocked;
     }
-    if (parent.status === 'cancelled') {
-      outcome = { status: 409, body: { error: 'series has been cancelled' } };
-      return;
-    }
     // Series-scope price/service overrides beat the parent's own columns for
     // everything the extend/convert spawn loops copy (allowlisted keys only;
     // no-op while the gate is off or nothing is stamped).
@@ -16984,6 +17059,22 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         outcome = { status: 200, body: { success: true, action, created: 0, alreadyResolved: true } };
         return;
       }
+    }
+
+    // Queue-backed cards can be stale too. Run the complete GET validation
+    // inside a savepoint: a tolerated lookup failure must never poison the
+    // action transaction or permit any writes.
+    const currentAlert = await trx.transaction(sp => refreshRecurringPlanAlert(sp, {
+      id: alert?.id || idParam, parentId,
+      customerId: alert ? alert.customer_id : parent.customer_id,
+      alertType: alert?.alert_type,
+    }, cols)).catch(() => {
+      logger.warn(`[recurring-alerts] revalidation failed for alert ${idParam}`);
+      return null;
+    });
+    if (!currentAlert) {
+      outcome = { status: 409, body: { error: 'This plan is no longer eligible for renewal. Refresh the schedule.' } };
+      return;
     }
 
     const rOpts = {
@@ -17577,6 +17668,7 @@ router._test = {
   sendPrepaidReceiptForInvoice,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
+  refreshRecurringPlanAlert,
   liveUpcomingSeriesVisits,
   findBillingCoveredVisits,
   reconcileRecurringSeriesVisitCount,

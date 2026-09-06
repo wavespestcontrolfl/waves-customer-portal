@@ -190,6 +190,7 @@ jest.mock('../models/db', () => {
   db.transaction = async (fn) => {
     const trx = (table) => makeQuery(table);
     trx.raw = async () => ({});
+    trx.fn = { now: () => new Date() };
     return fn(trx);
   };
   db.__tables = tables;
@@ -218,8 +219,8 @@ describe('processCancellationRequest', () => {
 
   test('pulls upcoming visits through the composed cancel path, stops recurrence, churns + winds down billing', async () => {
     db.__tables.scheduled_services = [
-      { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
-      { id: 's2', customer_id: 'c1', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      { id: 's1', customer_id: 'c1', is_recurring: true, recurring_pattern: 'quarterly', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
+      { id: 's2', customer_id: 'c1', is_recurring: true, recurring_parent_id: 's1', recurring_pattern: 'quarterly', status: 'confirmed', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
       { id: 's3', customer_id: 'c1', status: 'completed', scheduled_date: PAST, track_state: 'complete', cancelled_at: null, recurring_ongoing: false },
       { id: 's4', customer_id: 'c1', status: 'cancelled', scheduled_date: FUTURE, track_state: 'cancelled', cancelled_at: new Date(), recurring_ongoing: false },
       { id: 's5', customer_id: 'other', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: true },
@@ -246,6 +247,10 @@ describe('processCancellationRequest', () => {
     ];
     db.__tables.customer_interactions = [];
 
+    db.__tables.recurring_plan_alerts = [
+      { id: 'old-lapse', recurring_parent_id: 's1', customer_id: 'c1', alert_type: 'plan_lapsed', resolved_at: null },
+      { id: 'other-lapse', recurring_parent_id: 's1', customer_id: 'other', alert_type: 'plan_lapsed', resolved_at: null },
+    ];
     const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req1' });
 
     // s1 (pending future) + s2 (confirmed future) + s6 (rescheduled phantom) pulled.
@@ -282,6 +287,10 @@ describe('processCancellationRequest', () => {
     expect(svc('s1').recurring_ongoing).toBe(false);
     expect(svc('s2').recurring_ongoing).toBe(false);
     expect(svc('s5').recurring_ongoing).toBe(true);
+    const decisions = db.__tables.recurring_plan_alerts;
+    expect(decisions.filter(row => row.customer_id === 'c1')).toHaveLength(2);
+    expect(decisions.filter(row => row.customer_id === 'c1').every(row => row.resolved_action === 'cancel_series' && row.resolved_at)).toBe(true);
+    expect(decisions.find(row => row.id === 'other-lapse').resolved_at).toBeNull();
 
     // Customer churned / inactive + billing wound down.
     const cust = db.__tables.customers[0];

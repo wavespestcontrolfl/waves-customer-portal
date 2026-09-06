@@ -30,7 +30,7 @@ const fs = require('fs');
 const path = require('path');
 
 const adminScheduleRouter = require('../routes/admin-schedule');
-const { runRecurringSeriesMaintenance, runRecurringAlertAction } = adminScheduleRouter._test;
+const { runRecurringSeriesMaintenance, runRecurringAlertAction, refreshRecurringPlanAlert } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -46,7 +46,7 @@ function daysOut(n) {
 }
 
 const COLS = {
-  recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
+  recurring_template_overrides: {}, recurring_ongoing: {}, skip_weekends: {}, weekend_shift: {}, service_id: {},
   create_invoice_on_complete: {}, estimated_price: {}, is_callback: {}, discount_dollars: {},
   // Bill-To + stamped-service-address columns the refill must propagate.
   payer_id: {}, po_number: {}, self_pay_override: {},
@@ -78,7 +78,7 @@ function makeConn(handler, opts = {}) {
         const sub = {};
         // The occupancy probe's nested predicates (findConflictingVisits)
         // chain whereNull/orWhereRaw/etc. inside the callback too.
-        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw']) {
+        for (const nm of ['where', 'orWhere', 'whereNull', 'whereNotNull', 'orWhereNull', 'orWhereNot', 'whereRaw', 'orWhereRaw', 'orWhereNotIn']) {
           sub[nm] = (...a) => { nested.push([nm, ...a]); return sub; };
         }
         args[0].call(sub, sub);
@@ -91,6 +91,7 @@ function makeConn(handler, opts = {}) {
     for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare']) {
       b[m] = record(m);
     }
+    b.modify = (fn) => { fn(b); return b; };
     b.first = (...args) => {
       calls.push(['first', ...args]);
       return Promise.resolve(handler({ table, calls, op: 'first' }));
@@ -498,7 +499,8 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(helperBody).toContain(".where('is_recurring', true)");
     // 4th consumer: planUpdateDetailsRecurrenceDates (update-details' pre-trx
     // rung-1 date peek) anchors its extend plan on the same helper.
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(4);
+    // Lapse-alert display also uses the shared current-series end.
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(5);
     // The occupied-dates preload is shared the same way (same 4th consumer).
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
@@ -656,6 +658,13 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
     expect(matches.length).toBe(2);
   });
 
+  test('both derived scans deduplicate only queue rows belonging to the current owner', () => {
+    const route = src.slice(src.indexOf("router.get('/recurring-alerts'"), src.indexOf("router.post('/recurring-alerts/:id/action'"));
+    const queueChecks = route.match(/where\(\{ recurring_parent_id: plan.id, customer_id: plan.customer_id \}\)\.whereNull\('resolved_at'\)\.first\(\)/g) || [];
+    expect(queueChecks).toHaveLength(2);
+    expect(route).not.toContain("where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first()");
+  });
+
   test('schedule status route still runs the maintenance after completion', () => {
     expect(src).toContain('await runRecurringSeriesMaintenance(db, svc);');
   });
@@ -670,7 +679,7 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
 // `customer` = the customers row the billable-amount gate reads; null (the
 // default for the older scenarios) models an unreadable customer, which skips
 // the gate exactly as the make-recurring spawn does.
-function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [], customer = null } = {}) {
+function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [], customer = null, decision = null } = {}) {
   const state = {
     parent: {
       id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -681,7 +690,7 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
       create_invoice_on_complete: false,
       ...parentOverrides,
     },
-    alert: alertRow ? { ...alertRow } : null,
+    alert: alertRow ? { customer_id: 5, ...alertRow } : null,
     insertedVisits: [],
     auditInserts: [],
     activityInserts: [],
@@ -697,7 +706,9 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
     .length;
   const statusVisible = (calls, rows) => {
     const notIn = calls.find((c) => c[0] === 'whereNotIn' && c[1] === 'status');
-    return notIn ? rows.filter((r) => !notIn[2].includes(r.status)) : rows;
+    const inStatuses = calls.find((c) => c[0] === 'whereIn' && c[1] === 'status');
+    return rows.filter(r => (!notIn || !notIn[2].includes(r.status))
+      && (!inStatuses || inStatuses[2].includes(r.status)));
   };
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
@@ -706,14 +717,17 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
         const firstCall = calls.find((c) => c[0] === 'first');
         if (calls.some((c) => c[0] === 'count')) return { c: String(upcomingCount()) };
         if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: !!state.parent.recurring_ongoing };
+        if (calls.some(([op, fields]) => op === 'where' && fields?.status === 'completed')) {
+          return [state.parent, ...seriesRows].find(row => row.status === 'completed');
+        }
         if (firstCall[1] === 'create_invoice_on_complete') return undefined;
         // Post-registration terminal re-check: visit still live.
-        if (firstCall[1] === 'status') return { status: 'pending' };
+        if (firstCall[1] === 'status' && !calls.some((c) => c[0] === 'orderBy')) return { status: 'pending' };
         if (calls.some((c) => c[0] === 'orderBy')) {
           // DB-honest anchor: honor the status filter, then latest date — so
           // these tests fail if the shared filtered anchor is dropped again.
-          const sorted = statusVisible(calls, liveRows()).map((r) => r.scheduled_date).sort();
-          return sorted.length ? { scheduled_date: sorted[sorted.length - 1] } : undefined;
+          const sorted = statusVisible(calls, liveRows()).sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date));
+          return sorted.at(-1);
         }
         return { ...state.parent };
       }
@@ -757,6 +771,7 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
     // Series-child eligibility read (technician-eligibility.js): the parent's tech is assignable.
     if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
     if (table === 'recurring_plan_alerts') {
+      if (calls.some(c => c[0] === 'whereNotNull' && c[1] === 'resolved_at')) return decision;
       if (op === 'first') return state.alert ? { ...state.alert } : null;
       if (op === 'await') {
         const update = calls.find((c) => c[0] === 'update');
@@ -766,7 +781,16 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
       if (op === 'insert' || op === 'insertReturning') { state.auditInserts.push(data); return [1]; }
     }
     if (table === 'activity_log') { state.activityInserts.push(data); return [1]; }
-    if (table === 'customers') return op === 'first' ? customer : [];
+    if (table === 'customers') {
+      // Eligibility selects identity; financial reads below retain the
+      // separately supplied billing fixture for these extension scenarios.
+      if (calls.some((c) => c[0] === 'first' && c[1] === 'id')) {
+        if (customer?.active === false || customer?.deleted_at
+          || ['churned', 'past_customer', 'dormant'].includes(customer?.pipeline_stage)) return null;
+        return { id: 5 };
+      }
+      return op === 'first' ? customer : [];
+    }
     return null;
   };
   return { state, handler };
@@ -1011,16 +1035,143 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(state.alert.resolved_at).toBeNull();
   });
 
-  test('a series cancelled before the click is refused under the lock (409), inserting nothing', async () => {
+  test('an explicitly stopped series is refused under the lock (409), inserting nothing', async () => {
     const { state, handler } = alertActionScenario({
       parentOverrides: { status: 'cancelled' },
-      seriesRows: [{ scheduled_date: '2098-07-15', status: 'cancelled' }],
+      decision: { resolved_action: 'cancel_series' },
+      seriesRows: [{ scheduled_date: '2098-04-15', status: 'completed' }, { scheduled_date: '2098-07-15', status: 'cancelled' }],
       alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
     });
     const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
     expect(out.status).toBe(409);
     expect(state.insertedVisits).toHaveLength(0);
     expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test('an explicit cancellation blocks an old lapse card even while prepaid visits remain', async () => {
+    const { state, handler } = alertActionScenario({
+      decision: { resolved_action: 'cancel_series' },
+      seriesRows: [{ scheduled_date: daysOut(7), status: 'pending', prepaid_method: 'annual_prepay_invoice' }],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_lapsed', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(409);
+    expect(state.insertedVisits).toHaveLength(0);
+  });
+
+  test.each(['extend', 'convert_ongoing', 'let_lapse'])('%s preserves an exhausted series with individually cancelled first and last visits', async (action) => {
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { status: 'cancelled' },
+      seriesRows: [
+        { scheduled_date: daysOut(-90), status: 'completed' },
+        { scheduled_date: daysOut(-1), status: 'cancelled' },
+      ],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action, count: 2, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.alert.resolved_at).toBeTruthy();
+  });
+
+  test.each(['extend', 'convert_ongoing', 'let_lapse'])('%s works when only the anchor was cancelled', async (action) => {
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { status: 'cancelled' },
+      seriesRows: [
+        { scheduled_date: daysOut(-90), status: 'completed' },
+        { scheduled_date: daysOut(7), status: 'pending' },
+      ],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action, count: 2, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.alert.resolved_at).toBeTruthy();
+    expect(state.insertedVisits.length).toBe(action === 'let_lapse' ? 0 : 2);
+  });
+
+  test('a stale card cannot extend a series whose effective catalog service became one-time', async () => {
+    const resolver = require('../services/service-completion-profiles').resolveCompletionProfileForScheduledService;
+    const { gates } = require('../config/feature-gates');
+    const oldGate = gates.editApptPriceServiceScope;
+    gates.editApptPriceServiceScope = true;
+    resolver.mockImplementationOnce(async (row) => ({ billingType: row.service_id === 'one-time' ? 'one_time' : 'recurring' }));
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { recurring_template_overrides: { service_id: 'one-time' } },
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    try {
+      const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+      expect(out.status).toBe(409);
+      expect(state.insertedVisits).toHaveLength(0);
+      expect(state.alert.resolved_at).toBeNull();
+    } finally { gates.editApptPriceServiceScope = oldGate; }
+  });
+
+  test('a stale card cannot extend a former customer plan', async () => {
+    const { state, handler } = alertActionScenario({
+      customer: { id: 5, active: true, pipeline_stage: 'churned' },
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(409);
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test.each([
+    { label: 'refilled', seriesRows: [{ scheduled_date: daysOut(3), status: 'pending' }, { scheduled_date: daysOut(7), status: 'confirmed' }] },
+    { label: 'reassigned', parentOverrides: { customer_id: 6 } },
+    { label: 'awaiting first service', parentOverrides: { status: 'pending' } },
+  ])('a stale queued card refuses a plan that is $label', async (changes) => {
+    const { state, handler } = alertActionScenario({ ...changes,
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(409);
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test('a stale queued card refuses newly prepaid coverage and coverage lookup failures', async () => {
+    const coverage = jest.spyOn(require('../services/annual-prepay-renewals'), 'annualPrepayCoversVisit');
+    try {
+      for (const fail of [false, true]) {
+        if (fail) coverage.mockRejectedValueOnce(new Error('coverage unavailable'));
+        else coverage.mockResolvedValueOnce(true);
+        const { state, handler } = alertActionScenario({
+          seriesRows: [{ scheduled_date: daysOut(7), status: 'pending' }],
+          alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+        });
+        const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+        expect(out.status).toBe(409);
+        expect(state.insertedVisits).toHaveLength(0);
+        expect(state.alert.resolved_at).toBeNull();
+      }
+    } finally { coverage.mockRestore(); }
+  });
+
+  test('a later individually cancelled visit does not block a still-pending child', async () => {
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { status: 'cancelled' },
+      seriesRows: [
+        { scheduled_date: daysOut(-90), status: 'completed' },
+        { scheduled_date: daysOut(7), status: 'pending' },
+        { scheduled_date: daysOut(30), status: 'cancelled' },
+      ],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.insertedVisits).toHaveLength(2);
+  });
+
+  test('an explicit lapse stays actionable after future visits are added', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [{ scheduled_date: daysOut(30), status: 'pending' }, { scheduled_date: daysOut(90), status: 'confirmed' }],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_lapsed', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'let_lapse', adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.alert.resolved_at).toBeTruthy();
   });
 
   test('derived ids recompute the derived-scan condition under the lock — a concurrent refill makes the second click a no-op', async () => {
@@ -1082,5 +1233,177 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     // cancel lives in the shared helper.
     expect(src).toContain("['recurring-series-maintenance', String(parentId)],");
     expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(2);
+  });
+});
+
+
+describe('renewal banner revalidates historical recurring alerts', () => {
+  const profileResolver = require('../services/service-completion-profiles').resolveCompletionProfileForScheduledService;
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  const alert = { id: 1, parentId: 'series-a', customerId: 'customer-a', remainingVisits: 0 };
+  function scenario({ parent = {}, customer = { billing_mode: 'per_application' }, upcoming = 1, lastDate = daysOut(7), completed = true, lastVisit = {}, decision = null } = {}) {
+    return makeConn(({ table, calls, op }) => {
+      if (op === 'columnInfo') return { recurring_template_overrides: {} };
+      if (table === 'recurring_plan_alerts') return decision;
+      if (table === 'customers') {
+        if (!customer) return null;
+        const row = { id: 'customer-a', active: true, pipeline_stage: 'active_customer', ...customer };
+        // Evaluate the actual predicates, so removing the shared customer
+        // fence makes the archived/former-customer regressions fail.
+        for (const [op, key, value] of calls) {
+          if (op === 'where' && typeof key === 'string' && row[key] !== value) return null;
+          if (op === 'where' && typeof key === 'object' && Object.entries(key).some(([k, v]) => row[k] !== v)) return null;
+          if (op === 'whereFn' && !key.some(([nestedOp, k, v]) =>
+            (nestedOp === 'whereNull' && row[k] == null)
+            || (nestedOp === 'orWhereNotIn' && row[k] != null && !v.includes(row[k])))) return null;
+          if (op === 'whereNull' && row[key] != null) return null;
+          if (op === 'whereIn' && !value.includes(row[key])) return null;
+        }
+        return row;
+      }
+      if (calls.some(([op, fields]) => op === 'where' && fields?.status === 'completed')) return completed ? { id: 'completed-a' } : null;
+      if (calls.some(([op]) => op === 'count')) return { c: String(upcoming) };
+      if (calls.some(([op]) => op === 'orderBy')) return { id: 'last-visit', customer_id: 'customer-a', scheduled_date: lastDate, status: upcoming ? 'pending' : 'completed', ...lastVisit };
+      return { id: 'series-a', customer_id: 'customer-a', is_recurring: true,
+        recurring_pattern: 'quarterly', recurring_ongoing: false, status: 'completed',
+        service_type: 'Quarterly Pest Control Service', ...parent };
+    });
+  }
+  beforeEach(() => {
+    profileResolver.mockResolvedValue({ billingType: 'recurring' });
+    jest.spyOn(AnnualPrepayRenewals, 'annualPrepayCoversVisit').mockResolvedValue(false);
+  });
+  afterEach(() => jest.restoreAllMocks());
+  test.each([
+    { is_recurring: false }, { recurring_pattern: 'one_time' },
+  ])('omits an ineligible series: %j', async (parent) => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent }), alert)).toBeNull();
+  });
+  test.each([
+    null, { active: false }, { deleted_at: 'archived' },
+    { pipeline_stage: 'churned' }, { pipeline_stage: 'past_customer' },
+    { pipeline_stage: 'dormant' },
+  ])('omits former/deleted customers: %j', async (customer) => {
+    expect(await refreshRecurringPlanAlert(scenario({ customer }), alert)).toBeNull();
+  });
+  test.each(['cancelled', 'rescheduled'])('keeps a %s anchor whose children are ending or finished', async (status) => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { status } }), alert))
+      .toMatchObject({ remainingVisits: 1 });
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { status }, upcoming: 0 }), alert))
+      .toMatchObject({ remainingVisits: 0 });
+  });
+  test('omits a cancelled series even when older completed appointments remain', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { status: 'cancelled' }, upcoming: 0,
+      lastVisit: { status: 'cancelled' }, decision: { resolved_action: 'cancel_series' } }), alert)).toBeNull();
+  });
+  test.each(['new_lead', null])('keeps a serviced recurring plan despite stale CRM stage %j', async (pipeline_stage) => {
+    expect(await refreshRecurringPlanAlert(scenario({ customer: { pipeline_stage } }), alert))
+      .toMatchObject({ remainingVisits: 1 });
+  });
+  test('only live annual coverage suppresses a linked recurring plan', async () => {
+    const lastVisit = { annual_prepay_term_id: 'term-a', prepaid_method: 'annual_prepay_invoice', prepaid_amount: 90 };
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockResolvedValueOnce(true);
+    expect(await refreshRecurringPlanAlert(scenario({ lastVisit }), alert)).toBeNull();
+    // A refunded/cancelled allocation keeps its ID but is no longer covered.
+    expect(await refreshRecurringPlanAlert(scenario({ lastVisit }), alert))
+      .toMatchObject({ remainingVisits: 1 });
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockRejectedValueOnce(new Error('coverage unavailable'));
+    await expect(refreshRecurringPlanAlert(scenario({ lastVisit }), alert)).rejects.toThrow('coverage unavailable');
+  });
+  test('an old prepaid anchor cannot hide a later per-application series end', async () => {
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockImplementationOnce(async (visit) => visit?.prepaid_method === 'annual_prepay_invoice');
+    expect(await refreshRecurringPlanAlert(scenario({ parent: {
+      annual_prepay_term_id: 'old-term', prepaid_method: 'annual_prepay_invoice', prepaid_amount: 90,
+    } }), alert)).toMatchObject({ remainingVisits: 1 });
+  });
+  test('keeps a separate non-prepaid series on an annual-prepay customer', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ customer: { billing_mode: 'annual_prepay' } }), alert))
+      .toMatchObject({ id: 1, remainingVisits: 1 });
+  });
+  test('uses the saved recurring template after a parent-only service edit', async () => {
+    const { gates } = require('../config/feature-gates');
+    const previousGate = gates.editApptPriceServiceScope;
+    gates.editApptPriceServiceScope = true;
+    profileResolver.mockImplementationOnce(async (row) => ({
+      billingType: row.service_id === 'recurring-service' ? 'recurring' : 'one_time',
+    }));
+    try {
+      expect(await refreshRecurringPlanAlert(scenario({ parent: {
+        service_id: 'one-time-service', service_type: 'Cockroach Control',
+        recurring_template_overrides: { service_id: 'recurring-service', service_type: 'Quarterly Pest Control Service' },
+      } }), alert)).toMatchObject({ serviceType: 'Quarterly Pest Control Service', remainingVisits: 1 });
+    } finally {
+      gates.editApptPriceServiceScope = previousGate;
+    }
+  });
+  test('rejects catalog one-time work even with legacy recurring flags', async () => {
+    profileResolver.mockResolvedValue({ billingType: 'one_time' });
+    expect(await refreshRecurringPlanAlert(scenario(), alert)).toBeNull();
+  });
+  test('does not treat an accepted plan awaiting its first service as a renewal', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ completed: false }), alert)).toBeNull();
+  });
+  test('an explicit series stop hides lapse cards even with retained paid visits', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ upcoming: 1, decision: { resolved_action: 'cancel_series' } }),
+      { ...alert, alertType: 'plan_lapsed' })).toBeNull();
+  });
+  test('keeps explicit lapse holds visible regardless of refill, date, or paid coverage', async () => {
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockResolvedValue(true);
+    expect(await refreshRecurringPlanAlert(scenario({ upcoming: 2, lastDate: daysOut(90) }), { ...alert, alertType: 'plan_lapsed' }))
+      .toMatchObject({ remainingVisits: 2, lastVisitDate: daysOut(90), alertType: 'plan_lapsed' });
+    expect(AnnualPrepayRenewals.annualPrepayCoversVisit).not.toHaveBeenCalled();
+  });
+  test('drops a queued alert once two appointments exist', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ upcoming: 2 }), alert)).toBeNull();
+  });
+  test('drops a refilled ongoing plan and a fixed plan not ending soon', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { recurring_ongoing: true } }), alert)).toBeNull();
+    expect(await refreshRecurringPlanAlert(scenario({ lastDate: daysOut(30) }), alert)).toBeNull();
+  });
+  test('keeps a genuinely exhausted ongoing plan', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { recurring_ongoing: true }, upcoming: 0, lastDate: daysOut(-2) }), alert))
+      .toMatchObject({ remainingVisits: 0, lastVisitDate: daysOut(-2) });
+  });
+  test('refreshes stale counts and dates for a plan ending soon', async () => {
+    expect(await refreshRecurringPlanAlert(scenario(), alert))
+      .toMatchObject({ remainingVisits: 1, lastVisitDate: daysOut(7), pattern: 'quarterly' });
+  });
+  test('does not pair a historical customer identity with a reassigned plan', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { customer_id: 'customer-b' } }), alert)).toBeNull();
+  });
+  test('propagates lookup failures so callers can roll back before handling them', async () => {
+    profileResolver.mockRejectedValueOnce(new Error('catalog unavailable'));
+    await expect(refreshRecurringPlanAlert(scenario(), alert)).rejects.toThrow('catalog unavailable');
+    await expect(refreshRecurringPlanAlert(scenario(), { ...alert, id: 2 }))
+      .resolves.toMatchObject({ id: 2, remainingVisits: 1 });
+  });
+});
+
+const SKIP = !process.env.DATABASE_URL;
+(SKIP ? describe.skip : describe)('renewal revalidation savepoint (PostgreSQL)', () => {
+  let conn;
+  beforeAll(() => {
+    const config = require('../knexfile');
+    conn = require('knex')(config.development || config);
+  });
+  afterAll(async () => {
+    if (conn) await conn.destroy();
+    await require('../models/db').destroy();
+  });
+
+  test('a SQL error rejects the savepoint and leaves the outer transaction usable', async () => {
+    await conn.transaction(async trx => {
+      let queryError;
+      const current = await trx.transaction(async sp => {
+        // Session-local shadow: the production table is never altered. Its
+        // missing id column makes the real revalidation SELECT fail in PG.
+        await sp.raw('CREATE TEMP TABLE scheduled_services (not_an_id integer) ON COMMIT DROP');
+        return refreshRecurringPlanAlert(sp, { id: 1, parentId: 'series-a', customerId: 'customer-a' });
+      }).catch(err => { queryError = err; return null; });
+      expect(current).toBeNull();
+      expect(queryError?.code).toBe('42703');
+      const probe = await trx.raw('SELECT 1 AS usable');
+      expect(probe.rows[0].usable).toBe(1);
+    });
   });
 });

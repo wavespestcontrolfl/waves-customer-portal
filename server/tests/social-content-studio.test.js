@@ -1030,3 +1030,61 @@ describe('versus card label (Codex r3 on #3990)', () => {
     expect(Studio.buildVersusCardInput(lawn, { city: 'Venice', service: lawn.service }).service).toBe('Lawn Care');
   });
 });
+
+describe('RUN_KINDS / runKindFor (2026-09-06: every run kind on the creative engine)', () => {
+  const pair = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'paper_wasp_vs_mud_dauber');
+
+  test('versus plans classify as versus and hand the engine the versus overlay input', () => {
+    const plan = { versusPair: pair, city: 'Sarasota', service: pair.service, topic: 'Paper Wasp vs Mud Dauber' };
+    const kind = Studio.runKindFor(plan);
+    expect(kind).toBe(Studio.RUN_KINDS.versus);
+    expect(kind.variant).toBe('versus');
+    expect(kind.cardInput(plan, {})).toMatchObject({ variant: 'versus', city: 'Sarasota', left: pair.left, right: pair.right, verdict: pair.verdict });
+    expect(kind.photoTemplateKey).toBe('waves_photo_versus_v1');
+    expect(kind.cardTemplateKey).toBe('waves_versus_square');
+  });
+
+  test('milestone plans classify as milestone (company-wide: no city on the card)', () => {
+    const plan = { milestone: 300, averageRating: 4.8, city: 'Venice' };
+    const kind = Studio.runKindFor(plan);
+    expect(kind).toBe(Studio.RUN_KINDS.milestone);
+    expect(kind.cardInput(plan, {})).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.8, city: null });
+    expect(kind.photoTemplateKey).toBe('waves_photo_milestone_v1');
+  });
+
+  test('a review plan wins over any other payload; everything else is a campaign', () => {
+    const review = Studio.runKindFor({ reviewGraphic: { googleReviewId: 'r1', city: 'Venice', excerpt: 'Great', reviewerDisplayName: 'K.' }, versusPair: pair });
+    expect(review).toBe(Studio.RUN_KINDS.review);
+    expect(review.cardInput({ reviewGraphic: { googleReviewId: 'r1', city: 'Venice', excerpt: 'Great', reviewerDisplayName: 'K.' } }).variant).toBe('review');
+    // A review payload WITHOUT a source id is not a review run (liveness rule).
+    expect(Studio.runKindFor({ reviewGraphic: { city: 'Venice' } })).toBe(Studio.RUN_KINDS.campaign);
+    const campaign = Studio.runKindFor({ city: 'Parrish', topic: 'ants moving around lanais', service: 'general pest', cta: 'book inspection' });
+    expect(campaign.variant).toBe('campaign');
+    expect(campaign.cardInput({ city: 'Parrish', topic: 'ants', service: 'general pest' }, { inputs: {} }).variant).toBe('campaign');
+    expect(campaign.cardTemplateKey).toBe('waves_campaign_square');
+  });
+
+  test('every kind renders its card through the shared uploader signature', () => {
+    for (const kind of Object.values(Studio.RUN_KINDS)) {
+      expect(typeof kind.renderCard).toBe('function');
+      expect(kind.renderCard.length).toBe(3); // (plan, preview, platform)
+    }
+  });
+});
+
+describe('fixedCardIsFallback (Codex r3 on #3987: alert scope)', () => {
+  test('campaign: the fixed card is always the fallback (hero or scene expected), even beside a successful scene', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: true, engineProduced: true, creativeEligible: true, engineEnabled: true })).toBe(true);
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: true, engineProduced: false, creativeEligible: false, engineEnabled: false })).toBe(true);
+  });
+
+  test('versus/milestone/review: the GBP card beside a successful scene is the designed visual, never an alert', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: true, creativeEligible: true, engineEnabled: true })).toBe(false);
+  });
+
+  test('versus/milestone/review: the card is a fallback only when the engine was on and eligible yet produced nothing', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: true, engineEnabled: true })).toBe(true);
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: true, engineEnabled: false })).toBe(false); // engine off = designed
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: false, engineEnabled: true })).toBe(false); // GBP-only run
+  });
+});

@@ -234,3 +234,94 @@ describe('milestone card', () => {
     expect(svg).toContain('>250</text>');
   });
 });
+
+describe('versus + milestone redesign (2026-09-06)', () => {
+  const wasp = {
+    city: 'Sarasota',
+    service: 'General Pest',
+    left: { name: 'Paper Wasp', points: ['Open umbrella-shaped nest', 'Lives in small colonies', 'Nests under eaves and rails'] },
+    right: { name: 'Mud Dauber', points: ['Builds mud tube nests', 'Solitary and docile', 'Hunts spiders'] },
+    verdict: 'The nest shape tells you who built it.',
+  };
+  const termites = {
+    city: 'Lakewood Ranch',
+    service: 'Termite',
+    left: { name: 'Subterranean Termite', points: ['Mud tubes on the foundation', 'Needs soil moisture', 'Damage follows the grain'] },
+    right: { name: 'Drywood Termite', points: ['Six-sided pellets in piles', 'No soil contact needed', 'Lives inside the wood'] },
+    verdict: 'Look for mud tubes or pellet piles before you guess.',
+  };
+
+  test('versus text card fills the panel with two tinted tiles and never truncates the bank copy', () => {
+    for (const pair of [wasp, termites]) {
+      const svg = Renderer.renderSocialCardSvg({ variant: 'versus', ...pair, platform: 'square' });
+      expect(svg).toContain(`fill="${Renderer.COLORS.blueLight}"`); // left tile
+      expect(svg).toContain('fill="#FFF6CC"'); // right tile
+      expect(svg).toContain('>VS</text>');
+      for (const point of [...pair.left.points, ...pair.right.points]) {
+        // every word of every point survives (wrapping may split lines, never elide)
+        for (const word of point.split(' ')) expect(svg).toContain(word);
+      }
+      expect(svg).not.toContain('...');
+      expect(svg).toContain(pair.verdict.split(' ').slice(-2).join(' '));
+    }
+  });
+
+  test('versus text card still renders 4:3 for GBP', async () => {
+    const sharp = require('sharp');
+    const base64 = await Renderer.renderSocialCardJpegBase64({ variant: 'versus', ...termites }, { platform: 'gbp' });
+    const meta = await sharp(Buffer.from(base64, 'base64')).metadata();
+    expect([meta.width, meta.height]).toEqual([1200, 900]);
+  });
+
+  test('photo versus overlay: two white columns, VS badge, gold verdict, no card ground', () => {
+    const svg = Renderer.renderPhotoOverlaySvg({ variant: 'photo_versus', ...termites, platform: 'square' });
+    expect(svg).toContain('LAKEWOOD RANCH · PEST ID');
+    expect(svg).toContain('Subterranean');
+    expect(svg).toContain('Drywood Termite');
+    expect(svg).toContain('>VS</text>');
+    expect(svg).toContain('pellet piles');
+    expect(svg).not.toContain('...');
+    expect(svg).toContain('scrimBottom');
+    expect(svg).not.toContain(`fill="${Renderer.COLORS.sand}"`);
+    expect(svg).not.toContain('<rect x="0" y="0" width="1080" height="1080" fill="#FFFFFF"');
+  });
+
+  test('photo milestone overlay: count, label, real-average stars, thanks', () => {
+    const svg = Renderer.renderPhotoOverlaySvg({ variant: 'photo_milestone', count: 300, averageRating: 4.8, thanks: 'Thank you, Southwest Florida.', platform: 'square' });
+    expect(svg).toContain('>300</text>');
+    expect(svg).toContain('GOOGLE REVIEWS');
+    expect(svg).toContain('4.8 average rating');
+    expect((svg.match(/photo-star-clip-\d/g) || []).length).toBeGreaterThanOrEqual(5);
+    expect(svg).toContain('Thank you, Southwest Florida.');
+    const noAvg = Renderer.renderPhotoOverlaySvg({ variant: 'photo_milestone', count: 250, platform: 'square' });
+    expect(noAvg).not.toContain('average rating');
+    expect(noAvg).not.toContain('photo-star-clip');
+  });
+
+  test('photo overlays put the transparent logo on the photo with a shadow — no white chip', () => {
+    const logo = 'data:image/png;base64,iVBORw0KGgo=';
+    for (const variant of ['photo', 'photo_review', 'photo_versus', 'photo_milestone']) {
+      const svg = Renderer.renderPhotoOverlaySvg({ variant, city: 'Venice', topic: 'x', count: 10, platform: 'square' }, logo);
+      expect(svg).toContain(`href="${logo}"`);
+      expect(svg).toContain('filter="url(#logoShadow)"');
+      expect(svg).toContain('feDropShadow');
+      expect(svg).not.toMatch(/<rect[^>]*rx="20"[^>]*fill="#FFFFFF"/);
+    }
+  });
+});
+
+describe('versus card copy budget (the whole pair bank must fit)', () => {
+  const Studio = require('../services/social-content-studio');
+
+  test('no pair in PEST_VERSUS_PAIRS is elided on the square card, the GBP card, or the photo overlay', () => {
+    for (const pair of Studio.PEST_VERSUS_PAIRS) {
+      const input = { city: 'Lakewood Ranch', service: pair.service, left: pair.left, right: pair.right, verdict: pair.verdict };
+      for (const platform of ['square', 'gbp']) {
+        const svg = Renderer.renderSocialCardSvg({ variant: 'versus', ...input, platform });
+        expect({ pair: pair.key, platform, elided: svg.includes('...') }).toEqual({ pair: pair.key, platform, elided: false });
+      }
+      const overlay = Renderer.renderPhotoOverlaySvg({ variant: 'photo_versus', ...input, platform: 'square' });
+      expect({ pair: pair.key, overlay: overlay.includes('...') }).toEqual({ pair: pair.key, overlay: false });
+    }
+  });
+});

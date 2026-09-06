@@ -1274,19 +1274,77 @@ function hasVideoCapableChannel(channels) {
   return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
 }
 
-async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, effectiveMode, now }) {
+// Is a fixed (deterministic) card that reached a network a FIX: alert?
+// Always for a campaign: a hero photo or a scene was expected, and its GBP
+// card beside a successful scene is still the fallback for the hero. For the
+// other kinds the GBP card beside a scene is the DESIGNED visual (GBP never
+// posts AI imagery), so the card is a fallback only when the engine was on
+// and eligible yet produced nothing — engine off means the card is the
+// designed visual everywhere.
+function fixedCardIsFallback({ isCampaignRun, engineProduced, creativeEligible, engineEnabled }) {
+  if (isCampaignRun) return true;
+  return !engineProduced && !!creativeEligible && !!engineEnabled;
+}
+
+// Everything that differs per run kind, in ONE table: the creative engine's
+// variant + overlay input, the deterministic card renderer (the GBP image and
+// the engine-off / engine-failed fallback, at 'gbp' or square), and the
+// template keys stamped on the preview. runAutonomousLocked reads the kind
+// once and never branches on it again; adding a kind means adding a row.
+// Campaign is the only kind with a hero-photo alternative to its card — the
+// caller resolves that (resolveCampaignHero), the table just renders cards.
+const RUN_KINDS = {
+  review: {
+    variant: 'review',
+    cardInput: (plan) => buildReviewCardInput(plan.reviewGraphic),
+    renderCard: (plan, preview, platform) => renderReviewGraphicImageUrl(plan.reviewGraphic, platform),
+    photoTemplateKey: 'waves_photo_review_v1',
+    cardTemplateKey: 'waves_clean_square',
+  },
+  versus: {
+    variant: 'versus',
+    cardInput: (plan) => buildVersusCardInput(plan.versusPair, plan),
+    renderCard: (plan, preview, platform) => renderVersusImageUrl(plan.versusPair, plan, platform),
+    photoTemplateKey: 'waves_photo_versus_v1',
+    cardTemplateKey: 'waves_versus_square',
+  },
+  milestone: {
+    variant: 'milestone',
+    cardInput: (plan) => buildMilestoneCardInput(plan),
+    renderCard: (plan, preview, platform) => renderMilestoneImageUrl(plan, platform),
+    photoTemplateKey: 'waves_photo_milestone_v1',
+    cardTemplateKey: 'waves_milestone_square',
+  },
+  campaign: {
+    variant: 'campaign',
+    cardInput: (plan, preview) => buildCampaignCardInput(plan, preview),
+    renderCard: (plan, preview, platform) => renderCampaignImageUrl(plan, preview, platform),
+    photoTemplateKey: 'waves_photo_square_v1',
+    cardTemplateKey: 'waves_campaign_square',
+  },
+};
+
+// Classify a plan. A review run is identified by its source review id ALONE
+// (see the liveness note in runAutonomousLocked); versus and milestone by
+// their plan payloads; everything else is a campaign.
+function runKindFor(plan = {}) {
+  if (plan.reviewGraphic?.googleReviewId) return RUN_KINDS.review;
+  if (plan.versusPair) return RUN_KINDS.versus;
+  if (plan.milestone) return RUN_KINDS.milestone;
+  return RUN_KINDS.campaign;
+}
+
+async function creativeVariantsForRun(plan, preview, { kind, wantsGbp, effectiveMode, now }) {
   if (!CreativeEngine.CREATIVE_FLAGS.enabled) return [];
   try {
-    const cardInput = isReviewRun
-      ? buildReviewCardInput(plan.reviewGraphic)
-      : buildCampaignCardInput(plan, preview);
+    const { variant } = kind;
     const excludeConcepts = await recentCreativeConceptKeys();
     const variants = await CreativeEngine.generateVariants({
-      cardInput,
+      cardInput: kind.cardInput(plan, preview),
       topic: plan.topic,
       service: plan.service,
       city: plan.city,
-      variant: isReviewRun ? 'review' : 'campaign',
+      variant,
       count: effectiveMode === 'draft' ? CreativeEngine.CREATIVE_FLAGS.variantCount : 1,
       excludeConcepts,
       wantGbp: wantsGbp,
@@ -1301,7 +1359,7 @@ async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, ef
     // visual — stays a still.
     if (
       variants.length
-      && !isReviewRun
+      && variant === 'campaign'
       && effectiveMode === 'draft'
       && CreativeEngine.VIDEO_FLAGS.enabled
       && CreativeEngine.isVideoDay(now)
@@ -2341,14 +2399,16 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // campaign — skipping every source-liveness check on the publish path.
     // The fallible schema gate only decides whether the graphic can be
     // PERSISTED after a successful publish.
-    const isReviewRun = !!plan.reviewGraphic?.googleReviewId;
+    // Every run kind (review / versus / milestone / campaign) takes the
+    // creative engine (owner ruling 2026-09-06: the fixed SVG card reads as
+    // the "old post"); RUN_KINDS carries each kind's overlay, card renderer,
+    // and template keys. GBP still gets the deterministic card (no AI imagery).
+    const kind = runKindFor(plan);
+    const isReviewRun = kind === RUN_KINDS.review;
+    const isVersusRun = kind === RUN_KINDS.versus;
+    const isMilestoneRun = kind === RUN_KINDS.milestone;
+    const isCampaignRun = kind === RUN_KINDS.campaign;
     const canPersistGraphic = isReviewRun && await hasTable('review_graphics');
-    // Versus runs are the deterministic split-panel ID card by design — an AI
-    // photo scene can't render a two-pest comparison, so the creative engine is
-    // skipped entirely (same "never block, never substitute" posture as GBP).
-    const isVersusRun = !isReviewRun && !!plan.versusPair;
-    // Milestone runs are the deterministic number card (same posture as versus).
-    const isMilestoneRun = !isReviewRun && !isVersusRun && !!plan.milestone;
 
     // Creative engine first (AI photo scene + deterministic brand overlay,
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
@@ -2366,7 +2426,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // approval queue's content and publish later, when readiness may differ.
     const hasNonGbpChannel = Array.isArray(plan.channels)
       && plan.channels.some((c) => c !== 'gbp');
-    let creativeEligible = hasNonGbpChannel && !isVersusRun && !isMilestoneRun;
+    let creativeEligible = hasNonGbpChannel;
     if (creativeEligible && effectiveMode !== 'draft') {
       creativeEligible = false;
       for (const ch of plan.channels) {
@@ -2378,7 +2438,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     }
     const creativeVariants = creativeEligible
       ? await creativeVariantsForRun(plan, preview, {
-        isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
+        kind, wantsGbp: false, effectiveMode, now: startedAt,
       })
       : [];
     // Campaign runs with a live page attached use that page's hero photo
@@ -2389,89 +2449,72 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // Resolved lazily — the fetch + CDN upload only happens on a branch that
     // will actually consume it (creative Meta image + no GBP would otherwise
     // orphan an S3 object every run).
-    const campaignHeroEligible = !isReviewRun && !isVersusRun && !isMilestoneRun;
     let campaignHeroUrl = null;
     const resolveCampaignHero = async () => {
-      if (campaignHeroEligible && campaignHeroUrl === null) {
+      if (isCampaignRun && campaignHeroUrl === null) {
         campaignHeroUrl = (await heroImageForLink(finalPreview.suggestedLink)) || '';
       }
       return campaignHeroUrl || null;
     };
-    let gbpImageBranded = true;
+    // The run kind's deterministic visual at a platform: the linked page's
+    // hero for a campaign when one exists, otherwise the kind's fixed card.
+    // For a review run the card is rendered but the graphic is NOT persisted
+    // or approved yet: listReviewGraphicCandidates() excludes any review
+    // already joined to review_graphics, so creating the row here would
+    // consume the review from the candidate queue even on a dry run or a
+    // failed publish. Persist + approve happens only after a confirmed
+    // successful publish (below).
+    const deterministicVisual = async (platform) => {
+      const hero = await resolveCampaignHero();
+      if (hero) return { url: hero, hero: true };
+      return { url: await kind.renderCard(plan, preview, platform), hero: false };
+    };
+    const cardIsFallback = fixedCardIsFallback({
+      isCampaignRun,
+      engineProduced: creativeVariants.length > 0,
+      creativeEligible,
+      engineEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
+    });
     const legacyCardUrls = new Set();
+    const trackFallbackCard = (visual) => {
+      if (visual?.url && !visual.hero && cardIsFallback) legacyCardUrls.add(visual.url);
+    };
+    let gbpImageBranded = true;
     if (creativeVariants.length) {
       imageUrl = creativeVariants[0].imageUrl;
       if (wantsGbp) {
-        if (isReviewRun) {
-          gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
-        } else {
-          const hero = await resolveCampaignHero();
-          gbpImageUrl = hero || await renderCampaignImageUrl(plan, preview, 'gbp');
-          gbpImageBranded = !hero;
-          if (!hero && gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
-        }
+        const gbp = await deterministicVisual('gbp');
+        gbpImageUrl = gbp.url;
+        gbpImageBranded = !gbp.hero;
+        trackFallbackCard(gbp);
       }
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         gbpImageUrl,
         gbpImageBranded,
-        variant: isReviewRun ? 'review' : 'campaign',
-        templateKey: isReviewRun ? 'waves_photo_review_v1' : 'waves_photo_square_v1',
+        variant: kind.variant,
+        templateKey: kind.photoTemplateKey,
         creative: {
           conceptKey: creativeVariants[0].conceptKey,
           sceneModel: creativeVariants[0].sceneModel,
         },
         variants: creativeVariants,
       });
-    } else if (isReviewRun) {
-      // Render the review card for preview/publish, but do NOT persist or approve
-      // the graphic yet. listReviewGraphicCandidates() excludes any review
-      // already joined to review_graphics, so creating the row here would consume
-      // the review from the candidate queue even on a dry run or a failed
-      // publish. Persist + approve happens only after a confirmed successful
-      // publish (below).
-      imageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic);
-      if (wantsGbp) gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
-      finalPreview = previewWithVisual(preview, {
-        imageUrl,
-        gbpImageUrl,
-        variant: 'review',
-        templateKey: 'waves_clean_square',
-      });
-    } else if (isMilestoneRun) {
-      imageUrl = await renderMilestoneImageUrl(plan);
-      if (wantsGbp) gbpImageUrl = await renderMilestoneImageUrl(plan, 'gbp');
-      finalPreview = previewWithVisual(preview, {
-        imageUrl,
-        gbpImageUrl,
-        variant: 'milestone',
-        templateKey: 'waves_milestone_square',
-      });
-    } else if (isVersusRun) {
-      imageUrl = await renderVersusImageUrl(plan.versusPair, plan);
-      if (wantsGbp) gbpImageUrl = await renderVersusImageUrl(plan.versusPair, plan, 'gbp');
-      finalPreview = previewWithVisual(preview, {
-        imageUrl,
-        gbpImageUrl,
-        variant: 'versus',
-        templateKey: 'waves_versus_square',
-      });
     } else {
-      const hero = await resolveCampaignHero();
-      imageUrl = hero || await renderCampaignImageUrl(plan, preview);
-      if (wantsGbp) gbpImageUrl = hero || await renderCampaignImageUrl(plan, preview, 'gbp');
-      gbpImageBranded = !hero;
+      const main = await deterministicVisual();
+      imageUrl = main.url;
+      const gbp = wantsGbp ? (main.hero ? main : await deterministicVisual('gbp')) : null;
+      gbpImageUrl = gbp?.url || null;
+      gbpImageBranded = !main.hero;
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         gbpImageUrl,
         gbpImageBranded,
-        variant: 'campaign',
-        templateKey: hero ? 'waves_blog_hero' : 'waves_campaign_square',
+        variant: kind.variant,
+        templateKey: main.hero ? 'waves_blog_hero' : kind.cardTemplateKey,
       });
-      if (!hero) {
-        if (imageUrl) legacyCardUrls.add(imageUrl);
-        if (gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
-      }
+      trackFallbackCard(main);
+      trackFallbackCard(gbp);
     }
 
     if (effectiveMode === 'draft') {
@@ -3835,6 +3878,9 @@ module.exports = {
   captionContentRows,
   rowMatchesIntentKeywords,
   legacyCardShipped,
+  RUN_KINDS,
+  runKindFor,
+  fixedCardIsFallback,
   firstLivePage,
   suggestedLink,
   suggestedLinkTitle,
