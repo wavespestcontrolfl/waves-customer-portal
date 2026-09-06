@@ -4220,7 +4220,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
                   <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3 }}>{p.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(p) || 'No address on file'}</span>
                   {nextById && (
                     <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 2 }}>
-                      {nextById[p.id] === undefined ? 'Checking next visit…' : nextById[p.id] ? `Next visit ${nextVisitLabel(nextById[p.id])}` : 'No visit scheduled'}
+                      {nextById[p.id] ? `Next visit ${nextVisitLabel(nextById[p.id])}` : 'No visit scheduled'}
                     </span>
                   )}
                 </span>
@@ -4268,17 +4268,24 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   // the "next visit at each property" chips. Independent of the schedule
   // load so a failure here never blanks the tab; null = still loading.
   const multiProperty = properties.length > 1;
+  // null = loading, [] / rows = loaded; a failed read is tracked separately
+  // so it renders as "unavailable + retry", never as "Checking…" forever or
+  // as "no visit scheduled" (pre-push codex P1).
   const [accountNext, setAccountNext] = useState(null);
+  const [accountNextFailed, setAccountNextFailed] = useState(false);
+  const [accountNextAttempt, setAccountNextAttempt] = useState(0);
   useEffect(() => {
-    if (!multiProperty) { setAccountNext(null); return undefined; }
+    if (!multiProperty) { setAccountNext(null); setAccountNextFailed(false); return undefined; }
     let alive = true;
+    setAccountNext(null);
+    setAccountNextFailed(false);
     api.getAccountUpcoming()
       .then((res) => { if (alive) setAccountNext(Array.isArray(res?.properties) ? res.properties : []); })
-      .catch((err) => { console.error(err); if (alive) setAccountNext([]); });
+      .catch((err) => { console.error(err); if (alive) setAccountNextFailed(true); });
     return () => { alive = false; };
-  }, [multiProperty, customer?.id]);
+  }, [multiProperty, customer?.id, accountNextAttempt]);
   const nextById = multiProperty && accountNext
-    ? Object.fromEntries(accountNext.map((p) => [p.id, p.next || null]))
+    ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => row.id === p.id)?.next || null]))
     : null;
 
   const loadSchedule = useCallback(() => {
@@ -4866,7 +4873,15 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               />
             </div>
             <div style={{ display: 'grid', gap: 8 }}>
-              <span data-gt="eyebrow" style={{ fontSize: 12, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>Next visit at each property</span>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <span data-gt="eyebrow" style={{ fontSize: 12, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>Next visit at each property</span>
+                {accountNextFailed && (
+                  <span role="alert" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 14, color: muted }}>
+                    Next visits couldn&rsquo;t be loaded.
+                    <button type="button" onClick={() => setAccountNextAttempt((n) => n + 1)} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 800, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
+                  </span>
+                )}
+              </div>
               <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
                 {properties.map((p) => {
                   const active = p.id === customer.id;
@@ -4893,7 +4908,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                       <span style={{ minWidth: 0 }}>
                         <span style={{ display: 'block', fontSize: 15, fontWeight: 850, lineHeight: 1.25 }}>{p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')}</span>
                         <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: n || active ? B.glassNavy : muted, marginTop: 4 }}>
-                          {n === undefined ? 'Checking…' : nextVisitLabel(n)}
+                          {n === undefined ? (accountNextFailed ? 'Next visit unavailable' : 'Checking…') : nextVisitLabel(n)}
                         </span>
                         {n?.serviceType && <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: active ? B.glassNavy : muted, marginTop: 2 }}>{n.serviceType}</span>}
                       </span>
