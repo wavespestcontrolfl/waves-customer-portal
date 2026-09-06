@@ -1384,21 +1384,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Extend the existing commitment watcher to SMS. SMS receipts are replayed
-  // every five minutes; the call lane retains its daily 7:20am ET cadence.
+  // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
-    const et = etParts();
-    const smsWork = (async () => {
-      if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
-      try {
-        const { runSmsOperationalActions, refreshSmsCommitments } = require('./sms-operational-actions');
-        await runSmsOperationalActions();
-        await runExclusive('sms-commitment-fulfillment', () => refreshSmsCommitments());
-      } catch {
-        logger.error('[sms-operations] commitment watcher did not complete');
-      }
-    })();
-    if (et.hour !== 7 || et.minute !== 20) { await smsWork; return; }
+    if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
+    try {
+      const { runSmsOperationalActions, refreshSmsCommitments } = require('./sms-operational-actions');
+      await runSmsOperationalActions();
+      await runExclusive('sms-commitment-fulfillment', () => refreshSmsCommitments());
+    } catch {
+      logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Keep the existing daily call watchdog independent of timer latency.
+  cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
       const result = await runCallCommitmentsWatchdog();
@@ -1419,8 +1418,6 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Call-commitments watchdog tick failed: ${err.message}`);
-    } finally {
-      await smsWork;
     }
   }, { timezone: 'America/New_York' });
 

@@ -3,10 +3,14 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatch: jest.fn() }));
+jest.mock('../utils/pan-scrub', () => {
+  const actual = jest.requireActual('../utils/pan-scrub');
+  return { ...actual, scrubPans: jest.fn(actual.scrubPans) };
+});
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
-const { groundExtraction, extractSmsOperations } = require('../services/sms-operational-extractor');
+const { groundExtraction, extractSmsOperations, buildPrompt } = require('../services/sms-operational-extractor');
 const { eligibleMessage, factVerdict, runSmsOperationalActions } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const { dispatch } = require('../services/llm/call');
@@ -22,7 +26,7 @@ const obligation = (quote, extra = {}) => ({
   party: 'waves', kind: 'send_estimate', description: quote, quote,
   basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, ...extra,
 });
-const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'side of the house',
+const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
 const extracted = (obligations = [], facts = []) => ({ obligations, facts });
 
@@ -181,6 +185,53 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.dropped).toBe(Number(unverified));
   });
 
+  test.each(['The controller is not in the garage.', 'The controller is in the garage only until tomorrow.'])(
+    'controller locations preserve the complete instruction: %s', (body) => {
+      const result = groundExtraction(extracted([], [
+        fact({ quote: 'garage', value: 'garage' }),
+        fact({ quote: body, value: 'garage' }),
+        fact({ quote: body, value: body }),
+      ]), { message: source(body), properties });
+      expect(result.facts.map((item) => item.value)).toEqual([body]);
+      expect(result.dropped).toBe(2);
+    },
+  );
+
+  test.each(["Please don't call me tomorrow at 9am", 'Do not call me tomorrow at 9am',
+    'Never call me', 'Please text instead of call me', 'Call me, but only after I confirm'])(
+    'negated or conditional scope needs review: %s', (body) => {
+      const result = groundExtraction(extracted([obligation(body, { kind: 'callback', description: 'call me' })]), {
+        message: source(body), properties,
+      });
+      expect(result.obligations).toEqual([]);
+      expect(result.dropped).toBe(1);
+    },
+  );
+
+  test('prompts scrub current, historical, and split payment readbacks before serialization', () => {
+    const prompt = buildPrompt({ message: source('CVV is 123. Please send the estimate'),
+      history: [source('My card is 4242 4242'), source('4242 4242')] });
+    expect(prompt).not.toContain('4242 4242');
+    expect(prompt).not.toContain('CVV is 123');
+    expect(prompt).toContain('[card ending 4242]');
+    expect(prompt).toContain('[code removed]');
+    expect(prompt).toContain('Please send the estimate');
+  });
+
+  test('raw payment data echoed by the model cannot become operational facts', () => {
+    const quote = 'The code is 4242424242424242';
+    expect(() => groundExtraction(extracted([], [fact({ field: 'access_notes', quote, value: quote })]), {
+      message: source(quote), properties,
+    })).toThrow('sensitive_output');
+  });
+
+  test('an unavailable scrubber stops extraction before any provider call', async () => {
+    dispatch.mockClear();
+    require('../utils/pan-scrub').scrubPans.mockImplementationOnce(() => { throw new Error('scrubber unavailable'); });
+    await expect(extractSmsOperations({ message: source('Please send the estimate'), properties })).rejects.toThrow('scrubber unavailable');
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   test('notes cannot omit a negation or a condition from the source sentence', () => {
     const message = source('Do not treat the barn. Treat the yard only when the pets are inside.');
     const result = groundExtraction(extracted([], [
@@ -316,6 +367,17 @@ describe('fulfillment proof', () => {
     await verifySmsFulfillment({ ...cached, evidence: [{ quote: 'Only the revised confirmation' }] }, evidence);
     expect(dispatch).toHaveBeenCalledTimes(4);
     expect(dispatch.mock.calls[3][1].text).toContain('Only the revised confirmation');
+  });
+
+  test('fulfillment scrubs raw cross-channel text and rejects payment-data witness quotes', async () => {
+    dispatch.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const text = 'My card is 4242 4242 4242 4242. CVV is 123';
+    const evidence = { records: [{ ref: 'sms:1', type: 'sms', text, message_body: text }], failures: [] };
+    await verifySmsFulfillment(commitment, evidence);
+    expect(dispatch.mock.calls[0][1].text).not.toContain('4242 4242 4242 4242');
+    expect(dispatch.mock.calls[0][1].text).not.toContain('CVV is 123');
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'sms:1', quote: text }, evidence, { kind: 'other' }))
+      .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
   });
 
   test('provider failures pause retries without permanently caching the outage', async () => {

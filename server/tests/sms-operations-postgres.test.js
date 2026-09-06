@@ -63,7 +63,7 @@ postgres('SMS operations on PostgreSQL', () => {
       from_phone: '+12025550101', to_phone: numbers.locations.parrish.number, created_at: new Date(), status: 'received' };
     process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = new Date(message.created_at.getTime() - 1000).toISOString();
     await mockPg('sms_log').insert(message);
-    result = { dropped: 0, facts: [{ field: 'irrigation_controller_location', value: 'beside the garage',
+    result = { dropped: 0, facts: [{ field: 'irrigation_controller_location', value: 'The controller is beside the garage',
       quote: 'The controller is beside the garage', duration: 'durable', property_id: propertyId }],
     obligations: [{ party: 'waves', kind: 'send_estimate', description: 'send the estimate',
       quote: 'Please send the estimate', basis: 'request', property_id: propertyId, due_text: null, due_at: null }] };
@@ -84,7 +84,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('call_commitments')).toHaveLength(1);
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
     expect(await mockPg('audit_log')).toHaveLength(1);
-    expect((await mockPg('property_preferences').first()).irrigation_controller_location).toBe('beside the garage');
+    expect((await mockPg('property_preferences').first()).irrigation_controller_location).toBe('The controller is beside the garage');
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('applied');
     // Existing Owed/call readers remain call-scoped. No new portal queue.
     expect(await listOpenCommitments(mockPg)).toEqual([]);
@@ -142,7 +142,7 @@ postgres('SMS operations on PostgreSQL', () => {
       result.facts = first ? [preference, ...result.facts] : [...result.facts, preference];
       await recordMessageOperations(mockPg, message, result, context);
       expect(await mockPg('property_preferences').first()).toMatchObject({
-        contact_preference: value, irrigation_controller_location: 'beside the garage',
+        contact_preference: value, irrigation_controller_location: 'The controller is beside the garage',
       });
       expect((await mockPg('sms_log').first()).operational_analysis.facts.every((fact) => fact.outcome === 'applied')).toBe(true);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -304,6 +304,29 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('notifications')).toHaveLength(2);
     expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(1);
     expect((await mockPg('call_commitments').first()).status).toBe('open');
+  });
+
+  test('a merge updates bell ownership even after the rolling dedupe window expires', async () => {
+    const actualNotifications = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation(actualNotifications.notifyAdmin.bind(actualNotifications));
+    result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const verify = jest.fn().mockResolvedValue({ verdict: 'open' });
+    const now = new Date(message.created_at.getTime() + 2000);
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    const oldBell = await mockPg('notifications').first();
+    await mockPg('notifications').where({ id: oldBell.id }).update({ created_at: new Date(Date.now() - 25 * 3600000) });
+    const winner = randomUUID();
+    await mockPg('customers').insert({ id: winner, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550103', address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236' });
+    await mockPg('sms_log').where({ id: message.id }).update({ customer_id: winner });
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    const bells = await mockPg('notifications');
+    expect(bells).toHaveLength(2);
+    for (const bell of bells) {
+      expect(bell.link).toBe(`/admin/customers?customerId=${winner}`);
+      expect(bell.metadata.customerId).toBe(winner);
+    }
   });
 
   test('suppressed estimate sends and manual acceptance are not delivery witnesses', async () => {

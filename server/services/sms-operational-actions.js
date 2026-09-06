@@ -245,10 +245,19 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       if (!customer) return;
       const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
       if (!enabled() || live?.status !== 'open' || live.human_state != null) return;
+      const dedupeKey = `sms-commitment:${row.id}`;
+      if (live.sms_context.customer_id !== source.customer_id) {
+        // Rolling dedupe only refreshes recent rows. Older bells must also
+        // follow a merge or undo instead of opening the retired account.
+        await trx('notifications').where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({
+            link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}`,
+            metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
+          });
+      }
       await trx('call_commitments').where({ id: row.id }).update({
         sms_context: { ...current.sms_context, fulfillment_check: verdict },
       });
-      const dedupeKey = `sms-commitment:${row.id}`;
       if (verdict.verdict === 'fulfilled') {
         await trx('call_commitments').where({ id: row.id }).update({
           status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
