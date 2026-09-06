@@ -91,6 +91,10 @@ postgres('combined capacity conversion on the migrated application schema', () =
 
   test.each([
     ['two services', lines.slice(0, 2)],
+    ...[['monthly', 12], ['bimonthly', 6]].map(([pattern, visits]) => [
+      `${pattern} pest with lawn`, [{ ...lines[0], visitsPerYear: visits, frequency: pattern,
+        name: `${pattern} Pest Control`, catalog: `pest_general_${pattern}`, pattern }, lines[1]],
+    ]),
     ['three services', lines.slice(0, 3)],
     ['four services', lines],
     ['lawn and tree with different cadences', [lines[1], lines[2]]],

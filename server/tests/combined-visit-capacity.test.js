@@ -72,9 +72,19 @@ describe('combined visit booking capacity', () => {
   test('a service cadence the converter cannot seed is refused before offering a combined slot', () => {
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
     const estimate = estimateFor(['pest_control', 'lawn_care']);
-    estimate.estimate_data.result.recurring.services[0].visitsPerYear = 12;
+    estimate.estimate_data.result.recurring.services[1].visitsPerYear = 4;
     expect(() => resolveEstimateSlotProfile(estimate))
       .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
+  });
+
+  test.each([6, 12])('supported %i-application pest plans retain their companion capacity', (visits) => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const estimate = estimateFor(['pest_control', 'lawn_care']);
+    estimate.estimate_data.result.recurring.services[0].visitsPerYear = visits;
+    const profile = resolveEstimateSlotProfile(estimate);
+    expect(profile.services.map((row) => [row.service, row.visitsPerYear]))
+      .toEqual([['pest_control', visits], ['lawn_care', 6]]);
+    expect(profile.durationMinutes).toBe(120);
   });
 
   test('a persisted combined reservation keeps the accepted mix sized after the gate is off', () => {
