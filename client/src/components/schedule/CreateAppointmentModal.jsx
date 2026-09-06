@@ -796,10 +796,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Memoized: it is a dependency of the auto-apply effect below, so a fresh
   // array every render would re-run that effect on every keystroke.
   const visibleScheduleEstimates = useMemo(
-    () => (bookingPropertyState === 'error'
-      // Addresses unknown → a property-scoped quote cannot be matched to the
-      // address being booked, and booking it without propertyId would skip
-      // the server's mismatch check. Only address-agnostic quotes stay.
+    () => ((bookingPropertyState === 'error' || bookingPropertyState === 'loading')
+      // Addresses unknown (failed) or not yet known (loading) → a
+      // property-scoped quote cannot be matched to the address being booked,
+      // and auto-applying one while the list loads would let network order
+      // decide the address. Only address-agnostic quotes are offered until
+      // the property state resolves; the ready state then filters normally.
       ? scheduleEstimates.filter((e) => !e?.propertyId)
       : filterScheduleEstimatesForProperty(scheduleEstimates, propertyPickerActive ? selectedPropertyId : '')),
     [scheduleEstimates, propertyPickerActive, selectedPropertyId, bookingPropertyState],
@@ -992,6 +994,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const applyScheduleEstimate = (estimateId) => {
     if (!estimateId) {
       setLinkedEstimate(null);
+      // Lines priced for a property other than the one being booked cannot
+      // ride an unlinked (manual) booking either — the server's mismatch
+      // check only sees linked quotes. Lines for the selected property and
+      // address-agnostic quote lines stay editable as before.
+      if (propertyPickerActive) {
+        setServices((arr) => arr.filter((line) => !line.sourcePropertyId || String(line.sourcePropertyId) === String(selectedPropertyId)));
+      }
       return;
     }
     const estimate = findScheduleEstimateById(scheduleEstimates, estimateId);
