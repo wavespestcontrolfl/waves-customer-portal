@@ -334,3 +334,17 @@ restructuring than the local refresh fixes. This is an accepted structural
 follow-up, not a claim that the expanded component warning predates the PR.
 Earlier continuation lint records include the warning as present at those
 checkpoints; the final PR summary explicitly identifies this deferral.
+
+## Integration after the parent merge
+
+The cleanup parent PR #3980 was merged independently while this draft remained
+open. GitHub retargeted #4004 to `main`; the Email branch was reconciled with
+`origin/main` at `c1a99cf0c09902a0a638fb2c4753b944cba9dfb5`, preserving the merged
+cleanup and the Email navigation, role and sign-out coverage. The resulting
+diff against main contains only the 19 Email implementation/evidence files.
+
+After conflict resolution, all **104 focused tests across nine suites**,
+**14 synthetic browser scenarios**, and the production build with prebuild
+gates pass. Logs: `.tmp/email-main-integration-{focused,browser,build}.log`.
+Local migrations were not run. This reconciliation does not merge or release
+the Email draft PR.

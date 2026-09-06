@@ -91,6 +91,7 @@ function chain({ rows = [], first = undefined, update = 1 } = {}) {
   });
   c.first = jest.fn(async () => first);
   c.update = jest.fn(async () => update);
+  c.insert = jest.fn(async () => [1]);
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
 }
@@ -307,7 +308,9 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
   ];
   function executeQueues({ ledgerRefunded = '49.00', stragglers = [], unresolved = [], lingering = [] } = {}) {
     const q = previewQueues();
+    q.recurring_plan_alerts = [chain(), chain()];
     q.scheduled_services.push(
+      chain({ rows: [{ id: 'v-1', customer_id: 'cust-1', recurring_pattern: 'quarterly' }] }), // recurring series ledger evidence
       chain({ update: 1 }), // recurring_ongoing flip
       ...visitChains('pending', null), // v-1
       ...visitChains('confirmed', 'scheduled'), // v-2
@@ -334,6 +337,16 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     q.estimate_deposits.push(chain({ rows: [{ refunded_amount: ledgerRefunded }] }));
     return q;
   }
+
+  it('records an explicit signup series stop in the recurrence transaction', async () => {
+    const queues = executeQueues();
+    const ledger = queues.recurring_plan_alerts[1];
+    setDbQueues(queues);
+    await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(ledger.insert).toHaveBeenCalledWith(expect.objectContaining({
+      recurring_parent_id: 'v-1', customer_id: 'cust-1', resolved_action: 'cancel_series',
+    }));
+  });
 
   it('voids first, cancels visits, clears tier, refunds face-only, then emails the ledger total', async () => {
     setDbQueues(executeQueues());
@@ -442,6 +455,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
   function gatedQueues({ v1Fresh }) {
     const q = previewQueues();
     q.scheduled_services.push(
+      chain({ rows: [] }), // recurring series ledger evidence
       chain({ update: 1 }), // flip
       chain({ first: v1Fresh }), // v-1 fresh (fails before further chains)
       ...visitChains('confirmed', 'scheduled'), // v-2
@@ -480,6 +494,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
   it('a tracker that goes live BETWEEN the fresh read and the flip reverts the cancel', async () => {
     const q = previewQueues();
     q.scheduled_services.push(
+      chain({ rows: [] }), // recurring series ledger evidence
       chain({ update: 1 }), // flip
       chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh: clean
       chain({ first: { track_state: 'en_route' } }), // v-1 post-flip: went live
@@ -563,6 +578,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     // chains), so this run's queue is hand-built.
     const q = previewQueues();
     q.scheduled_services.push(
+      chain({ rows: [] }), // recurring series ledger evidence
       chain({ update: 1 }), // flip
       chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh
       chain({ first: { track_state: null } }), // v-1 post-flip

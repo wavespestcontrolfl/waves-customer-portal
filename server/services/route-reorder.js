@@ -38,7 +38,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
-const { computeWindowFitOrder } = require('./route-reorder-window-fit');
+const { computeWindowFitOrder, effectiveWindowRange, currentOrder } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -84,29 +84,6 @@ function getRouteReorderConfig(overrides = {}) {
   };
 }
 
-/** Stops ordered as the board currently runs them — the "before" baseline
- *  savings are measured against. MUST mirror the dispatch consumers' SQL
- *  exactly (dispatch.js jobs query: COALESCE(route_order, 999),
- *  COALESCE(window_start, '23:59'), created_at — no time_window, windowless
- *  stops LAST): a baseline built from any other sequence measures savings
- *  against a route nobody drives and can trigger a spurious reorder of an
- *  already-efficient day (codex GitHub round P2). `id` is a final stable
- *  tiebreak only — SQL leaves created_at ties unordered. */
-function currentOrder(stops) {
-  return [...stops].sort((a, b) => {
-    const ra = a.route_order == null ? 999 : Number(a.route_order);
-    const rb = b.route_order == null ? 999 : Number(b.route_order);
-    if (ra !== rb) return ra - rb;
-    const wa = a.window_start ? String(a.window_start).slice(0, 5) : '23:59';
-    const wb = b.window_start ? String(b.window_start).slice(0, 5) : '23:59';
-    if (wa !== wb) return wa < wb ? -1 : 1;
-    const ca = a.created_at ? new Date(a.created_at).getTime() : 0;
-    const cb = b.created_at ? new Date(b.created_at).getTime() : 0;
-    if (ca !== cb) return ca - cb;
-    return String(a.id) < String(b.id) ? -1 : 1;
-  });
-}
-
 /**
  * Effective chronology anchor for a stop: window_start when set, else the
  * legacy `time_window` band mapped to its start ('morning' → 08:00,
@@ -126,37 +103,6 @@ function effectiveWindowStart(stop) {
   const m = raw.match(/^(\d{1,2}):(\d{2})/);
   if (m) return `${m[1].padStart(2, '0')}:${m[2]}`;
   return null; // 'any' / free text — no chronology promise to enforce
-}
-
-const hhmmToMin = (hhmm) => {
-  const [h, m] = String(hhmm).split(':').map(Number);
-  return h * 60 + m;
-};
-
-/**
- * The [start, end] minute-of-day ARRIVAL range a stop is PROMISED to begin
- * within, or null when unconstrained. window_start rows: ALWAYS start + 120
- * — the customer's arrival promise is "time + 2h window" (the same rule the
- * SMS formatter's arrivalWindowRange enforces), NEVER the stored window_end,
- * which is a service-END estimate: a 3-hour 09:00 job has a noon window_end
- * but its promised arrival deadline is 11:00 (codex GitHub round P1). Legacy
- * bands get their real band ends (morning = 08:00–12:00, afternoon =
- * 12:00–17:00); a literal HH:MM in time_window gets the same +120 promise.
- */
-function effectiveWindowRange(stop) {
-  if (stop.window_start) {
-    const ws = hhmmToMin(String(stop.window_start).slice(0, 5));
-    return { startMin: ws, endMin: ws + 120 };
-  }
-  const raw = String(stop.time_window || '').trim().toLowerCase();
-  if (raw === 'morning') return { startMin: 8 * 60, endMin: 12 * 60 };
-  if (raw === 'afternoon') return { startMin: 12 * 60, endMin: 17 * 60 };
-  const m = raw.match(/^(\d{1,2}):(\d{2})/);
-  if (m) {
-    const ws = Number(m[1]) * 60 + Number(m[2]);
-    return { startMin: ws, endMin: ws + 120 };
-  }
-  return null;
 }
 
 /**

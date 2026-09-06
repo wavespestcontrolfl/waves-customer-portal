@@ -20,8 +20,17 @@
  *   - skipped for an inspection SERVICE (service type contains
  *     "inspection", e.g. "Pest Inspection Service") completed normally —
  *     the card is a pesticide-application notice and an inspection applies
- *     nothing. Owner can overrule by renaming the service or ruling
- *     otherwise; the rule lives in INSPECTION_SERVICE_RE.
+ *     nothing. The one exception is the WDO inspection PROJECT
+ *     (projectType 'wdo_inspection'): it posts the termite protection
+ *     notice (owner ruling 2026-09-06), so termite-scoped kit consumes
+ *     there. A visual "Termite Inspection Service" completed on the normal
+ *     path posts nothing and stays skipped (GH codex #3996 P2). Owner can
+ *     overrule by renaming the service or ruling otherwise; the rule lives
+ *     in INSPECTION_SERVICE_RE + NOTICE_PROJECT_TYPE.
+ *   - called from BOTH completion flows: the normal closeout
+ *     (complete-scheduled-service.js) and the project-backed completion
+ *     (project-completion.js — every termite service Adam named completes
+ *     there, GH codex #3996 P1). Both call it after their own commit.
  *   - retired products (active = false) are never consumed.
  *   - a kit item the technician ALSO logged in the completion product picker
  *     (an ordinary usage movement for the same product + visit already
@@ -43,8 +52,13 @@ const { gateEnvValue } = require('../config/feature-gates');
 
 const SOURCE = 'completion_consumable';
 const GATE = 'GATE_AUTO_REORDER';
-// A scheduled inspection (no application) leaves no yard sign.
+// A scheduled inspection (no application) leaves no yard sign — except the
+// WDO inspection project: it posts the termite protection notice (owner
+// ruling 2026-09-06), so termite-scoped kit still consumes there. Keyed on
+// the completion profile's projectType, not the service line: a visual
+// Termite Inspection Service posts nothing.
 const INSPECTION_SERVICE_RE = /\binspection\b/i;
+const NOTICE_PROJECT_TYPE = 'wdo_inspection';
 
 // Reasons to do nothing at all, in order, decided before any read.
 const SKIP_WHEN = [
@@ -57,7 +71,7 @@ const SKIP_WHEN = [
   // detectServiceLine reads it as pest — the completion's own posture is the
   // authority (Codex r9 P2).
   [(a) => a.isInternalOnlyCompletion === true, 'internal_only_completion'],
-  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)), 'inspection_service'],
+  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)) && a.projectType !== NOTICE_PROJECT_TYPE, 'inspection_service'],
 ];
 
 // SQL NULL = every line. Anything else must be an array of line keys —
@@ -215,9 +229,12 @@ async function consumeCompletionSupplies(db, {
   isInternalOnlyCompletion = false,
   serviceLine = null,
   serviceType = null,
+  // completion profile projectType for a project-backed completion; null on
+  // the normal closeout path.
+  projectType = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
-  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType }));
+  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType, serviceLine, projectType }));
   if (skip) { result.skipped.push({ reason: skip[1] }); return result; }
 
   let products;
@@ -328,4 +345,51 @@ async function retireLookupBellIfSettled(db, result, { scheduledServiceId, servi
   if (!(await clearMissedDeductionBells(db, { scheduledServiceId }))) failed('the obsolete visit lookup bell could not be retired');
 }
 
-module.exports = { consumeCompletionSupplies, appliesToLine, COMPLETION_CONSUMABLE_SOURCE: SOURCE, INSPECTION_SERVICE_RE };
+// ---- Durable "this completion still owes the kit" marker -------------------
+// service_records.field_flags.completion_supplies_owed. The completing
+// TRANSACTION writes it (pest-recap.js recap, project-completion.js close) so
+// a process death between that commit and the post-commit hook is retried by
+// the next recap / close of the same record instead of lost; an edit or
+// re-close of a completion that never owed (no marker) never consumes — a
+// historical completion has no movement for the at-most-once index to match.
+// One lifecycle for both paths (GH codex #3996 r3 P1).
+const OWED_FLAG = 'completion_supplies_owed';
+
+// jsonb merge of the marker onto the current field_flags value.
+function completionSuppliesOwedMarker(db) {
+  return db.raw("COALESCE(field_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [OWED_FLAG]: true })]);
+}
+
+// Marker read off a service_records row. Malformed flags establish nothing.
+function completionSuppliesOwed(record = null) {
+  if (!record) return false;
+  try {
+    const flags = typeof record.field_flags === 'string' ? JSON.parse(record.field_flags) : (record.field_flags || {});
+    return flags[OWED_FLAG] === true;
+  } catch { return false; }
+}
+
+// Consume, then clear the marker — unless the hand-off bell was LOST (Codex
+// #3832 r14 P1): a landed bell means staff adjust by hand, so a retry must
+// not deduct the same kit again on top of their correction; only a miss
+// nobody was told about (or an obsolete bell that could not be retired,
+// Codex r30 P1) keeps the marker for the next retry. Never throws past
+// consumeCompletionSupplies' own contract: the clear is a plain update.
+async function settleOwedCompletionSupplies(db, args = {}) {
+  const consumption = await consumeCompletionSupplies(db, args);
+  const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed');
+  if (args.serviceRecordId && !handoffLost) {
+    await db('service_records').where({ id: args.serviceRecordId }).update({ field_flags: db.raw(`COALESCE(field_flags, '{}'::jsonb) - '${OWED_FLAG}'`) });
+  }
+  return consumption;
+}
+
+module.exports = {
+  consumeCompletionSupplies,
+  settleOwedCompletionSupplies,
+  completionSuppliesOwed,
+  completionSuppliesOwedMarker,
+  appliesToLine,
+  COMPLETION_CONSUMABLE_SOURCE: SOURCE,
+  INSPECTION_SERVICE_RE,
+};

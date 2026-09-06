@@ -14,8 +14,51 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/epa-product-label', () => ({ ...jest.requireActual('../services/epa-product-label'), currentEpaSourceStatus: jest.fn() }));
 
 const jobCard = require('../services/job-card');
+
+describe('reviewed EPA weather evidence is separate from rate verification', () => {
+  afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; });
+  const { labelProductSnapshot } = require('../services/product-label-weather');
+  const absent = { status: 'not_stated', value: null, quote: '', page: null, note: '' };
+  function product() {
+    const p = { id: 'label-test', name: 'Synthetic product', epa_reg_number: '123-456', formulation: 'SC', label_verified_at: null };
+    p.label_weather_review = { active: { status: 'approved', productSnapshot: labelProductSnapshot(p), facts: {
+      minTempF: absent, maxTempF: absent, rainFreeHours: absent,
+      maxWindMph: { status: 'limit', value: 10, quote: 'Synthetic wind restriction.', page: 1, note: '' },
+    } } };
+    return p;
+  }
+  const now = new Date('2030-01-01T12:00:00Z');
+  const hourly = Array.from({ length: 4 }, (_, i) => ({ startTime: new Date(now.getTime() + i * 3600000).toISOString(), temperatureF: 80, windMph: 5, rainChance: 0 }));
+  const verdict = p => jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: 'current' } }).verdicts[0].verdict;
+  test('reviewed limits enable weather only; gate off preserves the existing unknown', () => {
+    const p = product(); expect(verdict(p)).toBe('unknown');
+    process.env.GATE_LABEL_PIPELINE = 'true'; expect(verdict(p)).toBe('ok'); expect(p.label_verified_at).toBeNull();
+    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+  });
+  test('conditional evidence stays unknown; a known breach still holds', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    p.label_weather_review.active.facts.maxTempF = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
+    expect(verdict(p)).toBe('unknown');
+    p.label_weather_review.active.facts.maxWindMph.value = 4; expect(verdict(p)).toBe('hold');
+  });
+  test('conditional-only evidence keeps its actionable warning without numeric limits', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    p.label_weather_review.active.facts.maxWindMph = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
+    expect(jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: 'current' } }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: 'Conditional label restrictions need review' });
+  });
+  test.each(['superseded', 'unavailable', undefined])('reviewed limits require a current source check (%s)', source => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    expect(jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: source } }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: expect.stringContaining('EPA') });
+  });
+  test('revoked or identity-stale evidence never falls back to a previously trusted general stamp', () => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product(); p.label_verified_at = '2030-01-01';
+    p.label_weather_review.active.status = 'revoked'; expect(verdict(p)).toBe('unknown');
+    p.label_weather_review.active.status = 'approved'; p.formulation = 'WG'; expect(verdict(p)).toBe('unknown');
+  });
+});
 
 const baseFacts = () => ({
   pets: '', petsSecured: '', gates: [], entry: '', parking: '', instructions: '',
@@ -574,6 +617,40 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
   });
 });
 
+describe('current-visit procedure uses the same authority as product resolution', () => {
+  test('the booked ET month selects the procedure; old cost annotations do not reach field readers', async () => {
+    const program = { name: 'Synthetic seasonal program', notes: ['Observe the marked area.', 'Add-on only; office minimum $35, never included in the base service.'], visits: [
+      { visit: 1, month: 'Jan', primary: 'January-only work' },
+      { visit: 9, month: 'Sep', main_goal: 'Inspect the September areas.', notes: 'Do not enter the marked-off area.', primary: 'September work ($4.20)\nRecord observations', secondary: 'If needed, take a close-up photo.' },
+    ] };
+    const out = await jobCard.resolveVisitProducts({ facts: { isLawn: false, serviceType: 'Tree & Shrub Care', scheduledDate: '2030-09-30' }, protocols: { tree_shrub: program }, catalog: [], dbh: () => ({}) });
+    expect(out.procedure).toMatchObject({ title: 'Visit 9 · Sep', objective: 'Inspect the September areas.', visitNotes: ['Do not enter the marked-off area.'], steps: ['September work', 'Record observations'], notes: ['Observe the marked area.', 'Add-on only; office minimum [price omitted], never included in the base service.'] });
+    expect(JSON.stringify(out.procedure)).not.toMatch(/January|\$/);
+  });
+
+  test.each(['active', 'draft', 'archived'])('lawn procedure respects the resolved protocol status (%s)', async status => {
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { month: 'Sep', visit: 9, trackKey: 'st_augustine' }, protocol: { objective: 'Leave the marked area untreated.', structured: {
+      status, grassTrack: 'st_augustine', name: 'Synthetic lawn protocol', version: 3, window: { title: 'September inspection', goal: 'Document site conditions.', requiredTasks: ['record_site_photo'] },
+    } } });
+    const out = await jobCard.resolveVisitProducts({ facts: { isLawn: true, serviceId: 'synthetic-visit' }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan } });
+    if (status === 'active') expect(out.procedure).toMatchObject({ source: 'Published protocol · version 3', visitNotes: ['Leave the marked area untreated.'], steps: ['record site photo'] });
+    else expect(out.procedure).toBeNull();
+    expect(buildPlan).toHaveBeenCalledTimes(1);
+  });
+
+  test('an assessment cannot inherit a treatment procedure from its display name', async () => {
+    const out = await jobCard.resolveVisitProducts({ facts: { serviceType: 'Quarterly Pest Control', serviceCategory: 'inspection', scheduledDate: '2030-09-30' }, protocols: { pest: { visits: [{ visit: 1, primary: 'Treatment step' }] } }, catalog: [] });
+    expect(out.procedure).toBeUndefined();
+    expect(out.lines).toEqual([]);
+  });
+
+  test('an unresolved lawn track cannot inherit the operating layer fallback procedure', async () => {
+    const buildPlan = async () => ({ propertyGate: { month: 'Sep', trackKey: null }, protocol: { structured: { status: 'active', grassTrack: 'st_augustine', window: { title: 'Default track' } } } });
+    const out = await jobCard.resolveVisitProducts({ facts: { isLawn: true, serviceId: 'synthetic-visit' }, protocols: {}, catalog: [], dbh: () => ({}), deps: { buildPlan } });
+    expect(out.procedure).toBeNull();
+  });
+});
+
 describe('isTankMixable', () => {
   const { isTankMixable } = jobCard._test;
   test('granular, bait and dry-weight products stay out of the tank', () => {
@@ -608,6 +685,24 @@ describe('mixForProduct', () => {
   const at = { now: new Date('2026-09-04T12:00:00Z') };
 
   const approve = () => jest.fn().mockResolvedValue({ blocks: [], warnings: [] });
+
+  test.each([
+    ['2026-09-05', 27.4, -82.5, false, 'Judged on the visit day'],
+    ['2026-09-04', null, null, false, 'No property pin on file — no forecast'],
+    ['2026-09-04', 27.4, -82.5, true, 'Current EPA label could not be verified — try again'],
+  ])('mix source checks run only when the verdict can use them (%s, %s)', async (date, lat, lng, shouldCheck, reason) => {
+    const sourceCheck = require('../services/epa-product-label').currentEpaSourceStatus;
+    sourceCheck.mockReset().mockResolvedValue('unavailable');
+    process.env.GATE_LABEL_PIPELINE = 'true';
+    try {
+      const reviewed = { ...product, name: 'Synthetic label product', epa_reg_number: '123-456', formulation: 'SC' };
+      reviewed.label_weather_review = { active: { status: 'approved', source: { registration: '123-456' }, productSnapshot: require('../services/product-label-weather').labelProductSnapshot(reviewed), facts: {} } };
+      const dbh = makeDb({ scheduled_services: [{ ...visit, scheduled_date: date, latitude: lat, longitude: lng }], products_catalog: [reviewed], equipment_calibrations: [live] });
+      const out = await jobCard.mixForProduct('p1', 1, { serviceId: 'svc1', dbh, ...at, deps: { getHourly: jest.fn().mockResolvedValue([]) } });
+      expect(sourceCheck).toHaveBeenCalledTimes(shouldCheck ? 1 : 0);
+      expect(out.sprayCheck).toMatchObject({ verdict: 'unknown', reason });
+    } finally { delete process.env.GATE_LABEL_PIPELINE; }
+  });
 
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
@@ -1044,6 +1139,21 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(card.notes.instructions).toContain('do not treat the vegetable garden');
   });
 
+  test('schedule readiness uses the resolver without generating or caching a paragraph, or returning private facts', async () => {
+    const callModel = jest.fn();
+    const update = jest.fn();
+    const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs });
+    const dbh = Object.assign(table => Object.assign(base(table), { update }), { raw: base.raw });
+    const result = await jobCard.buildJobCard('svc1', {
+      dbh, readinessOnly: true,
+      deps: { callModel, getRecentCalls: async () => [], getHourly: async () => null, protocols: {} },
+      now: new Date('2026-09-04T12:00:00Z'),
+    });
+    expect(result).toEqual({ serviceId: 'svc1', checkedAt: '2026-09-04T12:00:00.000Z', issues: [{ kind: 'protocol', status: 'unknown', label: 'No products resolved' }] });
+    expect(callModel).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
   test('the rain window ends on the viewed visit date, today at the latest (Codex r14 P2)', async () => {
     const getAreaRainfall = jest.fn(async () => 0.4);
     const today = new Date();
@@ -1227,7 +1337,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     };
     const out = await jobCard.resolveVisitLines({ facts, protocols, catalog: [...catalog, { id: 'a', name: 'Advion Gel' }], dbh: () => ({}) });
     expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['c', null], ['s', 'Tree & Shrub Care'], ['a', 'Initial German Roach Knockdown']]);
-    expect(out.addons).toEqual([
+    expect(out.addons).toMatchObject([
       { name: 'Tree & Shrub Care', products: 1, visit: { number: 9, month: 'Sep' }, note: null },
       { name: 'Lawn Care', products: 0, visit: null, note: 'Lawn add-on — no plan for this line on the card' },
       { name: 'Mosquito', products: 0, visit: null, note: 'No protocol matched this add-on' },
@@ -1403,7 +1513,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       ],
     };
     const out = await jobCard.resolveVisitLines({ facts, protocols, catalog, dbh: () => ({}) });
-    expect(out.addons).toEqual([
+    expect(out.addons).toMatchObject([
       { name: 'Termite Spot Treatment Service', products: 1, visit: { number: 4, month: 'Any' }, note: null },
       { name: 'Termite Pretreatment Service', products: 1, visit: { number: 3, month: 'Any' }, note: null },
       { name: 'Termite Installation Setup', products: 1, visit: { number: 2, month: 'Any' }, note: null },
@@ -1411,7 +1521,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out.lines.map((l) => [l.product.id, l.source || null])).toEqual([['d', null], ['foam', 'Termite Spot Treatment Service'], ['sc', 'Termite Pretreatment Service'], ['r', 'Termite Installation Setup']]);
     // A legacy add-on row without a key keeps the name path: visit 1, no products.
     const legacy = await jobCard.resolveVisitLines({ facts: { ...facts, addons: [{ name: 'Termite Spot Treatment Service', category: 'termite' }] }, protocols, catalog, dbh: () => ({}) });
-    expect(legacy.addons).toEqual([{ name: 'Termite Spot Treatment Service', products: 0, visit: { number: 1, month: 'Any' }, note: null }]);
+    expect(legacy.addons).toMatchObject([{ name: 'Termite Spot Treatment Service', products: 0, visit: { number: 1, month: 'Any' }, note: null }]);
     // The primary line follows its own key the same way.
     const primary = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Termite Spot Treatment Service', serviceCategory: 'termite', serviceKey: 'termite_spot_treatment', scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
     expect(primary.visit.visit).toBe(4);
@@ -1494,7 +1604,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       { name: 'Wildlife Trapping Service', category: 'specialty', serviceKey: 'wildlife_trapping' },
       { name: 'Bee / Wasp Nest Removal', category: 'specialty', serviceKey: 'bee_wasp_removal' },
     ] });
-    expect(specialty.addons).toEqual([
+    expect(specialty.addons).toMatchObject([
       { name: 'Fire Ant Treatment', products: 1, visit: { number: 3, month: 'Any' }, note: null },
       { name: 'Tick Control Service', products: 1, visit: { number: 4, month: 'Any' }, note: null },
       { name: 'Wildlife Trapping Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (specialty)' },
@@ -1525,7 +1635,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // The bait-station services keep the program: the trap-only add-on gets no Contrac Blox line, the quarterly bait service does (r9 P1).
     const rodentProtocols = { ...protocols, rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }, { visit: 2, month: 'Any', primary: 'Install exterior bait stations — Contrac Blox\nSet snap traps in attic zones' }] } };
     const rodent = await jobCard.resolveVisitLines({ facts: { isLawn: false, serviceType: 'Quarterly Pest Control', serviceCategory: 'pest_control', scheduledDate: '2026-09-04', addons: [{ name: 'Rodent Trapping Service', category: 'rodent', serviceKey: 'rodent_trapping' }, { name: 'Quarterly Rodent Bait Station Service', category: 'rodent', serviceKey: 'rodent_bait_quarterly' }] }, protocols: rodentProtocols, catalog: [...catalog, { id: 'blox', name: 'Contrac Blox' }], dbh: () => ({}) });
-    expect(rodent.addons).toEqual([
+    expect(rodent.addons).toMatchObject([
       { name: 'Rodent Trapping Service', products: 0, visit: null, note: 'No treatment protocol for this add-on (rodent)' },
       { name: 'Quarterly Rodent Bait Station Service', products: 1, visit: { number: 2, month: 'Any' }, note: null },
     ]);

@@ -256,6 +256,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
     noContext = wrote === 'written'; // the minimal stamp is what landed
   }
   if (wrote !== 'written' && wrote !== 'reconciled') {
+    ctx.toolFailed = true;
     logger.warn(`[voice-relay] transfer refused (${wrote}) — row not owned, already terminal, or storage unconfirmed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     revertLateWrites(ctx, packet.attempt, late);
     return 'The transfer could not be started on this call. Do NOT try again — take their details with capture_lead '
@@ -266,6 +267,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // this very tool chain before it can stamp the close — so the row would
   // stay a transfer nobody rang. Undo the stamp (detached) and abort.
   if (typeof ctx.sessionEnded === 'function' && ctx.sessionEnded() === true) {
+    ctx.toolFailed = true;
     logger.warn(`[voice-relay] transfer abandoned — session ended during the packet write callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     // AWAITED (bounded): end() resumes when this tool returns and reconciles
     // the row at once — a detached revert would race it (an ai_transferred
@@ -287,6 +289,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', facts.language));
   const sent = typeof ctx.endForTransfer === 'function' ? ctx.endForTransfer() : false;
   if (sent === false) {
+    ctx.toolFailed = true;
     // The socket closed (or the send threw) between the ended check and
     // the end frame: no /relay-complete transfer callback will come, so the
     // stamp is undone the same way (codex r5 P1). Nothing rings.
@@ -436,7 +439,12 @@ function composeRelaySegment(call) {
   // /relay-complete stamps even when both packet writes failed (hook P1).
   const transferred = meta && typeof meta === 'object'
     && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || Boolean(meta.relay_transfer_ring_at));
-  if (!transferred) return null;
+  // PR 2B: a RECONNECTED call that fell to voicemail (second failure,
+  // transfer unavailable) carries no transfer marker but the same evidence
+  // problem — its recording must not erase the composed relay transcript.
+  const reconnected = meta && typeof meta === 'object' && (Number(meta.relay_reconnects) || 0) > 0;
+  const registered = Array.isArray(meta?.relay_segment_owners) && meta.relay_segment_owners.length > 0;
+  if (!transferred && !reconnected && !registered) return null;
   const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
   // The durable copy first: end() stashes the relay transcript under
   // metadata.relay_transcript because the recording-status swap CLEARS the
@@ -445,10 +453,18 @@ function composeRelaySegment(call) {
   let text = String((stash && stash.text) || '').trim();
   let tmeta = stash && stash.metadata && typeof stash.metadata === 'object' ? stash.metadata : null;
   if (!text) {
-    if (call.transcription_provider !== TRANSCRIPTION_PROVIDER) return null;
-    text = String(call.transcription || '').trim();
-    tmeta = call.transcription_metadata;
-    if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
+    if (call.transcription_provider === TRANSCRIPTION_PROVIDER) {
+      text = String(call.transcription || '').trim();
+      tmeta = call.transcription_metadata;
+      if (typeof tmeta === 'string') { try { tmeta = JSON.parse(tmeta); } catch { tmeta = null; } }
+    }
+  }
+  // PR 2B: the segments themselves are the third source — a resumed leg that
+  // failed before any turn wrote no stash and the recording swap cleared the
+  // columns, but every earlier socket appended its segment.
+  if (!text && Array.isArray(meta.relay_segments)) {
+    text = String(require('./relay-segments').segmentsText(meta.relay_segments) || '').trim();
+    tmeta = null;
   }
   if (!text) return null;
   return {

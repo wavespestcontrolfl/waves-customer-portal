@@ -68,7 +68,7 @@ export default function RecurringAlertsBannerV2() {
         className="w-full flex items-center justify-between u-focus-ring"
       >
         <span className="text-13 font-medium text-alert-fg">
-          {alerts.length} renewal touchpoint{alerts.length === 1 ? '' : 's'} due
+          {alerts.length} {annualCount === 0 ? 'recurring ' : ''}plan{alerts.length === 1 ? '' : 's'} {alerts.length === 1 ? 'needs' : 'need'} review
         </span>
         <span className="u-label text-alert-fg">{expanded ? 'Hide' : 'Review'}</span>
       </button>

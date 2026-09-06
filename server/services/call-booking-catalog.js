@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 /**
  * Catalog-anchored resolution for phone-call auto-bookings.
  *
@@ -607,7 +608,7 @@ async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return [];
   return conn('scheduled_services')
     .where(pendingCallFollowUpFilter(parentServiceId))
-    .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes',
+    .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes', 'recurring_dispatch_due_date',
       conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
       conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
 }
@@ -735,6 +736,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
         .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [k.day])
         .update({
           scheduled_date: trx.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
+          ...recurringDispatchDuePatch({ ...k, scheduled_date: k.day }, { scheduled_date: k.new_day }),
           route_order: null,
           updated_at: trx.fn.now(),
         });

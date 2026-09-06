@@ -522,6 +522,16 @@ describe('splitBriefSources — sources are URLs, directives are source_notes', 
   });
 });
 
+describe('image exclusions reach the publisher', () => {
+  test('image_avoid flows into operator_brief as trimmed strings; absent → []', () => {
+    const manifest = seeder.loadManifest();
+    const byId = Object.fromEntries(manifest.briefs.map((b) => [b.id, b]));
+    const op = (brief) => seeder.buildOperatorOverlay({ opportunity: { signal_metadata: { intercept_brief: brief } }, pageType: 'supporting-blog' }).operator_brief;
+    expect(op({ ...byId.B4, image_avoid: [' competitor vehicles or uniforms ', ''] }).image_avoid).toEqual(['competitor vehicles or uniforms']);
+    expect(op(byId.B4).image_avoid).toEqual([]);
+  });
+});
+
 describe('sourcing directives reach the writer (the snapshot step never archives a sentence)', () => {
   test('B4: source_notes flow into operator_brief + a binding SOURCING DIRECTIVES line', () => {
     const manifest = seeder.loadManifest();

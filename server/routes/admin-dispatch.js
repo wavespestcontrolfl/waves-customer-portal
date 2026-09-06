@@ -2047,6 +2047,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // is already stamped by transitionJobStatus (notes →
           // job_status_history); the activity_log line below records the
           // plan stop.
+          // Record the explicit series decision in the existing renewal ledger.
+          // Appointment statuses cannot distinguish this from this_only cancels.
+          await require('../services/recurring-plan-decisions').recordRecurringSeriesStops(trx, [{
+            id: parentId, customer_id: svc.customer_id, recurring_pattern: svc.recurring_pattern,
+          }], req.technicianId);
           const cols = await trx('scheduled_services').columnInfo().catch(() => ({}));
           if (cols.recurring_ongoing) {
             ongoingStopped = await trx('scheduled_services')
@@ -2427,70 +2432,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
-      // Void any still-open invoice pre-minted for this visit so dunning
-      // doesn't chase a cancelled job. Money-state rules live in the shared
-      // helper (skips applied payments / live PaymentIntents); best-effort.
-      try {
-        const InvoiceService = require('../services/invoice');
-        // Inspection-credit reversal runs inside the void helper (after the
-        // voids restore any applied credit) — shared hook, can't be forgotten.
-        await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
-      } catch (e) { logger.error(`[admin-dispatch] cancellation invoice void sweep failed: ${e.message}`); }
-
-      // One-time card-on-file hold: a cancellation inside the window charges the
-      // flat late-cancel fee against the saved card; outside it the hold is
-      // released free. waiveCardHoldFee (body) is the business-initiated escape
-      // hatch — WE cancelled, so the hold releases with no fee. Admin-only:
-      // this route is technician-reachable (requireTechOrAdmin) and a fee
-      // waiver is a billing decision, so non-admin JWTs can't release an
-      // in-window hold free. Dark until ONE_TIME_CARD_HOLD; no-op when no
-      // hold exists. Best-effort — never block the committed status change.
-      try {
-        const CardHolds = require('../services/estimate-card-holds');
-        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
-        const holdResult = await CardHolds.handleCardHoldCancellation({
-          scheduledServiceId: svc.id,
-          waiveFee,
-        });
-        // Appointment-card fee rail fallback for visits with no hold row
-        // (mutually exclusive lanes — the rail re-checks). Same waive flag.
-        if (holdResult?.reason === 'no_hold') {
-          const ApptCardRequests = require('../services/appointment-card-request');
-          const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
-            scheduledServiceId: svc.id,
-            waiveFee,
-          });
-          // Unresolved (non-released) fee outcomes must reach the office
-          // (Codex #3153 r16 P1) — never a silent successful cancel.
-          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
-        }
-      } catch (e) {
-        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
-        logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`);
-        await require('../services/appointment-card-request')
-          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
-      }
-
-      try {
-        const result = await trackTransitions.cancel(svc.id, {
-          reason: notes || null,
-          actorId: req.technicianId,
-        });
-        await recordTrackTransitionResultFailure({
-          jobId: svc.id,
-          action: 'cancel',
-          actorId: req.technicianId,
-          result,
-        });
-      } catch (e) {
-        logger.error(`[admin-dispatch] cancel failed: ${e.message}`);
-        await recordTrackTransitionFailure({
-          jobId: svc.id,
-          action: 'cancel',
-          actorId: req.technicianId,
-          error: e,
-        });
-      }
+      // Share fee outcome alerts, invoice cleanup, and tracker updates with
+      // series cancellations. The helper uses the committed cancellation time
+      // so retrying a failed fee check never moves a timely cancel into the window.
+      await require('../services/visit-cancellation-followthrough').runVisitCancellationFollowThrough({
+        targetIds: [svc.id],
+        actorId: req.technicianId,
+        waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+        reason: notes || null,
+        source: 'admin-dispatch',
+      });
     } else if (toStatus === 'no_show') {
       // Free the tech on the dispatch roster. A no-show marked after the
       // job already went en_route/on_site leaves tech_status.current_job_id
@@ -2975,9 +2926,8 @@ async function recapSuppliesOwed(result) {
   if (result.priorCompleted !== true) return true;
   if (!result.recordId) return false;
   try {
-    const rec = await db('service_records').where({ id: result.recordId }).first('field_flags');
-    const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
-    return flags.completion_supplies_owed === true;
+    const { completionSuppliesOwed } = require('../services/supplies-consumption');
+    return completionSuppliesOwed(await db('service_records').where({ id: result.recordId }).first('field_flags'));
   } catch (err) {
     // A failed read establishes nothing: consuming anyway would deduct
     // today's kit for a HISTORICAL completion edited now — one completed
@@ -2990,42 +2940,31 @@ async function recapSuppliesOwed(result) {
   }
 }
 
-// The consume itself (same hook as /:serviceId/complete, same at-most-once
-// index) plus the job-cost recalc a kit movement's cost_used warrants
-// (idempotent UPSERT, fire-and-forget — GH codex r4 P2).
-async function consumeRecapSupplies(serviceId, result) {
-  const { consumeCompletionSupplies } = require('../services/supplies-consumption');
-  const svcRow = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'technician_id', 'service_type');
-  const consumption = await consumeCompletionSupplies(db, {
-    scheduledServiceId: serviceId,
-    serviceRecordId: result.recordId || null,
-    customerId: svcRow?.customer_id || null,
-    technicianId: svcRow?.technician_id || null,
-    isIncompleteVisit: false,
-    visitPerformed: result.priorNonPerformed !== true,
-    serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
-    serviceType: svcRow?.service_type || null,
-  });
-  if (consumption?.consumed?.length) {
-    const JobCosting = require('../services/job-costing');
-    void JobCosting.calculateJobCost(serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
-  }
-  return consumption;
-}
-
-// Recap consumable settlement: consume when owed, then clear the owed marker
-// — unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell
-// means staff adjust by hand, so a retry must not deduct the same kit again
-// on top of their correction; only a miss nobody was told about keeps the
-// marker so the next retry re-runs the at-most-once consume (pre-push P1).
+// Recap consumable settlement: consume when owed (same hook as
+// /:serviceId/complete, same at-most-once index), clear the owed marker per
+// the shared lifecycle in supplies-consumption.js (kept only when the
+// hand-off bell was lost), then the job-cost recalc a kit movement's
+// cost_used warrants (idempotent UPSERT, fire-and-forget — GH codex r4 P2).
 // Never throws: the recap response never waits on a supplies write.
 async function settleRecapSupplies(serviceId, result) {
   if (!(await recapSuppliesOwed(result))) return;
   try {
-    const consumption = await consumeRecapSupplies(serviceId, result);
-    // A hand-off bell that did not land, or an obsolete one that could not be retired (Codex r30 P1): the marker stays for the next retry.
-    const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed');
-    if (result.recordId && !handoffLost) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
+    const { settleOwedCompletionSupplies } = require('../services/supplies-consumption');
+    const svcRow = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'technician_id', 'service_type');
+    const consumption = await settleOwedCompletionSupplies(db, {
+      scheduledServiceId: serviceId,
+      serviceRecordId: result.recordId || null,
+      customerId: svcRow?.customer_id || null,
+      technicianId: svcRow?.technician_id || null,
+      isIncompleteVisit: false,
+      visitPerformed: result.priorNonPerformed !== true,
+      serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+      serviceType: svcRow?.service_type || null,
+    });
+    if (consumption?.consumed?.length) {
+      const JobCosting = require('../services/job-costing');
+      void JobCosting.calculateJobCost(serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+    }
   } catch (err) { logger.error(`[dispatch] recap supplies consumption failed: ${err.message}`); }
 }
 
@@ -4172,6 +4111,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   // for, or drop one it did).
   const notify = typeof result.notifyRequested === 'boolean' ? result.notifyRequested : notifyArg;
   const seriesMoveId = result.seriesMoveId || null;
+  const preserved = Array.isArray(result.preservedOccurrences) ? result.preservedOccurrences : [];
   const conflicts = occurrences
     .filter((occ) => occ.conflicted)
     .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
@@ -4254,25 +4194,33 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {
+    if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
         const parts = [];
+        if (!cardOnly && preserved.length) parts.push(`${preserved.length} future visit(s) kept existing appointments because of staff locks, reschedule holds, confirmed timing, or visit commitments (${preserved.map((c) => c.date).join(', ')}) — review their cadence in dispatch`);
         if (dueConflicts.length) parts.push(`${dueConflicts.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}) — set a time from dispatch`);
-        if (!cardOnly && overlapDates.length) parts.push(`${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
+        if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
+          ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
+          : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          dueConflicts.length ? 'Series move left visits without a time window' : 'Series move overlaps other visits',
+          preserved.length ? 'Recurring move needs a future visit review'
+            : dueConflicts.length ? 'Series move left visits without a time window'
+              : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates } }
+          { bell: true, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
-        if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
+        if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');
       } catch (err) {
         logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);
       }
     }
 
+    // The successor owns preserved commitments and accepted overlaps. With
+    // no still-untimed conflict, this superseded operation owes no old card.
+    if (cardOnly && !dueConflicts.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
@@ -4505,7 +4453,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
-            return renderRequiredTemplate('appointment_series_rescheduled', {
+            return renderRequiredTemplate(result.futurePlacementDays === 3
+              ? 'appointment_recurring_placement_confirmed' : 'appointment_series_rescheduled', {
               first_name: firstName,
               start_date: displayDate,
               window_text: windowText,
@@ -4819,6 +4768,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Staff surface: occupancy clashes commit with a warning instead of
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
+    rescheduleOptions.adminWindowRules = true;
     rescheduleOptions.sourceSurface = 'dispatch_board';
     rescheduleOptions.notifyRequested = notifyCustomer !== false;
     if (operationKey) rescheduleOptions.operationKey = operationKey;

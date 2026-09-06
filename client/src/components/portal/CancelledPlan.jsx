@@ -43,7 +43,7 @@ export function CancelledBanner({ cancelledAt, onOpenBilling }) {
       {onOpenBilling && (
         <button data-glass-accent="" type="button" onClick={onOpenBilling} style={{
           border: '1px solid #D8D0C0', borderRadius: 10, background: '#fff', color: B.glassNavy,
-          fontFamily: FONTS.body, fontSize: 14, fontWeight: 800, padding: '9px 14px', minHeight: 40, cursor: 'pointer',
+          fontFamily: FONTS.body, fontSize: 14, fontWeight: 700, padding: '9px 14px', minHeight: 40, cursor: 'pointer',
         }}>
           Go to Billing
         </button>
@@ -117,7 +117,7 @@ export default function CancelledPlanPanel({ customer, compact, styles, navigate
 
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={sectionTitle}>Restart my plan</div>
-        <h2 style={{ margin: '12px 0 6px', color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
+        <h2 style={{ margin: '12px 0 6px', color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>
           Ready to come back?
         </h2>
         <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.55 }}>
@@ -127,7 +127,7 @@ export default function CancelledPlanPanel({ customer, compact, styles, navigate
 
         {state === 'ready' ? (
           <div role="status" style={{ marginTop: 16, padding: 16, borderRadius: 10, background: subtle, border: '1px solid #E7E2D7' }}>
-            <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy }}>Your estimate is ready.</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Your estimate is ready.</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>Opening it now. If it does not open, use the button below.</div>
             <a data-glass-accent="" href={handoff} style={{ ...primaryButton, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none', marginTop: 12 }}>
               Review and approve my estimate
@@ -135,7 +135,7 @@ export default function CancelledPlanPanel({ customer, compact, styles, navigate
           </div>
         ) : state === 'unavailable' ? (
           <div role="status" style={{ marginTop: 16, padding: 16, borderRadius: 10, background: subtle, border: '1px solid #E7E2D7' }}>
-            <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy }}>We will price this one by hand.</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>We will price this one by hand.</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>{message}</div>
             <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ ...secondaryButton, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', textDecoration: 'none', marginTop: 12 }}>
               Call or text {WAVES_PHONE_DISPLAY}

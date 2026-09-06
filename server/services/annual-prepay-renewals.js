@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
 const logger = require('./logger');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
@@ -1240,7 +1241,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     ? Number(adoptedPromisedRow.estimated_duration_minutes)
     : baseDuration;
   const retimeAdoptedRow = async (trx) => {
-    const row = adoptedPromisedRow;
+    let row = adoptedPromisedRow;
     let windowStart = firstVisitWindowStart;
     let staleAdoption = false;
     let overlapConflict = null;
@@ -1264,6 +1265,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           staleAdoption = true;
           return;
         }
+        row = fresh;
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate: promisedTarget,
           windowStart,
@@ -1302,7 +1304,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     // surface recomputes from window_start.
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
-    await trx('scheduled_services').where({ id: row.id }).update(updates);
+    await trx('scheduled_services').where({ id: row.id }).update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
     // Filed only once the retime is written (same rule as the seed path):
     // the notice claims the visit WAS retimed, so it must never outlive a
     // failed update.

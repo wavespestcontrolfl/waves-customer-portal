@@ -29,7 +29,7 @@ jest.mock('../middleware/admin-auth', () => ({
 jest.mock('../services/geocoder', () => ({
   geocodeAddress: jest.fn(),
   ensureCustomerGeocoded: jest.fn(),
-  buildAddress: jest.fn(),
+  buildAddress: jest.requireActual('../services/geocoder').buildAddress,
 }));
 jest.mock('../services/scheduling/find-time', () => ({
   ...jest.requireActual('../services/scheduling/find-time'),
@@ -220,8 +220,8 @@ test('serviceId resolves the VISIT\'s stamped coords, never the customer primary
     where: () => ({
       leftJoin: () => ({
         first: async () => ({
-          visit_lat: 27.11, visit_lng: -82.22,
-          visit_line1: '9 Rental Way', visit_city: 'Parrish', visit_state: 'FL', visit_zip: '34219',
+          lat: 27.11, lng: -82.22,
+          address_line1: '9 Rental Way', city: 'Parrish', state: 'FL', zip: '34219',
           visit_customer_id: 'c9', visit_profile_label: null,
         }),
       }),
@@ -243,8 +243,8 @@ test('a divergent coordless stamp geocodes the STAMPED address, not the primary'
     where: () => ({
       leftJoin: () => ({
         first: async () => ({
-          visit_lat: null, visit_lng: null,
-          visit_line1: '9 Rental Way', visit_city: 'Parrish', visit_state: 'FL', visit_zip: '34219',
+          lat: null, lng: null,
+          address_line1: '9 Rental Way', city: 'Parrish', state: 'FL', zip: '34219',
           visit_customer_id: 'c9', visit_profile_label: null,
         }),
       }),
@@ -253,10 +253,38 @@ test('a divergent coordless stamp geocodes the STAMPED address, not the primary'
   geocodeAddress.mockResolvedValue({ lat: 27.5, lng: -82.4 });
   const res = await post({ hint: true, serviceId: 'svc-9', customerId: 'c9', durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
   expect(res.status).toBe(200);
-  expect(geocodeAddress).toHaveBeenCalledWith('9 Rental Way, Parrish, FL, 34219');
+  expect(geocodeAddress).toHaveBeenCalledWith('9 Rental Way, Parrish, FL, 34219', { cacheOnly: false });
   expect((await res.json()).target.source).toBe('address_geocoded_now');
   const opts = findAvailableSlots.mock.calls[0][0];
   expect([opts.lat, opts.lng]).toEqual([27.5, -82.4]);
+});
+
+test('arrival hints ignore stale request coordinates and resolve the saved appointment destination', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  const db = require('../models/db');
+  db.raw = jest.fn(sql => sql);
+  db.mockReturnValue({
+    where: () => ({
+      leftJoin: () => ({
+        first: async () => ({
+          lat: 27.55, lng: -82.4,
+          address_line1: '100 Fixture Street', city: 'Parrish', state: 'FL', zip: '34219',
+          visit_customer_id: 'fixture-customer', visit_profile_label: null,
+        }),
+      }),
+    }),
+  });
+  try {
+    const res = await post({ ...BASE, serviceId: 'fixture-service', hint: true, arrivalWindows: true });
+    expect(res.status).toBe(200);
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.55, lng: -82.4 }));
+    expect((await res.json()).target.source).toBe('visit_stamp');
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
 });
 
 test('the guard fails OPEN — a snapshot error keeps the engine answer', async () => {
@@ -265,4 +293,13 @@ test('the guard fails OPEN — a snapshot error keeps the engine answer', async 
   const res = await post({ ...BASE, hint: true });
   expect(res.status).toBe(200);
   expect((await res.json()).slots).toHaveLength(1);
+});
+
+test.each([undefined, false, true])('existing-visit arrival routing requires explicit supported-caller opt-in: %s', async (arrivalWindows) => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const res = await post({ ...BASE, serviceId: 'svc-1', hint: true, arrivalWindows });
+  expect(res.status).toBe(200);
+  const opts = findAvailableSlots.mock.calls[0][0];
+  if (arrivalWindows === true) expect(opts.arrivalWindow).toEqual({ serviceId: 'svc-1' });
+  else expect(opts).not.toHaveProperty('arrivalWindow');
 });

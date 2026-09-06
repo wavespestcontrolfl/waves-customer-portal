@@ -39,7 +39,7 @@ async function fetchSlotCheck(targets, signal) {
   return data.results;
 }
 
-export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes, excludeServiceIds, enabled = true }) {
+export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes, excludeServiceIds, serviceId, technicianId, enabled = true }) {
   const [conflicts, setConflicts] = useState([]);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
@@ -59,6 +59,9 @@ export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes
           date,
           window: { start: windowStart, end },
           excludeServiceIds: excludeKey ? excludeKey.split(',') : [],
+          serviceId,
+          technicianId,
+          durationMinutes: Number(durationMinutes) > 0 ? Number(durationMinutes) : undefined,
         }], controller.signal);
         if (!controller.signal.aborted && results) {
           setConflicts(Array.isArray(results[0]?.conflicts) ? results[0].conflicts : []);
@@ -67,7 +70,7 @@ export function useSlotConflicts({ date, windowStart, windowEnd, durationMinutes
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, windowStart, windowEnd, durationMinutes, excludeKey]);
+  }, [enabled, date, windowStart, windowEnd, durationMinutes, excludeKey, serviceId, technicianId]);
   return { conflicts, checking };
 }
 

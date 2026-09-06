@@ -4,7 +4,7 @@ jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jes
 jest.mock('../models/db', () => new Proxy((...args) => mockDb(...args), {
   get: (_, key) => typeof mockDb[key] === 'function' ? mockDb[key].bind(mockDb) : mockDb[key],
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: () => true }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: () => true, gates: { visitGroups: false } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');

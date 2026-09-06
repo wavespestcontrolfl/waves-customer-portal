@@ -45,6 +45,17 @@ describe('describeHeroForAlt', () => {
     expect(payload.text).toContain('Colorful Spiders in Southwest Florida');
   });
 
+  test('forwards the caller\'s remaining slot time; a spent deadline keeps the writer alt without a call (Codex r9 P2 on #3964)', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: 'A sprinkler head watering a Bradenton lawn' });
+    await describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T', timeoutMs: 42_000 });
+    expect(mockDispatch.mock.calls[0][1].timeoutMs).toBe(42_000);
+    await describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T' });
+    expect(mockDispatch.mock.calls[1][1]).not.toHaveProperty('timeoutMs');
+    mockDispatch.mockClear();
+    await expect(describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T', timeoutMs: 0 })).resolves.toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
   test('fails open (null) when both providers miss', async () => {
     mockDispatch.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     await expect(describeHeroForAlt({ buffer: PNG_BUFFER, title: 'T' })).resolves.toBeNull();

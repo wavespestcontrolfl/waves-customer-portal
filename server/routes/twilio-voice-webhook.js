@@ -327,16 +327,22 @@ function builtinTranscriptMayReplace(row) {
   // recording transcript the row will get if the providers fail — and the
   // AI segment is durable in metadata.relay_transcript (end()'s stash), from
   // which the processor rebuilds the composite. Never for a non-transfer.
-  return provider === 'conversation_relay' && isTransferredRow(row) && relayTranscriptStashed(row);
+  return provider === 'conversation_relay' && (isTransferredRow(row) || isReconnectedRow(row)) && relayTranscriptStashed(row);
 }
 
-/** The AI segment is safe in metadata.relay_transcript (PR 2A). */
+/** PR 2B: a call that reconnected (relay_reconnects > 0) — its recording is evidence-bearing like a transfer's. */
+function isReconnectedRow(row) {
+  return (Number(parseJsonObject(row && row.metadata).relay_reconnects) || 0) > 0;
+}
+
+/** The AI segment is safe in metadata.relay_transcript (PR 2A) — or in durable metadata.relay_segments (PR 2B: a silent resumed leg wrote no stash). */
 function relayTranscriptStashed(row) {
   const meta = parseJsonObject(row && row.metadata);
-  return Boolean(meta.relay_transcript && typeof meta.relay_transcript === 'object' && String(meta.relay_transcript.text || '').trim());
+  if (meta.relay_transcript && typeof meta.relay_transcript === 'object' && String(meta.relay_transcript.text || '').trim()) return true;
+  return Array.isArray(meta.relay_segments) && meta.relay_segments.some((seg) => seg && typeof seg === 'object' && String(seg.text || '').trim());
 }
 // The SQL twin of the rule above, re-checked in the write.
-const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND COALESCE(metadata->'relay_transcript'->>'text', '') <> '' AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred'))";
+const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND (COALESCE(metadata->'relay_transcript'->>'text', '') <> '' OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(metadata->'relay_segments') = 'array' THEN metadata->'relay_segments' ELSE '[]'::jsonb END) seg WHERE COALESCE(seg->>'text', '') <> '')) AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred' OR COALESCE((metadata->>'relay_reconnects')::int, 0) > 0))";
 
 // A second recording that arrived while the row's recording was load-bearing
 // (decideRecordingAttach → park). Nothing is lost: the recording rides in
@@ -782,18 +788,23 @@ const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
  * row already, the leg simply ends. No staff numbers ⇒ voicemail, never a
  * stranded caller.
  */
-async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
+async function appendRelayTransfer(req, twiml, callSid, handoff = {}, recoveryFallback = null) {
   if ((req.query || {}).sandbox === '1') {
     logger.info(`[relay-complete] sandbox transfer for ${maskSid(callSid)} — hanging up (no staff ring on the sandbox)`);
     twiml.hangup();
-    return;
+    return 'hangup';
   }
   // The frame names the socket's claim owner (owner-bound writes below).
   const owner = typeof handoff.owner === 'string' && handoff.owner ? handoff.owner.slice(0, 128) : null;
   // The one voicemail stamp every fallback on this callback takes: owner +
   // eligible-state fenced, so a reconnect that took the row meanwhile keeps
   // its own reconcile (hook / codex r3 P1).
-  const stampTransferVoicemail = () => db('call_log').where('twilio_call_sid', callSid)
+  const ringClaim = recoveryFallback ? require('crypto').randomUUID() : null;
+  const transferRow = (ownRingClaim = null) => {
+    const q = db('call_log').where('twilio_call_sid', callSid);
+    return recoveryFallback ? require('../services/voice-agent/relay-recovery').fallbackFence(q, { ...recoveryFallback, ringClaim: ownRingClaim }) : q;
+  };
+  const stampTransferVoicemail = () => transferRow(ringClaim)
     .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
     .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
     .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() });
@@ -814,7 +825,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
     // OWNER-BOUND (hook P1): the frame names the socket's claim owner; a
     // row now owned by a reconnect (or claimed while this frame says
     // unclaimed) matches 0 rows, so a superseded socket cannot ring staff.
-    const claimPromise = db('call_log').where('twilio_call_sid', callSid)
+    const claimPromise = transferRow()
         .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''")
         .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
         // A row already sent to voicemail (the fallback below, or a failed
@@ -823,21 +834,21 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
         .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['voicemail', 'relay_failed']))
         .update({
           call_outcome: db.raw('CASE WHEN call_outcome IS NULL OR call_outcome NOT IN (?, ?, ?) THEN ? ELSE call_outcome END', [...RELAY_TERMINAL_OUTCOMES, 'ai_transferred']),
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text)", [new Date().toISOString()]),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text) || ?::jsonb", [new Date().toISOString(), JSON.stringify(ringClaim ? { relay_transfer_ring_claim: ringClaim } : {})]),
           updated_at: new Date(),
         })
         .catch((err) => { logger.warn(`[relay-complete] transfer ring claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
     const claimed = await withDeadline(claimPromise, STAMP_DEADLINE_MS, 'timeout');
     if (claimed === 0) {
       logger.warn(`[relay-complete] transfer ring already claimed for ${maskSid(callSid)} — retry gets a bare response`);
-      return;
+      return 'bare';
     }
     if (!(Number(claimed) > 0)) {
       // The recorder's action is /voicemail-complete, which never
       // re-classifies: stamp voicemail here (bounded, best-effort) so a
       // transfer that reached nobody is not reported as a success (codex r2 P1).
       logger.error(`[relay-complete] transfer ring claim ${claimed} for ${maskSid(callSid)} — voicemail instead of an unconfirmed ring`);
-      await withDeadline(
+      const stamped = await withDeadline(
         stampTransferVoicemail().catch((err) => logger.warn(`[relay-complete] unconfirmed-ring voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
         STAMP_DEADLINE_MS,
       );
@@ -852,9 +863,10 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
           .then((rows) => { if (Number(rows) > 0) logger.warn(`[relay-complete] late ring claim for ${maskSid(callSid)} re-stamped as voicemail`); })
           .catch((err) => logger.warn(`[relay-complete] late-claim voicemail re-stamp failed for ${maskSid(callSid)}: ${err.message}`));
       }
+      if (recoveryFallback && !(Number(stamped) > 0)) return stamped == null ? 'unconfirmed' : 'bare';
       queueVoiceMessageSync(callSid);
       appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
-      return;
+      return 'voicemail';
     }
   }
   const forwardNumbers = getFallbackForwardNumbers();
@@ -866,16 +878,18 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
     if (callSid) {
       // Bounded like every other stamp on this callback: a stalled pool must
       // not hold the voicemail TwiML past Twilio's timeout (hook P1).
-      await withDeadline(
+      const stamped = await withDeadline(
         stampTransferVoicemail().catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
         STAMP_DEADLINE_MS,
       );
+      if (recoveryFallback && !(Number(stamped) > 0)) return stamped == null ? 'unconfirmed' : 'bare';
       queueVoiceMessageSync(callSid);
     }
     appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
-    return;
+    return 'voicemail';
   }
   appendStaffRingDial(twiml, forwardNumbers, 30, { language: relayCompleteLanguage(req) });
+  return 'ring';
 }
 
 /** A call_log row that went through a Sandy transfer: the packet, the ring claim, or the outcome. */
@@ -1696,61 +1710,242 @@ router.post('/voicemail-complete', (req, res) => {
 router.post('/relay-complete', async (req, res) => {
   const body = req.body || {};
   const callSid = body.CallSid;
-  const errorCode = body.ErrorCode || body.errorCode || '';
+  const errorCode = [body.ErrorCode, body.errorCode].find(Boolean);
   const sessionStatus = String(body.SessionStatus || body.sessionStatus || '').toLowerCase();
   const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
-  const failure = errorCode || sessionStatus || 'unknown';
+  const failure = errorCode || sessionStatus;
+  const sandbox = req.query.sandbox === '1';
   const twiml = new VoiceResponse();
-  // The relay's own end frame (`HandoffData`, a JSON string Twilio passes
-  // through verbatim; absent on a caller hang-up or a failure). Tolerated,
-  // never trusted beyond `reason`.
   const handoff = parseHandoffData(body.HandoffData);
-  if (!failed && handoff.reason === 'transfer') {
-    await appendRelayTransfer(req, twiml, callSid, handoff);
+  if (!failed) {
+    if (handoff.reason === 'transfer') await appendRelayTransfer(req, twiml, callSid, handoff);
     return res.type('text/xml').send(twiml.toString());
   }
-  // A sandbox call (the signed ?sandbox=1 the sandbox route itself rendered)
-  // never falls to voicemail: a recording on a test call would enter the
-  // voicemail pipeline as a customer message. It ends with the failure
-  // noted on its own row.
-  if (failed && (req.query || {}).sandbox === '1') {
-    logger.warn(`[relay-complete] sandbox relay session failed (${failure}) for ${maskSid(callSid)} — hanging up (no voicemail on the sandbox)`);
-    if (callSid) {
-      // call_outcome='relay_failed' is TERMINAL: the session's close-time
-      // reconcile (end()) excludes it, so a socket close that lands after
-      // this callback cannot rewrite the failure as an AI-handled call.
-      const { RELAY_FAILED_OUTCOME } = require('../services/voice-agent/relay-protocol');
-      await db('call_log').where('twilio_call_sid', callSid)
-        .update({
-          status: 'failed',
-          call_outcome: RELAY_FAILED_OUTCOME,
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_sandbox_failed: String(failure).slice(0, 64) })]),
-          updated_at: new Date(),
-        })
-        .catch((err) => logger.warn(`[relay-complete] sandbox call_log stamp failed for ${maskSid(callSid)}: ${err.message}`));
+
+  const recovery = require('../services/voice-agent/relay-recovery');
+  let secondFailure = false;
+  let recoveryFallback = null;
+  if (callSid && recovery.isRecoveryGateOn()) {
+    const reconnect = await attemptRelayReconnect(req, callSid, failure);
+    if (reconnect.xml) return res.type('text/xml').send(reconnect.xml);
+    if (reconnect.unconfirmed) return res.status(503).type('text/xml').send(twiml.toString());
+    if (reconnect.duplicate) return res.type('text/xml').send(twiml.toString());
+    recoveryFallback = { generation: reconnect.fallbackGeneration, callbackGeneration: Number(req.query.gen) || 0 };
+    secondFailure = reconnect.secondFailure === true;
+    if (secondFailure && !sandbox && await appendSecondFailureTransfer(req, twiml, callSid, recoveryFallback)) {
+      return res.type('text/xml').send(twiml.toString());
     }
-    twiml.hangup();
-    return res.type('text/xml').send(twiml.toString());
   }
-  if (failed) {
-    logger.warn(`[relay-complete] relay session failed (${failure}) for ${maskSid(callSid)} — falling back to voicemail`);
-    // Undo the ai_agent/ai_handled stamp the relay handoff applied: this call
-    // did NOT reach the agent, it went to voicemail. Reconcile before recording
-    // so reporting doesn't show a failed relay call as AI-handled.
-    // A caller who chose Spanish gets Spanish voicemail. The selection rides
-    // the signed action URL the Spanish leg itself rendered (?lang=es) —
-    // deterministic, no DB dependency on the failover path.
-    const language = relayCompleteLanguage(req);
-    if (callSid) {
-      await db('call_log').where('twilio_call_sid', callSid)
-        .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
-        .catch((err) => logger.warn(`[relay-complete] call_log reconcile failed for ${maskSid(callSid)}: ${err.message}`));
-      queueVoiceMessageSync(callSid);
-    }
-    appendVoicemailRecording(twiml, { language });
+  // Both failure destinations use the same fenced write. A lost fence never
+  // emits fallback instructions for a call now owned by a healthy reconnect.
+  if (callSid) {
+    const patch = sandbox ? {
+      status: 'failed',
+      call_outcome: require('../services/voice-agent/relay-protocol').RELAY_FAILED_OUTCOME,
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_sandbox_failed: String(failure).slice(0, 64) })]),
+    } : {
+      answered_by: 'voicemail', call_outcome: 'voicemail',
+      ...(secondFailure ? { status: 'completed' } : {}),
+    };
+    const row = db('call_log').where('twilio_call_sid', callSid);
+    if (recoveryFallback) recovery.fallbackFence(row, recoveryFallback);
+    const write = row.update({ ...patch, updated_at: new Date() })
+      .catch((err) => logger.warn(`[relay-complete] fallback stamp failed for ${maskSid(callSid)}: ${err.message}`));
+    // Gate-off behavior retains its unbounded best-effort reporting write.
+    const stamped = await (recoveryFallback ? withDeadline(write, STAMP_DEADLINE_MS, null) : write);
+    if (recoveryFallback && !(Number(stamped) > 0)) return res.status(stamped == null ? 503 : 200).type('text/xml').send(twiml.toString());
+    if (!sandbox) queueVoiceMessageSync(callSid);
   }
+  if (sandbox) twiml.hangup();
+  else appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
   res.type('text/xml').send(twiml.toString());
 });
+
+/**
+ * PR 2B — the one reconnect. The claim is ONE bounded, fenced UPDATE
+ * (relay-recovery.claimReconnect): 0 rows = already reconnected or not
+ * resumable ⇒ null (the caller takes the second-failure path); an
+ * unconfirmed claim (timeout / error) ⇒ HTTP 503 without fallback instructions.
+ * A claim that LANDS
+ * after the deadline is put back to the fallback's shape when it does (the
+ * deadline cannot cancel a queued UPDATE). Then the relay renders again for
+ * the same CallSid — same action (language / sandbox), resumed greeting,
+ * `resumed=1` parameter — with a token minted AFTER the stamp, so the new
+ * socket's generation is ≥ the row's reconnect fence. Returns
+ * { xml, duplicate, secondFailure, fallbackGeneration, unconfirmed };
+ * duplicate when this is a retry of the first leg's callback on a row that
+ * already reconnected (ignore it); secondFailure when the resumed leg
+ * itself failed (its action carried `gen`).
+ */
+async function attemptRelayReconnect(req, callSid, failure) {
+  const recovery = require('../services/voice-agent/relay-recovery');
+  const nowMs = Date.now();
+  const claimPromise = recovery.claimReconnect(db, { callSid, nowMs })
+    .catch((err) => { logger.warn(`[relay-complete] reconnect claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
+  const claimed = await withDeadline(claimPromise, STAMP_DEADLINE_MS, 'timeout');
+  if (claimed === 'timeout') {
+    void claimPromise
+      .then((rows) => (Number(rows) > 0 ? recovery.undoLateReconnect(db, { callSid, nowMs }) : 0))
+      .then((rows) => { if (Number(rows) > 0) logger.warn(`[relay-complete] late reconnect claim for ${maskSid(callSid)} put back to voicemail`); })
+      .catch((err) => logger.warn(`[relay-complete] late reconnect compensation failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  if (Number(claimed) > 0) return renderRelayReconnect(req, callSid, failure, nowMs);
+  if (claimed !== 0) return { unconfirmed: true };
+  const state = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
+  if (!state) return { unconfirmed: true };
+  const result = { xml: null, duplicate: false, secondFailure: false, fallbackGeneration: state.reconnectMs || 0 };
+  if (state.transferClaimed) return { ...result, duplicate: true };
+  if (state.reconnects < 1) return result;
+  const callbackGeneration = Number(req.query.gen) || null;
+  result.secondFailure = callbackGeneration !== null && callbackGeneration === state.reconnectMs;
+  if (result.secondFailure) return result;
+  // A live resumed socket makes this an old callback. A missing stamp is
+  // likewise not permission to reissue; retain the previous duplicate rule.
+  if (!state.reconnectMs || state.claimGen >= state.reconnectMs) return { ...result, duplicate: true };
+  // The first response was lost before a resumed socket claimed the call.
+  const reissued = await reissueRelayReconnect(callSid, state.reconnectMs);
+  if (reissued.ms) return renderRelayReconnect(req, callSid, failure, reissued.ms);
+  if (reissued.rows !== 0) return { unconfirmed: true };
+  // A concurrent reissue or resumed claim wins; a terminal row can fall back.
+  const current = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
+  if (!current) return { unconfirmed: true };
+  result.duplicate = current.transferClaimed || Boolean(current.reconnectMs && (current.reconnectMs !== state.reconnectMs || current.claimGen >= current.reconnectMs));
+  return result;
+}
+
+/** The bounded re-stamp for a replay: { ms } when it landed, { rows: 0 } when refused, {} when unconfirmed. */
+async function reissueRelayReconnect(callSid, priorMs) {
+  const recovery = require('../services/voice-agent/relay-recovery');
+  const nowMs = Date.now();
+  const promise = recovery.reissueReconnect(db, { callSid, priorMs, nowMs })
+    .catch((err) => { logger.warn(`[relay-complete] reconnect re-issue failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
+  const rows = await withDeadline(promise, STAMP_DEADLINE_MS, 'timeout');
+  if (rows === 'timeout') {
+    void promise
+      .then((n) => (Number(n) > 0 ? recovery.undoLateReconnect(db, { callSid, nowMs }) : 0))
+      .then((n) => { if (Number(n) > 0) logger.warn(`[relay-complete] late reconnect re-issue for ${maskSid(callSid)} put back to voicemail`); })
+      .catch((err) => logger.warn(`[relay-complete] late re-issue compensation failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  if (Number(rows) > 0) return { ms: nowMs };
+  return rows === 0 ? { rows: 0 } : {};
+}
+
+/**
+ * The reconnect render for a claim stamped `genMs` (the fresh claim, or the
+ * re-issue of one whose response was lost): the SAME action (language /
+ * sandbox) carrying `gen=<genMs>`, the resumed greeting, `resumed=1`, and a
+ * token minted now — after the stamp, so the new socket's generation is ≥
+ * the row's fence. No reachable relay ⇒ the claim is put back to the
+ * fallback's shape and today's path runs.
+ */
+async function renderRelayReconnect(req, callSid, failure, genMs) {
+  const { isEnabled } = require('../config/feature-gates');
+  const recovery = require('../services/voice-agent/relay-recovery');
+  const sandbox = req.query.sandbox === '1';
+  const language = relayCompleteLanguage(req);
+  const { buildRelayTwiML, RELAY_WS_PATH, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
+  let wsUrl = null;
+  let spanishVoice = null;
+  if (sandbox) {
+    wsUrl = `wss://${sandboxRelayHost(req)}${RELAY_WS_PATH}`;
+  } else {
+    try {
+      const routingConfig = await withDeadline(getCallRoutingConfig(db), STAMP_DEADLINE_MS, null);
+      if (isEnabled('voiceAiAgent') && routingConfig && agentHandoffKind(routingConfig) === 'relay') {
+        wsUrl = routingConfig.agentEndpoint.trim();
+        spanishVoice = routingConfig.spanishVoice || null; // the Spanish leg's voice, as the vestibule renders it
+      }
+    } catch (err) {
+      logger.warn(`[relay-complete] reconnect routing lookup failed for ${maskSid(callSid)}: ${err.message}`);
+    }
+  }
+  if (!wsUrl) {
+    // The claim landed but nothing can answer it: put the row back so the
+    // fallback below is what the record says happened.
+    logger.warn(`[relay-complete] reconnect for ${maskSid(callSid)} has no reachable relay — falling back`);
+    await withDeadline(
+      recovery.undoLateReconnect(db, { callSid, nowMs: genMs, outcome: sandbox ? 'relay_failed' : 'voicemail', answeredBy: sandbox ? null : 'voicemail', status: 'failed' })
+        .catch((err) => logger.warn(`[relay-complete] reconnect undo failed for ${maskSid(callSid)}: ${err.message}`)),
+      STAMP_DEADLINE_MS,
+    );
+    return { xml: null, duplicate: false, secondFailure: false, fallbackGeneration: genMs };
+  }
+  const spanish = language === 'es';
+  // The SAME relay profile the first leg opened with (the row's stamp —
+  // a sandbox cell, raw cell-99 attrs, or the production profile), so the
+  // recovery is attributed to that profile; no stamp ⇒ the active profile.
+  const stamped = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
+  if (!stamped) return { unconfirmed: true }; // never replace unreadable attribution with today's active profile
+  const relayOpts = stamped.profile || activeRelayTwiMLOptions(spanish ? { language: SPANISH_LANGUAGE } : {});
+  await withDeadline(stampRelayProfile(callSid, relayOpts));
+  logger.info(`[relay-complete] reconnecting ${maskSid(callSid)} after ${failure} (${sandbox ? 'sandbox' : 'prod'}${spanish ? ', es' : ''})`);
+  // The resumed leg's action carries the reconnect generation, so its own
+  // failure callback is told apart from a retry of the first leg's.
+  const baseAction = sandbox ? RELAY_COMPLETE_ACTION_SANDBOX : (spanish ? RELAY_COMPLETE_ACTION_ES : RELAY_COMPLETE_ACTION);
+  const action = `${baseAction}${baseAction.includes('?') ? '&' : '?'}gen=${genMs}`;
+  if (!recovery.isRecoveryGateOn() || (!sandbox && !isEnabled('voiceAiAgent'))) {
+    return { xml: null, duplicate: false, secondFailure: false, fallbackGeneration: genMs };
+  }
+  const xml = buildRelayTwiML({
+    wsUrl,
+    callSid,
+    action,
+    ...(spanish ? { language: SPANISH_LANGUAGE, voice: spanishVoice || null } : {}),
+    welcomeGreeting: recovery.resumeGreeting(language),
+    tokenNow: genMs, // a concurrent reissue makes this token stale at the atomic claim fence
+    ...relayOpts,
+    parameters: { resumed: '1', ...(spanish ? { lang: 'es' } : {}) },
+  });
+  return { xml, duplicate: false, secondFailure: false };
+}
+
+/**
+ * PR 2B — the second failure: office open AND the transfer gate on ⇒ the
+ * 2A staff ring (owner-bound to the row's current claim owner, read bounded;
+ * the whisper is the generic line — no packet). Anything else ⇒ false and
+ * the caller falls to today's voicemail. The capture floor already ran at
+ * the first segment's close, so the lead exists either way.
+ */
+async function appendSecondFailureTransfer(req, twiml, callSid, recoveryFallback) {
+  try {
+    const { isTransferGateOn } = require('../services/voice-agent/relay-transfer');
+    if (!isTransferGateOn()) return false;
+    const { loadOfficeHours, isOfficeOpenAt } = require('../services/voice-agent/relay-context');
+    const hours = await withDeadline(loadOfficeHours(), STAMP_DEADLINE_MS, null);
+    if (!hours || isOfficeOpenAt(hours, new Date()) !== true) return false;
+    // An UNCONFIRMED owner read (timeout / error) is not a proven-null owner:
+    // the ring claim would then match 0 rows and the caller would get an
+    // empty response — fall back to voicemail instead (codex r1 P1).
+    const row = await withDeadline(
+      db('call_log').where('twilio_call_sid', callSid).first('metadata').then((r) => r || false).catch(() => 'unconfirmed'),
+      STAMP_DEADLINE_MS,
+      'unconfirmed',
+    );
+    if (row === 'unconfirmed') {
+      logger.warn(`[relay-complete] second failure for ${maskSid(callSid)} — owner read unconfirmed, voicemail instead of a ring`);
+      return false;
+    }
+    const owner = row ? (parseJsonObject(row.metadata).relay_session_claim_owner || null) : null;
+    logger.info(`[relay-complete] second failure for ${maskSid(callSid)} — office open, ringing staff`);
+    const result = await appendRelayTransfer(req, twiml, callSid, { reason: 'transfer', owner: owner ? String(owner) : null }, recoveryFallback);
+    if (result === 'unconfirmed') return false;
+    if (result === 'voicemail') {
+      // The ring fell to voicemail (no staff numbers / unconfirmed ring
+      // claim): the reconnect claim had put the row back to in-progress and
+      // nothing after this voicemail finalizes it — stamp the terminal
+      // status here too (codex r5 P2). Fenced on the voicemail outcome.
+      await withDeadline(
+        db('call_log').where('twilio_call_sid', callSid).where('call_outcome', 'voicemail').update({ status: 'completed', updated_at: new Date() })
+          .catch((err) => logger.warn(`[relay-complete] second-failure voicemail status stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        STAMP_DEADLINE_MS,
+      );
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[relay-complete] second-failure transfer skipped for ${maskSid(callSid)}: ${err.message}`);
+    return false;
+  }
+}
 
 // =========================================================================
 // POST /api/webhooks/twilio/relay-sandbox — the ONLY test path for Sandy.
@@ -1840,7 +2035,7 @@ function sandboxRelayXml({ callSid, cell, req = null }) {
 // leg is attributed to a profile it never used (codex r14 P2).
 async function stampRelayProfile(callSid, opts, { clearWhenEmpty = false } = {}) {
   const has = Boolean(opts && opts.relayProfileId);
-  if (!has && !clearWhenEmpty) return;
+  if (!has && !clearWhenEmpty && process.env.GATE_VOICE_RELAY_RECOVERY !== 'true') return;
   const stamp = has
     ? { relay_profile_id: opts.relayProfileId, relay_attrs: opts.relayAttrs || {} }
     : { relay_profile_id: null, relay_attrs: null };

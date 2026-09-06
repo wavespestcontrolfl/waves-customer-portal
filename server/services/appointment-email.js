@@ -301,7 +301,9 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         });
       }
     } catch (err) {
-      outcomes.push({ error: err.message });
+      // Keep the library's error code (e.g. EMAIL_TEMPLATE_DISABLED) so a
+      // caller can tell a deterministic refusal from a transient failure.
+      outcomes.push({ error: err.message, code: err.code || null });
       await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'failed', failureReason: err.message, metadata });
       logger.error(`[appointment-email] ${eventType} failed for ${customer.id}: ${err.message}`);
     }
@@ -309,9 +311,14 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
 
   const sent = outcomes.find((o) => o?.sent);
   if (sent) return { ok: true, messageId: sent.message?.provider_message_id || null };
-  if (outcomes.some((o) => o?.blocked)) return { ok: false, blocked: true, reason: 'suppressed' };
+  // A mixed fan-out (one recipient suppressed, another hit a transient
+  // provider error) keeps BOTH facts: `blocked` for the suppression, `error`
+  // for the failure — a caller deciding whether to retry must see the error.
   const errored = outcomes.find((o) => o?.error);
-  if (errored) return { ok: false, error: errored.error };
+  if (outcomes.some((o) => o?.blocked)) {
+    return { ok: false, blocked: true, reason: 'suppressed', ...(errored ? { error: errored.error, ...(errored.code ? { code: errored.code } : {}) } : {}) };
+  }
+  if (errored) return { ok: false, error: errored.error, ...(errored.code ? { code: errored.code } : {}) };
   return { ok: false, reason: outcomes.find((o) => o?.reason)?.reason || 'email_not_sent' };
 }
 
@@ -464,6 +471,35 @@ async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, 
   });
 }
 
+// Email twin of the tech_arrived SMS — sent when the customer's Tech Arrived
+// delivery channel is email/both (template seeded by 20260707000050, version
+// re-activated by 20260906000020). Retired 2026-08-06 (#3247), restored on
+// the owner's 2026-09-06 go so the Text / Email / Both picker means what it
+// says for arrivals.
+// `occurrence` scopes the idempotency key to the appointment OCCURRENCE
+// (`<scheduled_service_id>:<date>`): live rescheduling reuses the row, so a
+// key on the id alone would dedupe the next genuine arrival against the
+// previous one's email.
+async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, occurrence, idempotencyKey } = {}) {
+  // Same stamped-label override as the confirmation/reminder emails — the
+  // template's Property row must name where the tech actually arrived.
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
+  const eventId = `appointment.tech_arrived:${occurrence || scheduledServiceId || customerId}`;
+  return sendTemplate({
+    customerId,
+    templateKey: 'appointment.tech_arrived',
+    eventType: 'appointment.tech_arrived',
+    payload: {
+      tech_name: clean(techName) || 'Your technician',
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
+    },
+    idempotencyKey: idempotencyKey || eventId,
+    categories: ['appointment_tech_arrived'],
+    triggerEventId: eventId,
+    metadata: { scheduled_service_id: scheduledServiceId || null },
+  });
+}
+
 /**
  * Missed-visit (no-show) email — the email twin of the appointment_no_show
  * SMS, fired from AppointmentReminders.handleNoShow. missedWhen arrives
@@ -513,5 +549,6 @@ module.exports = {
   sendAppointmentReminderEmail,
   sendAppointmentNoShowEmail,
   sendTechEnRouteEmail,
+  sendTechArrivedEmail,
   _private: { sendTemplate, loadCustomer, resolveRecipients, isEmailLike, propertyLabel },
 };

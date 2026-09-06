@@ -263,6 +263,7 @@ function buildTranscriptUpdate({ turns = [], modelSummary = null, reason, leadCa
         provider: TRANSCRIPTION_PROVIDER,
         model: model || null,
         source: 'voice_relay_session',
+        summary_source: clean(modelSummary, MAX_SUMMARY_CHARS) ? 'model' : 'deterministic',
         call_sid: callSid || null,
         end_reason: reason || null,
         lead_captured: Boolean(leadCaptured),

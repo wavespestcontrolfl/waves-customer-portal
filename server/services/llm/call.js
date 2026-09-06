@@ -300,8 +300,9 @@ const statusCode = (provider, status) => `${provider}_${String(status).toLowerCa
 // — the API retains application state by default, and these lanes carry
 // customer PII (inbound email sender/subject/body, call transcripts,
 // names/addresses).
-function openAIRequest({ model, system, text, images, jsonMode, jsonSchema, maxTokens, reasoningEffort }) {
-  const content = [{ type: 'input_text', text: text || '' }, ...images.map(toOpenAIImage)];
+function openAIRequest({ model, system, text, images, documents, jsonMode, jsonSchema, maxTokens, reasoningEffort }) {
+  const content = [{ type: 'input_text', text: text || '' }, ...images.map(toOpenAIImage),
+    ...documents.map((doc) => ({ type: 'input_file', filename: doc.filename, file_data: `data:application/pdf;base64,${doc.data}` }))];
   const body = { model, input: [{ role: 'user', content }], store: false };
   if (system) body.instructions = system;
   if (jsonMode && jsonSchema) body.text = { format: { type: 'json_schema', name: 'structured_response', schema: jsonSchema, strict: true } };
@@ -346,7 +347,7 @@ function openAIVerdict(data, out) {
   return null;
 }
 
-async function callOpenAI({ model, system, text, images = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
+async function callOpenAI({ model, system, text, images = [], documents = [], jsonMode = true, jsonSchema, maxTokens, timeoutMs = DEFAULT_TIMEOUT_MS, reasoningEffort = 'low', laneId, promptVersion, policyLabel } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
   const base = { provider: 'openai', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   const t0 = nowMs();
@@ -354,7 +355,7 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, j
     const resp = await fetch(OPENAI_RESPONSES_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-      body: JSON.stringify(openAIRequest({ model, system, text, images, jsonMode, jsonSchema, maxTokens, reasoningEffort })),
+      body: JSON.stringify(openAIRequest({ model, system, text, images, documents, jsonMode, jsonSchema, maxTokens, reasoningEffort })),
       ...abortAfter(timeoutMs),
     });
     if (!resp.ok) {
@@ -454,8 +455,9 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
 // A payload `temperature` is read by the Gemini leg only. Current Anthropic
 // models (Opus 4.7+, Sonnet 5, Fable) reject sampling controls with a 400, so
 // this leg never forwards it.
-function anthropicRequest({ model, system, text, images, tools, jsonMode, jsonSchema, maxTokens }) {
-  const content = [...images.map(toAnthropicImage)];
+function anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens }) {
+  const content = [...images.map(toAnthropicImage),
+    ...documents.map((doc) => ({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: doc.data } }))];
   if (text) content.push({ type: 'text', text });
   const req = { model, max_tokens: maxTokens, messages: [{ role: 'user', content }] };
   // Ephemeral cache breakpoint on the system prompt (tools render before
@@ -481,7 +483,7 @@ function anthropicVerdict(resp, maxTokens) {
   return 'anthropic_incomplete';
 }
 
-async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel } = {}) {
+async function callAnthropic({ model, system, text, images = [], documents = [], tools, jsonMode = true, jsonSchema, maxTokens = 1024, timeoutMs, anthropicClient, laneId, promptVersion, policyLabel } = {}) {
   if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   const base = { provider: 'anthropic', requestedModel: model, laneId, promptVersion, policyLabel, system, text };
   // Ledger latency. With no budget the SDK keeps its default retries, so one
@@ -489,7 +491,7 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
   const t0 = nowMs();
   try {
     const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const req = anthropicRequest({ model, system, text, images, tools, jsonMode, jsonSchema, maxTokens });
+    const req = anthropicRequest({ model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens });
     // maxRetries:0 whenever a budget is supplied — the SDK's per-request
     // timeout applies to EACH attempt, so its default retry policy (2 retries)
     // could hold a caller for ~3x its ceiling. Callers with a timeoutMs budget
@@ -516,7 +518,7 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
 
 /**
  * Dispatch a models.ROUTES entry ({ provider, model }) to the matching provider.
- * payload: { system, text, images, jsonMode, jsonSchema, maxTokens, tools, temperature,
+ * payload: { system, text, images, documents, jsonMode, jsonSchema, maxTokens, tools, temperature,
  *            anthropicClient, laneId, promptVersion } (`anthropicClient` supports
  *            existing injected clients and deterministic tests without bypassing
  *            the router; laneId / promptVersion only label the call-ledger row).
@@ -526,7 +528,9 @@ async function dispatch(route, payload = {}) {
   const args = { model: route.model, ...payload };
   switch (route.provider) {
     case PROVIDER.OPENAI: return callOpenAI(args);
-    case PROVIDER.GEMINI: return callGemini(args);
+    case PROVIDER.GEMINI:
+      if (args.documents?.length) return { ok: false, reason: 'unsupported_pdf_provider' };
+      return callGemini(args);
     case PROVIDER.ANTHROPIC: return callAnthropic(args);
     default: return { ok: false, reason: `unknown_provider_${route.provider}` };
   }

@@ -392,6 +392,10 @@ function mapToDisplayScores(composite) {
     // above so the Lawn Diagnostic tool, trends, and snapshot are untouched.
     stress_damage: computeStressDamageDisplay(composite),
     overwatering_signal: !!composite.overwatering_signal,
+    // Keep the moisture cause alongside the combined Stress/Damage score.
+    // /assess persists this object; absent/invalid evidence must stay unknown.
+    drought_stress: ['none', 'minor', 'moderate', 'severe'].includes(composite.drought_stress)
+      ? composite.drought_stress : null,
     observations: composite.observations || '',
   };
 }

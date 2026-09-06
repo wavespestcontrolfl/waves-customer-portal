@@ -219,9 +219,10 @@ The shell and HTTP helper now share `adminLoginUrl`, removing duplicate
 return-target construction. Its helper/layout checks passed again (15 tests),
 and the final build passed. A concurrent browser rerun timed out during its
 first page load while machine load exceeded 300; the subsequent sequential
-rerun passed all 10 scenarios. Assertions were not relaxed. Review fixes are
-committed locally; publishing them requires resolving the automatic-preview
-deployment boundary described below.
+rerun passed all 10 scenarios. Assertions were not relaxed. Both review fixes
+are included in the PR remediation. The two helper/layout suites (15 tests)
+and missing-Chromium startup test passed again before publication. Final-head
+CI and Codex results are recorded on PR #3980.
 
 Opening the PR also invoked the repository's existing Railway integration,
 which automatically created a PR preview. Read-only configuration inspection

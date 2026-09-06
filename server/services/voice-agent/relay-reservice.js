@@ -194,6 +194,7 @@ async function requestReserviceText(input = {}, ctx = {}) {
     const byLane = await openReserviceCallbacks(customerId);
     booked = (byLane && byLane[lane]) || null;
   } catch (err) {
+    ctx.toolFailed = true;
     logger.error(`[voice-relay-reservice] open-callback dedupe FAILED for ${customerId} — refusing to file (fail closed): ${err.message}`);
     return 'I could not check whether a re-service is already on the schedule for this account, so nothing was '
       + 'filed — filing a second one would double-book them. Tell the caller a Waves team member will follow up '
@@ -289,6 +290,7 @@ async function requestReserviceText(input = {}, ctx = {}) {
       // An unanswerable dedupe is not a licence to write — the same fail-closed
       // posture the read at the top takes.
       logger.error(`[voice-relay-reservice] in-lock callback dedupe FAILED for ${customerId} — refusing to file: ${err.message}`);
+      ctx.toolFailed = true;
       return { status: 'dedupe_failed' };
     }
     const raced = await trx('service_requests')

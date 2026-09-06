@@ -146,4 +146,82 @@ async function completeRun(runId, { status, totals, error = null }) {
   } catch (_) { /* non-critical */ }
 }
 
-module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES };
+// Include skipped/locked rows: unplaced due dates must not disappear behind
+// eligibility filters or the run cap. The existing bell dedupes repeated runs.
+async function flagUnplacedVisits(config, nowDate = new Date()) {
+  const { etDateString, addETDays } = require('../../utils/datetime-et');
+  const { toDateStr } = require('./dates');
+  // Retire obsolete content even if staff already acknowledged the card:
+  // the shared deduper needs changed content to reopen a later recurrence.
+  // Skip resolved cards so repeated recovery passes do not rewrite history.
+  const resolvedTitle = 'Recurring placement alert resolved';
+  await db('notifications')
+    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+    .whereNot('title', resolvedTitle)
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", ['recurring-dispatch:%'])
+    .whereNotExists(function stillUnplaced() {
+      this.select('s.id').from('scheduled_services as s')
+        .join('customers as c', 'c.id', 's.customer_id')
+        .where('c.active', true)
+        .whereNull('c.deleted_at')
+        .whereRaw("s.id::text = notifications.metadata->>'scheduledServiceId'")
+        .whereRaw("s.recurring_dispatch_due_date::text = notifications.metadata->>'dueDate'")
+        .whereNull('s.window_start')
+        .whereIn('s.status', ['pending', 'confirmed']);
+    })
+    .update({
+      read_at: nowDate,
+      title: resolvedTitle,
+      body: 'This visit is no longer awaiting placement for the recorded due date.',
+    });
+  const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
+  const rows = await db('scheduled_services as s')
+    .join('customers as c', 'c.id', 's.customer_id')
+    .whereNotNull('s.recurring_dispatch_due_date')
+    .whereNull('s.window_start')
+    .whereIn('s.status', ['pending', 'confirmed'])
+    .where('s.recurring_dispatch_due_date', '<=', cutoff)
+    .where('c.active', true)
+    .whereNull('c.deleted_at')
+    .select('s.id', 's.customer_id', 's.recurring_dispatch_due_date');
+  const notifications = require('../notification-service');
+  let flagged = 0;
+  for (const row of rows) {
+    const due = toDateStr(row.recurring_dispatch_due_date);
+    const notice = await db.transaction(async (trx) => {
+      // Pin placement through the shared notification dedupe/write. A staff
+      // placement that won the row lock makes this a no-op; one that follows
+      // us waits until the still-valid alert has committed.
+      const current = await trx('scheduled_services as s')
+        .join('customers as c', 'c.id', 's.customer_id')
+        .where({ 's.id': row.id, 's.customer_id': row.customer_id, 's.recurring_dispatch_due_date': due, 'c.active': true })
+        .whereNull('c.deleted_at')
+        .whereNull('s.window_start')
+        .whereIn('s.status', ['pending', 'confirmed'])
+        .forNoKeyUpdate('s')
+        .first('s.id');
+      if (!current) return null;
+      const inserted = await notifications.notifyAdmin(
+        'schedule_conflict',
+        'Recurring visit still needs a time',
+        `A recurring visit due ${due} is still awaiting placement within three days of its due date. Review availability and customer preferences in dispatch.`,
+        {
+          bell: true,
+          link: `/admin/dispatch?tab=schedule&date=${due}`,
+          dedupeKey: `recurring-dispatch:${row.id}:${due}`,
+          // Reopen a previously resolved card if this due date becomes unplaced
+          // again; the shared deduper leaves acknowledged, unchanged cards alone.
+          refreshOnDedupe: true,
+          metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
+          trx,
+        },
+      );
+      if (!inserted) throw new Error(`Recurring placement exception could not be recorded for ${row.id}`);
+      return inserted;
+    });
+    if (notice) flagged += 1;
+  }
+  return flagged;
+}
+
+module.exports = { startRun, logDecision, completeRun, settleAbandonedRuns, STALE_RUNNING_MINUTES, flagUnplacedVisits };

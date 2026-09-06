@@ -38,6 +38,7 @@ import {
   useEffect,
   useRef,
   useCallback,
+  useMemo,
   lazy,
   Suspense,
 } from "react";
@@ -61,6 +62,7 @@ import TimeGridDays from "../../components/schedule/TimeGridDays";
 import MobileWeekGrid from "../../components/schedule/MobileWeekGrid";
 import MobileDayStrip from "../../components/schedule/MobileDayStrip";
 import MobileDispatchList from "../../components/schedule/MobileDispatchList";
+import useDispatchReadiness from "../../components/schedule/useDispatchReadiness";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
@@ -78,7 +80,7 @@ import { ProjectDetail } from "./ProjectsPage";
 import { getAdminUser } from "../../lib/adminAuth";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
-import { Button, Card, CardBody, cn } from "../../components/ui";
+import { Button, cn } from "../../components/ui";
 import {
   etDateString,
   etStartOfWeek,
@@ -991,6 +993,14 @@ export default function DispatchPageV2({
   }
 
   const isReferencePanel = activeTab !== "board" && viewMode === "day";
+  const readiness = useDispatchReadiness({
+    services: data?.services,
+    date,
+    active: activeTab === "board" && viewMode === "day" && data?.date === date && !loading && !error,
+  });
+  const dayServices = useMemo(() => (data?.services || []).map(service => ({
+    ...service, readiness: readiness?.[service.id],
+  })), [data?.services, readiness]);
   if (loading && !isReferencePanel)
     return (
       <div className="py-16 text-center text-13 text-ink-secondary">
@@ -1018,9 +1028,8 @@ export default function DispatchPageV2({
   if (!data && !isReferencePanel) return null;
 
   const safeData = data || {};
-  const services = safeData.services || [];
+  const services = dayServices;
   const techSummary = safeData.techSummary || [];
-  const unassigned = safeData.unassigned || [];
   const technicians = safeData.technicians || [];
   const zoneColors = safeData.zoneColors || {};
   const zoneLabels = safeData.zoneLabels || {};
@@ -1112,14 +1121,11 @@ export default function DispatchPageV2({
         0,
       );
 
-  const unassignedCount = unassigned.length;
-  const newCustomers = services.filter((s) => !s.lastServiceDate);
   const weatherData = safeData.weather || {};
   const rainProbability =
     weatherData.rainProbability ?? weatherData.rain_probability ?? null;
   const windSpeed = weatherData.windSpeed ?? weatherData.wind_speed ?? null;
   const weatherTemp = weatherData.temp ?? weatherData.temperature ?? null;
-  const hasRainAlert = rainProbability != null && rainProbability > 40;
   // Per-zone NWS rain chances for the zones on today's board (day payload
   // zoneRain: { zoneSlug: 0-100|null }). Exception-based: only zones at
   // ≥40% surface as chips on the weather bar — amber <50, alert-red ≥50
@@ -1127,10 +1133,6 @@ export default function DispatchPageV2({
   const zoneRainAlerts = Object.entries(safeData.zoneRain || {})
     .filter(([, chance]) => chance != null && chance >= 40)
     .sort(([, a], [, b]) => b - a);
-  const hasFocusAlerts =
-    (!isMobile && unassignedCount > 0) ||
-    newCustomers.length > 0 ||
-    hasRainAlert;
   const sprayHold =
     (rainProbability != null && rainProbability > 50) ||
     (windSpeed != null && windSpeed > 15);
@@ -1635,35 +1637,6 @@ export default function DispatchPageV2({
       {/* Board tab content */}
       {viewMode === "day" && activeTab === "board" && (
         <>
-          {hasFocusAlerts && (
-            <Card className="mb-3">
-              {" "}
-              <CardBody className="py-3">
-                {" "}
-                <div className="u-label text-ink-secondary mb-1">
-                  Today's Focus
-                </div>
-                {!isMobile && unassignedCount > 0 && (
-                  <div className="text-13 font-medium text-alert-fg">
-                    {unassignedCount} service{unassignedCount > 1 ? "s" : ""}{" "}
-                    unassigned — assign techs
-                  </div>
-                )}
-                {newCustomers.length > 0 && (
-                  <div className="text-13 font-medium text-zinc-900">
-                    {newCustomers.length} new customer
-                    {newCustomers.length > 1 ? "s" : ""} today (first visit)
-                  </div>
-                )}
-                {hasRainAlert && (
-                  <div className="text-13 font-medium text-zinc-900">
-                    Rain expected ({rainProbability}% chance) — monitor spray
-                    conditions
-                  </div>
-                )}
-              </CardBody>{" "}
-            </Card>
-          )}
           {/* Weather bar — full-bleed, single row */}
           {(() => {
             const rp = rainProbability ?? 0;

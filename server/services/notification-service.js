@@ -182,7 +182,7 @@ const NotificationService = {
     // unread beside the new one). Errors then PROPAGATE — swallowing one
     // inside a caller's transaction would leave it aborted and doom the
     // commit — so the caller owns containment.
-    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
     }
@@ -225,11 +225,58 @@ const NotificationService = {
     const shape = (persisted) => ({ ...persisted.notification, deduped: persisted.deduped, ...(persisted.refreshed ? { refreshed: true } : {}) });
     if (callerTrx) return shape(await dedupeAndInsert(callerTrx));
     try {
-      return shape(await db.transaction(dedupeAndInsert));
+      let callbackStamp;
+      const persisted = await db.transaction(async (trx) => {
+        if (!relayFailureCall) return dedupeAndInsert(trx);
+        // Extend the existing notification transaction: shared callback claims
+        // are final delivery evidence, never a durable pending lease. Holding
+        // the call row also fences session takeover until the bell commits.
+        await trx.raw("SET LOCAL statement_timeout = '3s'");
+        await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
+        const call = await trx('call_log').where('twilio_call_sid', relayFailureCall.callSid).forUpdate().first('id', 'metadata', 'voicemail_callback_alerted_at');
+        let meta = call?.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+        if (!call || call.voicemail_callback_alerted_at || ((meta?.relay_session_claim_owner ?? null) !== relayFailureCall.owner)) {
+          return { notification: { suppressed: true }, deduped: true };
+        }
+        if (relayFailureCall.isActive?.() === false) throw new Error('relay callback cancelled');
+        const persisted = await dedupeAndInsert(trx);
+        if (!persisted.notification.suppressed) {
+          const [stamped] = await trx('call_log').where('id', call.id).update({
+            voicemail_callback_alerted_at: trx.fn.now(),
+            metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_failure_callback_filed_at', now()::text)"),
+          }).returning('metadata');
+          callbackStamp = stamped.metadata.relay_failure_callback_filed_at;
+        }
+        if (relayFailureCall.isActive?.() === false) throw new Error('relay callback cancelled');
+        return persisted;
+      });
+      const receipt = callbackStamp && !persisted.deduped ? {
+        callSid: relayFailureCall.callSid, callbackStamp, notificationId: persisted.notification.id,
+      } : null;
+      // The same conditional compensation handles close during COMMIT and an
+      // end-frame failure after the bell result reaches the conversation.
+      if (receipt && relayFailureCall.isActive?.() === false) {
+        await this.revertRelayFailureCallback(receipt);
+        return null;
+      }
+      if (receipt) relayFailureCall.onCommitted?.(receipt);
+      return shape(persisted);
     } catch (err) {
       logger.warn(`[notifications] Admin notification dedupe failed: ${err.message}`);
       return null;
     }
+  },
+
+  async revertRelayFailureCallback({ callSid, callbackStamp, notificationId }) {
+    return db.transaction(async (trx) => {
+      const call = await trx('call_log').where('twilio_call_sid', callSid).forUpdate().first('id');
+      if (!call) return;
+      const cleared = await trx('call_log').where('id', call.id)
+        .whereRaw("metadata->>'relay_failure_callback_filed_at' = ?", [callbackStamp])
+        .update({ voicemail_callback_alerted_at: null, metadata: trx.raw("metadata - 'relay_failure_callback_filed_at'") });
+      if (cleared) await trx('notifications').where('id', notificationId).delete();
+    });
   },
 
   // Create customer notification

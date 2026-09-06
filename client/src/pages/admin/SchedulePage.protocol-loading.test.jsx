@@ -20,6 +20,7 @@ function deferred() {
 }
 function fixture(url, label = "Current") {
   const path = new URL(url, "http://localhost").pathname;
+  if (path.endsWith('/intelligence-bar/quick-actions')) return { actions: [] };
   // The job card is gate-off here (GATE_JOB_CARD unset): the legacy tabs render.
   if (path.includes("/protocols/job-card/")) return { enabled: false };
   if (path.endsWith("/turf-profile")) return { profile: { track_key: "A_St_Aug_Sun", lawn_sqft: 10000 } };
@@ -43,6 +44,28 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("ProtocolPanel mix previews", () => {
+  it("uses the server-selected procedure when enabled and opens its SOP without the annual calendar", async () => {
+    vi.stubGlobal('scrollTo', vi.fn());
+    fetch.mockImplementation((url) => reply(url.includes('/protocols/job-card/') ? {
+      enabled: true, serviceId: service.id, strip: { name: 'Fixture account', program: 'Lawn Care' }, products: [], addons: [], planBlocks: [],
+      sprayCheck: { window: 'not_today' }, tank: { calibrated: false, reason: 'Fixture rig unavailable' },
+      protocol: { enabled: true, procedure: { name: 'Published fixture protocol', source: 'Published protocol · version 3', title: 'September visit', objective: 'Record current conditions.', visitNotes: [], steps: ['Inspect the marked area.'], conditional: [], notes: ['Read the source notes.'] }, addons: [] },
+    } : fixture(url)));
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.click(screen.getByRole('button', { name: 'Protocol', exact: true }));
+    expect(await screen.findByText('September visit')).toBeVisible();
+    expect(screen.queryByText('Annual Protocol Calendar')).not.toBeInTheDocument();
+    const opener = screen.getByRole('button', { name: 'Read SOP' });
+    opener.focus();
+    fireEvent.click(opener);
+    expect(within(screen.getByRole('dialog', { name: 'Service SOP' })).getByText('Read the source notes.')).toBeVisible();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'View product checks and mixing amounts' }));
+    expect(screen.getByText('Spray check')).toBeVisible();
+  });
+
   it("shows labeled optional quantities and prefers actual quantities for selected products", async () => {
     fetch.mockImplementation((url) => {
       const body = fixture(url);
