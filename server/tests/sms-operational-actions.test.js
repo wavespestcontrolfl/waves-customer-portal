@@ -101,6 +101,16 @@ describe('SMS operational evidence and ownership', () => {
     expect(prompt).toContain('Please send the estimate');
   });
 
+  test('a split readback spanning the current SMS becomes an explicit review exception', async () => {
+    dispatchWithFallback.mockClear();
+    const result = await extractSmsOperations({
+      history: [source('My card is 4242 4242')],
+      message: source('4242 4242. The controller is beside the garage.'), properties,
+    });
+    expect(result).toMatchObject({ facts: [], dropped: 1 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('raw payment data echoed by the model cannot become operational facts', () => {
     const quote = 'The code is 4242424242424242';
     expect(() => groundExtraction(extracted([], [fact({ field: 'access_notes', quote, value: quote })]), {
