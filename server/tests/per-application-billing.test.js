@@ -700,6 +700,31 @@ describe('accepted pest cadence reaches the service schedule', () => {
     expect(EstimateConverter.remainingUnitCatalogKey(staleLine)).toBeNull();
   });
 
+  test.each(['monthly', 'bimonthly'])('%s legacy lines reject contradictory or invalid counts without an accepted selection', (frequency) => {
+    for (const counts of [{ visitsPerYear: 4 }, { visitsPerYear: 0 }, { visitsPerYear: 12, appsPerYear: 6 }]) {
+      const line = { service: 'pest_control', frequency, ...counts };
+      expect(EstimateConverter.converterFollowUpSeedingPattern(line, {}, frequency)).toBeNull();
+      expect(EstimateConverter.annualPrepayCoverageCadence(line, frequency)).toBe('prepay_coverage_invalid');
+      // A persisted selection is affirmative evidence and overrides stale quote counts.
+      expect(EstimateConverter.converterFollowUpSeedingPattern(line, {}, frequency, frequency)).toBe(frequency);
+    }
+  });
+
+  test.each([['monthly', 12], ['bimonthly', 6]])('%s legacy lines seed the complete year when their count agrees', (frequency, visits) => {
+    const line = { service: 'pest_control', frequency, visitsPerYear: visits };
+    const pattern = EstimateConverter.converterFollowUpSeedingPattern(line, {}, frequency);
+    expect(pattern).toBe(frequency);
+    expect(EstimateConverter.annualPrepayCoverageCadence(line, frequency)).toBe(frequency);
+    expect(buildRecurringFollowUpRows(parent, {
+      pattern, visitsPerYear: EstimateConverter.annualPrepayCoverageVisits(line, pattern),
+    })).toHaveLength(visits - 1);
+  });
+
+  test.each([null, 'quarterly', 'bimonthly', 'monthly'])('%s pest appointments preserve the estimate scheduler duration', (pattern) => {
+    expect(EstimateConverter.durationMinutesForRecurringService(staleLine, pattern)).toBe(60);
+    expect(EstimateConverter.durationMinutesForRecurringService({ ...staleLine, estimatedDurationMinutes: 90 }, pattern)).toBe(90);
+  });
+
   test('commercial pest and lawn do not inherit residential pest selection rules', () => {
     expect(EstimateConverter.converterFollowUpSeedingPattern({ service: 'commercial_pest', frequency: 'monthly' }, {}, 'monthly', 'monthly')).toBeNull();
     expect(EstimateConverter.converterFollowUpSeedingPattern({ service: 'pest_control', isCommercial: true }, {}, 'monthly', 'monthly')).toBeNull();
