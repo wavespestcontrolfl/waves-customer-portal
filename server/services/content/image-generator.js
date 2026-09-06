@@ -471,6 +471,11 @@ const defaultInstance = new ImageGenerator();
 
 module.exports = defaultInstance;
 module.exports.ImageGenerator = ImageGenerator;
+// Public: the publisher plans each image before generating it (pre-push
+// Codex P1 on e8b864170 — an _internals-only export would have thrown on
+// every autonomous publish).
+module.exports.planFor = planFor;
+module.exports.IMAGE_STYLES = IMAGE_STYLES;
 module.exports._internals = {
   DEFAULT_CHAIN,
   MODEL_MAP,

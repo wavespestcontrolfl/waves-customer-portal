@@ -147,12 +147,15 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
     }
-    const allowed = new Set(allowedText.map(normalizeText).filter(Boolean));
+    // An allowed caption may come back split ("1", "OFF") or joined; accept a
+    // detected string only when every one of its words belongs to ONE allowed
+    // caption — never a superset ("1 OFF SALE" is extra text around a caption
+    // and fails; pre-push Codex P1 on e8b864170).
+    const allowedTokenSets = allowedText.map((c) => new Set(normalizeText(c).split(' ').filter(Boolean))).filter((set) => set.size);
     const strayText = parsed.readableText.filter((t) => {
-      const n = normalizeText(t);
-      // Allowed captions may come back split or joined; accept a string the
-      // allowed set contains or that is contained by an allowed caption.
-      return n && !allowed.has(n) && ![...allowed].some((a) => a.includes(n) || n.includes(a));
+      const tokens = normalizeText(t).split(' ').filter(Boolean);
+      if (!tokens.length) return false;
+      return !allowedTokenSets.some((set) => tokens.every((tok) => set.has(tok)));
     });
     const reasons = [];
     if (parsed.logos.length) reasons.push(`logo or brand mark: ${parsed.logos.slice(0, 3).join(', ')}`);

@@ -201,6 +201,13 @@ describe('category-seed-seeder: overlay', () => {
     expect(overlay.operator_brief.slug).toBe(brief.slug);
   });
 
+  test('image_avoid flows into operator_brief as trimmed strings (the publisher feeds it to every image prompt); absent → []', () => {
+    const m = seeder.loadManifest();
+    const withAvoid = { ...m.briefs[0], image_avoid: [' irrigation repair scenes ', '', 'a competitor truck'] };
+    expect(overlayFor(withAvoid).operator_brief.image_avoid).toEqual(['irrigation repair scenes', 'a competitor truck']);
+    expect(overlayFor(m.briefs[0]).operator_brief.image_avoid).toEqual([]);
+  });
+
   test('binding instructions carry the informational-lane rule, verify notes, and relative CTAs', () => {
     const overlay = overlayFor();
     const joined = overlay.operator_brief.binding_instructions.join('\n');

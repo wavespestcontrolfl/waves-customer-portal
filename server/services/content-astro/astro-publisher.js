@@ -1812,7 +1812,16 @@ function describeHeroFailure(err) {
 // error (see isDeterministicPublishError in autonomous-runner) so the runner
 // parks the run for review instead of retry-looping, and never publishes
 // hero-less.
-async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
+// The brief's "must not depict" list for every image of the post: a brief-level
+// image_avoid, or the operator brief's (category-seed / intercept manifests
+// carry it; pre-push Codex P1 on e8b864170 asked for the hero to get it too).
+function imageExclusionsFor(brief = {}) {
+  const raw = Array.isArray(brief?.image_avoid) ? brief.image_avoid
+    : (Array.isArray(brief?.voice_constraints?.operator_brief?.image_avoid) ? brief.voice_constraints.operator_brief.image_avoid : []);
+  return raw.map((v) => String(v || '').trim()).filter(Boolean);
+}
+
+async function resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvoid = [] }) {
   if (existingFile) {
     try {
       const liveSrc = fm.parse(existingFile.file.content)?.data?.hero_image?.src;
@@ -1838,6 +1847,7 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       meta_description: frontmatter.meta_description,
       keyword: frontmatter.primary_keyword,
       slug,
+      image_avoid: imageAvoid,
     });
     let buffer;
     try {
@@ -2931,7 +2941,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
           slug,
           index: k + 1 + attempt * 100,
           captions,
-          avoidDepicting: Array.isArray(brief.image_avoid) ? brief.image_avoid : [],
+          avoidDepicting: imageExclusionsFor(brief),
         });
         buffer = await compressToWebp(gen.buffer, { width: BODY_IMAGE_WIDTH });
       } catch (err) {
@@ -3189,7 +3199,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // commit into this branch. Fails CLOSED (deterministic publish error) —
   // never a silent hero-less publish. Resolution happens BEFORE the branch is
   // cut so a hero failure can't orphan a branch/PR.
-  const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile });
+  const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvoid: imageExclusionsFor(brief) });
   // A freshly generated hero carries a generation-derived alt that describes
   // the actual image — it wins over the agent's alt, which was written
   // before the image existed (the recurring alt↔hero mismatch). Reused
@@ -5095,6 +5105,8 @@ module.exports = {
     normalizeAutonomousBlogFrontmatter,
     normalizeAuthorBlock,
     buildDraftPrBody,
+    imageExclusionsFor,
+    describeImageProvenance,
     buildMetadataPrBody,
     buildRefreshPrBody,
     buildSeoReviewSection,

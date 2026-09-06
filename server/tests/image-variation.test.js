@@ -42,6 +42,15 @@ describe('planFor — deterministic variation per post and slot', () => {
   });
 });
 
+describe('module surface', () => {
+  test('planFor and IMAGE_STYLES are public on the module (the publisher calls them on the default export)', () => {
+    const mod = require('../services/content/image-generator');
+    expect(typeof mod.planFor).toBe('function');
+    expect(mod.IMAGE_STYLES).toBe(gen.IMAGE_STYLES);
+    expect(mod.planFor({ slug: 'x', mode: 'blog-hero', index: 0 })).toEqual(gen.planFor({ slug: 'x', mode: 'blog-hero', index: 0 }));
+  });
+});
+
 describe('buildPrompt with a plan', () => {
   test('names the style, setting, time and vantage; forbids text and logos; carries the brief\'s guards', () => {
     const plan = { style: 'photo', setting: 'inside a residential garage, controller and tools on the wall', timeOfDay: 'late afternoon', vantage: 'over the shoulder' };
@@ -106,8 +115,11 @@ describe('screenGeneratedImage', () => {
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/logo or brand mark: Orkin/), expect.stringMatching(/readable text: ORKIN/)] });
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["SET TIME", "ZONE 5 RUN"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: SET TIME, ZONE 5 RUN/)] });
-    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF", "2  MANUAL", "3 OFF"], "logos_or_brand_marks": []}' });
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF", "2  MANUAL", "3", "OFF"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL', '3 OFF'] })).toMatchObject({ ok: true });
+    // Extra words around an allowed caption are stray text, not the caption.
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["1 OFF SALE", "2 MANUAL"], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['1 OFF', '2 MANUAL'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/readable text: 1 OFF SALE/)] });
     expect(buildScreenPrompt({ allowedText: ['1 OFF'] })).toMatch(/ALLOWED.*"1 OFF"/);
   });
 
