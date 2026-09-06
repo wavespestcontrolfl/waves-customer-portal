@@ -224,6 +224,7 @@ router.get('/strategy/reports', async (req, res, next) => {
 // decision (payment / membership / legal); `watching` = unactionable today,
 // rechecked. The worker's claim() leases only 'prospect', so neither is ever
 // leased; both join the per-domain guard sets in prospect-domain-lock.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROSPECT_STATUSES = Object.freeze(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed', 'lost', 'rejected', 'awaiting_owner', 'watching']);
 const PARKED_STATUSES = Object.freeze(['awaiting_owner', 'watching']);
 // Sources the owner's paste box may stamp. Bulk lists are list_import; a seed
@@ -597,8 +598,7 @@ router.post('/prospects', async (req, res, next) => {
 // PATCH /api/admin/backlink-agent/prospects/:id — edit
 router.post('/prospects/:id/reconcile-backlink', async (req, res, next) => {
   try {
-    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    if (!uuid.test(req.params.id) || !uuid.test(req.body?.backlink_id || '')) return res.status(400).json({ error: 'valid placement and backlink ids required' });
+    if (!UUID.test(req.params.id) || !UUID.test(req.body?.backlink_id || '')) return res.status(400).json({ error: 'valid placement and backlink ids required' });
     const result = await require('../utils/cron-lock').runExclusive('backlink-scan', () => require('../services/seo/link-prospect-verifier').reconcileOutreach({ ownerMatch: { prospectId: req.params.id.toLowerCase(), backlinkId: req.body.backlink_id.toLowerCase(), actorId: req.technician?.id || null } }), { recordHealth: false });
     if (!result.matched) return res.status(409).json({ error: 'This link no longer matches an available outreach placement. Refresh the queue.' });
     res.json(result);
@@ -616,8 +616,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     const verdict = req.body.submission_verdict;
     const negativeVerdict = verdict === 'not_submitted';
     if (verdict !== undefined) {
-      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-      if (!['not_submitted', 'placed'].includes(verdict) || !uuid.test(req.body.submission_attempt_id || '')
+      if (!['not_submitted', 'placed'].includes(verdict) || !UUID.test(req.body.submission_attempt_id || '')
         || Object.keys(patch).some((key) => key !== 'live_url') || (negativeVerdict && 'live_url' in patch)) {
         return res.status(400).json({ error: 'A submission verdict requires its attempt id and no unrelated board edits' });
       }
@@ -644,10 +643,6 @@ router.patch('/prospects/:id', async (req, res, next) => {
       const inOutreach = (status, type) => ACTIVE_OUTREACH_STATUSES.includes(status) && !SIGNUP_TYPES.includes(type || '');
       const entersOutreach = inOutreach('status' in patch ? patch.status : current.status, 'link_type' in patch ? patch.link_type : current.link_type)
         && !inOutreach(current.status, current.link_type);
-      if (entersOutreach) {
-        const { inFlight } = await claimProspectDomain(trx, current.target_domain);
-        if (inFlight && inFlight.id !== current.id) return { inFlight };
-      }
       // a status edit INTO the active outreach lifecycle (prospect / contacted / negotiating / awaiting_owner) — a reopen
       // from lost / rejected above all — drops the closure stamp with it: conversationClosed (the §13 inbox guard) would
       // otherwise keep reading the live row as closed and free its inbox to a second conversation; lost-link recovery
@@ -656,11 +651,11 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // edit (notes, a page move) on a row that carries the stamp.
       const resultStatus = 'status' in patch ? patch.status : current.status;
       if (ACTIVE_OUTREACH_STATUSES.includes(resultStatus) && ('status' in patch || entersOutreach)) patch.conversation_closed_at = null;
-      // a CLOSED conversation reopened by that edit (the stamp dropped on a row that was already in the active set, so
-      // entersOutreach did not run the probe) is a board admission too: the closure released the domain to a later
-      // placement, and two conversations for one publisher must not become active — the same per-domain admission probe
-      // (the probe ignores closure-stamped rows, so the row being reopened is not its own conflict)
-      if (patch.conversation_closed_at === null && current.conversation_closed_at && !entersOutreach) {
+      // a CLOSED conversation reopened by that edit (the stamp dropped on a row that was already in the active set) is a
+      // board admission too: the closure released the domain to a later placement, and two conversations for one
+      // publisher must not become active — the same per-domain admission probe (the probe ignores closure-stamped rows,
+      // so the row being reopened is not its own conflict)
+      if (entersOutreach || (patch.conversation_closed_at === null && current.conversation_closed_at)) {
         const { inFlight } = await claimProspectDomain(trx, current.target_domain);
         if (inFlight && inFlight.id !== current.id) return { inFlight };
       }
