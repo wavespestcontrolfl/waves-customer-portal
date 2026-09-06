@@ -1,6 +1,6 @@
 // One-time backfill: every existing SECONDARY profile (an additional
-// property / rental on an account — customers.is_primary_profile = false
-// with an account_id) gets its five appointment texts switched OFF.
+// property / rental on an account — customers.is_primary_profile is not
+// true and account_id is set) gets its five appointment texts switched OFF.
 //
 // Owner ruling 2026-09-06: "all rental texts should be off, only primary for
 // now." Going forward createDefaultCustomerRows seeds a secondary profile's
@@ -27,8 +27,10 @@ exports.up = async function up(knex) {
     if (!(await knex.schema.hasColumn('notification_prefs', col))) return;
   }
 
+  // NULL-safe: the recipient/reminder classifiers treat every value other than
+  // true as secondary, so a NULL flag on an account-linked row is a rental too.
   const secondaries = await knex('customers')
-    .where({ is_primary_profile: false })
+    .where(function notPrimary() { this.whereNull('is_primary_profile').orWhere('is_primary_profile', false); })
     .whereNotNull('account_id')
     .whereNull('deleted_at')
     .pluck('id');
@@ -47,7 +49,11 @@ exports.up = async function up(knex) {
       .where(function anyTextStillOn() {
         for (const col of COLUMNS) this.orWhereNot(col, false).orWhereNull(col);
       })
-      .select('customer_id', ...COLUMNS);
+      .select('customer_id', ...COLUMNS)
+      // Lock the rows we snapshot so a concurrent preference save cannot land
+      // between the SELECT and the UPDATE and be overwritten with a stale
+      // audit record (codex P2).
+      .forUpdate();
     if (!before.length) {
       console.log('[20260906000010] every secondary profile already had its appointment texts off');
       return;

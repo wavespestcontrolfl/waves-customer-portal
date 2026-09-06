@@ -34,6 +34,12 @@ describe('createDefaultCustomerRows — secondary profiles start with appointmen
     expect(SECONDARY_PROFILE_APPOINTMENT_TEXTS_OFF).not.toHaveProperty('appointment_notify_primary');
   });
 
+  test('a NULL primary flag on an account-linked row is secondary too', async () => {
+    const { dbc, inserts } = fakeDb({ is_primary_profile: null, account_id: 'acct-1' });
+    await createDefaultCustomerRows(dbc, 'cust-4');
+    expect(inserts.notification_prefs).toMatchObject({ customer_id: 'cust-4', appointment_confirmation: false, tech_arrived: false });
+  });
+
   test('a stand-alone row with no account, or no customer row at all, is treated as primary', async () => {
     for (const row of [{ is_primary_profile: false, account_id: null }, undefined]) {
       const { dbc, inserts } = fakeDb(row);

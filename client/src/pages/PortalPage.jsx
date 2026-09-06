@@ -4880,7 +4880,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
       {/* Empty state — the schedule API is the only source of truth; never
           invent a next-treatment month or mosquito restart the customer's
           plan may not include (tranche-1 truth fix) */}
-      {upcomingOnly.length === 0 && (hasPlanWork || !!customer?.tier) && (
+      {/* resolveActiveTierName, not raw tier truthiness: 'One-Time' / 'Commercial'
+          are non-member tiers and must not resurrect the panel (codex P2). */}
+      {upcomingOnly.length === 0 && (hasPlanWork || !!resolveActiveTierName(customer)) && (
         // A cancelled account (C4) can't create requests — every
         // request-creation route is blocked for this session, so the copy
         // must not instruct an impossible action (codex GH r14 P2).
