@@ -231,3 +231,16 @@ This PR can be reviewed independently of the uncommitted Customer360 page work; 
 - `server/services/inbound-sms-read.js` / `client/src/hooks/useUnreadConversations.js`: the existing badge counts endpoint-scoped conversations, while the inbox groups by contact phone. A contact using two Waves numbers can therefore show a badge count of two and one inbox thread. Changing that metric is deferred to a coordinated Communications/Customer360 change.
 - Physical iPhone Safari/PWA, Gmail/Outlook rendering, live provider template versions and the hosted commercial proposal/PDF renderer remain unverified. The original local SMTP/PDF checks remain applicable; no hosted document was generated during this follow-up.
 - The local restored schema is not evidence that current migrations ran in a dev/preview or production environment. CI and final-head automated PR review must complete before this lane is described as merge-ready.
+
+## PR review remediation
+
+PR [#4014](https://github.com/wavespestcontrolfl/waves-customer-portal/pull/4014) passed all seven CI jobs on `d9b530ca7d`. Its first GitHub review found one P1, four P2s and one P3. The P1 and three local P2s are fixed:
+
+- A scheduled deliberate resend persists the keys of the uncertain attempts the operator actually acknowledged. The cron honors those keys, still refuses its own already-started attempt, and refuses any later uncertainty that was not acknowledged. A receipt is also retained when an acknowledgement request has no explicit idempotency key.
+- Email dispatch is recorded at the existing template library's `onQueued` boundary (and immediately before SMTP `sendMail`). Missing, disabled or changed reviewed templates now complete a definite failed attempt; a provider timeout still retains an uncertain receipt.
+- Messaging refreshes the expanded lead's activity directly without toggling the detail closed.
+- Duplicate suggestions combine the existing unconverted and customer-linked contact matchers. Open linked opportunities are included; closed leads remain excluded, and this advisory read never merges or creates records.
+
+Five focused server suites passed **238 tests**; the queue file passed **6 tests**. The isolated real PostgreSQL/API proof confirmed a 409 without acknowledgement, persisted acknowledged keys when scheduled, zero transport from scheduling, and both linked/unlinked open candidates with the closed candidate excluded. Temporary proof rows were removed. Desktop and mobile browser messaging checks confirmed that activity refreshed and the lead stayed expanded; `/tmp/waves-lead-after-message-{1440,390}.png` were visually inspected. Build and brand/domain gates were re-run. Changed-file ESLint retained **74 warnings, zero errors**.
+
+The send-dialog complexity P2 remains listed under Deferred P2s; reducing its decision flow is a separate simplification. The inbox-to-global-badge polling delay is P3 advisory and unchanged. Final-head CI and follow-up review are required for the remediation commit; the earlier green run is not its result. The local pre-push hook skipped the original large diff at its 500 KB cap, so it is not counted as a clean review.

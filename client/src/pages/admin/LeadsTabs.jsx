@@ -784,7 +784,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   const openMessages = useCustomerSms();
   const messageLead = (lead, initialDraft = "") => openMessages?.({
     id: lead.customer_id, firstName: lead.first_name, lastName: lead.last_name, phone: lead.phone,
-  }, { initialDraft, onSent: () => { loadLeads(); expandLead(lead); } });
+  }, { initialDraft, onSent: () => { loadLeads(); loadLeadActivities(lead.id, { silent: true }); } });
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
   const [apptForm, setApptForm] = useState(null); // { leadId, date, time, serviceId, serviceType, technicianId, notes }
   const [apptSaving, setApptSaving] = useState(false);

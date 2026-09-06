@@ -2,9 +2,11 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LeadsSection } from './LeadsTabs';
+const { openMessages } = vi.hoisted(() => ({ openMessages: vi.fn() }));
+vi.mock('../../components/admin/customer360/CustomerSmsPanel', () => ({ useCustomerSms: () => openMessages }));
 const lead = { id: 'lead-qa', first_name: 'QA', last_name: 'Prospect', status: 'estimate_viewed', service_interest: 'Mosquito', first_contact_at: new Date().toISOString() };
 let calls;
 function Location() { return <output aria-label="Current route">{useLocation().search}</output>; }
@@ -12,6 +14,7 @@ function mount(url = '/admin/pipeline', props = {}) {
   return render(<MemoryRouter initialEntries={[url]}><LeadsSection {...props} /><Location /></MemoryRouter>);
 }
 beforeEach(() => {
+  openMessages.mockClear();
   calls = [];
   vi.stubGlobal('fetch', vi.fn(async (url, options) => {
     const path = String(url); calls.push({ path, options });
@@ -22,6 +25,15 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const queueCalls = () => calls.filter(({path}) => path.includes('/admin/leads?'));
 describe('Pipeline queue navigation', () => {
+  it('refreshes activity after messaging without collapsing the active lead', async () => {
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Message', exact: true }));
+    const before = calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length;
+    await act(async () => openMessages.mock.calls[0][1].onSent());
+    await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));
+    expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  });
   it('retains source and date scope on its first request', async () => {
     mount('/admin/pipeline?source_name=Synthetic&from=2020-01-01&to=2020-02-01&period_label=Test');
     await screen.findByRole('button', { name: 'QA Prospect' });

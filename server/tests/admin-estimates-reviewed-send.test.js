@@ -98,7 +98,7 @@ function savedEstimate(overrides = {}) {
     customer_id: null, customer_name: 'Synthetic Recipient',
     customer_phone: '+19415550123', customer_email: 'recipient@example.invalid',
     address: 'Synthetic service property', monthly_total: '100', annual_total: '1200', onetime_total: '0',
-    pricing_authority: 'SERVER', estimate_data: {},
+    pricing_authority: 'SERVER', estimate_data: {}, estimate_group_id: null,
     created_at: new Date('2026-01-01T12:00:00.000Z'), updated_at: new Date('2026-01-01T12:00:00.000Z'),
     ...overrides,
   };
@@ -178,7 +178,10 @@ beforeEach(() => {
   db.mockImplementation(estimateDatabase);
   sendgrid.isConfigured.mockReturnValue(true);
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-synthetic-reviewed' });
-  email.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'synthetic-email-accepted' } });
+  email.sendTemplate.mockImplementation(async ({ onQueued }) => {
+    await onQueued?.();
+    return { sent: true, message: { provider_message_id: 'synthetic-email-accepted' } };
+  });
   email.loadTemplateByKey.mockImplementation(async (key) => ({ template: { template_key: key }, activeVersion: { id: 'synthetic-email-version' } }));
 });
 
@@ -227,11 +230,58 @@ describe('reviewed send attempt receipts', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([true, false])('a scheduled deliberate resend honors acknowledged earlier uncertainty (request key: %s)', async (withKey) => {
+    row.status = 'draft';
+    const earlier = { key: 'synthetic-earlier-timeout', startedAt: new Date().toISOString() };
+    row.estimate_data = { manualSendAttempts: [earlier] };
+    const { body } = scheduledAttempt();
+    if (!withKey) delete body.idempotencyKey;
+    expect((await invoke('/:id/send', 'post', body)).statusCode).toBe(409);
+    const scheduled = await invoke('/:id/send', 'post', { ...body, acknowledgeUncertainSend: true });
+    expect(scheduled.body.scheduled).toBe(true);
+    const receipt = dataOf().manualSendAttempts[1];
+    expect(receipt.scheduleReview.acknowledgedUncertainAttemptKeys).toEqual([earlier.key]);
+    row.status = 'sending'; // the existing cron's atomic claim
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
+    expect(result.sent).toBe(true);
+    expect(dataOf().manualSendAttempts.find((entry) => entry.key === receipt.key).result.sent).toBe(true);
+    expect(dataOf().manualSendAttempts[0].result).toBeUndefined();
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a scheduled acknowledgement does not authorize uncertainty from a later attempt', async () => {
+    row.status = 'draft';
+    row.estimate_data = { manualSendAttempts: [{ key: 'old-timeout', startedAt: new Date().toISOString() }] };
+    const { body } = scheduledAttempt();
+    expect((await invoke('/:id/send', 'post', { ...body, acknowledgeUncertainSend: true })).body.scheduled).toBe(true);
+    row.estimate_data = { ...dataOf(), manualSendAttempts: [
+      ...dataOf().manualSendAttempts, { key: 'later-timeout', startedAt: new Date().toISOString() },
+    ] };
+    row.status = 'sending';
+    await expect(router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true }))
+      .rejects.toMatchObject({ code: 'SEND_OUTCOME_UNCERTAIN' });
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each(['reviewed email content changed', 'template disabled', 'template version not found'])('pre-dispatch %s is a definite failed receipt', async (reason) => {
+    const { entry, body } = scheduledAttempt();
+    const reviewedMessages = { email: { versionId: 'synthetic-reviewed-version' } };
+    email.sendTemplate.mockRejectedValueOnce(new Error(reason));
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { manualAttempt: entry, reviewedMessages });
+    expect(result).toMatchObject({ sent: false, channels: { email: { ok: false, uncertain: false } } });
+    expect(dataOf().manualSendAttempts[0].result.sent).toBe(false);
+    expect((await invoke('/:id/send', 'post', body)).body).toMatchObject({ sent: false, replayed: true });
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
   test('a provider timeout keeps its channel receipt unresolved and replay never dispatches again', async () => {
     const { entry, body, scheduledAt } = scheduledAttempt();
     row.scheduled_at = scheduledAt;
     row.estimate_data = { manualSendAttempts: [entry] };
-    email.sendTemplate.mockRejectedValueOnce(Object.assign(new Error('Synthetic provider timeout'), { name: 'TimeoutError' }));
+    email.sendTemplate.mockImplementationOnce(async ({ onQueued }) => {
+      await onQueued();
+      throw Object.assign(new Error('Synthetic provider timeout'), { name: 'TimeoutError' });
+    });
 
     const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true });
     expect(result).toMatchObject({ sent: false, uncertain: true, channels: { email: { ok: false, uncertain: true } } });

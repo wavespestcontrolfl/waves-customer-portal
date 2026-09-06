@@ -842,8 +842,11 @@ router.get('/', async (req, res, next) => {
 // match as estimate/lead linking. A shared contact never implies a merge.
 router.get('/contact-matches', async (req, res, next) => {
   try {
-    const { findUnconvertedLeadsByContact } = require('../services/lead-estimate-link');
-    const matches = await findUnconvertedLeadsByContact(db, req.query.phone, req.query.email);
+    const { findUnconvertedLeadsByContact, findCustomerLinkedLeadsByContact } = require('../services/lead-estimate-link');
+    const matches = (await Promise.all([
+      findUnconvertedLeadsByContact(db, req.query.phone, req.query.email),
+      findCustomerLinkedLeadsByContact(db, req.query.phone, req.query.email),
+    ])).flat();
     res.json({ matches: matches.slice(0, 5).map(({ id, first_name, last_name, status, service_interest }) => ({
       id, first_name, last_name, status, service_interest,
     })), total: matches.length });

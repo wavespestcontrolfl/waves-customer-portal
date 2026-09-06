@@ -2009,6 +2009,7 @@ module.exports = {
   resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
+  findCustomerLinkedLeadsByContact,
   linkLeadEstimatesToCustomer,
   attributeSelfBooking,
   // Exported for the one-off leads-pipeline-audit cleanup script, which must

@@ -772,7 +772,7 @@ async function buildEstimateSendPreview(estimate) {
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null }) {
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null }) {
   const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
   if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
   if (reviewedProvider === 'smtp') {
@@ -793,6 +793,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
         idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
         categories: ['estimate_delivery'],
         attachments: Array.isArray(attachments) ? attachments : [],
+        onQueued: onDispatch,
       });
       if (result.blocked) {
         return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
@@ -837,6 +838,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     content: Buffer.from(a.content, 'base64'),
     contentType: a.type || 'application/pdf',
   }));
+  onDispatch?.();
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
     to: estimate.customer_email,
@@ -1212,6 +1214,12 @@ router.post('/:id/send', async (req, res, next) => {
       // accept (money-bearing state lost, and the row re-enters the send
       // pipeline on a committed conversion).
       const scheduleResult = { success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() };
+      // A deliberate resend acknowledges only the uncertain attempts staff
+      // reviewed now, not a later handoff that may fail before the cron runs.
+      const acknowledgedUncertainAttemptKeys = req.body?.acknowledgeUncertainSend === true
+        ? (Array.isArray(attempts) ? attempts : []).filter((entry) => entry.startedAt && !entry.result).map((entry) => entry.key)
+        : [];
+      const scheduledAttemptKey = idempotencyKey || (acknowledgedUncertainAttemptKeys.length ? crypto.randomUUID() : null);
       const scheduleOutcome = await db.transaction(async (trx) => {
         if (estimate.estimate_group_id) {
           await trx.raw(
@@ -1228,9 +1236,9 @@ router.post('/:id/send', async (req, res, next) => {
         }
         const lockedData = parseEstimateData(lockedRow?.estimate_data) || {};
         const priorAttempts = Array.isArray(lockedData.manualSendAttempts) ? lockedData.manualSendAttempts : [];
-        const receipt = idempotencyKey ? {
-          key: idempotencyKey, binding: attemptBinding, scheduleResult, channels: {},
-          scheduleReview: { scheduledAt: scheduledTime.toISOString(), reviewedMessages, reviewedOffer: req.body?.expectedEditVersion ? estimateOfferVersion(lockedRow) : null, reviewedGroupVersions: req.body?.groupVersions || null },
+        const receipt = scheduledAttemptKey ? {
+          key: scheduledAttemptKey, binding: attemptBinding, scheduleResult, channels: {},
+          scheduleReview: { scheduledAt: scheduledTime.toISOString(), reviewedMessages, reviewedOffer: req.body?.expectedEditVersion ? estimateOfferVersion(lockedRow) : null, reviewedGroupVersions: req.body?.groupVersions || null, acknowledgedUncertainAttemptKeys },
         } : null;
         const claimed = await trx('estimates')
           .where({ id: estimate.id })
@@ -2054,7 +2062,8 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     const scheduledAt = new Date(estimate.scheduled_at).toISOString();
     const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
     const scheduled = (Array.isArray(attempts) ? attempts : []).findLast((entry) => entry.scheduleReview?.scheduledAt === scheduledAt);
-    if ((Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result)) throw Object.assign(new Error('An earlier send has an uncertain outcome. Staff must review it before this schedule runs.'), { code: 'SEND_OUTCOME_UNCERTAIN', statusCode: 409 });
+    const acknowledged = scheduled?.scheduleReview?.acknowledgedUncertainAttemptKeys || [];
+    if ((Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result && !acknowledged.includes(entry.key))) throw Object.assign(new Error('An earlier send has an uncertain outcome. Staff must review it before this schedule runs.'), { code: 'SEND_OUTCOME_UNCERTAIN', statusCode: 409 });
     if (scheduled) {
       if (scheduled.startedAt) throw Object.assign(new Error('This scheduled send already started. Review the recorded provider outcome before another send.'), { code: 'SEND_OUTCOME_UNCERTAIN', statusCode: 409 });
       options = { ...options, ...scheduled.scheduleReview, idempotencyKey: scheduled.key, manualAttempt: { key: scheduled.key, binding: scheduled.binding } };
@@ -2599,7 +2608,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             throw new Error('invalidated_before_delivery');
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
-          emailDispatchStarted = true;
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
@@ -2611,6 +2619,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             versionId: options.reviewedMessages?.email?.versionId || null,
             expectedContentHash: options.reviewedMessages?.email?.contentHash || null,
             reviewedProvider: options.reviewedMessages?.email?.provider || null,
+            onDispatch: () => { emailDispatchStarted = true; },
           });
           channels.email = result.ok
             ? { ok: true, provider: result.template || result.provider || 'email' }
