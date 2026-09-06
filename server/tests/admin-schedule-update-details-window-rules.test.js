@@ -471,3 +471,20 @@ test('an address change combined with a collective series date move is refused b
   expect(refuse).toBeLessThan(firstTrx);
   expect(handler.slice(refuse, refuse + 700)).toContain('throw httpError(422,');
 });
+
+test('an address change combined with a cadence rewrite is refused under lock before the first write', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const trxStart = handler.indexOf('await db.transaction(');
+  const beforeRead = handler.indexOf('const recurringParentBefore = ');
+  const refuse = handler.indexOf('if (addressPlan && recurringParentBefore?.is_recurring');
+  const firstWrite = handler.indexOf('addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan');
+  expect(trxStart).toBeGreaterThan(-1);
+  expect(beforeRead).toBeGreaterThan(trxStart);
+  expect(refuse).toBeGreaterThan(beforeRead);
+  expect(refuse).toBeLessThan(firstWrite);
+  const block = handler.slice(refuse, firstWrite);
+  expect(block).toContain('shouldRewritePendingRecurringRows(recurringParentBefore, { ...recurringParentBefore, ...updates })');
+  expect(block).toContain("throw httpError(422, 'Change the address and the recurrence in separate saves.')");
+  // No scheduled_services write may precede the refusal inside the trx.
+  expect(handler.slice(trxStart, refuse)).not.toMatch(/\.(update|insert|del|delete)\(/);
+});

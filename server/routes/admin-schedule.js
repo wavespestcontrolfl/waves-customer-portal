@@ -8702,6 +8702,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
         : null;
+      // An address change and a cadence rewrite in one save would re-date the
+      // relocated children after their stop locks were taken for the ORIGINAL
+      // dates, so the regroup loop at the end of this trx acquires each
+      // rewritten destination stop late (deadlock window against
+      // handleChildStopChanged; the maybeGroupRow savepoint swallows the
+      // abort and the save commits ungrouped). Refuse the combination here —
+      // the locked read above is authoritative and no row has been written
+      // yet — rather than widen the pre-lock set again.
+      if (addressPlan && recurringParentBefore?.is_recurring && !recurringParentBefore.recurring_parent_id
+        && shouldRewritePendingRecurringRows(recurringParentBefore, { ...recurringParentBefore, ...updates })) {
+        throw httpError(422, 'Change the address and the recurrence in separate saves.');
+      }
 
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
