@@ -462,10 +462,11 @@ html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !imp
 html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
 html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
 /* Placeholders read as hints, never as entered values (owner 2026-09-06,
-   customer feedback): lighter than any input text and italic. This is the
+   customer feedback): italic, slate-500 (#64748B, 4.8:1 on white — WCAG AA for
+   14px text; a lighter grey fell to 2.6:1). This is the
    authoritative rule on glass surfaces; client/index.html carries the same
    values as the non-glass fallback. */
-html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::placeholder { font-size: 14px !important; font-weight: 400 !important; font-style: italic !important; color: #94A3B8 !important; opacity: 1; }
+html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::placeholder { font-size: 14px !important; font-weight: 400 !important; font-style: italic !important; color: #64748B !important; opacity: 1; }
 
 /* ===== Estimate = the template (ruling 2026-09-03): every customer glass page
    takes the estimate card grammar — warm-tinted outer card, soft inner boxes,
