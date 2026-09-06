@@ -5189,6 +5189,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     ].filter(Boolean).join('\n');
 
     const InvoiceService = require('../services/invoice');
+    const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
+    const sendReceipt = require('../config/feature-gates').gates.recordedAnnualPrepayReceipt;
     let result;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
@@ -5249,7 +5251,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           status: 'paid',
           paid_at: trx.fn.now(),
           payment_method: method,
-          payment_reference: reference || null,
+          payment_reference: reference,
           payment_recorded_by: recordedBy,
           payment_recorded_at: trx.fn.now(),
           updated_at: trx.fn.now(),
@@ -5340,8 +5342,20 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         }),
       }).catch((err) => logger.warn(`[customers:annual-prepay] activity_log insert failed: ${err.message}`));
 
+      if (sendReceipt) {
+        // Persist delivery with the payment so a restart cannot lose its receipt.
+        await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+          invoiceId: updatedInvoice.id,
+          source: 'customer360_annual_prepay',
+          // Recording a past payment does not prove the customer acted now.
+          customerInitiated: false,
+          database: trx,
+        });
+      }
       result = { invoice: updatedInvoice, term, payment };
     });
+
+    if (sendReceipt) ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
 
     // A cash/check annual prepay is the customer paying — same automatic-
     // clear contract as every other receipt path. The helper owns the rules
