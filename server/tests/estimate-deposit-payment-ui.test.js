@@ -90,6 +90,31 @@ test.each(['pay_at_visit', 'prepay_annual'])('%s acceptance proceeds directly to
   expect(window.document.querySelector('a[href="/pay/invoice-fixture"]')).not.toBeNull();
 });
 
+test('an annual prepay overlap refusal keeps the appointment and shows the billing explanation', async () => {
+  const { window } = await renderEstimate();
+  const normalFetch = window.fetch.getMockImplementation();
+  window.fetch.mockImplementation((url, options) => url === `/api/estimates/${TOKEN}/accept`
+    ? Promise.resolve({
+      ok: false, status: 409,
+      json: async () => ({ code: 'ANNUAL_PREPAY_OVERLAP', error: 'This account already has an active annual prepay plan. Please call or text us.' }),
+    })
+    : normalFetch(url, options));
+
+  const payload = await confirmExistingAppointment(window, 'prepay_annual');
+  expect(payload).toMatchObject({ existingAppointmentId: 'visit-fixture', paymentMethodPreference: 'prepay_annual' });
+  await new Promise(setImmediate);
+  const toast = window.document.getElementById('toast');
+  expect(toast.textContent).toBe('This account already has an active annual prepay plan. Please call or text us.');
+  expect(window.getComputedStyle(toast).opacity).toBe('1');
+  // Not a slot conflict: the appointment choice survives and no hold is released.
+  expect(window.document.getElementById('review-area').style.display).not.toBe('none');
+  expect(window.fetch.mock.calls.some(([url, options]) => /\/reserve\//.test(String(url)) || (options && options.method === 'DELETE'))).toBe(false);
+  expect(window.document.getElementById('confirm-book-btn').disabled).toBe(false);
+  for (const choice of window.document.querySelectorAll('[data-pay-pref]')) expect(choice.disabled).toBe(false);
+  expect(window.document.querySelector('a[href="/pay/invoice-fixture"]')).toBeNull();
+  expect(db).not.toHaveBeenCalled();
+});
+
 test('one-time acceptance keeps pay-at-visit without collecting a deposit', async () => {
   const { window } = await renderEstimate('', true);
   const payload = await confirmExistingAppointment(window, 'pay_at_visit');
