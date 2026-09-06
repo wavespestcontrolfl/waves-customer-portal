@@ -62,6 +62,14 @@ the request settles. A pending request warns before leaving the page, including
 while a different channel is open. This does not add provider idempotency or
 claim recovery of an unknown send outcome after a forced reload.
 
+After first use, the Email workspace stays mounted while switching channels,
+preserving its search, classification, pagination, archived/blocked view,
+selected message and compose state. Hidden Email cannot open a portal composer
+or follow a newly changed message query; recipient lookup pauses until visible.
+Returning to Email does not start another inbox/status load solely from a
+remount. Refresh still has the existing filter reset behavior; typed Email
+drafts and the URL-selected message have explicit reload recovery.
+
 No extra inbox or approval queue was created. EmailPage remains the only inbox
 implementation and uses the same routes and provider contract. The previous
 inbox could fetch an off-list deep-linked message without rendering it; the
@@ -71,5 +79,23 @@ and fragment context survive selection, the alias, Back and Forward.
 The Email module is imported by Communications, which already uses the App's
 chunk-retry loader. This adds Email code to that page's chunk rather than
 introducing another loader or parallel route. Opening another Communications
-tab does not mount Email or request its APIs. The exact bundle effect is
+tab before visiting Email does not mount it or request its APIs. The exact bundle effect is
 recorded with verification below.
+
+## Capability parity
+
+| Existing capability | Canonical location and access | Data/actions and state | Evidence and limit |
+|---|---|---|---|
+| Standalone Email entry | Communications → Email; verified admin only | Same EmailPage; old `/admin/email` aliases to the selected channel with repeated query values and fragments retained | Alias tests and browser old-link/refresh scenario; technician mount/API denial and owner-only IB context tests |
+| Inbox, filters, pagination, message and blocked-sender detail | Email Inbox / Blocked Senders sub-sections | Existing list/detail/thread/read/classification/star/archive/trash/block endpoints, response fields and controls retained | Source comparison; synthetic inbox/off-list/blocked/browser scenarios; provider side effects not exercised |
+| Compose and reply editors | Same Email composer and inline thread reply | Typed fields recover per verified account in this browser tab; failed sends retain text, explicit discard and successful sends clear the submitted draft | Eleven component regressions, store and sign-out tests; no cross-device or Gmail draft sync |
+| SMS composer | Communications → SMS, existing staff access | Existing sender, recipient, text, MMS and link state stays mounted after use; hidden dictation and portal dialogs stop | Browser switches both channels with unsent text; SMS still has its existing reload/navigation-away limitation |
+| Send, AI suggestion and late responses | Existing buttons and endpoints in Email | No send/provider policy change; local pending guard survives navigation; AI and send callbacks respect current draft/session | Synthetic failed/successful send and delayed-response tests; no live send, OAuth handshake or server idempotency claim |
+| Attachments, classification, digest and provider connection | Existing Email controls and status surfaces | Same attachment downloads, safe email body rendering, digest and Gmail OAuth routes | Source/API contract comparison and existing suite; no attachment upload, signature or assignment feature invented |
+| Email Intelligence Bar context | Global palette while owner Email is active | Existing `email` tools, history, confirm boundary and route; verified role replaces stored-role inference | Palette context tests; no live LLM/tool invocation |
+| Mobile and keyboard compose | Same Communications header; Email sub-section and modal | Existing safe-area layout, labeled fields and shared modal focus trap; close retains draft, discard removes it | 1440/390 screenshots reviewed; synthetic close/resume, desktop keyboard behavior; native devices not exercised |
+
+Events and the template library stay separate while their staff/owner editing
+permissions differ. No queue, persisted business state, provider integration,
+pricing or server route is merged or retired by this branch. Revert the Email
+commits independently to restore its direct navigation and prior editor state.

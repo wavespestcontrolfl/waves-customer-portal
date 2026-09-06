@@ -3436,6 +3436,7 @@ export default function CommunicationsPageV2() {
   const navigate = useNavigate();
   const [tab, setTab] = useState(() => new URLSearchParams(location.hash.replace(/^#/, "")).get("tab") || "sms");
   const [smsVisited, setSmsVisited] = useState(tab === "sms");
+  const [emailVisited, setEmailVisited] = useState(tab === "email");
   // SMS / Email are sub-views of the single Message Templates tab.
   const [templateKind, setTemplateKind] = useState("sms");
   // Server-verified role from the shell's Outlet context (never localStorage).
@@ -3450,7 +3451,9 @@ export default function CommunicationsPageV2() {
   );
   const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
   useEffect(() => { if (activeTab === "sms") setSmsVisited(true); }, [activeTab]);
+  useEffect(() => { if (activeTab === "email") setEmailVisited(true); }, [activeTab]);
   const selectTab = (nextTab) => {
+    setTab(nextTab);
     const params = new URLSearchParams(location.hash.replace(/^#/, ""));
     params.set("tab", nextTab);
     navigate({ pathname: location.pathname, search: location.search, hash: `#${params}` });
@@ -3497,7 +3500,10 @@ export default function CommunicationsPageV2() {
   return (
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1300px] mx-auto">
       {" "}
-      {activeTab === "email" ? <EmailPage key={outletContext.user.id} navigation={navigation} /> : <AdminCommandHeader
+      {isAdminRole && emailVisited && <div hidden={activeTab !== "email"}>
+        <EmailPage key={outletContext.user.id} active={activeTab === "email"} navigation={navigation} />
+      </div>}
+      {activeTab !== "email" && <AdminCommandHeader
         {...navigation}
         secondarySections={tab === "templates" ? TEMPLATE_KINDS : []}
         secondaryActiveKey={templateKind}

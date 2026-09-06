@@ -36,7 +36,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 function mount(userId = "fixture-owner") {
   return render(<BrowserRouter><Routes><Route path="/admin" element={<Outlet context={{ user: { id: userId, role: "admin" } }} />}>
-    <Route path="communications" element={<EmailPage navigation={{ title: "Communications", sections: [] }} />} />
+    <Route path="communications" element={<EmailPage active navigation={{ title: "Communications", sections: [] }} />} />
   </Route></Routes></BrowserRouter>);
 }
 async function compose() {

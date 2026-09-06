@@ -89,11 +89,13 @@ async function main() {
     });
     await scenario('Email reply and SMS composer both survive channel switches', async () => {
       await page.getByRole('textbox', { name: 'Reply' }).fill('Synthetic reply to A');
+      await page.getByPlaceholder('Search emails...', { exact: true }).fill('Synthetic saved filter');
       await channel(page, 'SMS').click();
       await page.getByPlaceholder('Type your message…', { exact: true }).fill('Synthetic unsent SMS');
       await channel(page, 'Email').click();
       await page.getByRole('textbox', { name: 'Reply' }).waitFor();
       assert.equal(await page.getByRole('textbox', { name: 'Reply' }).inputValue(), 'Synthetic reply to A');
+      assert.equal(await page.getByPlaceholder('Search emails...', { exact: true }).inputValue(), 'Synthetic saved filter');
       await channel(page, 'SMS').click();
       assert.equal(await page.getByPlaceholder('Type your message…', { exact: true }).inputValue(), 'Synthetic unsent SMS');
       await page.goBack();
@@ -142,6 +144,23 @@ async function main() {
     await scenario('blocked senders remains in the Email sub-section', async () => {
       await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked Senders' }).click();
       await page.getByPlaceholder('Block domain or email (e.g. spammer.com or bad@example.com)').waitFor();
+      await channel(page, 'SMS').click();
+      await channel(page, 'Email').click();
+      await page.getByPlaceholder('Block domain or email (e.g. spammer.com or bad@example.com)').waitFor();
+      await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Inbox', exact: true }).click();
+    });
+    await scenario('hidden Email defers a changed message link until the channel opens', async () => {
+      await channel(page, 'SMS').click();
+      const before = report.requests.filter((r) => r.path === `/admin/email/message/${b.id}`).length;
+      await page.evaluate(async (id) => {
+        history.pushState({}, '', `/admin/communications?id=${id}#tab=sms`);
+        dispatchEvent(new PopStateEvent('popstate'));
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }, b.id);
+      assert.equal(report.requests.filter((r) => r.path === `/admin/email/message/${b.id}`).length, before);
+      await channel(page, 'Email').click();
+      await page.getByText(b.body_text, { exact: true }).waitFor();
+      assert.equal(report.requests.filter((r) => r.path === `/admin/email/message/${b.id}`).length, before + 1);
     });
     const mobile = await openPage('admin', 390);
     await scenario('mobile Email keeps one header and a recoverable full-screen composer', async () => {

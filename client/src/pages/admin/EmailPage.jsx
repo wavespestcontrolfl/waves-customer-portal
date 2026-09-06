@@ -132,7 +132,7 @@ function timeAgo(dateStr) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-export default function EmailPage({ navigation }) {
+export default function EmailPage({ navigation, active }) {
   const isMobile = useIsMobile();
   const { user } = useOutletContext();
   const [searchParams] = useSearchParams();
@@ -178,7 +178,7 @@ export default function EmailPage({ navigation }) {
   const [showCompose, setShowCompose] = useState(false);
   const setComposeForm = (update) => changeDrafts((current) => ({ ...current, compose: update(current.compose) }));
   const [composeSending, setComposeSending] = useState(draftSession.sending.compose);
-  const composeRef = useModalFocus(showCompose, () => { if (!composeSending) setShowCompose(false); });
+  const composeRef = useModalFocus(active && showCompose, () => { if (!composeSending) setShowCompose(false); });
   const [connecting, setConnecting] = useState(false);
   // Customer search for the compose "To" field — type a name (or partial
   // email) to look up a customer and drop their email into the recipient.
@@ -287,7 +287,7 @@ export default function EmailPage({ navigation }) {
   // Old bells/OAuth returns keep working through /admin/email's alias.
   // Observe query changes as well as mount so Back/Forward can select mail.
   useEffect(() => {
-    if (!status?.connected) return;
+    if (!active || !status?.connected) return;
     const id = searchParams.get("id");
     if (!id) { setSelectedEmail(null); setThread([]); return; }
     if (id === selectedIdRef.current) return;
@@ -303,7 +303,7 @@ export default function EmailPage({ navigation }) {
       } catch { /* the inbox still renders */ }
     })();
     return () => { cancelled = true; };
-  }, [status, searchParams]);
+  }, [active, status, searchParams]);
 
   const openEmail = async (email) => {
     selectedIdRef.current = email.id;
@@ -487,7 +487,7 @@ export default function EmailPage({ navigation }) {
   // partial email via the customers list endpoint and keeps only matches
   // that actually have an email on file (the only ones we can send to).
   useEffect(() => {
-    if (!showCompose) return undefined;
+    if (!active || !showCompose) return undefined;
     const q = composeForm.to.trim();
     if (q.length < 2) {
       setToResults([]);
@@ -515,7 +515,7 @@ export default function EmailPage({ navigation }) {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [composeForm.to, showCompose]);
+  }, [active, composeForm.to, showCompose]);
 
   // Dismiss the customer dropdown on an outside click/tap.
   useEffect(() => {
@@ -1617,7 +1617,7 @@ export default function EmailPage({ navigation }) {
         </>
       )}
       {/* Compose modal — opened by + New Email */}
-      {showCompose &&
+      {active && showCompose &&
         createPortal(
         <div
           onClick={() => !composeSending && setShowCompose(false)}
