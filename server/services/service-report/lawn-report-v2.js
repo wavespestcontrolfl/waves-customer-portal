@@ -587,12 +587,19 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       const predicate = match[0].startsWith('under') && match[0].endsWith('ing')
         ? after.replace(/^(?:\s+(?:and|or|nor)\s+|,\s*)(?:[a-z'’,-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ').replace(/,/g, ' ')
         : after;
+      // A bare mention or a condition under consideration is not a diagnosis.
+      // Require observed evidence or an explicit state/causal assertion first.
+      const currentEvidence = !match[0].startsWith('under')
+        || /\b(?:visible|observed|seen|evident|confirmed|detected|found|signs?|evidence|show(?:s|ed|ing)?|suggest(?:s|ed|ing)?|indicat(?:e[sd]?|ing)|point(?:s|ed|ing)? to|consistent with)\b[^.!?;]*$/.test(before)
+        || (match[0].endsWith('ed') && /\b(?:is|are|was|were|look(?:s|ed)?|appear(?:s|ed)?|remain(?:s|ed)?)\s+(?:\w+\s+)*$/.test(before))
+        || /^\s*(?::|[—–-])?\s*(?:(?:symptoms?|signs?)\s+)?(?:(?:is|are|was|were|has been|have been|remains?)\s+)?(?:(?:currently|clearly|still|visibly)\s+)*(?:visible|observed|seen|evident|present|confirmed|detected|found|caus(?:es?|ing)|inconsistent across|not (?:caused by|due to))\b/.test(predicate);
       // Monitoring, historical/resolved conditions, and uncertain diagnoses are not
       // present moisture evidence. Scope these qualifiers to this occurrence;
       // a separate observed diagnosis must still produce the coverage warning.
       const nonCurrent = /\b(?:monitor(?:ing)?|watch(?:ing)?|check(?:ing)?|look(?:ing)?)\s+(?:out\s+)?for\b|\b(?:prevent(?:ing)?|avoid(?:ing)?|risk|potential|possible|if|unless|could|may|might|would|will|should|previously|formerly|unclear|uncertain|inconclusive|insufficient evidence)\b/.test(before)
         || /^\s+(?:(?:symptoms?|signs?)\s+)?(?:(?:can|could|may|might|would|will|should)\s+(?:\w+\s+)?(?:be|become|develop|occur|emerge|appear|arise|return|cause|explain)\b|(?:is|remains?)\s+(?:possible|potential|expected|a risk)\b)/.test(predicate);
-      return !/\b(?:no|not|never|neither|nor|without|[a-z]+n['’]t|cannot|free of|absence of|exclude[ds]?|ruled out|inconsistent with)\b/.test(before)
+      return currentEvidence
+        && !/\b(?:no|not|never|neither|nor|without|[a-z]+n['’]t|cannot|free of|absence of|exclude[ds]?|ruled out|inconsistent with)\b/.test(before)
         && !nonCurrent
         && !/^\s+(?:(?!(?:and|or|nor|with|without|because|due|from|not|never|neither)\b)[a-z'’-]+\s+)*?(?:absent|unlikely|excluded|resolved|recovered|cleared|corrected|unconfirmed|unclear|uncertain|inconclusive|inconsistent with|ruled out|no longer|(?:not|never|neither|[a-z]+n['’]t|cannot)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
     }));
