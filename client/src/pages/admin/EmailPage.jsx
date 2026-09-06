@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
+import { useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import { Ban, Inbox, Plus, Send } from "lucide-react";
@@ -136,10 +136,11 @@ export default function EmailPage({ navigation, active }) {
   const isMobile = useIsMobile();
   const { user } = useOutletContext();
   const [searchParams] = useSearchParams();
-  const location = useLocation();
   const navigate = useNavigate();
   const selectMessageId = (id, replace = false) => {
-    const next = new URLSearchParams(searchParams);
+    const location = window.location;
+    if (location.pathname.replace(/\/+$/, "") !== "/admin/communications") return;
+    const next = new URLSearchParams(location.search);
     if (id) next.set("id", id); else next.delete("id");
     navigate({ pathname: location.pathname, search: `?${next}`, hash: location.hash }, { replace });
   };
@@ -167,6 +168,7 @@ export default function EmailPage({ navigation, active }) {
   const selectedIdRef = useRef(null);
   const wasActiveRef = useRef(false);
   selectedIdRef.current = selectedEmail?.id;
+  useEffect(() => () => { selectedIdRef.current = null; }, []);
   const setReplyDraft = (id, text) => changeDrafts((current) => ({ ...current, replies: { ...current.replies, [id]: text } }));
   const [sending, setSending] = useState(draftSession.sending.reply);
   const [showArchived, setShowArchived] = useState(false);
@@ -336,11 +338,11 @@ export default function EmailPage({ navigation, active }) {
     }
   };
 
-  const closeEmail = () => {
+  const closeEmail = (emailId) => {
     selectedIdRef.current = null;
     setSelectedEmail(null);
     setThread([]);
-    selectMessageId(null, true);
+    if (new URLSearchParams(window.location.search).get("id") === emailId) selectMessageId(null, true);
   };
 
   const handleStar = async (e, email) => {
@@ -367,7 +369,7 @@ export default function EmailPage({ navigation, active }) {
         method: "POST",
       });
       setEmails((prev) => prev.filter((e) => e.id !== emailId));
-      if (selectedIdRef.current === emailId) closeEmail();
+      if (selectedIdRef.current === emailId) closeEmail(emailId);
       loadStats();
     } catch {
       /* ignore */
@@ -380,7 +382,7 @@ export default function EmailPage({ navigation, active }) {
         method: "POST",
       });
       setEmails((prev) => prev.filter((e) => e.id !== emailId));
-      if (selectedIdRef.current === emailId) closeEmail();
+      if (selectedIdRef.current === emailId) closeEmail(emailId);
       loadStats();
     } catch {
       /* ignore */

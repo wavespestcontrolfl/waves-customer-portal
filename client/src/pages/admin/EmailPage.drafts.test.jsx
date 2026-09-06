@@ -13,12 +13,13 @@ const b = { ...a, id: "00000000-0000-4000-8000-000000000002", gmail_thread_id: "
 let sendResponse;
 let draftResponse;
 let messageResponse;
+let actionResponse;
 let inbox;
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 beforeEach(() => {
   clearEmailDrafts(); sessionStorage.clear(); localStorage.setItem("waves_admin_token", "fixture-token");
   window.history.replaceState({}, "", "/admin/communications#tab=email");
-  inbox = [a, b]; sendResponse = null; draftResponse = null; messageResponse = null;
+  inbox = [a, b]; sendResponse = null; draftResponse = null; messageResponse = null; actionResponse = null;
   vi.spyOn(window, "alert").mockImplementation(() => {});
   vi.stubGlobal("fetch", vi.fn(async (input, options = {}) => {
     const url = new URL(input, "https://fixture.invalid");
@@ -28,6 +29,7 @@ beforeEach(() => {
     if (url.pathname.endsWith("/ai-draft")) return draftResponse ? draftResponse() : response({ reply_draft: "Synthetic AI suggestion" });
     if (url.pathname.includes("/thread/")) return response({ thread: [url.pathname.endsWith("thread-a") ? a : b] });
     if (url.pathname.endsWith("/star")) return response({ is_starred: true });
+    if (/\/(archive|trash)$/.test(url.pathname)) return actionResponse ? actionResponse() : response({ success: true });
     if (url.pathname.endsWith("/reclassify")) return response({ classification: { category: "customer", summary: "Synthetic classification detail" } });
     if (url.pathname.includes("/message/")) return messageResponse ? messageResponse(url) : response(url.pathname.endsWith(a.id) ? a : b);
     if (url.pathname.endsWith("/stats")) return response({ total: inbox.length, unread: 0 });
@@ -113,6 +115,37 @@ describe("Email draft and navigation preservation", () => {
     expect(await screen.findByText("⭐", { exact: true })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Reclassify/ }));
     expect(await screen.findByText("AI classification:")).toBeInTheDocument();
+  });
+
+  it.each(["Archive", "Trash"].flatMap((action) => [a.id, b.id].map((id) => [action, id])))("a late %s keeps the current SMS route and message context (%s)", async (action, id) => {
+    const view = mount(); await open(a);
+    let finish;
+    actionResponse = () => new Promise((resolve) => { finish = resolve; });
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(`${action}$`) }));
+    view.rerender(<BrowserRouter><Routes><Route path="/admin" element={<Outlet context={{ user: { id: "fixture-owner", role: "admin" } }} />}>
+      <Route path="communications" element={<EmailPage active={false} navigation={{ title: "Communications", sections: [] }} />} />
+    </Route></Routes></BrowserRouter>);
+    act(() => {
+      window.history.pushState({}, "", `/admin/communications?id=${id}&tag=new&thread=fixture-customer#tab=sms`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await act(async () => finish(response({ success: true })));
+    expect(window.location.hash).toBe("#tab=sms");
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get("tag")).toBe("new");
+    expect(params.get("thread")).toBe("fixture-customer");
+    expect(params.get("id")).toBe(id === a.id ? null : b.id);
+  });
+
+  it.each(["Archive", "Trash"])("a late %s cannot navigate after leaving Communications", async (action) => {
+    const view = mount(); await open(a);
+    let finish;
+    actionResponse = () => new Promise((resolve) => { finish = resolve; });
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(`${action}$`) }));
+    view.unmount();
+    window.history.pushState({}, "", "/admin/settings?tab=general");
+    await act(async () => finish(response({ success: true })));
+    expect(window.location.pathname + window.location.search).toBe("/admin/settings?tab=general");
   });
 
   it("retains a failed compose and clears it only after a confirmed send", async () => {

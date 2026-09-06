@@ -304,3 +304,15 @@ to distinguish Archive from the Archived filter and inspect the rendered
 classification fields. The fast-navigation failure was traced to a visible
 Email tab despite an SMS URL, and the complete browser run passes after its
 router synchronization fix. Debugging scripts remain ignored local evidence.
+
+The following pre-push pass found another valid P1: a delayed Archive/Trash
+response retained a route captured before the operator switched channels.
+The existing message-id helper now reads the current browser location, rejects
+other routes, and removes only the matching message id while retaining newer
+query values and the current channel. Unmount invalidates the selected-message
+reference, so late responses cannot navigate back after leaving Communications.
+Six delayed-response regressions failed before this fix and now pass. The
+complete focused selection passes **100 tests across nine suites**; all 14
+browser scenarios, the production build and prebuild gates pass. Scoped Email
+lint has zero errors and three existing warnings. Evidence:
+`.tmp/email-late-actions-{red,all-focused,browser,build,lint}.log`.
