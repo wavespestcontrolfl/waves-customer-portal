@@ -18,6 +18,7 @@
     "build": "cd client && npm run build",
     "check:portal-brand": "node scripts/check-portal-brand.js",
     "check:domain-rules": "node scripts/check-domain-rules.js",
+    "check:ib-coverage": "node scripts/check-ib-coverage.js",
     "prestart": "npm run verify:blog-schema && npm run verify:affiliate-registry",
     "start": "node server/index.js",
     "db:migrate": "cd server && npx knex migrate:latest",

@@ -1,3 +1,4 @@
+import { ibRequestIdentity } from "../../utils/ibSession";
 import { useState, useEffect, useRef, useCallback } from "react";
 import PendingActionsCard from "./PendingActionsCard";
 
@@ -418,7 +419,7 @@ export default function IntelligenceBar({ onSelectCustomer }) {
       try {
         const data = await adminFetch("/admin/intelligence-bar/query", {
           method: "POST",
-          body: JSON.stringify({ prompt: q, conversationHistory }),
+          body: JSON.stringify({ prompt: q, conversationHistory, ...ibRequestIdentity() }),
         });
 
         setResponse(data.response);

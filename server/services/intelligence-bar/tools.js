@@ -373,7 +373,7 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'compare_technicians': return await compareTechnicians(input);
       case 'find_duplicates': return await findDuplicates(input);
       case 'create_customer': return await createCustomer(input);
-      case 'update_customer': return await updateCustomer(input.customer_id, input.updates);
+      case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -460,6 +460,7 @@ async function queryCustomers(input) {
     const s = `%${search}%`;
     query = query.where(function () {
       this.whereILike('first_name', s).orWhereILike('last_name', s)
+        .orWhereRaw("concat_ws(' ', first_name, last_name) ILIKE ?", [s])
         .orWhereILike('phone', s).orWhereILike('email', s)
         .orWhereILike('address_line1', s).orWhereILike('city', s)
         .orWhereILike('company_name', s);
@@ -598,7 +599,7 @@ async function findOverdueCustomers(input) {
 
 
 async function getCustomerDetail(customerId) {
-  const customer = await db('customers').where('id', customerId).first();
+  const customer = await db('customers').where('id', customerId).whereNull('deleted_at').first();
   if (!customer) return { error: 'Customer not found' };
 
   const services = await db('service_records')
@@ -609,7 +610,7 @@ async function getCustomerDetail(customerId) {
   const upcoming = await db('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '>=', etDateString())
-    .whereNotIn('status', ['cancelled'])
+    .whereNotIn('status', ['cancelled', 'completed', 'skipped'])
     .orderBy('scheduled_date', 'asc')
     .limit(10);
 
@@ -619,6 +620,7 @@ async function getCustomerDetail(customerId) {
     .limit(5);
 
   const tags = await db('customer_tags').where('customer_id', customerId).select('tag');
+  const properties = await require('../customer-properties').listProperties(customerId);
 
   const health = await db('customer_health_scores')
     .where('customer_id', customerId)
@@ -650,6 +652,7 @@ async function getCustomerDetail(customerId) {
       notes: customer.crm_notes,
     },
     tags: tags.map(t => t.tag),
+    properties,
     health_score: health ? {
       overall: health.overall_score,
       churn_risk: health.churn_risk,
@@ -671,6 +674,9 @@ async function getCustomerDetail(customerId) {
       type: s.service_type,
       status: s.status,
       time_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+      property_id: s.property_id || null,
+      service_address: s.service_address_line1 || customer.address_line1 || null,
+      location_provenance: s.service_address_line1 ? 'appointment_snapshot' : 'account_fallback',
     })),
     recent_invoices: invoices.map(i => ({
       id: i.id,
@@ -1045,7 +1051,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates) {
+async function updateCustomer(customerId, updates, expectedVersion) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
@@ -1131,6 +1137,16 @@ async function updateCustomer(customerId, updates) {
         err.customerNoLongerLive = true;
         throw err;
       }
+      if (expectedVersion) {
+        // Compare Postgres' full-precision version while holding the same row
+        // lock as the domain write; JS Date equality loses microseconds.
+        const current = await trx('customers').where('id', customerId).first(trx.raw('updated_at::text AS version'));
+        if (current.version !== expectedVersion) {
+          const err = new Error('Customer changed since this action was prepared. Review a fresh proposal.');
+          err.previewChanged = true;
+          throw err;
+        }
+      }
       const lockedMerged = { ...lockedBefore, ...clean };
       // Close the inferred-monthly vector (#3140 resolution): billing_mode
       // is not an IB-updatable field, so a tier/rate write that leaves the
@@ -1210,6 +1226,7 @@ async function updateCustomer(customerId, updates) {
       }
     });
   } catch (e) {
+    if (e?.previewChanged) return { error: e.message, preview_changed: true };
     if (e && e.customerNoLongerLive) {
       return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
     }

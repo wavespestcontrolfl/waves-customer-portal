@@ -20,4 +20,7 @@ reports/
 
 # Local live-edit stubs (real payloads) must never ship — served verbatim from the public web root
 client/public/__stub/
+
+# Task-local test credentials and browser artifacts
+.local/
 .ui-verify/

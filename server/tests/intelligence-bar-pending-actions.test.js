@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const {
   paramsHash,
+  stepKey,
   stableStringify,
   createPendingAction,
   claimForConfirm,
@@ -53,6 +54,18 @@ describe('pending-actions service', () => {
     expect(h).toMatch(/^[0-9a-f]{64}$/);
     expect(paramsHash('update_customer', { first_name: 'Jeff' })).not.toBe(h);
     expect(paramsHash('create_customer', { first_name: 'Jefe' })).not.toBe(h);
+  });
+
+  test('stored JSON preserves hashes for Date versions and omitted values', () => {
+    const input = { version: new Date('2020-01-02T03:04:05Z'), ignored: undefined, values: [undefined, null] };
+    expect(paramsHash('update_customer', input)).toBe(paramsHash('update_customer', JSON.parse(JSON.stringify(input))));
+  });
+
+  test('semantic steps dedupe name/ID aliases, defaults, and changing execution pins', () => {
+    const one = { customer_id: 'a', customer_name: 'Synthetic Person', phone: '+1 (555) 010-1234', message: 'Synthetic message', _require_phone_match: true };
+    const two = { customerId: 'a', phone: '15550101234', message: 'Synthetic message', message_type: 'manual', _ib_task_context: { version: 'later' } };
+    expect(stepKey('send_sms', one)).toBe(stepKey('send_sms', two));
+    expect(stepKey('send_sms', one)).not.toBe(stepKey('send_sms', { ...two, message: 'Different message' }));
   });
 
   test('createPendingAction stores hash, actor, and a future expiry', async () => {

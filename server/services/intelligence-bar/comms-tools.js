@@ -225,7 +225,18 @@ async function executeCommsTool(toolName, input) {
       default: return { error: `Unknown comms tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:comms] Tool ${toolName} failed:`, err);
+    // The sender preserves a provider receipt when its later audit write
+    // fails. Losing that receipt would label an accepted message failed and
+    // invite a duplicate send. Never include the recipient/body in logs.
+    if (err.providerOutcome?.sent === true) {
+      return {
+        success: true, state: 'provider_accepted',
+        providerMessageId: err.providerOutcome.providerMessageId || null,
+        auditLogId: err.providerOutcome.auditLogId || null,
+        warning: 'The provider accepted the message, but its local audit could not be completed. Do not send it again.',
+      };
+    }
+    logger.error(`[intelligence-bar:comms] Tool ${toolName} failed (code=${err.code || 'unknown'})`);
     return { error: err.message };
   }
 }
@@ -725,6 +736,9 @@ async function sendSms(input) {
     logger.info(`[intelligence-bar:comms] Sent SMS (custId=${custId || 'n/a'} segs=${result.segmentCount})`);
     return {
       success: true,
+      state: 'provider_accepted',
+      providerMessageId: result.providerMessageId || null,
+      auditLogId: result.auditLogId || null,
       sent_to: phone,
       customer: customerName,
       message,

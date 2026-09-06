@@ -24,6 +24,8 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
+import IntelligenceTaskCard from "./IntelligenceTaskCard";
+import { ibSessionId } from "../../utils/ibSession";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
@@ -305,6 +307,12 @@ function GlobalCommandPalette(_props, ref) {
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState(null);
   const [pendingActions, setPendingActions] = useState([]);
+  const [activeTask, setActiveTask] = useState(null);
+  const [savedTasks, setSavedTasks] = useState([]);
+  const [tasksAvailable, setTasksAvailable] = useState(false);
+  const sessionIdRef = useRef(null);
+  if (!sessionIdRef.current) sessionIdRef.current = ibSessionId();
+  const submittingRef = useRef(false);
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
   const [conversationHistory, setConversationHistory] = useState([]);
@@ -413,8 +421,14 @@ function GlobalCommandPalette(_props, ref) {
   // Gate off (or not yet probed): the exact pre-thread ephemeral behavior —
   // clear everything. Attachments stay per-message either way.
   useEffect(() => {
+    threadEpochRef.current += 1;
+    submittingRef.current = false;
+    setLoading(false);
+    setActiveTask(null);
+    setResponse(null);
+    setPendingActions([]);
+    setToolActivity([]);
     if (!threadsAvailableRef.current) {
-      threadEpochRef.current += 1;
       // Unlike New chat/submit (deliberate detach — no re-resume), a
       // context-driven invalidation should let the next palette open retry
       // the resume probe; otherwise a route change during the inflight
@@ -432,7 +446,7 @@ function GlobalCommandPalette(_props, ref) {
       threadSeqRef.current = null;
     }
     resetAttachments();
-  }, [context, resetAttachments]);
+  }, [location.pathname, location.search, context, resetAttachments]);
 
   // Load a server thread into the palette (resume-on-open and the picker
   // share this). Shows the thread's last reply — otherwise the palette
@@ -466,6 +480,8 @@ function GlobalCommandPalette(_props, ref) {
       .then((data) => setThreads(Array.isArray(data?.threads) ? data.threads : []))
       .catch(() => setThreads([]))
       .finally(() => setThreadsLoading(false));
+    adminFetch(`/admin/intelligence-bar/tasks?session_id=${encodeURIComponent(sessionIdRef.current)}`)
+      .then(data => setSavedTasks(data.tasks || [])).catch(() => setSavedTasks([]));
   }, []);
 
   const toggleThreads = () => {
@@ -518,15 +534,15 @@ function GlobalCommandPalette(_props, ref) {
   }, [open, conversationHistory.length]);
 
   const submit = useCallback(
-    async (text) => {
+    async (text, selectedTarget) => {
       const q = (text || prompt).trim();
-      if (!q || loading || attachmentsLoadingRef.current) return;
+      if (!q || loading || submittingRef.current || attachmentsLoadingRef.current) return;
+      submittingRef.current = true;
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
       setShowThreads(false); // a query from the History view shows its answer
       setLoading(true);
       setResponse(null);
-      setPendingActions([]);
       setToolActivity([]);
       saveRecent(q);
       setRecents(loadRecents());
@@ -538,13 +554,16 @@ function GlobalCommandPalette(_props, ref) {
             prompt: q,
             conversationHistory,
             context,
+            session_id: sessionIdRef.current,
+            request_key: crypto.randomUUID(),
+            ...(selectedTarget ? { selected_target: selectedTarget } : {}),
             ...(threadId
               ? {
                   thread_id: threadId,
                   ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
                 }
               : {}),
-            pageData: { route: location.pathname },
+            pageData: { route: location.pathname, search: location.search },
             ...(attachments.length
               ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
               : {}),
@@ -554,7 +573,8 @@ function GlobalCommandPalette(_props, ref) {
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
           setResponse(data.response);
-          setPendingActions(data.pendingActions || []);
+          setPendingActions(previous => [...new Map([...previous, ...(data.pendingActions || [])].map(a => [a.id, a])).values()]);
+          setActiveTask(data.taskId ? data : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
           setConversationHistory(data.conversationHistory || []);
           if (data.threadId) {
@@ -584,12 +604,63 @@ function GlobalCommandPalette(_props, ref) {
       } catch (err) {
         if (threadEpochRef.current === epoch) setResponse(`Error: ${err.message}`);
       }
-      setLoading(false);
-      setPrompt("");
-      resetAttachments();
+      if (threadEpochRef.current === epoch) {
+        submittingRef.current = false;
+        setLoading(false);
+        setPrompt("");
+        resetAttachments();
+      }
     },
-    [prompt, loading, conversationHistory, context, threadId, location.pathname, attachments, resetAttachments],
+    [prompt, loading, conversationHistory, context, threadId, location.pathname, location.search, attachments, resetAttachments],
   );
+
+  const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
+    if (!id || submittingRef.current) return;
+    const epoch = ++threadEpochRef.current;
+    submittingRef.current = true;
+    setLoading(true);
+    try {
+      const data = await adminFetch(operation ? `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}/${operation}`
+        : `/admin/intelligence-bar/tasks/${encodeURIComponent(id)}?session_id=${encodeURIComponent(sessionIdRef.current)}`,
+      operation ? { method: 'POST', body: JSON.stringify({ session_id: sessionIdRef.current,
+        ...(candidate ? { customer_id: candidate.customer_id } : {}) }) } : {});
+      if (threadEpochRef.current !== epoch) return;
+      setActiveTask(data);
+      setResponse(data.response);
+      setConversationHistory(data.conversationHistory || []);
+      setThreadId(data.threadId || null);
+      threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
+      setPendingActions(data.pendingActions || []);
+      setToolActivity(data.toolActivity || []);
+      setShowThreads(false);
+    } catch (err) {
+      if (threadEpochRef.current === epoch) setResponse(`Status unavailable: ${err.message}`);
+    } finally {
+      if (threadEpochRef.current === epoch) { submittingRef.current = false; setLoading(false); }
+    }
+  };
+
+  const onActionResolved = () => {
+    if (!activeTask) return;
+    void refreshTask();
+  };
+  const taskCard = <IntelligenceTaskCard task={activeTask}
+    onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}
+    onRefresh={() => refreshTask()} onContinue={() => refreshTask(activeTask?.taskId, 'resume')} onResolved={onActionResolved} />;
+  const taskHistory = savedTasks.length > 0 && <div style={{ marginBottom: 12 }}>
+    <div style={{ fontSize: 14, marginBottom: 8 }}>Saved requests — clearing a chat does not cancel actions</div>
+    {savedTasks.map(task => <button key={task.id} type="button" onClick={() => refreshTask(task.id)}
+      style={{ display: 'block', width: '100%', minHeight: 44, padding: 8, textAlign: 'left' }}>
+      {task.target?.target?.label || 'Platform request'} · {task.state.replaceAll('_', ' ')}
+    </button>)}
+  </div>;
+
+  useEffect(() => {
+    if (!open) return;
+    adminFetch(`/admin/intelligence-bar/tasks?session_id=${encodeURIComponent(sessionIdRef.current)}`)
+      .then(data => { setTasksAvailable(true); setSavedTasks(data.tasks || []); })
+      .catch(() => setTasksAvailable(false));
+  }, [open]);
 
   const addAttachments = useCallback(
     async (files) => {
@@ -632,6 +703,9 @@ function GlobalCommandPalette(_props, ref) {
       try { localStorage.setItem(dismissedThreadKey(), threadId); } catch { /* storage unavailable */ }
     }
     threadEpochRef.current += 1; // invalidate any inflight thread resume
+    submittingRef.current = false;
+    setLoading(false);
+    setActiveTask(null);
     setConversationHistory([]);
     setResponse(null);
     setPendingActions([]);
@@ -690,12 +764,16 @@ function GlobalCommandPalette(_props, ref) {
         loading={loading}
         response={response}
         pendingActions={pendingActions}
+        taskCard={taskCard}
+        activeTask={activeTask}
+        onActionResolved={onActionResolved}
+        taskHistory={taskHistory}
         toolActivity={toolActivity}
         recents={recents}
         quickActions={quickActions}
         contextLabel={contextLabel}
         clear={clear}
-        threadsAvailable={threadsAvailable}
+        threadsAvailable={threadsAvailable || tasksAvailable}
         showThreads={showThreads}
         toggleThreads={toggleThreads}
         threads={threads}
@@ -909,6 +987,7 @@ function GlobalCommandPalette(_props, ref) {
             >
               Previous conversations
             </div>
+            {taskHistory}
             <ThreadList threads={threads} loading={threadsLoading} onOpen={openThread} variant="dark" />
           </div>
         )}
@@ -977,19 +1056,10 @@ function GlobalCommandPalette(_props, ref) {
         )}
         {response && !loading && !showThreads && (
           <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }}>
+            {taskCard}
             {" "}
-            <ToolActivityList items={toolActivity} variant="dark" />
-            <div
-              style={{
-                fontSize: 13,
-                lineHeight: 1.65,
-                color: D.text,
-                fontFamily: "Roboto, Arial, sans-serif",
-              }}
-            >
-              {renderMarkdown(response)}
-            </div>{" "}
-            <PendingActionsCard actions={pendingActions} variant="dark" />
+            <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="dark" />
+            {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
           </div>
         )}
         {response && !loading && !showThreads && (
@@ -1066,7 +1136,7 @@ function GlobalCommandPalette(_props, ref) {
           <span style={{ fontSize: 10, color: D.border }}>
             Intelligence Bar — context: {contextLabel}
           </span>{" "}
-          {threadsAvailable && (
+          {(threadsAvailable || tasksAvailable) && (
             <button
               onClick={toggleThreads}
               style={{
@@ -1122,6 +1192,10 @@ function MobileSheet({
   loading,
   response,
   pendingActions,
+  taskCard,
+  activeTask,
+  onActionResolved,
+  taskHistory,
   toolActivity,
   recents,
   quickActions,
@@ -1164,8 +1238,8 @@ function MobileSheet({
           position: "fixed",
           left: 0,
           right: 0,
-          bottom: 0,
-          top: 64,
+          bottom: "var(--keyboard-inset, 0px)",
+          top: "calc(var(--vv-offset-top, 0px) + env(safe-area-inset-top, 0px) + 12px)",
           background: "#FFFFFF",
           zIndex: 9999,
           display: "flex",
@@ -1229,6 +1303,14 @@ function MobileSheet({
               {contextLabel}
             </div>{" "}
           </div>{" "}
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <details style={{ position: "relative" }}>
+              <summary aria-label="Conversation options" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 44, height: 44, cursor: "pointer", fontSize: 22 }}>⋯</summary>
+              <div style={{ position: "absolute", right: 0, top: 44, minWidth: 170, padding: 6, border: "1px solid #E4E4E7", borderRadius: 10, background: "#FFF", zIndex: 1 }}>
+                {threadsAvailable && <button onClick={toggleThreads} style={{ display: "block", width: "100%", minHeight: 44, textAlign: "left", padding: 10, border: 0, background: "transparent", font: "inherit" }}>{showThreads ? "Back to request" : "History"}</button>}
+                <button onClick={clear} style={{ display: "block", width: "100%", minHeight: 44, textAlign: "left", padding: 10, border: 0, background: "transparent", font: "inherit" }}>New chat</button>
+              </div>
+            </details>
           <button
             onClick={close}
             aria-label="Close"
@@ -1248,6 +1330,7 @@ function MobileSheet({
           >
             ×
           </button>{" "}
+          </div>
         </div>
         {/* Input */}
         <div style={{ padding: "0 16px 12px" }}>
@@ -1260,6 +1343,7 @@ function MobileSheet({
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Ask anything…"
+              enterKeyHint="send"
               style={{
                 width: "100%",
                 padding: "14px 96px 14px 16px",
@@ -1320,7 +1404,7 @@ function MobileSheet({
               padded={false}
             />
           )}{" "}
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          {(prompt.trim() || loading || attachmentsLoading) && <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             {" "}
             <button
               onClick={() => submit()}
@@ -1343,48 +1427,13 @@ function MobileSheet({
             >
               {loading ? "Thinking…" : attachmentsLoading ? "Attaching…" : "Ask"}
             </button>
-            {threadsAvailable && (
-              <button
-                onClick={toggleThreads}
-                style={{
-                  padding: "12px 16px",
-                  borderRadius: 10,
-                  border: "1px solid #E4E4E7",
-                  background: showThreads ? "#18181B" : "#FFFFFF",
-                  color: showThreads ? "#FFFFFF" : "#52525B",
-                  fontSize: 13,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                {showThreads ? "Back" : "History"}
-              </button>
-            )}
-            {(response || prompt) && (
-              <button
-                onClick={clear}
-                style={{
-                  padding: "12px 16px",
-                  borderRadius: 10,
-                  border: "1px solid #E4E4E7",
-                  background: "#FFFFFF",
-                  color: "#52525B",
-                  fontSize: 13,
-                  fontFamily: "Roboto, Arial, sans-serif",
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                Clear
-              </button>
-            )}
-          </div>{" "}
+          </div>}
         </div>
         {/* Body: scrollable region below the input */}
         <div
           style={{
             flex: 1,
+            minHeight: 0,
             overflowY: "auto",
             WebkitOverflowScrolling: "touch",
             padding: "0 16px 20px",
@@ -1411,26 +1460,18 @@ function MobileSheet({
           )}
 
           {response && !loading && !showThreads && (
-            <ToolActivityList items={toolActivity} variant="light" />
+            taskCard
           )}
           {response && !loading && !showThreads && (
-            <div
-              style={{
-                fontSize: 14,
-                lineHeight: 1.7,
-                color: "#27272A",
-                fontFamily: "Roboto, Arial, sans-serif",
-              }}
-            >
-              {renderMarkdown(response)}
-            </div>
+            <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" />
           )}
-          {response && !loading && !showThreads && (
-            <PendingActionsCard actions={pendingActions} variant="light" />
+          {response && !loading && !showThreads && !activeTask && (
+            <PendingActionsCard actions={pendingActions} variant="light" onResolved={onActionResolved} />
           )}
 
           {showThreads && !loading && (
             <Section label="Previous conversations">
+              {taskHistory}
               <ThreadList threads={threads} loading={threadsLoading} onOpen={openThread} variant="light" />
             </Section>
           )}
@@ -1499,6 +1540,19 @@ function MobileSheet({
 }
 
 // Attach (photo) control — square icon button sized to match DictationButton.
+function IntelligenceResponse({ response, activity, task, variant }) {
+  const hasActions = task && (task.pendingActions?.length || task.receipts?.length);
+  const prose = <div style={{ fontSize: 14, lineHeight: 1.65, color: '#27272A' }}>{renderMarkdown(response)}</div>;
+  return <>
+    {!hasActions && prose}
+    {(hasActions || activity.length > 0) && <details style={{ marginTop: 12, fontSize: 14, color: '#52525B' }}>
+      <summary style={{ minHeight: 44, cursor: 'pointer', paddingTop: 8 }}>Execution details</summary>
+      <ToolActivityList items={activity} variant={variant} />
+      {hasActions && prose}
+    </details>}
+  </>;
+}
+
 function AttachButton({ onClick, color, size = 30, disabled = false }) {
   return (
     <button

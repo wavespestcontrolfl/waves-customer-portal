@@ -16,6 +16,7 @@ import {
   toggleFavorite as toggleFavoriteStorage,
 } from '../utils/ibStorage';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../utils/ibImages';
+import { ibSessionId } from '../utils/ibSession';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -59,6 +60,10 @@ export function useIntelligenceBar({
   const [attachmentsLoading, setAttachmentsLoading] = useState(false);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
+  const epochRef = useRef(0);
+  const submittingRef = useRef(false);
+  const sessionIdRef = useRef(null);
+  if (!sessionIdRef.current) sessionIdRef.current = ibSessionId();
 
   const buildPageDataRef = useRef(buildPageData);
   const onAfterSubmitRef = useRef(onAfterSubmit);
@@ -118,7 +123,9 @@ export function useIntelligenceBar({
 
   const submit = useCallback(async (text) => {
     const q = (text ?? prompt).trim();
-    if (!q || loading || attachmentsLoadingRef.current) return;
+    if (!q || loading || submittingRef.current || attachmentsLoadingRef.current) return;
+    submittingRef.current = true;
+    const epoch = ++epochRef.current;
 
     setLoading(true);
     setExpanded(true);
@@ -129,7 +136,7 @@ export function useIntelligenceBar({
 
     setRecentPrompts(addRecent(context, q));
 
-    const body = { prompt: q, conversationHistory };
+    const body = { prompt: q, conversationHistory, session_id: sessionIdRef.current, request_key: crypto.randomUUID() };
     if (context) body.context = context;
     if (attachments.length) {
       body.images = attachments.map(({ mediaType, data }) => ({ mediaType, data }));
@@ -144,7 +151,7 @@ export function useIntelligenceBar({
     // or attachments here would clobber the new key's freshly primed state;
     // the surface's own switch handler (clear()) already reset them. Only the
     // loading flag is released — no new submit can start while it is held.
-    const isStale = () => getRequestKeyRef.current && requestKey !== getRequestKeyRef.current();
+    const isStale = () => epoch !== epochRef.current || (getRequestKeyRef.current && requestKey !== getRequestKeyRef.current());
 
     try {
       const data = await adminFetch('/admin/intelligence-bar/query', {
@@ -153,7 +160,7 @@ export function useIntelligenceBar({
       });
 
       if (isStale()) {
-        setLoading(false);
+        if (epoch === epochRef.current) { submittingRef.current = false; setLoading(false); }
         return;
       }
 
@@ -165,18 +172,22 @@ export function useIntelligenceBar({
       if (onAfterSubmitRef.current) onAfterSubmitRef.current(data);
     } catch (err) {
       if (isStale()) {
-        setLoading(false);
+        if (epoch === epochRef.current) { submittingRef.current = false; setLoading(false); }
         return;
       }
       setResponse(`Error: ${err.message}`);
     }
 
+    submittingRef.current = false;
     setLoading(false);
     setPrompt('');
     resetAttachments();
   }, [prompt, loading, conversationHistory, context, attachments, resetAttachments]);
 
   const clear = useCallback(() => {
+    epochRef.current += 1;
+    submittingRef.current = false;
+    setLoading(false);
     setConversationHistory([]);
     setResponse(null);
     setStructuredData(null);

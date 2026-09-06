@@ -1,3 +1,4 @@
+import { ibRequestIdentity } from "../../utils/ibSession";
 /**
  * Procurement Intelligence Bar
  * client/src/components/admin/ProcurementIntelligenceBar.jsx
@@ -256,6 +257,7 @@ export default function ProcurementIntelligenceBar({ stats, onRefresh }) {
           method: "POST",
           body: JSON.stringify({
             prompt: q,
+            ...ibRequestIdentity(),
             conversationHistory,
             context: "procurement",
             pageData: buildPageData(),

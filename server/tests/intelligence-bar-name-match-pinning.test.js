@@ -129,6 +129,20 @@ describe('resolveCustomer (comms)', () => {
     expect(res.preview_changed).toBeUndefined();
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415551111', customerId: null }));
   });
+
+  test('provider acceptance survives a later audit failure and keeps its provider receipt', async () => {
+    db.mockReturnValue(chain({ first: CUST_A }));
+    const err = Object.assign(new Error('audit unavailable'), {
+      providerOutcome: { sent: true, providerMessageId: 'SM_synthetic_receipt' },
+    });
+    sendCustomerMessage.mockRejectedValueOnce(err);
+    const result = await executeCommsTool('send_sms', {
+      customer_id: CUST_A.id, phone: CUST_A.phone, message: 'Synthetic message',
+    });
+    expect(result).toMatchObject({ success: true, state: 'provider_accepted', providerMessageId: 'SM_synthetic_receipt' });
+    expect(result.warning).toContain('Do not send it again');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('update_lead_status (leads)', () => {

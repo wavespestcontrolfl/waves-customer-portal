@@ -1,3 +1,4 @@
+import { ibRequestIdentity } from "../../utils/ibSession";
 /**
  * SEO Intelligence Bar
  * client/src/components/admin/SEOIntelligenceBar.jsx
@@ -372,6 +373,7 @@ export default function SEOIntelligenceBar({
           method: "POST",
           body: JSON.stringify({
             prompt: q,
+            ...ibRequestIdentity(),
             conversationHistory,
             context: context,
             pageData: buildPageData(),

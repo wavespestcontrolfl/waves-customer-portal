@@ -1,3 +1,4 @@
+import { ibRequestIdentity } from "../../utils/ibSession";
 /**
  * Revenue Intelligence Bar
  * client/src/components/admin/RevenueIntelligenceBar.jsx
@@ -254,6 +255,7 @@ export default function RevenueIntelligenceBar({ period, revenueData }) {
           method: "POST",
           body: JSON.stringify({
             prompt: q,
+            ...ibRequestIdentity(),
             conversationHistory,
             context: "revenue",
             pageData: buildPageData(),

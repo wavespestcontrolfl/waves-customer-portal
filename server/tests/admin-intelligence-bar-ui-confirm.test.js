@@ -410,7 +410,7 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
           source: { type: 'base64', media_type: 'image/png', data: validImageData },
         },
         // Last block of the last message carries the per-round cache breakpoint.
-        { type: 'text', text: prompt, cache_control: { type: 'ephemeral' } },
+        { type: 'text', text: expect.stringContaining(`\n\n${prompt}`), cache_control: { type: 'ephemeral' } },
       ]);
 
       expect(body.conversationHistory[0].content).toBe(
@@ -468,6 +468,29 @@ describe('/confirm-action commit path', () => {
 
   afterAll(() => {
     delete process.env.GATE_IB_UI_CONFIRM;
+  });
+
+  test.each([
+    { success: false, blocked: true, reason: 'duplicate_estimate', message: 'A draft already exists' },
+    { failed: true, reason: 'validation_failed' },
+    { blocked: true, reason: 'approval_required' },
+  ])('does not report a refused domain outcome as completed: %j', async (outcome) => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'create_customer', params: { first_name: 'Synthetic', last_name: 'Fixture' } },
+    });
+    mockExecuteTool.mockResolvedValue(outcome);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      const body = await res.json();
+      expect(body.success).toBe(false);
+      expect(body.result).toEqual(outcome);
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, outcome);
+    });
   });
 
   test('claims, attaches server-derived confirmed for two-step tools, executes stored params', async () => {

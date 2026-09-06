@@ -1,3 +1,4 @@
+import { ibRequestIdentity } from "../../utils/ibSession";
 /**
  * Dashboard Intelligence Bar
  * client/src/components/admin/DashboardIntelligenceBar.jsx
@@ -279,6 +280,7 @@ export default function DashboardIntelligenceBar({ kpiData }) {
           method: "POST",
           body: JSON.stringify({
             prompt: q,
+            ...ibRequestIdentity(),
             conversationHistory,
             context: "dashboard",
             pageData: buildPageData(),
