@@ -429,13 +429,21 @@ function selectedPricingFrequency(estimate = {}, estData = {}, selectedFrequency
 function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '') {
   const frequency = selectedPricingFrequency(estimate, estData, selectedFrequency);
   const stored = storedRecurringRowsForEstimate(estimate, estData);
-  if (!Array.isArray(frequency?.perServiceTreatments) || !frequency.perServiceTreatments.length) return stored;
+  const selected = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments.map((row) => ({ ...row })) : [];
+  if (estimate.show_one_time_option || estimate.showOneTimeOption) {
+    const { shouldPersistPestOnlyRecurringChoice, isPestServiceName } = require('../routes/estimate-public');
+    if (shouldPersistPestOnlyRecurringChoice(estimate, estData)) {
+      return (selected.length ? selected : stored)
+        .filter((row) => isPestServiceName(row.name || row.label || row.service));
+    }
+  }
+  if (!selected.length) return stored;
 
   // A generated lawn tier describes only lawn. Apply its selected cadence
   // without interpreting omitted companions as customer removals. Keep the
   // converter's precise identities: bait, rental and bond are distinct rows.
   const { recurringServiceKey } = require('./estimate-converter');
-  const selected = frequency.perServiceTreatments.map((row) => ({ ...row }));
   const selectedKeys = new Set(selected.map(recurringServiceKey));
   return [...selected, ...stored.filter((row) => !selectedKeys.has(recurringServiceKey(row)))];
 }

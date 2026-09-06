@@ -100,6 +100,35 @@ describe('estimate slot selection retains companion programs', () => {
     expect(converter.recurringServiceKey({ service: 'commercial_foam_recurring' })).toBe('commercial_foam_recurring');
   });
 
+  test.each([
+    ['show_one_time_option', 'saved'], ['show_one_time_option', 'generated'],
+    ['showOneTimeOption', 'saved'], ['showOneTimeOption', 'generated'],
+  ])('%s preserves intentional pest-only recurring choice with a %s frequency', (flag, shape) => {
+    const estimate = estimateWith([
+      { service: 'pest_control', name: 'Pest Control', visitsPerYear: 4, perTreatment: 120 },
+      { service: 'mosquito', name: 'Seasonal Mosquito Control', visitsPerYear: 9, perTreatment: 60 },
+    ]);
+    estimate[flag] = true;
+    if (shape === 'saved') {
+      estimate.estimate_data.sendSnapshot = { pricingBundle: { frequencies: [{
+        key: 'quarterly', monthly: 100, annual: 1200,
+        perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', visitsPerYear: 4 }],
+      }] } };
+    }
+    const profile = resolveEstimateSlotProfile(estimate, { selectedFrequency: 'quarterly' });
+    expect(profile.services.map((row) => [row.service, row.visitsPerYear])).toEqual([['pest_control', 4]]);
+    expect(require('../services/estimate-slot-availability').seasonalSelectionProfile(profile)).toBe(false);
+    expect(require('../routes/estimate-public').shouldPersistPestOnlyRecurringChoice(estimate, estimate.estimate_data)).toBe(true);
+  });
+
+  test('a one-time toggle without an eligible pest choice retains lawn companions', () => {
+    const estimate = estimateWith([{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }, ...companions]);
+    estimate.show_one_time_option = true;
+    expect(require('../routes/estimate-public').shouldPersistPestOnlyRecurringChoice(estimate, estimate.estimate_data)).toBe(false);
+    expect(selectedCounts(estimate, { selectedFrequency: 'standard' }))
+      .toEqual([['lawn_care', 6], ['tree_shrub', 9], ['mosquito', 12]]);
+  });
+
   test('a selected bait line does not erase distinct rental or bond identities', () => {
     const estimate = estimateWith([
       { service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4 },

@@ -72,6 +72,8 @@ not the route,
 service profile uses the converter's canonical stored/engine service rows.
 Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
+The existing pest-only recurring choice on eligible one-time-toggle estimates
+retains its intentional companion exclusion, using the acceptance predicate.
 Existing request fields, token/signature guards, rate limits, privacy headers,
 and booking duration policy apply), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
