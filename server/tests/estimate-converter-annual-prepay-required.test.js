@@ -8,7 +8,7 @@ describe('estimate converter annual prepay orchestration', () => {
     jest.dontMock('../services/estimate-deposits');
   });
 
-  function makeDb(recurringServices, { monthlyTotal = 55, annualTotal = 660, recurringExtra = {} } = {}) {
+  function makeDb(recurringServices, { monthlyTotal = 55, annualTotal = 660, recurringExtra = {}, customerSelection = null } = {}) {
     const estimate = {
       id: 'estimate-1',
       status: 'accepted',
@@ -19,6 +19,7 @@ describe('estimate converter annual prepay orchestration', () => {
         // recurringExtra carries scalar supplemental fields (e.g. rodentBaitMo)
         // that ride OUTSIDE recurring.services — the combo-companion case.
         recurring: { services: recurringServices, ...recurringExtra },
+        customerSelection,
       },
     };
     const customer = {
@@ -94,6 +95,23 @@ describe('estimate converter annual prepay orchestration', () => {
   }
 
   const convertOpts = { billingTerm: 'prepay_annual', skipAutoSchedule: true };
+
+  test.each([
+    ['monthly', 'monthly', 12],
+    ['bi_monthly', 'bimonthly', 6],
+  ])('%s accepted pest reaches term creation with matching cadence and count', async (frequency, cadence, visits) => {
+    const { EstimateConverter, renewals } = setup([
+      { service: 'pest_control', name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4 },
+    ], { customerSelection: { frequency } });
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+      .rejects.toThrow('Annual prepay term was not created');
+
+    expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({
+      coverageVisitCount: visits,
+      coverageCadence: cadence,
+    }));
+  });
 
   test('single recurring service: stamps coverage config on the term + voids the draft when the term is not created', async () => {
     const { EstimateConverter, invoiceService, renewals } = setup([

@@ -676,6 +676,7 @@ describe('accepted pest cadence reaches the service schedule', () => {
     const coverageCadence = EstimateConverter.annualPrepayCoverageCadence(line, selection, selection);
     expect(pattern).toBe(cadence);
     expect(coverageCadence).toBe(cadence);
+    expect(EstimateConverter.remainingUnitCatalogKey(line, selection)).toBe(`pest_general_${cadence}`);
     const count = EstimateConverter.annualPrepayCoverageVisits(line, pattern, selection);
     expect(count).toBe(visits);
     const rows = buildRecurringFollowUpRows(parent, { pattern, visitsPerYear: count, skipWeekends: true });
@@ -696,11 +697,13 @@ describe('accepted pest cadence reaches the service schedule', () => {
   test('without a final selection the line keeps its own cadence', () => {
     expect(EstimateConverter.converterFollowUpSeedingPattern(staleLine, parent, 'monthly', null)).toBe('quarterly');
     expect(EstimateConverter.annualPrepayCoverageCadence(staleLine, 'monthly', null)).toBe('quarterly');
+    expect(EstimateConverter.remainingUnitCatalogKey(staleLine)).toBe('pest_general_quarterly');
   });
 
   test('commercial pest and lawn do not inherit residential pest selection rules', () => {
     expect(EstimateConverter.converterFollowUpSeedingPattern({ service: 'commercial_pest', frequency: 'monthly' }, {}, 'monthly', 'monthly')).toBeNull();
     expect(EstimateConverter.converterFollowUpSeedingPattern({ service: 'pest_control', isCommercial: true }, {}, 'monthly', 'monthly')).toBeNull();
+    expect(EstimateConverter.remainingUnitCatalogKey({ service: 'pest_control', isCommercial: true }, 'monthly')).toBeNull();
     const lawn = { service: 'lawn_care', visitsPerYear: 6 };
     expect(EstimateConverter.converterFollowUpSeedingPattern(lawn, {}, 'monthly')).toBe('bimonthly');
     expect(EstimateConverter.annualPrepayCoverageCadence(lawn, 'monthly')).toBe('bimonthly');

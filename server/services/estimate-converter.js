@@ -3268,7 +3268,11 @@ function identityOnlyCatalogKey(catalogServiceKey) {
       && TREE_SHRUB_IDENTITY_ONLY_KEYS.has(catalogServiceKey));
 }
 
-function remainingUnitCatalogKey(svc = {}) {
+function remainingUnitCatalogKey(svc = {}, acceptedPlanFrequency = null) {
+  if (seedingFamilyKey(svc) === 'pest_control') {
+    const pattern = converterFollowUpSeedingPattern(svc, {}, undefined, acceptedPlanFrequency);
+    return PEST_CADENCE_CATALOG_KEYS[pattern] || null;
+  }
   const key = String(svc.serviceKey || svc.service_key || '').trim();
   if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
   // GATE_SEPARATE_COMBO_VISITS: a legacy lawn+T&S line carries only its
@@ -5120,7 +5124,7 @@ const EstimateConverter = {
             for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
             for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
             for (const svc of remaining) {
-              await addUnit(svc.name || svc.serviceName || svc.service_name || 'Service', remainingUnitCatalogKey(svc));
+              await addUnit(svc.name || svc.serviceName || svc.service_name || 'Service', remainingUnitCatalogKey(svc, acceptedPlanFrequency));
             }
           }
           if (lockUnits.length > 1) {
@@ -5928,7 +5932,9 @@ const EstimateConverter = {
                   ? ((reservedSeedingPattern === 'semiannual' && isPalmInjectionFamily(seedSvc || {}, reservedStart)) ? 'palm_injection_semiannual' : null)
                   : reservedFam === 'lawn_care'
                     ? (LAWN_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
-                    : null;
+                    : reservedFam === 'pest_control'
+                      ? (PEST_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
+                      : null;
                 if (reservedCatalogKey) {
                   try {
                     const catalogRow = await trx('services')
@@ -6043,11 +6049,12 @@ const EstimateConverter = {
       const scheduleUnits = [
         ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
         ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
-        ...remaining.map((svc) => ({ svc, catalogServiceKey: remainingUnitCatalogKey(svc) })),
+        ...remaining.map((svc) => ({ svc, catalogServiceKey: remainingUnitCatalogKey(svc, acceptedPlanFrequency) })),
       ];
       for (const unit of scheduleUnits) {
         const svc = unit.svc;
         let combinedServiceId = null;
+        let acceptedPestServiceName = null;
         if (unit.catalogServiceKey) {
           // service_id makes profile resolution sturdy against later
           // renames; name-based resolution still works without it, so a
@@ -6065,9 +6072,12 @@ const EstimateConverter = {
             // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
               .where({ service_key: unit.catalogServiceKey })
-              .first('id', 'default_duration_minutes');
+              .first('id', 'name', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
+              if (Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)) {
+                acceptedPestServiceName = catalogRow.name;
+              }
               if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
                 svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
               }
@@ -6095,7 +6105,7 @@ const EstimateConverter = {
             throw palmCatalogMissingError();
           }
         }
-        const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
+        const serviceName = acceptedPestServiceName || svc.name || svc.serviceName || svc.service_name || 'Service';
         // A palm unit with recurring EVIDENCE that did NOT resolve the
         // semiannual catalog identity (contradictory/conflicting/invalid
         // data declines seeding by design, leaving catalogServiceKey null)
