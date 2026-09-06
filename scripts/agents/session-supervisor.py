@@ -462,6 +462,14 @@ def reconcile_workers(root, jobs, execute):
         elif job.get('launch_pending') or job['status'] == 'launching':
             clear = False
             print(json.dumps({'job': key, 'action': 'block', 'reason': 'interrupted_launch'}), flush=True)
+        elif job['status'] == 'running':
+            # The worker's result was lost with its supervisor. Even an exited
+            # group might have reported a permission/owner blocker; never guess.
+            clear = False
+            print(json.dumps({'job': key, 'action': 'block', 'reason': 'interrupted_worker'}), flush=True)
+            if execute:
+                clear_worker(root, key, job['launch_id'])
+                update_job(root, key, job['revision'], {'status': 'blocked', 'reason': 'interrupted_worker'})
     return clear
 
 

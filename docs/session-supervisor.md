@@ -76,7 +76,8 @@ Worker cleanup drains the CLI and its remaining live tool process group;
 zombies count as exited because they cannot run or respond to signals.
 Re-enrollment cannot erase a surviving worker or unresolved launch record.
 After a supervisor crash, the next tick terminates any recorded surviving worker
-before another job can launch; the interrupted job requires an explicit retry.
+before another job can launch. An interrupted job requires an explicit retry
+even when its worker has already exited, because its final disposition was lost.
 
 ## See progress, pause, and recover
 

@@ -184,6 +184,19 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNotNone(process.poll())
         self.assertEqual(supervisor.read_jobs(self.root)[self.key]['reason'], 'orphaned_worker')
 
+    def test_lost_worker_result_blocks_even_when_its_group_has_exited(self):
+        for pid, launch in [(987654, 'launch-one'), (None, None)]:
+            self.job.update({'status': 'running', 'worker_pid': pid, 'worker_stamp': 'old',
+                             'launch_id': launch, 'launch_pending': False})
+            self.store()
+            with patch.object(supervisor, 'group_active', return_value=False), \
+                    patch.object(supervisor, 'inspect_job', side_effect=AssertionError('lost disposition retried')):
+                supervisor.tick(self.root, execute=True)
+            job = supervisor.read_jobs(self.root)[self.key]
+            self.assertEqual(job['status'], 'blocked')
+            self.assertEqual(job['reason'], 'interrupted_worker')
+            self.assertEqual(supervisor.inspect_job(job, 1000)['action'], 'skip')
+
     def test_unknown_launch_fences_queue_even_after_pause(self):
         self.job.update({'status': 'paused', 'launch_pending': True})
         self.store()
