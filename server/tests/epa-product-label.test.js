@@ -43,6 +43,17 @@ test('rejects HTML and oversized PDFs', async () => {
   await expect(downloadEpaLabel(source)).rejects.toThrow('exceeds the supported size');
 });
 
+test.each([new TypeError('network unavailable'), new DOMException('request timed out', 'TimeoutError')])('EPA request failure stays operational and retryable (%s)', async failure => {
+  jest.spyOn(global, 'fetch').mockRejectedValue(failure);
+  await expect(findEpaLabel('123-456')).rejects.toMatchObject({ statusCode: 502, isOperational: true, message: 'EPA source is unavailable. Try again later.' });
+});
+
+test('EPA body-stream failure stays operational and retryable', async () => {
+  const stream = new ReadableStream({ start(controller) { controller.error(new TypeError('stream disconnected')); } });
+  jest.spyOn(global, 'fetch').mockResolvedValue(new Response(stream));
+  await expect(findEpaLabel('123-456')).rejects.toMatchObject({ statusCode: 502, isOperational: true });
+});
+
 test('source checks coalesce, then invalidate a superseded label after at most 60 seconds', async () => {
   const pdf = await PDFDocument.create(); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
   const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: require('crypto').createHash('sha256').update(bytes).digest('hex') };

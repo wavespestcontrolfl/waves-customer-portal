@@ -15,20 +15,25 @@ function labelError(message, statusCode = 422) {
 }
 
 async function readBounded(url, maxBytes) {
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(20000) });
-  if (!response.ok || !response.body) throw labelError('EPA source is unavailable. Try again later.', 502);
-  if (Number(response.headers.get('content-length')) > maxBytes) {
-    await response.body.cancel();
-    throw labelError('EPA document exceeds the supported size. Review the source manually.');
+  try {
+    const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(20000) });
+    if (!response.ok || !response.body) throw labelError('EPA source is unavailable. Try again later.', 502);
+    if (Number(response.headers.get('content-length')) > maxBytes) {
+      await response.body.cancel();
+      throw labelError('EPA document exceeds the supported size. Review the source manually.');
+    }
+    let size = 0;
+    const chunks = [];
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > maxBytes) throw labelError('EPA document exceeds the supported size. Review the source manually.');
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  } catch (err) {
+    if (err.isOperational) throw err;
+    throw labelError('EPA source is unavailable. Try again later.', 502);
   }
-  let size = 0;
-  const chunks = [];
-  for await (const chunk of response.body) {
-    size += chunk.length;
-    if (size > maxBytes) throw labelError('EPA document exceeds the supported size. Review the source manually.');
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
 }
 
 function selectEpaSource(payload, registration) {
