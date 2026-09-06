@@ -90,7 +90,13 @@ snapshot leg that could not be frozen (missing customer or technician row)
 is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
-cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
+`moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
+stored `composite_scores.drought_stress`. Missing or invalid historical
+values yield `null`; raw model responses and the full composite are never
+projected. The existing customer/visit linkage and signed assessment pin
+requirements apply to this field too),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
