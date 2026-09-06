@@ -105,6 +105,37 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts.map((f) => f.value)).toEqual(['#aB12*']);
   });
 
+  test.each([['Text only please', 'text'], ['I prefer a call.', 'call'], ['Email only', 'email']])(
+    'binds %s to its expressed channel', (quote, value) => {
+      const facts = ['call', 'text', 'email'].map((channel) => fact({
+        field: 'contact_preference', quote, value: channel,
+      }));
+      const result = groundExtraction(extracted([], facts), { message: source(quote), properties });
+      expect(result.facts.map((item) => item.value)).toEqual([value]);
+      expect(result.dropped).toBe(2);
+    },
+  );
+
+  test('a preference quote cannot drop a preceding negation', () => {
+    const result = groundExtraction(extracted([], [fact({ field: 'contact_preference',
+      quote: 'only text', value: 'text' })]), { message: source('Do not only text'), properties });
+    expect(result.facts).toEqual([]);
+  });
+
+  test.each([
+    ['2040-09-10T15:00:00-04:00', '2040-09-10T19:00:00.000Z', false],
+    ['2040-09-11T15:00:00-04:00', null, true],
+    ['2040-09-10T15:00:00Z', null, true],
+    ['2040-09-10T15:00:00-05:00', null, true],
+  ])('checks model deadline %s against the quoted ET day and time', (proposed, expected, unverified) => {
+    const message = source('Please send the estimate by September 10 at 3 PM');
+    const result = groundExtraction(extracted([obligation(message.message_body, {
+      due_text: 'by September 10 at 3 PM', due_at: proposed,
+    })]), { message, properties });
+    expect(result.obligations[0]).toMatchObject({ due_at: expected, timing_unverified: unverified });
+    expect(result.dropped).toBe(Number(unverified));
+  });
+
   test('notes cannot omit a negation or a condition from the source sentence', () => {
     const message = source('Do not treat the barn. Treat the yard only when the pets are inside.');
     const result = groundExtraction(extracted([], [
@@ -157,6 +188,8 @@ describe('private profile writes', () => {
     expect(factVerdict(fact({ field: 'contact_preference', value: 'text', quote: 'Text me when you get here' }), context))
       .toBe('preference_uncertain');
     expect(factVerdict(fact({ field: 'contact_preference', value: 'text', quote: 'Text only please' }), context)).toBe('apply');
+    expect(factVerdict(fact({ field: 'contact_preference', value: 'email', quote: 'Text only please' }), context))
+      .toBe('preference_uncertain');
   });
 });
 
@@ -189,6 +222,20 @@ describe('fulfillment proof', () => {
   test('a text cannot fulfill a promised phone call', () => {
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, { kind: 'callback' })).toBe(false);
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 0 }, { kind: 'callback' })).toBe(false);
+  });
+
+  test('a visit needs post-request scheduling or completion activity', () => {
+    const before = '2040-03-09T15:00:00Z';
+    const after = '2040-03-11T15:00:00Z';
+    const visit = { type: 'visit', property_id: PROPERTY_ID, status: 'confirmed', created_at: before };
+    const scheduled = { ...commitment, kind: 'schedule_visit' };
+    const completed = { ...commitment, kind: 'technician_follow_up' };
+    expect(admissibleWitness(visit, scheduled)).toBe(false);
+    expect(admissibleWitness({ ...visit, created_at: after }, scheduled)).toBe(true);
+    expect(admissibleWitness({ ...visit, status: 'rescheduled', transitioned_at: after }, scheduled)).toBe(true);
+    expect(admissibleWitness({ ...visit, status: 'completed', completed_at: before }, completed)).toBe(false);
+    expect(admissibleWitness({ ...visit, status: 'completed', completed_at: after }, completed)).toBe(true);
+    expect(admissibleWitness({ ...visit, status: 'completed', created_at: after, completed_at: before }, completed)).toBe(false);
   });
   test('a staff claim of sending or completing work is not the deliverable itself', () => {
     const reply = { type: 'sms', status: 'delivered', message_type: 'manual', text: 'I sent the estimate' };

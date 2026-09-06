@@ -12,9 +12,11 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
-const { recordMessageOperations, loadMessageContext, runSmsOperationalActions } = require('../services/sms-operational-actions');
+const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, refreshSmsCommitments } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
-const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, admissibleWitness } = require('../services/sms-commitment-fulfillment');
+const NotificationService = require('../services/notification-service');
+const { etDateString } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
 const { listOpenCommitments } = require('../services/call-commitments');
 const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
@@ -22,7 +24,7 @@ const postgres = connection ? describe : describe.skip;
 const schema = `sms_operations_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'system_settings'];
+  'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'system_settings'];
 let mockPg;
 let admin;
 let message;
@@ -45,6 +47,8 @@ postgres('SMS operations on PostgreSQL', () => {
     }
   });
   beforeEach(async () => {
+    jest.clearAllMocks();
+    NotificationService.notifyAdmin.mockResolvedValue({ id: randomUUID() });
     for (const table of TABLES) await mockPg(table).delete();
     process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
     const customerId = randomUUID();
@@ -55,7 +59,8 @@ postgres('SMS operations on PostgreSQL', () => {
       address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true });
     message = { id: randomUUID(), customer_id: customerId, direction: 'inbound',
       message_body: 'The controller is beside the garage. Please send the estimate.',
-      from_phone: '+12025550101', to_phone: '+12025550102', created_at: new Date(), status: 'received' };
+      from_phone: '+12025550101', to_phone: numbers.locations.parrish.number, created_at: new Date(), status: 'received' };
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = new Date(message.created_at.getTime() - 1000).toISOString();
     await mockPg('sms_log').insert(message);
     result = { dropped: 0, facts: [{ field: 'irrigation_controller_location', value: 'beside the garage',
       quote: 'The controller is beside the garage', duration: 'durable', property_id: propertyId }],
@@ -131,6 +136,73 @@ postgres('SMS operations on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date());
     expect(evidence.failures).toEqual([]);
     expect(evidence.records).toEqual([]);
+  });
+
+  test('visit witnesses distinguish old work from post-request creation and transitions', async () => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const base = { customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Lawn', scheduled_date: etDateString(message.created_at),
+      window_start: '09:00:00', created_at: before };
+    const rows = await mockPg('scheduled_services').insert([
+      { ...base, status: 'confirmed', completed_at: null },
+      { ...base, status: 'confirmed', created_at: after, completed_at: null },
+      { ...base, status: 'completed', completed_at: before },
+      { ...base, status: 'completed', completed_at: after },
+      { ...base, status: 'rescheduled', completed_at: null },
+    ]).returning('id');
+    await mockPg('job_status_history').insert({ job_id: rows[4].id, from_status: 'confirmed',
+      to_status: 'rescheduled', transitioned_at: after });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
+    expect(evidence.failures).toEqual([]);
+    const sms_context = { property_id: base.property_id, source_at: message.created_at.toISOString() };
+    const allowed = (kind) => evidence.records.filter((r) => admissibleWitness(r, { kind, sms_context })).map((r) => r.id).sort();
+    expect(allowed('schedule_visit')).toEqual([rows[1].id, rows[4].id].sort());
+    expect(allowed('technician_follow_up')).toEqual([rows[3].id]);
+  });
+
+  test('merge and merge undo retain open obligations on the source SMS’s current owner', async () => {
+    result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const winner = randomUUID();
+    await mockPg('customers').insert({ id: winner, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550103', address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236' });
+    // The merge executor's FK sweep and retirement; JSON snapshots do not move.
+    await mockPg.transaction(async (trx) => {
+      await trx('sms_log').where({ id: message.id }).update({ customer_id: winner });
+      await trx('customer_properties').where({ customer_id: message.customer_id }).update({ customer_id: winner });
+      await trx('customers').where({ id: message.customer_id }).update({ deleted_at: new Date() });
+    });
+    const verify = jest.fn().mockResolvedValue({ verdict: 'open' });
+    const now = new Date(message.created_at.getTime() + 2000);
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify.mock.calls[0][0].sms_context.customer_id).toBe(winner);
+    expect((await mockPg('call_commitments').first()).sms_context.customer_id).toBe(winner);
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].link).toBe(`/admin/customers?customerId=${winner}`);
+    await mockPg.transaction(async (trx) => {
+      await trx('sms_log').where({ id: message.id }).update({ customer_id: message.customer_id });
+      await trx('customer_properties').where({ customer_id: winner }).update({ customer_id: message.customer_id });
+      await trx('customers').where({ id: message.customer_id }).update({ deleted_at: null });
+    });
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect((await mockPg('call_commitments').first()).sms_context.customer_id).toBe(message.customer_id);
+    expect(NotificationService.notifyAdmin.mock.calls[1][3].link).toBe(`/admin/customers?customerId=${message.customer_id}`);
+  });
+
+  test('an ownership move during verification cannot complete or notify the former account', async () => {
+    result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const winner = randomUUID();
+    await mockPg('customers').insert({ id: winner, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550103', address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236' });
+    const verify = jest.fn(async () => {
+      await mockPg('sms_log').where({ id: message.id }).update({ customer_id: winner });
+      return { verdict: 'fulfilled' };
+    });
+    await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(message.created_at.getTime() + 2000) });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('suppressed estimate sends and manual acceptance are not delivery witnesses', async () => {

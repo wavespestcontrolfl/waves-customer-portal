@@ -12,7 +12,7 @@ const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
-const { VERSION, extractSmsOperations } = require('./sms-operational-extractor');
+const { VERSION, extractSmsOperations, explicitContactPreference } = require('./sms-operational-extractor');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment } = require('./sms-commitment-fulfillment');
 
@@ -45,7 +45,7 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
   if (properties.length !== 1 || fact.property_id !== properties[0].id) return 'property_ambiguous';
   if (fact.duration !== 'durable') return 'temporary_instruction';
   if (fact.field === 'contact_preference'
-    && !/\b(?:text only|only text|prefer (?:a )?text|prefer (?:a )?call|prefer email|email only|call only)\b/i.test(fact.quote)) return 'preference_uncertain';
+    && explicitContactPreference(fact.quote) !== fact.value) return 'preference_uncertain';
   if (fact.field.endsWith('_code') && !/^[#*\dA-Za-z -]{1,100}$/.test(fact.value)) return 'code_uncertain';
   const maxLength = fact.field.endsWith('_code') ? 100 : fact.field === 'irrigation_controller_location' ? 200 : 600;
   if (fact.value.length > maxLength) return 'value_too_long';
@@ -223,13 +223,21 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     if (!enabled()) return { scanned, fulfilled, unverified, skipped: 'gate_off' };
     scanned += 1;
     const message = await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS);
-    if (!message || message.customer_id !== row.sms_context?.customer_id || !eligibleMessage(message)) continue;
-    const evidence = await loadSmsFulfillmentEvidence(conn, row, message, now);
-    const verdict = await verify(row, evidence);
+    if (!message || !eligibleMessage(message)) continue;
+    // The SMS foreign key follows merges and merge undo. Embedded context
+    // is only a snapshot; never let its former owner strand the obligation.
+    const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
+    const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
+    const verdict = await verify(current, evidence);
     if (verdict.verdict === 'uncertain') unverified += 1;
     await conn.transaction(async (trx) => {
+      // Intake also locks SMS before commitment. A merge/relink while the
+      // verifier runs must retry against the new owner, not publish stale proof.
+      const source = await trx('sms_log').where({ id: message.id }).forUpdate().first();
+      if (!source || !eligibleMessage(source) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
       const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
       if (!enabled() || live?.status !== 'open' || live.human_state != null) return;
+      await trx('call_commitments').where({ id: row.id }).update({ sms_context: current.sms_context });
       const dedupeKey = `sms-commitment:${row.id}`;
       if (verdict.verdict === 'fulfilled') {
         await trx('call_commitments').where({ id: row.id }).update({

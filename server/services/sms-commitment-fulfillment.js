@@ -54,9 +54,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .where('sent_at', '<=', now).orderBy('sent_at', 'desc').limit(LIMIT + 1)
       .select('id', 'status', 'sent_at', 'title', 'service_type', 'scheduled_service_id'),
     visit: conn('scheduled_services').where({ customer_id: customerId })
+      .where('created_at', '<=', now)
       .where('scheduled_date', '>=', etDateString(addETDays(after, -1)))
       .orderBy('scheduled_date', 'desc').limit(LIMIT + 1)
-      .select('id', 'status', conn.raw('scheduled_date::text as scheduled_date'), 'window_start', 'service_type', 'property_id'),
+      .select('id', 'status', 'created_at', conn.raw('scheduled_date::text as scheduled_date'), 'window_start', 'service_type', 'property_id',
+        conn.raw('CASE WHEN completed_at <= ? THEN completed_at END as completed_at', [now]),
+        conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
+          WHERE h.job_id = scheduled_services.id AND h.to_status = scheduled_services.status
+            AND h.transitioned_at > ? AND h.transitioned_at <= ?) as transitioned_at`, [after, now])),
   };
   const entries = Object.entries(sources);
   const results = await Promise.allSettled(entries.map(([, query]) => query));
@@ -76,11 +81,20 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   return { records, failures };
 }
 
+function visitWitnessAt(record, commitment) {
+  const after = new Date(commitment.sms_context?.source_at);
+  const activity = commitment.kind === 'technician_follow_up' ? record.completed_at : record.created_at;
+  const times = [activity, record.transitioned_at].filter(Boolean).map((v) => new Date(v))
+    .filter((v) => !Number.isNaN(v.getTime()) && v > after);
+  return times.length ? new Date(Math.min(...times.map((v) => v.getTime()))) : null;
+}
+
 function admissibleWitness(record, commitment) {
   // Deliverables and completed work need their actual records. A staff
   // text/call saying "sent" or "done" is only an association hint.
   if (!(REQUIRED_TYPES[commitment.kind] || ANSWER_TYPES).includes(record.type)) return false;
   const propertyId = commitment.sms_context?.property_id;
+  if (['estimate', 'visit'].includes(record.type) && (!propertyId || record.property_id !== propertyId)) return false;
   switch (record.type) {
     case 'sms':
       return ['sent', 'delivered'].includes(record.status)
@@ -93,10 +107,10 @@ function admissibleWitness(record, commitment) {
       return ['sent', 'delivered', 'opened', 'clicked'].includes(record.status)
         && !!record.sent_at && !record.bounced_at;
     case 'estimate':
-      return !!witnessAt(record, new Date(commitment.sms_context?.source_at))
-        && !!propertyId && record.property_id === propertyId;
+      return !!witnessAt(record, new Date(commitment.sms_context?.source_at));
     case 'visit':
-      return !!propertyId && record.property_id === propertyId && VISIT_STATUSES[commitment.kind].includes(record.status);
+      return VISIT_STATUSES[commitment.kind].includes(record.status)
+        && !!visitWitnessAt(record, commitment);
     // An invoice send does not establish that an invoice QUESTION was answered.
     // Its record is useful context only; require an actual scoped answer.
     default: return false;
@@ -113,7 +127,8 @@ function groundFulfillment(parsed, evidence, commitment) {
   if (quote.length < 3 || !normalized(witness.text).includes(quote)) return { verdict: 'uncertain', reason: 'ungrounded_witness' };
   return { verdict: 'fulfilled', record_type: witness.type, record_id: witness.id,
     matched_at: witness.type === 'estimate' ? witnessAt(witness, new Date(commitment.sms_context?.source_at))
-      : witness.sent_at || witness.received_at || witness.created_at, quote: parsed.quote,
+      : witness.type === 'visit' ? visitWitnessAt(witness, commitment)
+        : witness.sent_at || witness.received_at || witness.created_at, quote: parsed.quote,
     basis: 'grounded_sms_request_outcome', extractor_version: VERSION };
 }
 
