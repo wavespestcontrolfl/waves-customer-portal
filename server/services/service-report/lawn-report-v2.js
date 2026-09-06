@@ -568,12 +568,16 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // treating tan color or curling alone as moisture evidence.
   // Check each underwatering mention locally: a negated diagnosis must not
   // create advice or suppress a separate affirmative observation.
-  const underwateringSignal = [...obsText.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
-    const before = obsText.slice(0, match.index);
-    const after = obsText.slice(match.index + match[0].length);
-    return !/\b(?:no|not|never|without|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|free of|absence of)\s+(?:(?!(?:but|however|yet|while|whereas)\b)[a-z'’-]+\s+){0,3}(?:[a-z'’-]+(?:\s+[a-z'’-]+){0,2}\s*(?:,\s*(?:(?:or|and|nor)\s+)?|(?:or|and|nor)\s+))*$/.test(before)
-      && !/^\s+(?:(?:is|was|are|were|has|have|had)\s+)?(?:been\s+)?(?:absent|ruled out|(?:not|never|isn['’]t|wasn['’]t|hasn['’]t)\s+(?:been\s+)?(?:(?:a|an|the)\s+)?(?:seen|observed|visible|present|evident|indicated|detected|found|identified|documented|supported|suspected|concern|issue|problem|cause))\b/.test(after);
-  });
+  // A comma/"and" can join a negated list; split only when it starts a new
+  // subject or follows a completed observation ("no weeds seen, ...").
+  const underwateringSignal = obsText
+    .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?:,|\band\b)\s*(?=(?:the|this|that|these|those)\b)|\b(?:seen|found|observed|present)\s*(?:,\s*(?:and\s+)?|and\s+)/)
+    .some(clause => [...clause.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
+      const before = clause.slice(0, match.index);
+      const after = clause.slice(match.index + match[0].length);
+      return !/\b(?:no|not|never|without|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|free of|absence of)\b/.test(before)
+        && !/^\s+(?:(?:is|was|are|were|has|have|had)\s+)?(?:been\s+)?(?:absent|unlikely|ruled out|(?:not|never|isn['’]t|wasn['’]t|hasn['’]t)\s+(?:been\s+)?(?:(?:a|an|the)\s+)?(?:seen|observed|visible|present|evident|indicated|detected|found|identified|documented|supported|suspected|likely|concern|issue|problem|cause))\b/.test(after);
+    }));
   const drySignal = underwateringSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
     // Reversed order — "irrigation is uneven across the west side"
