@@ -25,6 +25,35 @@ function guardedCoordSelects(db) {
   ];
 }
 
+// The saved service address is authoritative for an existing appointment.
+// Keep hints and transactional arrival checks on the same address/pin read.
+function serviceLocationSelects(db) {
+  return [
+    ...guardedCoordSelects(db),
+    db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+    db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+    db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+    db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
+  ];
+}
+
+async function resolveServiceLocation(row, addressOverride) {
+  const { buildAddress, geocodeAddress } = require('../geocoder');
+  // Legacy ranged searches accept a free-form address override. Arrival
+  // callers pass only the stored row, so they cannot certify a client pin.
+  const address = addressOverride || buildAddress(row);
+  const hasPin = row.lat != null && row.lng != null
+    && Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lng))
+    && Number(row.lat) !== 0 && Number(row.lng) !== 0;
+  // The existing geocoder rejects partial, coarse, and out-of-area results
+  // and caches by address. Never persist a pin during an advisory lookup.
+  const pin = hasPin ? row : (address ? await geocodeAddress(address) : null);
+  return {
+    lat: pin?.lat ?? null, lng: pin?.lng ?? null, address,
+    source: hasPin ? 'visit_stamp' : (pin ? 'address_geocoded_now' : null),
+  };
+}
+
 /**
  * Build the day-stops query.
  *   dateStr          YYYY-MM-DD (scheduled_services.scheduled_date)
@@ -46,4 +75,4 @@ function dayStopsQuery(db, { dateStr, technicianId = null, excludeStatuses, sele
     .select(...select);
 }
 
-module.exports = { dayStopsQuery, guardedCoordSelects };
+module.exports = { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation };

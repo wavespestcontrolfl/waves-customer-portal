@@ -10,7 +10,7 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
-const { dayStopsQuery, guardedCoordSelects } = require('./day-stops');
+const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
 const { currentOrder, effectiveWindowRange, simulateArrivalRoute } = require('../route-reorder-window-fit');
 
 const COLUMNS = [
@@ -55,12 +55,15 @@ async function loadArrivalRouteContext({
   const stored = await conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.id', serviceId)
-    .first(...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn));
+    .first(...COLUMNS.map(c => `scheduled_services.${c}`), ...serviceLocationSelects(conn));
   if (!stored) return null;
   const techId = technicianId === undefined
     ? (Object.prototype.hasOwnProperty.call(changes, 'technician_id') ? changes.technician_id : stored.technician_id)
     : technicianId;
   const target = { ...stored, ...changes, technician_id: techId, scheduled_date: date };
+  const location = await resolveServiceLocation(target);
+  target.lat = location.lat;
+  target.lng = location.lng;
   if (dateOnly(stored.scheduled_date) !== date || (stored.technician_id || null) !== (techId || null)) {
     target.route_order = null;
   }
