@@ -1090,6 +1090,47 @@ describe('showdown bank formats: myth vs fact + three signs (PR 3)', () => {
     }
   });
 
+  test('every format card is grounded: verified facts-bank ids and/or a named public reference, surfaced in the plan sources', () => {
+    for (const entry of [...Studio.PEST_MYTHS, ...Studio.PEST_SIGNS]) {
+      const g = entry.grounding || {};
+      const facts = Array.isArray(g.facts) ? g.facts : [];
+      const refs = Array.isArray(g.refs) ? g.refs : [];
+      expect({ key: entry.key, grounded: facts.length + refs.length > 0 }).toEqual({ key: entry.key, grounded: true });
+      for (const id of facts) expect(id).toMatch(/^service_[a-z_]+_\d{2}$/);
+      const line = Studio.showdownGrounding(entry);
+      for (const id of facts) expect(line).toContain(id);
+      for (const ref of refs) expect(line).toContain(ref);
+    }
+    expect(Studio.showdownGrounding(Studio.PEST_VERSUS_PAIRS[0])).toBeNull();
+    // Spring-only wasp advice is season-gated like the swarmer pair.
+    expect(Studio.PEST_SIGNS.find((g) => g.key === 'signs_paper_wasps').months).toEqual([2, 3, 4, 5]);
+    expect(Studio.PEST_MYTHS.find((m) => m.key === 'myth_dryer_sheets_wasps').months).toEqual([2, 3, 4, 5]);
+    expect(Studio.versusPublishBlocker({ versusPair: { key: 'signs_paper_wasps' } }, etNoon('2026-11-30'))).toMatch(/out of season/);
+    expect(Studio.versusPublishBlocker({ versusPair: { key: 'signs_paper_wasps' } }, etNoon('2026-03-30'))).toBeNull();
+  });
+
+  test('the lane steps past recently published showdown keys, so a grown bank does not replay last month', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const day = etNoon('2026-09-10');
+    const natural = Studio.selectAutonomousVersusPlan(day);
+    const skipped = Studio.selectAutonomousVersusPlan(day, { recent: new Set([natural.versusPair.key]) });
+    expect(skipped.versusPair.key).not.toBe(natural.versusPair.key);
+    // The next bank entry, not a random one; the city is still the day's city.
+    const idx = Studio.SHOWDOWN_BANK.findIndex((e) => e.key === natural.versusPair.key);
+    expect(skipped.versusPair.key).toBe(Studio.SHOWDOWN_BANK[(idx + 1) % Studio.SHOWDOWN_BANK.length].key);
+    expect(skipped.city).toBe(natural.city);
+    // Every key recent → the plain sequence (never a dead lane).
+    const all = new Set(Studio.SHOWDOWN_BANK.map((e) => e.key));
+    expect(Studio.selectAutonomousVersusPlan(day, { recent: all }).versusPair.key).toBe(natural.versusPair.key);
+    // A month of fires with last month's cards in the window never repeats one of them.
+    const lastMonth = new Set([2, 6, 10, 14, 18, 22, 26, 30].map((d) => Studio.selectAutonomousVersusPlan(etNoon(`2026-08-${String(d).padStart(2, '0')}`))?.versusPair.key).filter(Boolean));
+    for (const d of [2, 6, 10, 14, 18, 22, 26, 30]) {
+      const plan = Studio.selectAutonomousVersusPlan(etNoon(`2026-09-${String(d).padStart(2, '0')}`), { recent: lastMonth });
+      if (plan) expect(lastMonth.has(plan.versusPair.key)).toBe(false);
+    }
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+
   test('every format draft passes the publish validator and carries the copy without the card', () => {
     for (const entry of [...Studio.PEST_MYTHS, ...Studio.PEST_SIGNS]) {
       const drafts = Studio.buildVersusDrafts(entry, 'Bradenton');
@@ -1123,8 +1164,11 @@ describe('showdown bank formats: myth vs fact + three signs (PR 3)', () => {
       expect(plan.angle).toBe('pest showdown');
       expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/book/');
       expect(plan.preview.sources[0].detail).toContain(plan.versusPair.verdict);
-      expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-01-02'))).toBeNull();
-      expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-08-02'))).toBeNull();
+      if (!plan.versusPair.months) {
+        expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-01-02'))).toBeNull();
+        expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-08-02'))).toBeNull();
+      }
+      expect(plan.preview.sources.find((src) => src.type === 'reference').detail).toBe(Studio.showdownGrounding(plan.versusPair));
     }
     const card = Studio.buildVersusCardInput(seen.signs.versusPair, seen.signs);
     expect(card.variant).toBe('versus');
