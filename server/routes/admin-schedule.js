@@ -10314,11 +10314,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
 
     // Research must see committed address stamps and must not replay prep sends.
-    try {
-      await require('../services/appointment-address').refreshAppointmentAddressBriefs(db, addressUpdatedIds);
-    } catch (err) {
+    void require('../services/appointment-address').refreshAppointmentAddressBriefs(db, addressUpdatedIds).catch((err) => {
       logger.error(`[schedule/update-details] address brief refresh failed: ${err.message}`);
-    }
+    });
 
     // Visit-group seam (visit-group-scope.md §2; codex #3590 r4/r8): a
     // direct Edit-Appointment change must repair grouped membership like
