@@ -572,6 +572,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // subject or follows a completed observation ("no weeds seen, ...").
   const underwateringSignal = obsText
     .replace(/\b(not|never|[a-z]+n['’]t)\s+yet\b/g, '$1')
+    // Two finite predicates joined by "and" are separate observations, unlike
+    // a shared subject list ("no signs of overwatering and underwatering").
+    .replace(/(\b(?:is|are|was|were|has|have|had|do|does|did)\b[^.!?;,]*?)\band\b(?=[^.!?;,]*\b(?:is|are|was|were|has|have|had|points? to|suggests?|indicates?|shows?|appears?|looks?|remains?|persists?)\b)/g, '$1;')
     .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?:,|\band\b)\s*(?=(?:the|this|that|these|those)\b)|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
     .some(clause => [...clause.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
       const before = clause.slice(0, match.index).replace(/\bnot\s+(?:only|just)\b/g, '');
@@ -581,8 +584,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       const predicate = match[0].endsWith('ing')
         ? after.replace(/^\s+(?:and|or|nor)\s+(?:[a-z'’-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ')
         : after;
-      return !/\b(?:no|not|never|neither|nor|without|[a-z]+n['’]t|cannot|free of|absence of)\b/.test(before)
-        && !/^\s+(?:(?!(?:and|or|nor|with|without|because|due|from|not|never|neither)\b)[a-z'’-]+\s+)*?(?:absent|unlikely|ruled out|no longer|(?:not|never|neither|[a-z]+n['’]t|cannot)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
+      return !/\b(?:no|not|never|neither|nor|without|[a-z]+n['’]t|cannot|free of|absence of|exclude[ds]?|ruled out|inconsistent with)\b/.test(before)
+        && !/^\s+(?:(?!(?:and|or|nor|with|without|because|due|from|not|never|neither)\b)[a-z'’-]+\s+)*?(?:absent|unlikely|excluded|inconsistent with|ruled out|no longer|(?:not|never|neither|[a-z]+n['’]t|cannot)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
     }));
   const drySignal = underwateringSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
