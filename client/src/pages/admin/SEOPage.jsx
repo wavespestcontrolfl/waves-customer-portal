@@ -3536,6 +3536,10 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   // after a mutation: the parent refreshes every panel when it owns the key, else this panel reloads itself
   const refresh = () => (onMutated ? onMutated() : load());
 
+  // Preserve edits (including clearing) for this held attempt; untouched verified rows use their exact stored URL.
+  const displayedSubmissionUrl = (card) => placementUrls[card.submission_ambiguity.id]
+    ?? (["live", "indexed"].includes(card.placement.status) ? card.placement.live_url ?? "" : "");
+
   const recordSubmissionVerdict = async (card, verdict) => {
     if (!window.confirm(verdict === "placed" ? "Confirm this submission reached the publisher at the URL entered below." : "Confirm you reviewed the evidence and no submission reached the publisher. This releases the automatic retry hold.")) return;
     setBusy(card.domain.id);
@@ -3543,7 +3547,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ submission_verdict: verdict, submission_attempt_id: card.submission_ambiguity.id, ...(verdict === "placed" ? { live_url: placementUrls[card.placement.id] || "" } : {}) }),
+        body: JSON.stringify({ submission_verdict: verdict, submission_attempt_id: card.submission_ambiguity.id, ...(verdict === "placed" ? { live_url: displayedSubmissionUrl(card) } : {}) }),
       });
       refresh();
     } catch (e) { setError(e?.message || "Submission verdict failed"); }
@@ -3718,10 +3722,10 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
               <p>The submission may have reached the publisher. Review the evidence before recording a verdict. Automatic retry remains held.</p>
               {c.submission_ambiguity.evidence_url ? <a href={c.submission_ambiguity.evidence_url} target="_blank" rel="noopener noreferrer">View submission screenshot</a> : <p>Screenshot unavailable. Verify the submission directly with the publisher before recording a verdict.</p>}
               <label style={{ display: "block", marginTop: 12 }}>Confirmed publisher URL
-                <input type="url" value={placementUrls[c.placement.id] || ""} onChange={(event) => setPlacementUrls({ ...placementUrls, [c.placement.id]: event.target.value })} placeholder="https://publisher.example/listing" style={{ width: "100%", boxSizing: "border-box", padding: 8, marginTop: 4, border: `1px solid ${D.border}`, borderRadius: 6, fontSize: 14 }} />
+                <input type="url" value={displayedSubmissionUrl(c)} onChange={(event) => setPlacementUrls({ ...placementUrls, [c.submission_ambiguity.id]: event.target.value })} placeholder="https://publisher.example/listing" style={{ width: "100%", boxSizing: "border-box", padding: 8, marginTop: 4, border: `1px solid ${D.border}`, borderRadius: 6, fontSize: 14 }} />
               </label>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
-                <button disabled={busy !== null || Boolean(c.placement.claimed_at) || !placementUrls[c.placement.id]} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => recordSubmissionVerdict(c, "placed")}>Confirm submitted</button>
+                <button disabled={busy !== null || Boolean(c.placement.claimed_at) || !displayedSubmissionUrl(c)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => recordSubmissionVerdict(c, "placed")}>Confirm submitted</button>
                 <button disabled={busy !== null || Boolean(c.placement.claimed_at)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => recordSubmissionVerdict(c, "not_submitted")}>Confirm not submitted</button>
               </div>
             </div>}
