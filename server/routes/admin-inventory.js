@@ -137,6 +137,7 @@ function approvedPerOzFields(price, quantity) {
 // shipping_cost / tax_rate / landed_cost, and the count-based ranking rebuilds
 // its landed total from them, so an obsolete charge left beside the new
 // price would still decide the vendor; shipping_estimate follows the snapshot.
+const snapshotCountUnit = (uom) => (uom && parsePackCount(`1 ${String(uom).trim()}`) ? String(uom).trim().toLowerCase() : null);
 function snapshotPricingFields(snapshot) {
   return {
     normalized_unit_price: snapshot.normalized_unit_price ?? null,
@@ -146,7 +147,11 @@ function snapshotPricingFields(snapshot) {
     // row that the snapshot moved to a count pack in 'oz' mode.
     price_per_oz: null,
     quantity: snapshot.quantity ?? null,
-    unit_normalized: snapshot.normalized_unit ?? null,
+    // The price-sync worker stores a COUNT offer's unit in price_snapshots.uom
+    // ("each"), not normalized_unit (Codex #3974 r6 P1): a count uom is
+    // carried into unit_normalized so scoreVendorRows can honor the row's
+    // per-item landed_unit_price; a measured uom stays with normalized_unit.
+    unit_normalized: snapshot.normalized_unit ?? snapshotCountUnit(snapshot.uom),
     expires_at: snapshot.expires_at ?? null,
     shipping_cost: null,
     tax_rate: null,

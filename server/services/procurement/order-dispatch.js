@@ -92,7 +92,7 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const { startOfETMonth, addETDays } = require('../../utils/datetime-et');
 const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
-const { parsePackSize, convertToOz } = require('../product-costing');
+const { parsePackSize, parsePackCount, countUnitsCompatible, convertToOz } = require('../product-costing');
 const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 
 const GATE = 'GATE_AUTO_ORDER';
@@ -189,7 +189,6 @@ async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
 }
 
 // Pack-size count for count-based stock: "100", "100 each", "50 ct", "1 pc".
-const COUNT_PACK_RE = /^(\d+(?:\.\d+)?)\s*(?:each|ea|ct|count|pcs?|pieces?|units?)?\.?$/i;
 
 /**
  * The quantity typed into the VENDOR's order field, derived from the request
@@ -218,8 +217,14 @@ function countOrderQuantity({ adapter, requested, unit, requestUnit }) {
 // 128 fl oz jug orders 2 jugs = 256 fl oz, and THAT is what arrives).
 function packagedOrderQuantity({ requested, unit, requestUnit, packRaw }) {
   if (unit === 'each') {
-    const m = packRaw.match(COUNT_PACK_RE);
-    const per = m ? Number(m[1]) : null;
+    // The ONE count-pack parser (product-costing.parsePackCount — the same
+    // one the best-price recalculation scales by, Codex #3974 r6 P1): a
+    // pack the catalog prices as "10 stations" or "20 tablets" is orderable
+    // as that many items. A container noun ("1 case") is not a count of
+    // items — countUnitsCompatible('each', …) refuses it — so it still
+    // parks no_pack_size rather than ordering one item per case.
+    const pack = parsePackCount(packRaw);
+    const per = pack && countUnitsCompatible('each', pack.unit) ? pack.count : null;
     if (!per || per <= 0) return { error: 'no_pack_size', message: `price row pack size "${packRaw || '—'}" is not a count for a product stocked in each` };
     const quantity = Math.ceil(requested / per - 1e-9);
     return { quantity, packSize: `${per} each`, orderedQuantity: quantity * per };

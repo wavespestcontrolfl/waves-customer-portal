@@ -487,6 +487,12 @@ describe('recalcBestPrice', () => {
     const { snapshotPricingFields } = inventoryRouter._test;
     const f = snapshotPricingFields({ price: 20.07, quantity: '20 count', normalized_unit_price: null, normalized_unit: null, expires_at: null, shipping_estimate: 6.5 });
     expect(f).toEqual({ normalized_unit_price: null, landed_unit_price: null, price_per_oz: null, quantity: '20 count', unit_normalized: null, expires_at: null, shipping_cost: null, tax_rate: null, landed_cost: null, shipping_estimate: 6.5 });
+    // a worker COUNT offer carries its unit in uom ("each"), not normalized_unit — it must reach unit_normalized so the per-item landed price is honored (r6 P1)
+    const c = snapshotPricingFields({ price: 10, quantity: '10 stations', uom: 'each', landed_unit_price: 3, normalized_unit: null });
+    expect(c.unit_normalized).toBe('each');
+    expect(c.landed_unit_price).toBe(3);
+    // a measured uom without a normalized unit stays null (measured rows read normalized_unit)
+    expect(snapshotPricingFields({ price: 10, quantity: '1 gal', uom: 'gal', normalized_unit: null }).unit_normalized).toBeNull();
   });
 
   test('COGS that contradicts the catalog\'s committed size is reset on EVERY path — the stale guard, the no-valid-price path — while unknown semantics are left alone (r5 P1)', async () => {
