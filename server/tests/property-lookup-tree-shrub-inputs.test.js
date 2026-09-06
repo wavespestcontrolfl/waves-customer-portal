@@ -36,6 +36,15 @@ function baseProfile(extra = {}) {
 const treeShrubLine = (input) => generateEstimate(input).lineItems.find((li) => li.service === 'tree_shrub');
 
 describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () => {
+  test('preserves an operator-confirmed bed area instead of stamping it inferred', () => {
+    const manual = translateV2CallToV1Input(baseProfile({ estimatedBedAreaSf: 900, bedAreaSource: 'manual' }), ['TREE_SHRUB'], {});
+    const inferred = translateV2CallToV1Input(baseProfile({ estimatedBedAreaSf: 900 }), ['TREE_SHRUB'], {});
+    expect(manual).toMatchObject({ bedArea: 900, bedAreaSource: 'manual' });
+    expect(inferred).toMatchObject({ bedArea: 900, bedAreaSource: 'estimated' });
+    expect(treeShrubLine(manual).bedAreaSource).toBe('explicit');
+    expect(treeShrubLine(inferred).bedAreaSource).toBe('estimated');
+  });
+
   test('defaults: standard program, easy access, no count fabricated (INP-002)', () => {
     const input = translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], {});
     expect(input.services.treeShrub).toEqual({ tier: 'standard', access: 'easy' });

@@ -706,20 +706,25 @@ router.get('/', async (req, res, next) => {
   try {
     const {
       status, source, source_name, channel, search, sort = 'first_contact_at',
-      order = 'desc', page = 1, limit = 50, start_date, end_date,
+      order = 'desc', page = 1, limit = 50, start_date, end_date, id,
     } = req.query;
+    if (id && Joi.string().uuid().validate(id).error) return res.status(400).json({ error: 'Invalid lead id' });
 
     let query = db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'estimates.status as estimate_status',
         db.raw("technicians.name as assigned_name"),
       )
       .whereNull('leads.deleted_at');
+
+    if (id) query = query.where('leads.id', id);
 
     // Virtual `open` filter (the Pipeline table's default view): every status
     // still being worked. Individual status values pass through unchanged.
@@ -775,6 +780,7 @@ router.get('/', async (req, res, next) => {
     const countQuery = db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .whereNull('leads.deleted_at');
+    if (id) countQuery.where('leads.id', id);
     if (status === 'open') countQuery.whereIn('leads.status', OPEN_LEAD_STATUSES);
     else if (status) countQuery.where('leads.status', status);
     if (source) countQuery.where('leads.lead_source_id', source);
@@ -824,10 +830,23 @@ router.get('/', async (req, res, next) => {
 
     const leads = await query
       .orderBy(sortCol, order === 'asc' ? 'asc' : 'desc')
+      .orderBy('leads.id', 'asc')
       .limit(lim)
       .offset((pg - 1) * lim);
 
     res.json({ leads, total: parseInt(count, 10), page: pg, limit: lim });
+  } catch (err) { next(err); }
+});
+
+// Manual intake shows possible existing records using the same contact
+// match as estimate/lead linking. A shared contact never implies a merge.
+router.get('/contact-matches', async (req, res, next) => {
+  try {
+    const { findUnconvertedLeadsByContact } = require('../services/lead-estimate-link');
+    const matches = await findUnconvertedLeadsByContact(db, req.query.phone, req.query.email);
+    res.json({ matches: matches.slice(0, 5).map(({ id, first_name, last_name, status, service_interest }) => ({
+      id, first_name, last_name, status, service_interest,
+    })), total: matches.length });
   } catch (err) { next(err); }
 });
 

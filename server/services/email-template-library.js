@@ -642,6 +642,17 @@ async function alertBlockedOperationalSend({ template, suppressionGroupKey, to, 
   }
 }
 
+// Content identity for an explicitly reviewed send. Version status and
+// publication timestamps can change while the offer waits; content cannot.
+function templateContentHash(template, version) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    template.name, template.template_key, template.mode, template.layout_wrapper_id,
+    template.default_cta_label, template.default_cta_url_variable,
+    template.from_name, template.from_email, template.reply_to,
+    version.subject, version.preview_text, normalizeBlocks(version.blocks), version.text_body,
+  ])).digest('hex');
+}
+
 async function loadTemplateByKey(templateKey) {
   const template = await db('email_templates').where({ template_key: templateKey }).first();
   if (!template) return null;
@@ -898,6 +909,7 @@ function assertTemplateSendable(template, { test = false } = {}) {
 async function sendTemplate({
   templateKey,
   versionId,
+  expectedContentHash = null,
   to,
   payload,
   recipientType,
@@ -963,6 +975,9 @@ async function sendTemplate({
     }
     template = loaded.template;
     version = loaded.activeVersion;
+  }
+  if (expectedContentHash && templateContentHash(template, version) !== expectedContentHash) {
+    throw new Error('The reviewed email content changed. Review the message again before sending.');
   }
   try {
     assertTemplateSendable(template, { test });
@@ -1321,6 +1336,7 @@ module.exports = {
   renderTemplate,
   renderVersion,
   loadTemplateByKey,
+  templateContentHash,
   loadVersion,
   dedupedResultForExistingMessage,
   shouldRetryExistingMessage,

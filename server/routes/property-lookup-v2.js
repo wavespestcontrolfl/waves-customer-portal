@@ -4667,7 +4667,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     estimatedBedAreaSf: p.estimatedBedAreaSf,
     estimatedBedAreaPercent: p.estimatedBedAreaPercent,
     bedArea: p.estimatedBedAreaSf,
-    bedAreaSource: p.estimatedBedAreaSf !== undefined && p.estimatedBedAreaSf !== null && p.estimatedBedAreaSf !== ''
+    bedAreaSource: p.bedAreaSource === 'manual' ? 'manual' : p.estimatedBedAreaSf !== undefined && p.estimatedBedAreaSf !== null && p.estimatedBedAreaSf !== ''
       ? 'estimated'
       : undefined,
     palmCount: positiveIntegerValue(p.palmCount),
