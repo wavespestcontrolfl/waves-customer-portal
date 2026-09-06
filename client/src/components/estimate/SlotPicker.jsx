@@ -24,6 +24,7 @@ import {
 import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/estimate-glass-slots';
 import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
 import { W } from './tokens';
+import { GOLD_CTA } from '../../theme-brand';
 
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -101,6 +102,7 @@ export default function SlotPicker({
   const [pickedDate, setPickedDate] = useState(null);
   const [pickedData, setPickedData] = useState(null);
   const [pickedLoading, setPickedLoading] = useState(false);
+  const [pickedError, setPickedError] = useState(false);
   const [pickedDateFocused, setPickedDateFocused] = useState(false);
   const latestPickedRequestRef = useRef(0);
   const pickedDateInputId = useId();
@@ -182,6 +184,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(null);
     setPickedData(null);
+    setPickedError(false);
     setPickedLoading(false);
     latestPickedRequestRef.current += 1;
     const params = new URLSearchParams();
@@ -271,7 +274,11 @@ export default function SlotPicker({
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
     if (glass) body.summary = glassRewriteSlotSummary(body.summary, query);
+    latestPickedRequestRef.current += 1;
     setPickedDate(null);
+    setPickedData(null);
+    setPickedError(false);
+    setPickedLoading(false);
     setPickedDay(null);
     selectSlot(null);
     setSearchData(body);
@@ -283,6 +290,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(null);
     setPickedData(null);
+    setPickedError(false);
     setPickedDay(null);
     setPickedLoading(false);
     selectSlot(null);
@@ -294,6 +302,7 @@ export default function SlotPicker({
     setSearchData(null);
     setPickedDate(date);
     setPickedData(null);
+    setPickedError(false);
     setPickedDay(null);
     selectSlot(null);
     if (!date) {
@@ -305,12 +314,13 @@ export default function SlotPicker({
       const p = freqParams();
       p.set('date', date);
       const res = await fetch(`${API_BASE}/public/estimates/${token}/available-slots?${p.toString()}`);
-      const body = res.ok ? await res.json() : { primary: [], expander: [] };
+      if (!res.ok) throw new Error('slot fetch failed');
+      const body = await res.json();
       if (latestPickedRequestRef.current !== requestId) return;
       setPickedData(body);
     } catch {
       if (latestPickedRequestRef.current !== requestId) return;
-      setPickedData({ primary: [], expander: [] });
+      setPickedError(true);
     } finally {
       if (latestPickedRequestRef.current === requestId) {
         setPickedLoading(false);
@@ -365,7 +375,7 @@ export default function SlotPicker({
         subtitle={null}
         onSearch={runAiSearch}
       />
-      {searchData || pickedData ? (
+      {searchData || pickedDate ? (
         <button
           type="button"
           onClick={clearFinder}
@@ -503,10 +513,17 @@ export default function SlotPicker({
         <GlassTechChip slotMeta={heldSelection} licenseNumber={licenseNumber} />
       ) : null}
       {search}
-      {glass && !activePayload && !pickedLoading ? (
+      {glass && !activePayload && !pickedDate && !pickedLoading ? (
         <GlassScarcityBadge info={glassScarcityInfo(allSlots, data?.metadata?.firstDayAvailability)} />
       ) : null}
-      {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 12 }}>Loading times…</div> : picker}
+      {pickedLoading ? <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 12 }}>Loading times…</div> : pickedError ? (
+        <div role="alert" style={{ fontSize: 16, color: W.textBody, marginBottom: 12 }}>
+          We couldn’t load times for that day. Please try again.
+          <button type="button" onClick={() => onPickDate(pickedDate)} style={{ ...GOLD_CTA, display: 'block', width: '100%', marginTop: 12 }}>
+            Try again
+          </button>
+        </div>
+      ) : picker}
       {dateFinder}
     </div>
   );

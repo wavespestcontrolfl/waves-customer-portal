@@ -131,26 +131,24 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
 
-  // New proposals replace the previous batch's local state. Countdown
+  // Preserve existing card outcomes and expiry across clarification turns. Countdown
   // deadlines anchor on RECEIPT TIME + the server-computed expiresInMs, so a
   // skewed device clock can't stale the card early or keep Confirm alive
   // past the server's TTL; raw expiresAt is only the fallback for older
   // server responses that don't send the duration.
   const [deadlineById, setDeadlineById] = useState({});
   useEffect(() => {
-    setStatusById({});
-    setErrorById({});
     const received = Date.now();
     const deadlines = {};
     for (const a of actions || []) {
       if (typeof a.expiresInMs === "number") {
-        deadlines[a.id] = received + a.expiresInMs;
+        deadlines[a.id] = (a.receivedAt ?? received) + a.expiresInMs;
       } else if (a.expiresAt) {
         const at = new Date(a.expiresAt).getTime();
         if (Number.isFinite(at)) deadlines[a.id] = at;
       }
     }
-    setDeadlineById(deadlines);
+    setDeadlineById(previous => Object.fromEntries(Object.entries(deadlines).map(([id, deadline]) => [id, previous[id] ?? deadline])));
   }, [actions]);
 
   // Tick for the expiry countdown — the server enforces the 10-minute TTL
@@ -204,6 +202,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       if (onResolved) onResolved(action, decision, body);
     } catch (err) {
       setStatus(action.id, "failed", err.message);
+      if (onResolved) onResolved(action, decision, { success: false, result: { error: err.message } });
     }
   };
 
@@ -227,7 +226,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       className={dark ? undefined : "mt-2 mb-3 flex flex-col gap-2"}
     >
       {actions.map((action) => {
-        const status = statusById[action.id];
+        const status = statusById[action.id] || action.resolvedStatus;
         const settled = status === "confirmed" || status === "cancelled" || status === "failed";
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
@@ -279,12 +278,12 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             </div>
             )}
 
-            {(status === "failed" || (status === "confirmed" && errorById[action.id])) && (
+            {(status === "failed" || (status === "confirmed" && (errorById[action.id] || action.resolvedWarning))) && (
               <div
                 style={dark ? { fontSize: 14, color: D.red, marginBottom: 8 } : undefined}
                 className={dark ? undefined : "text-[14px] text-alert-fg mb-2"}
               >
-                {errorById[action.id]}
+                {(errorById[action.id] || action.resolvedWarning)}
               </div>
             )}
 

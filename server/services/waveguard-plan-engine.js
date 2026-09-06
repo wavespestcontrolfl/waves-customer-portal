@@ -1021,7 +1021,10 @@ async function getLatestAssessment(knex, customerId, { strict = false } = {}) {
   };
 }
 
-async function getActiveCalibrations(knex, filters = {}) {
+// strict: a failed calibration read throws instead of reading as "no rig"
+// (the job card shows the check as unavailable; the Lawn plan keeps its
+// empty-list default).
+async function getActiveCalibrations(knex, filters = {}, { strict = false } = {}) {
   const query = knex('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -1043,7 +1046,7 @@ async function getActiveCalibrations(knex, filters = {}) {
     query.where('ec.id', filters.calibrationId);
   }
 
-  return query.catch(() => []);
+  return query.catch((err) => { if (strict) throw err; return []; });
 }
 
 // strict: a failed catalog read throws instead of reading as an empty
@@ -1073,7 +1076,9 @@ async function getProducts(knex, { strict = false } = {}) {
     ? await knex('product_aliases')
       .whereIn('product_id', productIds)
       .select('product_id', 'alias_name')
-      .catch(() => [])
+      // strict: aliases are how de-branded protocol lines find their
+      // product — a failed read would silently drop them, so it throws too.
+      .catch((err) => { if (strict) throw err; return []; })
     : [];
   const aliasesByProduct = aliases.reduce((acc, row) => {
     if (!acc[row.product_id]) acc[row.product_id] = [];

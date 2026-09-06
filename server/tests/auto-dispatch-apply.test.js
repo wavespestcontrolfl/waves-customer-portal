@@ -509,3 +509,23 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard({ trx, members })).resolves.toBeUndefined();
   });
 });
+
+
+const LOCATION = {
+  property_id: 'property-original', service_address_line1: '100 Example Street', service_address_line2: '',
+  service_address_city: 'Example City', service_address_state: 'FL', service_address_zip: '00000', lat: '27.4', lng: '-82.5',
+};
+test.each(Object.keys(LOCATION))('rejects a changed %s before applying a scored move', async (field) => {
+  const scored = { ...SERVICE, ...LOCATION };
+  db.mockImplementation(() => readRow({ ...scored, [field]: field === 'lat' || field === 'lng' ? '28.5' : 'changed' }));
+  await expect(applyAutoDispatchMove(scored, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('pins the complete location in the atomic rebooker expectation', async () => {
+  const scored = { ...SERVICE, ...LOCATION };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, BEST, 'run1', {});
+  expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject(LOCATION);
+});

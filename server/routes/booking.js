@@ -1,3 +1,4 @@
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../services/stops-ahead');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
@@ -882,7 +883,7 @@ function roundPublicCoord(value) {
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '' }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '' }) {
   // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
   // daily outlook so it overlaps the slot computation; stamped onto days/slots
   // just before the return. Bounded + cached + fail-open in the service (null
@@ -918,13 +919,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // "no open window" message despite real weekend availability. Match the
     // estimate flow so both booking surfaces offer the same days.
     includeWeekends: true,
-    // The default best-4 window is narrow, so 200 ranked candidates is ample.
-    // A specific-date / "Find more dates" browse (expandOpenDays) can span the
-    // full 90-day horizon across several techs — capping at 200 there would
-    // drop the lowest-scored (furthest-out) dates and make the calendar mark
-    // them unavailable, so pull every feasible candidate. find-time only slices
-    // a pre-computed list, so this is cheap.
-    topN: expandOpenDays ? Number.MAX_SAFE_INTEGER : 200,
+    // Display selection happens only after every feasible day is evaluated.
+    topN: Number.MAX_SAFE_INTEGER,
   });
 
   // Enforce max_self_books_per_day — filter out dates already at cap.
@@ -951,8 +947,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const bookingCounts = await db(function effectiveDates() {
     this.select('id', db.raw(`${effectiveDateSql} AS effective_date`, inactiveStatuses))
       .from('self_booked_appointments')
-      .whereNot('status', 'cancelled')
-      .as('sb');
+      .whereNot('status', 'cancelled');
+    if (excludeSelfBookingId) this.whereNot('id', excludeSelfBookingId);
+    this.as('sb');
   })
     .whereBetween('effective_date', [rangeFrom, rangeTo])
     .select('effective_date as date')
@@ -966,7 +963,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // day_full: the offer surface promising what the gate declines, which is the
   // exact divergence this filter exists to prevent.
   const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-  const voiceCounts = await db('scheduled_services')
+  const voiceCountQuery = db('scheduled_services')
     .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
     // Same inactive set the commit-time counter uses — a skipped (office-
     // rejected) AI request releases its slot instead of holding the day full.
@@ -975,6 +972,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     .select('scheduled_date')
     .count('* as count')
     .groupBy('scheduled_date');
+  if (excludeServiceIds.length) voiceCountQuery.whereNotIn('id', excludeServiceIds);
+  const voiceCounts = await voiceCountQuery;
   // Never throws on a missing/unparseable date: an availability BUILDER that
   // dies mid-count would take the whole offer surface down with it.
   const dayKey = (d) => {
@@ -1172,19 +1171,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     slots.sort((a, b) => a.start_time.localeCompare(b.start_time));
     const best = slots.reduce((acc, s) => (acc == null || s.rank < acc.rank ? s : acc), null);
     const labels = dateLabels(date);
-    // Default landing keeps the tight 4-per-day cap; a specific-date / AI
-    // search opens it up so the customer sees the full block of options.
-    const perDayCap = expandOpenDays ? 8 : 4;
-    // "nearby" (route-efficient) is a per-slot fact — the picker labels
-    // each time from its own flag; the day rolls them up for the calendar.
-    const cappedSlots = slots
-      .map(s => ({ ...s, is_best_fit: s === best, nearby: s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES }))
-      .slice(0, perDayCap);
+    // Keep every feasible start for selection and confirmation; recommendations
+    // remain curated separately. Route proximity is a per-slot fact.
+    const daySlots = slots.map(s => ({ ...s, is_best_fit: s === best, nearby: s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES }));
     days.push({
       date,
       ...labels,
-      nearby: cappedSlots.some(s => s.nearby),
-      slots: cappedSlots,
+      nearby: daySlots.some(s => s.nearby),
+      slots: daySlots,
     });
   }
   days.sort((a, b) => a.date.localeCompare(b.date));
@@ -2564,7 +2558,7 @@ async function createSelfBooking(payload = {}) {
       const conflictQuery = trx('scheduled_services')
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', slotDateStr)
-        .whereNotIn('scheduled_services.status', ['cancelled'])
+        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
         .where((q) => {
           q.whereNull('scheduled_services.reservation_expires_at')
             .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');

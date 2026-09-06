@@ -1650,6 +1650,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
+  const [addressOptions, setAddressOptions] = useState([]);
+  const [addressState, setAddressState] = useState("loading");
+  const [selectedPropertyId, setSelectedPropertyId] = useState("");
+  const selectedProperty = addressOptions.find((property) => property.id === selectedPropertyId);
+  useEffect(() => {
+    let cancelled = false;
+    const customerId = service.customerId || service.customer_id;
+    setAddressState("loading");
+    setSelectedPropertyId("");
+    adminFetch(`/admin/customers/${customerId}/properties?context=appointment_address`)
+      .then((data) => {
+        if (cancelled) return;
+        setAddressOptions(data.properties || []);
+        setAddressState(data.canChangeAppointmentAddress === true ? "ready" : "disabled");
+      })
+      .catch(() => { if (!cancelled) setAddressState("error"); });
+    return () => { cancelled = true; };
+  }, [service.customerId, service.customer_id, service.id]);
   const [customerData, setCustomerData] = useState(null);
   const [customerLoading, setCustomerLoading] = useState(false);
   const [payers, setPayers] = useState([]);
@@ -2166,6 +2184,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
@@ -3415,13 +3434,38 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 Customer location
               </div>{" "}
+              {addressState === "ready" && addressOptions.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <label htmlFor="appointment-property" style={{ ...labelStyle, fontSize: 14 }}>Service address</label>
+                  <select id="appointment-property" value={selectedPropertyId}
+                    onChange={(event) => setSelectedPropertyId(event.target.value)}
+                    disabled={saving} style={{ ...inputStyle, maxWidth: "100%" }}>
+                    <option value="">Keep current appointment address</option>
+                    {addressOptions.map((property) => (
+                      <option key={property.id} value={property.id}>
+                        {[property.label, property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(", ")}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedPropertyId && (
+                    <p style={{ fontSize: 14, color: D.muted, margin: "8px 0 0" }}>
+                      {serviceHasSeries
+                        ? "Saving applies this address to this appointment and all upcoming appointments in this plan, including appointments created later."
+                        : "Saving changes this appointment’s address."}
+                      {" Services grouped at the same stop stay together."}
+                    </p>
+                  )}
+                </div>
+              )}
+              {addressState === "loading" && <p style={{ fontSize: 14, color: D.muted }}>Loading saved addresses…</p>}
+              {addressState === "error" && <p role="alert" style={{ fontSize: 14 }}>Saved addresses could not be loaded. Reopen this appointment to try again.</p>}
               <div style={{ display: "grid", gap: 12 }}>
                 {" "}
                 <div>
                   {" "}
                   <label style={labelStyle}>Street address</label>{" "}
                   <input
-                    value={service.address || customer.address?.line1 || ""}
+                    value={selectedProperty ? [selectedProperty.address_line1, selectedProperty.address_line2].filter(Boolean).join(" ") : service.address || customer.address?.line1 || ""}
                     readOnly
                     className="font-medium"
                     style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -3439,7 +3483,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {" "}
                     <label style={labelStyle}>City</label>{" "}
                     <input
-                      value={service.city || customer.address?.city || ""}
+                      value={selectedProperty ? selectedProperty.city || "" : service.city || customer.address?.city || ""}
                       readOnly
                       className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -3449,7 +3493,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {" "}
                     <label style={labelStyle}>State</label>{" "}
                     <input
-                      value={customer.address?.state || "Florida"}
+                      value={selectedProperty ? selectedProperty.state || "" : service.state || customer.address?.state || "Florida"}
                       readOnly
                       className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -4883,6 +4927,8 @@ function JobCardOrderButton({ productId, name, order, D, compact = false }) {
 
 function JobCardProduct({ p, D }) {
   const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+  // The shortage line names the plan's requirement even while the dose is withheld.
+  const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
   const right = (
     <>
       {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
@@ -4902,8 +4948,8 @@ function JobCardProduct({ p, D }) {
         {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
         {p.short && (
           <div style={{ color: "#C8312F" }}>
-            {amount
-              ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${amount} planned.`
+            {demand
+              ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
               : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
           </div>
         )}
@@ -4961,6 +5007,8 @@ function JobCardTank({ tank, serviceId, D }) {
     }
     let cancelled = false;
     setBusy(true);
+    // Never show the previous product's verdict beside the new one.
+    setMix(null);
     adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
@@ -4987,11 +5035,11 @@ function JobCardTank({ tank, serviceId, D }) {
       title="Tank"
       defaultOpen
       D={D}
-      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label="Not calibrated" D={D} /> : null}
+      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label={tank.unavailable ? "Unavailable" : "Not calibrated"} D={D} /> : null}
     >
       <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
         {tank && !tank.calibrated && (
-          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld until a calibrated rig is on file; per-gallon dilutions still mix.</div>
+          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld {tank.unavailable ? "until the check succeeds" : "until a calibrated rig is on file"}; per-gallon dilutions still mix.</div>
         )}
         <div style={{ display: "flex", gap: 8 }}>
           <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>
@@ -5041,7 +5089,14 @@ function JobCardTank({ tank, serviceId, D }) {
         )}
         {picked && (
           <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: 12, display: "grid", gap: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>{picked.name}</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+              <span>{picked.name}</span>
+              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.verdict} D={D} />}
+            </div>
+            {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
+              <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
+            )}
+            {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}{mix.context.conditional ? " · if needed" : ""}</div>}
             {busy ? (
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
@@ -5100,12 +5155,15 @@ function JobCardTab({ card, loading, error, D }) {
       )}
       {products.length > 0 && (
         <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
-          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}
+          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}{card.addons?.length ? ` · + ${card.addons.map((a) => (a.visit?.number ? `${a.name} (visit ${a.visit.number})` : a.name)).join(", ")}` : ""}
         </div>
       )}
+      {(card.addons || []).filter((a) => a.note).map((a) => (
+        <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
+      ))}
       {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
       {products.length === 0 && (
-        <div style={{ fontSize: 13, color: D.muted }}>No protocol products matched this visit.</div>
+        <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
       )}
     </div>
   );
