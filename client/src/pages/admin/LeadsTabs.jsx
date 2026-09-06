@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useCustomerSms } from "../../components/admin/customer360/CustomerSmsPanel";
+import React, { useState, useEffect, useCallback, useRef, useMemo, useId } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Trash2 } from "lucide-react";
+import { Trash2, Search, SlidersHorizontal } from "lucide-react";
+import useModalFocus from "../../hooks/useModalFocus";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import useIsMobile from "../../hooks/useIsMobile";
@@ -108,7 +110,7 @@ function LeadOwedPromises({ leadId }) {
     <div style={{ marginTop: 12 }} data-testid="lead-owed">
       <h4 style={{ margin: "0 0 8px", color: C.heading, fontSize: 14 }}>Owed on this lead</h4>
       {error && (
-        <div role="alert" style={{ color: C.red, fontSize: 12, marginBottom: 8 }}>
+        <div role="alert" style={{ color: C.red, fontSize: 14, marginBottom: 8 }}>
           {error}{" "}
           <button type="button" onClick={load} style={{ minHeight: 32, padding: "4px 10px", border: `1px solid ${C.border}`, borderRadius: 6, background: "transparent", color: C.text, cursor: "pointer", font: "inherit", fontSize: 12 }}>
             Retry
@@ -116,7 +118,7 @@ function LeadOwedPromises({ leadId }) {
         </div>
       )}
       {rows.slice(0, LEAD_OWED_LIMIT).map((row) => (
-        <div key={row.id} style={{ border: `1px solid ${row.overdue ? C.red : C.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: C.text }}>
+        <div key={row.id} style={{ border: `1px solid ${row.overdue ? C.red : C.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 14, color: C.text }}>
           <div style={{ marginBottom: 4 }}>
             <strong>{row.party === "waves" ? "Waves promised" : "Customer agreed"}:</strong> {row.description}
           </div>
@@ -236,13 +238,7 @@ const leadMatchesStatusFilter = (lead, status) =>
   (status === "open"
     ? OPEN_FILTER_STATUSES.includes(lead.status)
     : lead.status === status);
-const BOARD_STAGES = [
-  "new",
-  "contacted",
-  "estimate_sent",
-  "won",
-  "lost",
-];
+const BOARD_STAGES = STATUSES;
 const LEAD_TYPES = [
   "inbound_call",
   "inbound_sms",
@@ -255,7 +251,6 @@ const LEAD_TYPES = [
   "email_inquiry",
 ];
 const LEADS_REFRESH_MS = 10_000;
-const PIPELINE_SUMMARY_REFRESH_MS = 30_000;
 const EXPANDED_LEAD_REFRESH_MS = 15_000;
 
 function isPageVisible() {
@@ -332,7 +327,7 @@ function Badge({ label, color, style }) {
         display: "inline-block",
         padding: "2px 10px",
         borderRadius: 9999,
-        fontSize: 11,
+        fontSize: 14,
         fontWeight: 500,
         backgroundColor: color + "22",
         color,
@@ -378,7 +373,7 @@ function MetricCard({ label, value, sub, color }) {
   return (
     <Card style={{ flex: "1 1 180px", minWidth: 160 }}>
       {" "}
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
+      <div style={{ fontSize: 14, color: C.muted, marginBottom: 4 }}>
         {label}
       </div>{" "}
       <div
@@ -392,7 +387,7 @@ function MetricCard({ label, value, sub, color }) {
         {value}
       </div>
       {sub && (
-        <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{sub}</div>
+        <div style={{ fontSize: 14, color: C.muted, marginTop: 2 }}>{sub}</div>
       )}
     </Card>
   );
@@ -422,7 +417,7 @@ function PipelineStatusCard({ label, value }) {
       >
         <span
           style={{
-            fontSize: 11,
+            fontSize: 14,
             fontWeight: 500,
             textTransform: "uppercase",
             letterSpacing: 0,
@@ -439,109 +434,24 @@ function PipelineStatusCard({ label, value }) {
   );
 }
 
-function LeadsWorkspaceNav({ active, onChange, counts }) {
-  const tabs = [
-    {
-      key: "pipeline",
-      label: "Pipeline",
-      count: counts.pipeline,
-    },
-    {
-      key: "sources",
-      label: "Sources",
-      count: counts.sources,
-    },
-    {
-      key: "analytics",
-      label: "ROI Analytics",
-      count: counts.analytics,
-    },
-  ];
-  return (
-    <div
-      style={{
-        marginBottom: 24,
-        border: `1px solid ${C.border}`,
-        borderRadius: 6,
-        background: C.card,
-        overflow: "hidden",
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-          gap: 0,
-        }}
-      >
-        {tabs.map((t) => {
-          const isActive = active === t.key;
-          return (
-            <button
-              key={t.key}
-              type="button"
-              onClick={() => onChange(t.key)}
-              style={{
-                minHeight: 48,
-                padding: "12px 14px",
-                border: "none",
-                borderRight:
-                  t.key === "analytics" ? "none" : `1px solid ${C.border}`,
-                borderBottom: isActive
-                  ? `3px solid ${C.heading}`
-                  : "3px solid transparent",
-                background: isActive ? C.bg : C.card,
-                color: isActive ? C.heading : C.text,
-                cursor: "pointer",
-                textAlign: "left",
-                fontFamily: ROBOTO,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 10,
-                }}
-              >
-                {" "}
-                <span
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 700,
-                    letterSpacing: "0.06em",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  {t.label}
-                </span>{" "}
-                <span
-                  style={{
-                    ...mono,
-                    fontSize: 11,
-                    color: isActive ? C.heading : C.muted,
-                  }}
-                >
-                  {t.count ?? 0}
-                </span>{" "}
-              </div>{" "}
-            </button>
-          );
-        })}
-      </div>{" "}
-    </div>
-  );
+function LeadsWorkspaceNav({ active, onChange }) {
+  return <nav aria-label="Lead tools" style={{ display: "flex", gap: 16, marginBottom: 12 }}>
+    {[{ key: "pipeline", label: "Work queue" }, { key: "sources", label: "Sources" }, { key: "analytics", label: "Analytics" }].map(({ key, label }) => (
+      <button key={key} type="button" onClick={() => onChange(key)} aria-current={active === key ? "page" : undefined}
+        style={{ minHeight: 44, padding: 0, border: "none", background: "transparent", color: active === key ? C.heading : C.muted, fontFamily: ROBOTO, fontSize: 14, fontWeight: 500, cursor: "pointer", textDecoration: active === key ? "underline" : "none", textUnderlineOffset: 7 }}>
+        {label}
+      </button>
+    ))}
+  </nav>;
 }
 
-function Btn({ children, onClick, color, small, style, disabled }) {
+function Btn({ children, onClick, color, small, style, disabled, ...rest }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
+      {...rest}
       style={{
         padding: small ? "4px 12px" : "8px 16px",
         borderRadius: 8,
@@ -549,7 +459,8 @@ function Btn({ children, onClick, color, small, style, disabled }) {
         cursor: disabled ? "not-allowed" : "pointer",
         backgroundColor: color || C.teal,
         color: "#fff",
-        fontSize: small ? 12 : 13,
+        fontSize: 14,
+        minHeight: 44,
         fontWeight: 500,
         opacity: disabled ? 0.5 : 1,
         transition: "opacity 0.2s",
@@ -562,24 +473,25 @@ function Btn({ children, onClick, color, small, style, disabled }) {
 }
 
 function Input({ label, value, onChange, type, placeholder, style, options }) {
+  const id = useId();
   const base = {
     backgroundColor: C.input,
     border: `1px solid ${C.inputBorder}`,
     borderRadius: 8,
     padding: "8px 12px",
     color: C.text,
-    fontSize: 13,
+    fontSize: 16,
     width: "100%",
-    outline: "none",
+    minHeight: 44,
     boxSizing: "border-box",
     ...style,
   };
   return (
     <div style={{ marginBottom: 12 }}>
       {label && (
-        <label
+        <label htmlFor={id}
           style={{
-            fontSize: 12,
+            fontSize: 14,
             color: C.muted,
             display: "block",
             marginBottom: 4,
@@ -589,7 +501,7 @@ function Input({ label, value, onChange, type, placeholder, style, options }) {
         </label>
       )}
       {options ? (
-        <select
+        <select id={id}
           value={value || ""}
           onChange={(e) => onChange(e.target.value)}
           style={base}
@@ -603,7 +515,7 @@ function Input({ label, value, onChange, type, placeholder, style, options }) {
           ))}
         </select>
       ) : (
-        <input
+        <input id={id}
           type={type || "text"}
           value={value || ""}
           onChange={(e) => onChange(e.target.value)}
@@ -617,6 +529,7 @@ function Input({ label, value, onChange, type, placeholder, style, options }) {
 
 function Modal({ title, onClose, children }) {
   const isMobile = useIsMobile();
+  const panelRef = useModalFocus(true, onClose);
   return createPortal(
     <div
       role="dialog"
@@ -640,7 +553,7 @@ function Modal({ title, onClose, children }) {
       onClick={onClose}
     >
       {" "}
-      <div
+      <div ref={panelRef} tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{
           backgroundColor: C.card,
@@ -803,7 +716,7 @@ function SpeedToLeadTimer({ firstContactAt }) {
     <span
       style={{
         ...mono,
-        fontSize: 13,
+        fontSize: 14,
         color,
         fontWeight: 500,
         animation: shouldPulse ? "stlPulse 1.5s ease-in-out infinite" : "none",
@@ -832,9 +745,7 @@ const LOST_REASONS = [
 // filters can be initialized from them on the very first render — the initial
 // pipeline load is then already scoped, avoiding an unfiltered first fetch that
 // (with no stale-response guard) could resolve last and overwrite the results.
-function readSourceDrillParams() {
-  if (typeof window === "undefined") return null;
-  const sp = new URLSearchParams(window.location.search);
+function readSourceDrillParams(sp = new URLSearchParams(window.location.search)) {
   const sourceName = sp.get("source_name");
   if (!sourceName) return null;
   return {
@@ -849,18 +760,35 @@ function readSourceDrillParams() {
   };
 }
 
-export function LeadsSection() {
+const LEAD_FILTER_KEYS = { status: "leadStatus", search: "leadSearch", sort: "leadSort", page: "leadPage", source_name: "source_name", start_date: "start_date", end_date: "end_date", builder_warranty: "builder_warranty" };
+function leadFiltersFromParams(params) {
+  const drill = readSourceDrillParams(params);
+  const status = params.get("leadStatus");
+  return {
+    status: status === "all" ? "" : ["open", ...STATUSES].includes(status) ? status : params.has("lead") ? "" : drill?.status ?? "open",
+    search: params.get("leadSearch") || "",
+    sort: params.get("leadSort") || "first_contact_at",
+    page: Math.max(1, Number.parseInt(params.get("leadPage"), 10) || 1),
+    source_name: params.get("source_name") || "", start_date: params.get("start_date") || drill?.start_date || "", end_date: params.get("end_date") || drill?.end_date || "",
+    builder_warranty: params.get("builder_warranty") === "expiring" ? "expiring" : "",
+  };
+}
+
+export function LeadsSection({ newLeadRequest = 0 }) {
   const navigate = useNavigate();
-  const [, setSearchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isMobile = useIsMobile();
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
+  const compactQueue = useIsMobile(1280);
   const [tab, setTab] = useState("pipeline");
-  const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
+  const openMessages = useCustomerSms();
+  const messageLead = (lead, initialDraft = "") => openMessages?.({
+    id: lead.customer_id, firstName: lead.first_name, lastName: lead.last_name, phone: lead.phone,
+  }, { initialDraft, onSent: () => { loadLeads(); expandLead(lead); } });
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
   const [apptForm, setApptForm] = useState(null); // { leadId, date, time, serviceId, serviceType, technicianId, notes }
   const [apptSaving, setApptSaving] = useState(false);
   const [services, setServices] = useState([]);
-  const [smsSending, setSmsSending] = useState(false);
   const [leads, setLeads] = useState([]);
   const [leadsTotal, setLeadsTotal] = useState(0);
   const [sources, setSources] = useState([]);
@@ -884,43 +812,66 @@ export function LeadsSection() {
   const [leadCalls, setLeadCalls] = useState([]);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
-  const [filters, setFilters] = useState(() => {
-    // Drill-down from the dashboard Marketing Attribution panel: filter to a
-    // single source name, scoped to the period window the panel was showing.
-    // Initialized from the URL so the first load is already scoped.
-    const drill = readSourceDrillParams();
-    // A ?lead= deep link must start UNFILTERED: the target's status is
-    // unknown before the list loads, and loadLeads has no stale-response
-    // guard — an initial open-filtered fetch could resolve after the
-    // widened one and hide a closed lead's expanded row.
-    const leadDeepLink = new URLSearchParams(window.location.search).get("lead");
-    // Bell drill from the builder_warranty_expiring alert: the server-side
-    // predicate scopes the list to exactly the leads the bell counted.
-    const builderWarrantyDrill = new URLSearchParams(window.location.search).get("builder_warranty") === "expiring";
-    return {
-      // The pipeline table defaults to OPEN statuses (new / contacted /
-      // estimate sent / estimate viewed) — the server expands `status=open`.
-      // A dashboard drill overrides the default (see readSourceDrillParams).
-      status: leadDeepLink ? "" : drill ? drill.status : "open",
-      search: "",
-      sort: "first_contact_at",
-      page: 1,
-      source_name: drill?.source_name || "",
-      start_date: drill?.start_date || "",
-      end_date: drill?.end_date || "",
-      builder_warranty: builderWarrantyDrill ? "expiring" : "",
-    };
-  });
+  const [contactMatches, setContactMatches] = useState(null);
+  useEffect(() => {
+    setContactMatches(null);
+    if (showModal !== "newLead" || (!formData.phone && !formData.email)) return undefined;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const query = new URLSearchParams({ phone: formData.phone || "", email: formData.email || "" });
+        const data = await adminFetch(`/admin/leads/contact-matches?${query}`);
+        if (!cancelled) setContactMatches(data);
+      } catch { if (!cancelled) setContactMatches({ error: true }); }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [showModal, formData.phone, formData.email]);
+  const filters = useMemo(() => leadFiltersFromParams(searchParams), [searchParams]);
+  const linkedLeadId = searchParams.get("lead");
+  const setFilters = useCallback((updater) => {
+    setSearchParams((params) => {
+      const current = leadFiltersFromParams(params);
+      const next = typeof updater === "function" ? updater(current) : updater;
+      const updated = new URLSearchParams(params);
+      ["from", "to", "status", "lead"].forEach((key) => updated.delete(key));
+      if (!next.source_name) updated.delete("period_label");
+      for (const [key, param] of Object.entries(LEAD_FILTER_KEYS)) {
+        if (key === "status") updated.set(param, next[key] || "all");
+        else if (next[key] && !(key === "page" && next[key] === 1)) updated.set(param, String(next[key]));
+        else updated.delete(param);
+      }
+      return updated;
+    }, { replace: true });
+  }, [setSearchParams]);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [debouncedSearch, setDebouncedSearch] = useState(filters.search);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(filters.search), 250);
+    return () => clearTimeout(timer);
+  }, [filters.search]);
   // Human label for the active source-drill chip (e.g. "This month").
   const [sourcePeriodLabel, setSourcePeriodLabel] = useState(
     () => readSourceDrillParams()?.period_label || "",
   );
-  const [pipelineView, setPipelineView] = useState("table");
+  const pipelineView = searchParams.get("leadView") === "board" ? "board" : "table";
+  const setPipelineView = useCallback((view) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      if (view === "board") next.set("leadView", "board"); else next.delete("leadView");
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
   const [draggingLeadId, setDraggingLeadId] = useState(null);
   const [deletingLeadId, setDeletingLeadId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [techs, setTechs] = useState([]);
+
+  useEffect(() => {
+    if (!newLeadRequest) return;
+    setFormData({});
+    setShowModal("newLead");
+  }, [newLeadRequest]);
 
   const setActiveLead = useCallback((leadId) => {
     expandedLeadRef.current = leadId;
@@ -936,18 +887,17 @@ export function LeadsSection() {
     try {
       if (!silent) setLoadError(null);
       const params = new URLSearchParams();
-      // The board view needs EVERY status (its Won / Lost columns would be
-      // emptied by the table's default "open" filter), so it always fetches
-      // unfiltered; the table's status selection is preserved for switching
-      // back. Filtering stays server-side — the list is paginated.
-      const status = pipelineView === "board" ? "" : filters.status;
+      if (linkedLeadId) params.set("id", linkedLeadId);
+      // List and board apply the same server-side filters and pagination.
+      const status = filters.status;
       if (status) params.set("status", status);
-      if (filters.search) params.set("search", filters.search);
+      if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
       if (filters.source_name) params.set("source_name", filters.source_name);
       if (filters.builder_warranty) params.set("builder_warranty", filters.builder_warranty);
       if (filters.start_date) params.set("start_date", filters.start_date);
       if (filters.end_date) params.set("end_date", filters.end_date);
       params.set("sort", filters.sort);
+      params.set("order", filters.sort === "name" ? "asc" : "desc");
       params.set("page", filters.page);
       params.set("limit", "50");
       const data = await adminFetch(`/admin/leads?${params}`);
@@ -959,7 +909,7 @@ export function LeadsSection() {
       console.error("loadLeads", e);
       if (!silent) setLoadError(e);
     }
-  }, [filters, pipelineView]);
+  }, [linkedLeadId, filters.status, filters.sort, filters.page, filters.source_name, filters.start_date, filters.end_date, filters.builder_warranty, debouncedSearch]);
 
   const loadSources = useCallback(async ({ silent = false } = {}) => {
     try {
@@ -1042,37 +992,17 @@ export function LeadsSection() {
     loadServices();
   }, [loadTechs, loadServices]);
 
+  useEffect(() => { if (tab === "pipeline") void loadLeads(); }, [tab, loadLeads]);
   useEffect(() => {
-    if (tab === "pipeline") {
-      loadLeads();
-      loadAnalytics();
-      loadSources();
-    }
-    if (tab === "sources") {
-      loadSources();
-      loadSourceROI();
-    }
-    if (tab === "analytics") loadAnalytics();
-  }, [tab, loadLeads, loadSources, loadSourceROI, loadAnalytics]);
-
+    void loadSources();
+    if (tab === "sources") void loadSourceROI();
+    if (tab === "analytics") void loadAnalytics();
+  }, [tab, loadSources, loadSourceROI, loadAnalytics]);
   useEffect(() => {
     if (tab !== "pipeline") return undefined;
-    const id = window.setInterval(() => {
-      if (!isPageVisible()) return;
-      loadLeads({ silent: true });
-    }, LEADS_REFRESH_MS);
-    return () => window.clearInterval(id);
+    const id = window.setInterval(() => { if (isPageVisible()) void loadLeads({ silent: true }); }, LEADS_REFRESH_MS);
+    return () => { window.clearInterval(id); leadsRequestRef.current += 1; };
   }, [tab, loadLeads]);
-
-  useEffect(() => {
-    if (tab !== "pipeline") return undefined;
-    const id = window.setInterval(() => {
-      if (!isPageVisible()) return;
-      loadAnalytics({ silent: true });
-      loadSources({ silent: true });
-    }, PIPELINE_SUMMARY_REFRESH_MS);
-    return () => window.clearInterval(id);
-  }, [tab, loadAnalytics, loadSources]);
 
   const loadLeadActivities = useCallback(
     async (leadId, { silent = false } = {}) => {
@@ -1119,33 +1049,20 @@ export function LeadsSection() {
     return () => window.clearInterval(id);
   }, [tab, expandedLead, loadLeadActivities]);
 
-  // Deep-link from a notification: /admin/leads?lead=<leadId> opens the pipeline
-  // and expands that lead's detail row (new_lead notification). The expanded row
-  // only renders in the pipeline table view, so snap there first. Runs once.
-  const leadDeepLinkDone = useRef(false);
+  // Notifications and duplicate matches use the same exact-record filter,
+  // including records outside the first page. Ordinary filters clear it.
   useEffect(() => {
-    if (leadDeepLinkDone.current) return;
-    leadDeepLinkDone.current = true;
-    const leadId = new URLSearchParams(window.location.search).get("lead");
-    if (!leadId) return;
+    if (!linkedLeadId) return;
     setTab("pipeline");
     setPipelineView("table");
-    // The status filter already initialized to "" for lead deep-links (see
-    // the filters useState) so even the FIRST fetch is unfiltered and a
-    // closed lead's row can render its expanded detail.
-    setActiveLead(leadId);
-    loadLeadActivities(leadId);
-  }, [setActiveLead, loadLeadActivities]);
+    setActiveLead(linkedLeadId);
+    loadLeadActivities(linkedLeadId);
+  }, [linkedLeadId, setActiveLead, loadLeadActivities, setPipelineView]);
 
   // Drill-down from the dashboard Marketing Attribution panel:
   // /admin/leads?source_name=<name>&from=<YYYY-MM-DD>&to=<YYYY-MM-DD>&period_label=<label>
   // filters the pipeline table to that source for the panel's period window.
-  // Runs once, then strips the drill params so the chip (state) is the single
-  // source of truth and a refresh/share keeps the URL clean.
-  // The `filters` + chip label were already initialized from these params (lazy
-  // useState above), so the first pipeline load is correctly scoped. This effect
-  // just snaps to the table view and strips the drill params, leaving the chip
-  // state as the single source of truth (clean URL on refresh/share).
+  // Initial filters already use these params; keep the cohort in the URL.
   const sourceDeepLinkDone = useRef(false);
   useEffect(() => {
     if (sourceDeepLinkDone.current) return;
@@ -1154,10 +1071,8 @@ export function LeadsSection() {
     if (!sp.get("source_name")) return;
     setTab("pipeline");
     setPipelineView("table");
-    ["source_name", "from", "to", "period_label", "status"].forEach((k) =>
-      sp.delete(k),
-    );
-    setSearchParams(sp, { replace: true });
+    // Keep the scoped filters in the URL so Back and refresh preserve the
+    // exact reporting cohort. Ordinary filter changes normalize legacy keys.
   }, [setSearchParams]);
 
   const expandLead = async (lead) => {
@@ -1295,33 +1210,6 @@ export function LeadsSection() {
   // PIPELINE TAB
   // ═════════════════════════════════════════════════════════════════════════
   const renderPipeline = () => {
-    const ov = overview || {};
-    const funnelByStage = new Map(funnel.map((f) => [f.stage, f]));
-    const countStages = (stages) =>
-      stages.reduce(
-        (sum, stage) => sum + Number(funnelByStage.get(stage)?.count || 0),
-        0,
-      );
-    const pipelineOrder = [
-      { stage: "new", label: "New Leads", count: countStages(["new"]) },
-      {
-        stage: "contacted",
-        label: "Contacted",
-        count: countStages(["contacted"]),
-      },
-      {
-        stage: "estimate_sent",
-        label: "Estimate Sent",
-        count: countStages(["estimate_sent", "estimate_viewed", "negotiating"]),
-      },
-      { stage: "won", label: "Won", count: countStages(["won"]) },
-      {
-        stage: "lost",
-        label: "Lost",
-        count: countStages(["lost", "unresponsive", "disqualified", "duplicate"]),
-      },
-    ];
-    const funnelData = pipelineOrder;
     const draggingLead = draggingLeadId
       ? leads.find((lead) => lead.id === draggingLeadId)
       : null;
@@ -1335,348 +1223,48 @@ export function LeadsSection() {
 
     return (
       <>
-        {/* Metric Cards */}
-        <div
-          style={{
-            display: "flex",
-            gap: 16,
-            flexWrap: "wrap",
-            marginBottom: 24,
-          }}
-        >
-          {" "}
-          <MetricCard
-            label="New Leads (Month)"
-            value={ov.total || 0}
-            color={C.teal}
-          />{" "}
-          <MetricCard
-            label="Conversion Rate"
-            value={fmtPct(ov.conversionRate)}
-            color={C.green}
-          />{" "}
-          <MetricCard
-            label="Median Response Time"
-            value={fmtTime(ov.medianResponseTime)}
-            sub={
-              ov.recentMedianResponseTime != null
-                ? `7-day: ${fmtTime(ov.recentMedianResponseTime)}`
-                : undefined
-            }
-            color={C.amber}
-          />{" "}
-          <MetricCard
-            label="Cost per Acquisition"
-            value={fmtMoney(ov.cpa)}
-            color={C.purple}
-          />{" "}
-          <MetricCard
-            label="Avg Speed to Lead"
-            value={ov.avgSpeedToLead != null ? fmtTime(ov.avgSpeedToLead) : "--"}
-            sub={(() => {
-              const since = ov.speedToLeadSince
-                ? ` since ${fmtShortDate(ov.speedToLeadSince)}`
-                : "";
-              if (ov.avgSpeedToLead == null) return `None waiting${since}`;
-              const quality =
-                ov.avgSpeedToLead < 5
-                  ? "Great!"
-                  : ov.avgSpeedToLead < 15
-                    ? "Good"
-                    : "Needs work";
-              return `${ov.openUnansweredCount} waiting${since} · ${quality}`;
-            })()}
-            color={
-              ov.avgSpeedToLead == null
-                ? C.green
-                : ov.avgSpeedToLead < 5
-                  ? C.green
-                  : ov.avgSpeedToLead < 15
-                    ? C.amber
-                    : C.red
-            }
-          />{" "}
-          <MetricCard
-            label="Monthly ROI"
-            value={ov.roi != null ? fmtPct(ov.roi) : "--"}
-            color={roiColor(ov.roi || 0)}
-          />{" "}
-        </div>
-        {/* Pipeline status */}
-        <div style={{ marginBottom: 10 }}>
-          <h2
-            style={{
-              margin: "0 0 6px",
-              color: C.heading,
-              fontSize: 12,
-              fontWeight: 500,
-              fontFamily: ROBOTO,
-              letterSpacing: "0.02em",
-            }}
-          >
-            Pipeline status
-          </h2>
-          <div style={{ margin: 0, color: C.muted, fontSize: 12 }}>
-            Current lead counts by status for the selected month.
-          </div>
-        </div>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            marginBottom: 16,
-            flexWrap: "wrap",
-          }}
-        >
-          {funnelData.map((f) => (
-            <PipelineStatusCard
-              key={f.stage}
-              label={f.label || f.stage.replace(/_/g, " ")}
-              value={f.count}
-            />
-          ))}
-        </div>
-        {/* Filters + Actions */}
-        <div
-          style={{
-            display: "flex",
-            gap: 12,
-            marginBottom: 16,
-            flexWrap: "wrap",
-            alignItems: "center",
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              display: "flex",
-              background: "#F4F4F5",
-              borderRadius: 8,
-              padding: 3,
-              border: `1px solid ${C.border}`,
-            }}
-          >
-            {["table", "board"].map((view) => (
-              <button
-                key={view}
-                type="button"
-                onClick={() => {
-                  // Keep filters.status intact — loadLeads ignores it while
-                  // the board is active (the board fetches all statuses), so
-                  // the table's selection survives a round-trip to the board.
-                  setPipelineView(view);
-                  if (view === "board")
-                    setFilters((f) => ({ ...f, page: 1 }));
-                }}
-                style={{
-                  background: pipelineView === view ? C.heading : "transparent",
-                  color: pipelineView === view ? C.white : C.muted,
-                  padding: "5px 14px",
-                  borderRadius: 6,
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  textTransform: "capitalize",
-                  fontFamily: ROBOTO,
-                }}
-              >
-                {view}
-              </button>
-            ))}
-          </div>
-          {pipelineView === "table" && (
-            <select
-              value={filters.status}
-              onChange={(e) =>
-                setFilters((f) => ({ ...f, status: e.target.value, page: 1 }))
-              }
-              style={{
-                backgroundColor: C.input,
-                border: `1px solid ${C.inputBorder}`,
-                borderRadius: 8,
-                padding: "6px 12px",
-                color: C.text,
-                height: isMobile ? 44 : undefined,
-                fontSize: isMobile ? 16 : 13,
-              }}
-            >
-              {" "}
-              <option value="open">Open</option>
-              <option value="">All Statuses</option>
-              {STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s.replace(/_/g, " ")}
-                </option>
-              ))}
-            </select>
-          )}
-          <input
-            placeholder="Search by name, phone, email"
-            value={filters.search}
-            onChange={(e) =>
-              setFilters((f) => ({ ...f, search: e.target.value, page: 1 }))
-            }
-            style={{
-              backgroundColor: C.input,
-              border: `1px solid ${C.inputBorder}`,
-              borderRadius: 8,
-              padding: "8px 12px",
-              color: C.text,
-              height: isMobile ? 44 : undefined,
-              fontSize: isMobile ? 16 : 14,
-              minWidth: isMobile ? 0 : 200,
-              width: isMobile ? "100%" : undefined,
-            }}
-          />
-          {pipelineView === "table" && (
-            <select
-              value={filters.sort}
-              onChange={(e) =>
-                setFilters((f) => ({ ...f, sort: e.target.value }))
-              }
-              style={{
-                backgroundColor: C.input,
-                border: `1px solid ${C.inputBorder}`,
-                borderRadius: 8,
-                padding: "6px 12px",
-                color: C.text,
-                height: isMobile ? 44 : undefined,
-                fontSize: isMobile ? 16 : 13,
-              }}
-            >
-              {" "}
-              <option value="first_contact_at">Newest First</option>{" "}
-              <option value="name">Name</option>{" "}
-              <option value="status">Status</option>{" "}
-              <option value="response_time">Response Time</option>{" "}
-              <option value="monthly_value">Value</option>{" "}
-            </select>
-          )}
-          {filters.source_name && (
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                backgroundColor: C.bg,
-                border: `1px solid ${C.border}`,
-                borderRadius: 999,
-                padding: "5px 6px 5px 12px",
-                fontSize: 13,
-                color: C.text,
-                fontFamily: ROBOTO,
-              }}
-            >
-              <span style={{ color: C.muted }}>Source:</span>
-              <span style={{ fontWeight: 500 }}>{filters.source_name}</span>
-              {sourcePeriodLabel && (
-                <span style={{ color: C.muted }}>· {sourcePeriodLabel}</span>
-              )}
-              <button
-                type="button"
-                aria-label="Clear source filter"
-                title="Clear source filter"
-                onClick={() => {
-                  setFilters((f) => ({
-                    ...f,
-                    source_name: "",
-                    start_date: "",
-                    end_date: "",
-                    page: 1,
-                  }));
-                  setSourcePeriodLabel("");
-                }}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 18,
-                  height: 18,
-                  borderRadius: 999,
-                  border: "none",
-                  background: "transparent",
-                  color: C.muted,
-                  cursor: "pointer",
-                  fontSize: 14,
-                  lineHeight: 1,
-                }}
-              >
-                ×
-              </button>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ position: "relative", flex: "1 1 180px", minWidth: 0 }}>
+              <Search size={18} aria-hidden style={{ position: "absolute", left: 12, top: 13, color: C.muted }} />
+              <input type="search" aria-label="Search leads" placeholder="Search leads" value={filters.search}
+                onChange={(event) => setFilters((f) => ({ ...f, search: event.target.value, page: 1 }))}
+                style={{ width: "100%", boxSizing: "border-box", height: 44, border: `1px solid ${C.inputBorder}`, borderRadius: 6, padding: "8px 12px 8px 38px", background: C.input, color: C.text, fontSize: 16 }} />
             </div>
-          )}
-          {filters.builder_warranty === "expiring" && (
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 6,
-                backgroundColor: C.bg,
-                border: `1px solid ${C.border}`,
-                borderRadius: 999,
-                padding: "5px 6px 5px 12px",
-                fontSize: 13,
-                color: C.text,
-                fontFamily: ROBOTO,
-              }}
-            >
-              <span style={{ fontWeight: 500 }}>Builder warranty expiring</span>
-              <button
-                type="button"
-                aria-label="Clear builder warranty filter"
-                title="Clear builder warranty filter"
-                onClick={() => {
-                  setFilters((f) => ({ ...f, builder_warranty: "", page: 1 }));
-                  // Strip the drill param too (codex P2): a remount or
-                  // refresh re-reads the URL, so state-only clearing would
-                  // silently re-apply the filter.
-                  const sp = new URLSearchParams(window.location.search);
-                  if (sp.has("builder_warranty")) {
-                    sp.delete("builder_warranty");
-                    setSearchParams(sp, { replace: true });
-                  }
-                }}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 18,
-                  height: 18,
-                  borderRadius: 999,
-                  border: "none",
-                  background: "transparent",
-                  color: C.muted,
-                  cursor: "pointer",
-                  fontSize: 14,
-                  lineHeight: 1,
-                }}
-              >
-                ×
-              </button>
-            </div>
-          )}
-          <div style={{ flex: 1 }} />{" "}
-          <Btn
-            onClick={() => {
-              if (sources.length === 0) loadSources();
-              setFormData({});
-              setShowModal("newLead");
-            }}
-          >
-            + New Lead
-          </Btn>{" "}
+            <Btn onClick={() => setFiltersOpen((open) => !open)} aria-expanded={filtersOpen} aria-controls="lead-queue-filters"
+              style={{ display: "inline-flex", gap: 6, alignItems: "center", background: C.white, color: C.text, border: `1px solid ${C.border}` }}>
+              <SlidersHorizontal size={18} aria-hidden /> Filters
+              {(filters.status !== "open" || filters.source_name || filters.builder_warranty || filters.sort !== "first_contact_at") && <span aria-label="Active filters" style={{ width: 6, height: 6, borderRadius: "50%", background: C.heading }} />}
+            </Btn>
+            {!isMobile && <div role="group" aria-label="Lead view" style={{ display: "flex", gap: 4 }}>
+              {["table", "board"].map((view) => <Btn key={view} onClick={() => setPipelineView(view)} aria-pressed={pipelineView === view}
+                style={{ background: pipelineView === view ? C.heading : C.white, color: pipelineView === view ? C.white : C.text, border: `1px solid ${C.border}` }}>{view === "table" ? "List" : "Board"}</Btn>)}
+            </div>}
+          </div>
+          {(filtersOpen || !isMobile) && <div id="lead-queue-filters" style={{ display: "flex", flexWrap: "wrap", alignItems: "end", gap: 12, marginTop: 12 }}>
+            <Input label="Stage" value={filters.status || "all"} onChange={(value) => setFilters((f) => ({ ...f, status: value === "all" ? "" : value, page: 1 }))}
+              options={[{ value: "open", label: "Open leads" }, { value: "all", label: "All stages" }, ...STATUSES.map((value) => ({ value, label: value.replace(/_/g, " ") }))]} />
+            <Input label="Sort" value={filters.sort} onChange={(sort) => setFilters((f) => ({ ...f, sort, page: 1 }))}
+              options={[{ value: "first_contact_at", label: "Newest first" }, { value: "name", label: "Name A–Z" }, { value: "status", label: "Stage" }, { value: "response_time", label: "Response time" }, { value: "monthly_value", label: "Monthly value" }]} />
+            {isMobile && <Input label="View" value={pipelineView} onChange={setPipelineView} options={[{ value: "table", label: "List" }, { value: "board", label: "Board" }]} />}
+            {(filters.source_name || filters.builder_warranty) && <p style={{ fontSize: 14 }}>{[filters.source_name, sourcePeriodLabel, filters.builder_warranty && "Builder warranty expiring"].filter(Boolean).join(" · ")}</p>}
+            <Btn onClick={() => { setFilters({ status: "open", search: "", sort: "first_contact_at", page: 1 }); setSourcePeriodLabel(""); }} style={{ marginBottom: 12, background: "transparent", color: C.text }}>Reset filters</Btn>
+          </div>}
+          <div role="status" aria-live="polite" style={{ marginTop: 12, color: C.muted, fontSize: 14 }}>
+            {leadsTotal === 0 ? "No matching leads" : `${(filters.page - 1) * 50 + 1}–${Math.min(filters.page * 50, leadsTotal)} of ${leadsTotal} matching leads`}
+            {pipelineView === "board" ? " · column counts show this page" : ""}
+          </div>
         </div>
         {pipelineView === "table" && (
           <>
             {/* Leads Table */}
-            <Card style={{ padding: 0, overflow: "hidden" }}>
+            <Card style={{ padding: 0 }}>
               {" "}
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
+              <table className="lead-queue-table" style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+                {!compactQueue && <colgroup>{[26, 13, 19, 8, 18, 10, 6].map((width, index) => <col key={index} style={{ width: `${width}%` }} />)}</colgroup>}
+                <thead style={compactQueue ? { display: "none" } : undefined}>
                   <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-                    {(isMobile
+                    {(compactQueue
                       ? ["Name / Phone", "Status"]
                       : [
                           "Name / Phone",
@@ -1693,7 +1281,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 16px",
                           textAlign: "left",
-                          fontSize: 11,
+                          fontSize: 14,
                           color: C.muted,
                           fontWeight: 500,
                           textTransform: "uppercase",
@@ -1709,8 +1297,7 @@ export function LeadsSection() {
                     const isExpanded = expandedLead === lead.id;
                     return (
                       <React.Fragment key={lead.id}>
-                        {" "}
-                        <tr
+                        <tr className="lead-queue-record"
                           onClick={() => expandLead(lead)}
                           style={{
                             borderBottom: `1px solid ${C.border}`,
@@ -1726,13 +1313,15 @@ export function LeadsSection() {
                             <div
                               style={{
                                 display: "flex",
+                                flexWrap: "wrap",
                                 alignItems: "center",
                                 gap: 8,
                               }}
                             >
                               {" "}
-                              <span
+                              <button type="button" onClick={(event) => { event.stopPropagation(); expandLead(lead); }} aria-expanded={isExpanded}
                                 style={{
+                                  border: "none", background: "transparent", padding: 0, minHeight: 44, textAlign: "left", cursor: "pointer", fontFamily: "inherit",
                                   color: C.heading,
                                   fontSize: 14,
                                   fontWeight: 500,
@@ -1741,35 +1330,37 @@ export function LeadsSection() {
                                 {[lead.first_name, lead.last_name]
                                   .filter(Boolean)
                                   .join(" ") || "Unknown"}
-                              </span>{" "}
+                              </button>{" "}
                               <AgingBadge lead={lead} />{" "}
                             </div>{" "}
                             <div
-                              style={{ color: C.muted, fontSize: 12, ...mono }}
+                              style={{ color: C.muted, fontSize: 14, ...mono }}
                             >
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
-                            {isMobile && lead.service_interest && (
-                              <div style={{ color: C.text, fontSize: 12 }}>
+                            {compactQueue && lead.service_interest && (
+                              <div style={{ color: C.text, fontSize: 14 }}>
                                 {lead.service_interest}
                               </div>
                             )}{" "}
+                            {lead.estimate_id && <div style={{ fontSize: 14, color: C.muted }}>Estimate: {lead.estimate_status || "linked"}</div>}
+                            <div style={{ fontSize: 14, color: C.muted }}>
+                              {lead.next_follow_up_at ? `Follow up ${fmtShortDate(lead.next_follow_up_at)}` : `Added ${fmtShortDate(lead.first_contact_at)}`}
+                            </div>
                           </td>
-                          {!isMobile && (
+                          {!compactQueue && (
                             <>
                               <td style={{ padding: "12px 16px" }}>
                                 {lead.source_name ? (
                                   <Badge
                                     label={
-                                      lead.source_name.length > 25
-                                        ? lead.source_name.slice(0, 22) + "..."
-                                        : lead.source_name
+                                      lead.source_name
                                     }
                                     color={C.teal}
                                   />
                                 ) : (
                                   <span
-                                    style={{ color: C.muted, fontSize: 12 }}
+                                    style={{ color: C.muted, fontSize: 14 }}
                                   >
                                     --
                                   </span>
@@ -1779,7 +1370,7 @@ export function LeadsSection() {
                                 style={{
                                   padding: "12px 16px",
                                   color: C.text,
-                                  fontSize: 13,
+                                  fontSize: 14,
                                 }}
                               >
                                 {lead.service_interest || "--"}
@@ -1813,7 +1404,7 @@ export function LeadsSection() {
                             onClick={(e) => e.stopPropagation()}
                           >
                             {" "}
-                            <select
+                            <select aria-label={`Stage for ${[lead.first_name, lead.last_name].filter(Boolean).join(" ") || "lead"}`}
                               value={lead.status}
                               onChange={(e) =>
                                 updateLeadStatus(lead.id, e.target.value)
@@ -1825,7 +1416,7 @@ export function LeadsSection() {
                                 borderRadius: 6,
                                 padding: "4px 8px",
                                 color: STATUS_COLORS[lead.status] || C.text,
-                                fontSize: 12,
+                                fontSize: 14,
                                 cursor: "pointer",
                               }}
                             >
@@ -1836,13 +1427,13 @@ export function LeadsSection() {
                               ))}
                             </select>{" "}
                           </td>
-                          {!isMobile && (
+                          {!compactQueue && (
                             <>
                               <td
                                 style={{
                                   padding: "12px 16px",
                                   ...mono,
-                                  fontSize: 13,
+                                  fontSize: 14,
                                   color:
                                     lead.response_time_minutes != null
                                       ? lead.response_time_minutes < 15
@@ -1867,40 +1458,7 @@ export function LeadsSection() {
                                 style={{ padding: "12px 16px" }}
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                <button
-                                  type="button"
-                                  aria-label={`Delete lead for ${
-                                    [lead.first_name, lead.last_name]
-                                      .filter(Boolean)
-                                      .join(" ") || "unknown"
-                                  }`}
-                                  title="Delete lead"
-                                  disabled={deletingLeadId === lead.id}
-                                  onClick={() => deleteLead(lead)}
-                                  style={{
-                                    display: "inline-flex",
-                                    alignItems: "center",
-                                    gap: 6,
-                                    border: `1px solid ${C.red}33`,
-                                    borderRadius: 6,
-                                    padding: "5px 8px",
-                                    background: C.white,
-                                    color: C.red,
-                                    fontSize: 12,
-                                    fontWeight: 500,
-                                    cursor:
-                                      deletingLeadId === lead.id
-                                        ? "not-allowed"
-                                        : "pointer",
-                                    opacity:
-                                      deletingLeadId === lead.id ? 0.5 : 1,
-                                  }}
-                                >
-                                  <Trash2 size={14} strokeWidth={1.8} />
-                                  {deletingLeadId === lead.id
-                                    ? "Deleting"
-                                    : "Delete"}
-                                </button>
+                                <Btn small onClick={() => expandLead(lead)} aria-expanded={isExpanded} style={{ background: "transparent", color: C.text, paddingInline: 4, whiteSpace: "nowrap" }}>Open</Btn>
                               </td>
                             </>
                           )}
@@ -1908,7 +1466,7 @@ export function LeadsSection() {
                         {isExpanded && (
                           <tr>
                             <td
-                              colSpan={isMobile ? 2 : 7}
+                              colSpan={compactQueue ? 2 : 7}
                               style={{ padding: 0 }}
                             >
                               {" "}
@@ -1942,7 +1500,7 @@ export function LeadsSection() {
                                     </h4>{" "}
                                     <div
                                       style={{
-                                        fontSize: 13,
+                                        fontSize: 14,
                                         color: C.muted,
                                         lineHeight: 1.8,
                                       }}
@@ -2153,7 +1711,7 @@ export function LeadsSection() {
                                               borderRadius: 8,
                                               padding: 10,
                                               marginBottom: 8,
-                                              fontSize: 12,
+                                              fontSize: 14,
                                               color: C.muted,
                                             }}
                                           >
@@ -2185,7 +1743,7 @@ export function LeadsSection() {
                                                   style={{
                                                     cursor: "pointer",
                                                     color: C.teal,
-                                                    fontSize: 12,
+                                                    fontSize: 14,
                                                   }}
                                                 >
                                                   View transcript
@@ -2197,7 +1755,7 @@ export function LeadsSection() {
                                                     overflowY: "auto",
                                                     whiteSpace: "pre-wrap",
                                                     color: C.text,
-                                                    fontSize: 12,
+                                                    fontSize: 14,
                                                     lineHeight: 1.5,
                                                   }}
                                                 >
@@ -2231,7 +1789,7 @@ export function LeadsSection() {
                                         <div
                                           style={{
                                             color: C.muted,
-                                            fontSize: 12,
+                                            fontSize: 14,
                                           }}
                                         >
                                           Loading activities...
@@ -2242,7 +1800,7 @@ export function LeadsSection() {
                                           <div
                                             style={{
                                               color: C.red,
-                                              fontSize: 12,
+                                              fontSize: 14,
                                             }}
                                           >
                                             Activity failed to load:{" "}
@@ -2256,7 +1814,7 @@ export function LeadsSection() {
                                           <div
                                             style={{
                                               color: C.muted,
-                                              fontSize: 12,
+                                              fontSize: 14,
                                             }}
                                           >
                                             No activities logged
@@ -2266,7 +1824,7 @@ export function LeadsSection() {
                                         <div
                                           key={a.id}
                                           style={{
-                                            fontSize: 12,
+                                            fontSize: 14,
                                             color: C.muted,
                                             padding: "4px 0",
                                             borderLeft: `2px solid ${C.border}`,
@@ -2316,7 +1874,7 @@ export function LeadsSection() {
                                           })()}
                                           <div
                                             style={{
-                                              fontSize: 10,
+                                              fontSize: 14,
                                               marginTop: 2,
                                             }}
                                           >
@@ -2360,7 +1918,7 @@ export function LeadsSection() {
                                       {" "}
                                       <div
                                         style={{
-                                          fontSize: 12,
+                                          fontSize: 14,
                                           color: C.teal,
                                           fontWeight: 500,
                                           marginBottom: 6,
@@ -2370,7 +1928,7 @@ export function LeadsSection() {
                                       </div>{" "}
                                       <div
                                         style={{
-                                          fontSize: 13,
+                                          fontSize: 14,
                                           color: C.text,
                                           marginBottom: 8,
                                           lineHeight: 1.5,
@@ -2402,33 +1960,9 @@ export function LeadsSection() {
                                         <Btn
                                           small
                                           color={C.teal}
-                                          disabled={smsSending}
-                                          onClick={async () => {
-                                            setSmsSending(true);
-                                            try {
-                                              await adminFetch(
-                                                `/admin/leads/${lead.id}/send-sms`,
-                                                {
-                                                  method: "POST",
-                                                  body: {
-                                                    message:
-                                                      meta.suggestedReply,
-                                                  },
-                                                },
-                                              );
-                                              loadLeads();
-                                              expandLead(lead);
-                                            } catch (e) {
-                                              alert(
-                                                "Send failed: " + e.message,
-                                              );
-                                            }
-                                            setSmsSending(false);
-                                          }}
+                                          onClick={() => messageLead(lead, meta.suggestedReply)}
                                         >
-                                          {smsSending
-                                            ? "Sending..."
-                                            : "Send This Reply"}
+                                          Review reply
                                         </Btn>{" "}
                                       </div>{" "}
                                     </div>
@@ -2448,28 +1982,19 @@ export function LeadsSection() {
                                     small
                                     color={C.teal}
                                     onClick={() => {
-                                      const name = lead.first_name || "there";
-                                      const svc =
-                                        lead.service_interest || "pest control";
-                                      setSmsCompose({
-                                        leadId: lead.id,
-                                        message: "",
-                                        suggestions: [
-                                          `Hi ${name}! This is Adam from Waves Pest Control. I saw your inquiry about ${svc} — I'd love to help. When's a good time to chat?`,
-                                          `Hey ${name}! Thanks for reaching out about ${svc}. We can usually get you on the schedule within a day or two. Want me to set up an estimate?`,
-                                        ],
-                                      });
+                                      messageLead(lead);
                                     }}
                                   >
-                                    Send Text
+                                    Message
                                   </Btn>{" "}
                                   <Btn
                                     small
                                     color={C.purple}
                                     onClick={() => {
-                                      navigate(
-                                        `/admin/estimates?${leadEstimateParams(lead).toString()}`,
-                                      );
+                                      const next = new URLSearchParams(searchParams);
+                                      for (const [key, value] of leadEstimateParams(lead)) next.set(key, value);
+                                      next.set("tab", "new");
+                                      navigate(`/admin/pipeline?${next}`);
                                     }}
                                   >
                                     Create Estimate
@@ -2497,6 +2022,9 @@ export function LeadsSection() {
                                   >
                                     Schedule Callback
                                   </Btn>{" "}
+                                  <details style={{ flexBasis: "100%" }}>
+                                    <summary style={{ cursor: "pointer", minHeight: 44, padding: "12px 0", fontSize: 14, fontWeight: 500 }}>More actions</summary>
+                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, paddingBottom: 8 }}>
                                   <Btn
                                     small
                                     color={C.green}
@@ -2664,124 +2192,9 @@ export function LeadsSection() {
                                       ? "Deleting"
                                       : "Delete Lead"}
                                   </Btn>{" "}
-                                </div>
-                                {/* Inline SMS Compose */}
-                                {smsCompose &&
-                                  smsCompose.leadId === lead.id && (
-                                    <div
-                                      style={{
-                                        border: `1px solid ${C.border}`,
-                                        borderRadius: 10,
-                                        padding: 14,
-                                        marginBottom: 12,
-                                        backgroundColor: C.card,
-                                      }}
-                                    >
-                                      {" "}
-                                      <div
-                                        style={{
-                                          fontSize: 12,
-                                          color: C.teal,
-                                          fontWeight: 500,
-                                          marginBottom: 8,
-                                        }}
-                                      >
-                                        Send SMS to {lead.first_name || "Lead"}
-                                      </div>
-                                      {smsCompose.suggestions &&
-                                        smsCompose.suggestions.map((s, i) => (
-                                          <div
-                                            key={i}
-                                            onClick={() =>
-                                              setSmsCompose((prev) => ({
-                                                ...prev,
-                                                message: s,
-                                              }))
-                                            }
-                                            style={{
-                                              fontSize: 12,
-                                              color: C.text,
-                                              padding: "8px 10px",
-                                              borderRadius: 6,
-                                              border: `1px solid ${C.border}`,
-                                              marginBottom: 6,
-                                              cursor: "pointer",
-                                              backgroundColor:
-                                                smsCompose.message === s
-                                                  ? C.teal + "22"
-                                                  : "transparent",
-                                              transition: "background 0.15s",
-                                            }}
-                                          >
-                                            {s}
-                                          </div>
-                                        ))}
-                                      <textarea
-                                        value={smsCompose.message}
-                                        onChange={(e) =>
-                                          setSmsCompose((prev) => ({
-                                            ...prev,
-                                            message: e.target.value,
-                                          }))
-                                        }
-                                        placeholder="Type your message..."
-                                        style={{
-                                          width: "100%",
-                                          minHeight: 60,
-                                          backgroundColor: C.input,
-                                          border: `1px solid ${C.inputBorder}`,
-                                          borderRadius: 8,
-                                          padding: "8px 12px",
-                                          color: C.text,
-                                          fontSize: 13,
-                                          resize: "vertical",
-                                          boxSizing: "border-box",
-                                          marginBottom: 8,
-                                        }}
-                                      />{" "}
-                                      <div style={{ display: "flex", gap: 8 }}>
-                                        {" "}
-                                        <Btn
-                                          small
-                                          color={C.teal}
-                                          disabled={
-                                            smsSending || !smsCompose.message
-                                          }
-                                          onClick={async () => {
-                                            setSmsSending(true);
-                                            try {
-                                              await adminFetch(
-                                                `/admin/leads/${lead.id}/send-sms`,
-                                                {
-                                                  method: "POST",
-                                                  body: {
-                                                    message: smsCompose.message,
-                                                  },
-                                                },
-                                              );
-                                              setSmsCompose(null);
-                                              loadLeads();
-                                              expandLead(lead);
-                                            } catch (e) {
-                                              alert(
-                                                "Send failed: " + e.message,
-                                              );
-                                            }
-                                            setSmsSending(false);
-                                          }}
-                                        >
-                                          {smsSending ? "Sending..." : "Send"}
-                                        </Btn>{" "}
-                                        <Btn
-                                          small
-                                          color={C.muted}
-                                          onClick={() => setSmsCompose(null)}
-                                        >
-                                          Cancel
-                                        </Btn>{" "}
-                                      </div>{" "}
                                     </div>
-                                  )}
+                                  </details>
+                                </div>
                                 {/* Inline Schedule Callback */}
                                 {callbackForm &&
                                   callbackForm.leadId === lead.id && (
@@ -2797,7 +2210,7 @@ export function LeadsSection() {
                                       {" "}
                                       <div
                                         style={{
-                                          fontSize: 12,
+                                          fontSize: 14,
                                           color: C.amber,
                                           fontWeight: 500,
                                           marginBottom: 8,
@@ -2829,7 +2242,7 @@ export function LeadsSection() {
                                             borderRadius: 8,
                                             padding: "6px 10px",
                                             color: C.text,
-                                            fontSize: 13,
+                                            fontSize: 14,
                                           }}
                                         />{" "}
                                         <input
@@ -2848,7 +2261,7 @@ export function LeadsSection() {
                                             borderRadius: 8,
                                             padding: "6px 10px",
                                             color: C.text,
-                                            fontSize: 13,
+                                            fontSize: 14,
                                           }}
                                         />{" "}
                                       </div>{" "}
@@ -2869,7 +2282,7 @@ export function LeadsSection() {
                                           borderRadius: 8,
                                           padding: "8px 12px",
                                           color: C.text,
-                                          fontSize: 13,
+                                          fontSize: 14,
                                           resize: "vertical",
                                           boxSizing: "border-box",
                                           marginBottom: 8,
@@ -2930,7 +2343,7 @@ export function LeadsSection() {
                                   >
                                     <div
                                       style={{
-                                        fontSize: 12,
+                                        fontSize: 14,
                                         color: C.green,
                                         fontWeight: 500,
                                         marginBottom: 8,
@@ -2961,7 +2374,7 @@ export function LeadsSection() {
                                           borderRadius: 8,
                                           padding: "6px 10px",
                                           color: C.text,
-                                          fontSize: 13,
+                                          fontSize: 14,
                                         }}
                                       />
                                       {/* Windows start on the hour (owner rule) — an
@@ -2982,7 +2395,7 @@ export function LeadsSection() {
                                           borderRadius: 8,
                                           padding: "6px 10px",
                                           color: C.text,
-                                          fontSize: 13,
+                                          fontSize: 14,
                                         }}
                                       >
                                         <option value="">Time…</option>
@@ -3030,7 +2443,7 @@ export function LeadsSection() {
                                           borderRadius: 8,
                                           padding: "6px 10px",
                                           color: C.text,
-                                          fontSize: 13,
+                                          fontSize: 14,
                                         }}
                                       >
                                         <option value="">
@@ -3059,7 +2472,7 @@ export function LeadsSection() {
                                           borderRadius: 8,
                                           padding: "6px 10px",
                                           color: C.text,
-                                          fontSize: 13,
+                                          fontSize: 14,
                                         }}
                                       >
                                         <option value="">— Unassigned —</option>
@@ -3087,7 +2500,7 @@ export function LeadsSection() {
                                         borderRadius: 8,
                                         padding: "8px 12px",
                                         color: C.text,
-                                        fontSize: 13,
+                                        fontSize: 14,
                                         resize: "vertical",
                                         boxSizing: "border-box",
                                         marginBottom: 8,
@@ -3095,7 +2508,7 @@ export function LeadsSection() {
                                     />
                                     <div
                                       style={{
-                                        fontSize: 11,
+                                        fontSize: 14,
                                         color: C.muted,
                                         marginBottom: 8,
                                       }}
@@ -3294,7 +2707,7 @@ export function LeadsSection() {
                   {leads.length === 0 && (
                     <tr>
                       <td
-                        colSpan={isMobile ? 2 : 7}
+                        colSpan={compactQueue ? 2 : 7}
                         style={{
                           padding: 40,
                           textAlign: "center",
@@ -3308,53 +2721,13 @@ export function LeadsSection() {
                 </tbody>
               </table>{" "}
             </Card>
-            {/* Pagination */}
-            {leadsTotal > 50 && (
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "center",
-                  gap: 8,
-                  marginTop: 16,
-                }}
-              >
-                {" "}
-                <Btn
-                  small
-                  disabled={filters.page <= 1}
-                  onClick={() =>
-                    setFilters((f) => ({ ...f, page: f.page - 1 }))
-                  }
-                >
-                  Prev
-                </Btn>{" "}
-                <span
-                  style={{
-                    color: C.muted,
-                    fontSize: 13,
-                    alignSelf: "center",
-                    ...mono,
-                  }}
-                >
-                  Page {filters.page} of {Math.ceil(leadsTotal / 50)}
-                </span>{" "}
-                <Btn
-                  small
-                  disabled={filters.page >= Math.ceil(leadsTotal / 50)}
-                  onClick={() =>
-                    setFilters((f) => ({ ...f, page: f.page + 1 }))
-                  }
-                >
-                  Next
-                </Btn>{" "}
-              </div>
-            )}
           </>
         )}
 
         {pipelineView === "board" && (
-          <div
+          <div role="region" aria-label="Lead board" tabIndex={0}
             style={{
+              maxWidth: "100%",
               display: "flex",
               gap: 12,
               overflowX: "auto",
@@ -3401,7 +2774,7 @@ export function LeadsSection() {
                     <span
                       style={{
                         color: C.heading,
-                        fontSize: 11,
+                        fontSize: 14,
                         fontWeight: 700,
                         letterSpacing: "0.08em",
                         textTransform: "uppercase",
@@ -3410,7 +2783,7 @@ export function LeadsSection() {
                     >
                       {stage.replace(/_/g, " ")}
                     </span>{" "}
-                    <span style={{ color: C.muted, fontSize: 12, ...mono }}>
+                    <span style={{ color: C.muted, fontSize: 14, ...mono }}>
                       {stageLeads.length}
                     </span>{" "}
                   </div>{" "}
@@ -3426,7 +2799,8 @@ export function LeadsSection() {
                     {stageLeads.map((lead) => (
                       <div
                         key={lead.id}
-                        draggable
+                        draggable role="button" tabIndex={0}
+                        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setPipelineView("table"); expandLead(lead); } }}
                         onDragStart={(e) => {
                           e.dataTransfer.setData("text/plain", String(lead.id));
                           setDraggingLeadId(lead.id);
@@ -3465,7 +2839,7 @@ export function LeadsSection() {
                           <div
                             style={{
                               color: C.heading,
-                              fontSize: 13,
+                              fontSize: 14,
                               fontWeight: 500,
                               overflow: "hidden",
                               textOverflow: "ellipsis",
@@ -3482,7 +2856,7 @@ export function LeadsSection() {
                         <div
                           style={{
                             color: C.muted,
-                            fontSize: 12,
+                            fontSize: 14,
                             ...mono,
                             marginBottom: 5,
                             overflow: "hidden",
@@ -3495,7 +2869,7 @@ export function LeadsSection() {
                         <div
                           style={{
                             color: C.text,
-                            fontSize: 12,
+                            fontSize: 14,
                             marginBottom: 8,
                             overflow: "hidden",
                             textOverflow: "ellipsis",
@@ -3554,7 +2928,7 @@ export function LeadsSection() {
                             padding: "4px 7px",
                             background: C.white,
                             color: C.red,
-                            fontSize: 11,
+                            fontSize: 14,
                             fontWeight: 500,
                             cursor:
                               deletingLeadId === lead.id
@@ -3572,7 +2946,7 @@ export function LeadsSection() {
                       <div
                         style={{
                           color: C.muted,
-                          fontSize: 12,
+                          fontSize: 14,
                           fontStyle: "italic",
                           padding: "12px 4px",
                           textAlign: "center",
@@ -3587,6 +2961,47 @@ export function LeadsSection() {
             })}
           </div>
         )}
+            {/* Pagination */}
+            {leadsTotal > 50 && (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "center",
+                  gap: 8,
+                  marginTop: 16,
+                }}
+              >
+                {" "}
+                <Btn
+                  small
+                  disabled={filters.page <= 1}
+                  onClick={() =>
+                    setFilters((f) => ({ ...f, page: f.page - 1 }))
+                  }
+                >
+                  Prev
+                </Btn>{" "}
+                <span
+                  style={{
+                    color: C.muted,
+                    fontSize: 14,
+                    alignSelf: "center",
+                    ...mono,
+                  }}
+                >
+                  Page {filters.page} of {Math.ceil(leadsTotal / 50)}
+                </span>{" "}
+                <Btn
+                  small
+                  disabled={filters.page >= Math.ceil(leadsTotal / 50)}
+                  onClick={() =>
+                    setFilters((f) => ({ ...f, page: f.page + 1 }))
+                  }
+                >
+                  Next
+                </Btn>{" "}
+              </div>
+            )}
       </>
     );
   };
@@ -3631,7 +3046,7 @@ export function LeadsSection() {
             style={{
               margin: 0,
               color: C.heading,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 500,
               fontFamily: ROBOTO,
               letterSpacing: "0.02em",
@@ -3679,7 +3094,7 @@ export function LeadsSection() {
                     style={{
                       padding: "12px 14px",
                       textAlign: "left",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: C.muted,
                       fontWeight: 500,
                       textTransform: "uppercase",
@@ -3740,7 +3155,7 @@ export function LeadsSection() {
                         <div
                           style={{
                             color: C.heading,
-                            fontSize: 13,
+                            fontSize: 14,
                             fontWeight: 500,
                           }}
                         >
@@ -3762,7 +3177,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           color: C.text,
-                          fontSize: 13,
+                          fontSize: 14,
                         }}
                       >
                         {src.channel || "--"}
@@ -3771,7 +3186,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           ...mono,
-                          fontSize: 13,
+                          fontSize: 14,
                           color: C.text,
                         }}
                       >
@@ -3781,7 +3196,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           ...mono,
-                          fontSize: 13,
+                          fontSize: 14,
                           color: C.heading,
                         }}
                       >
@@ -3791,7 +3206,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           ...mono,
-                          fontSize: 13,
+                          fontSize: 14,
                           color: C.green,
                         }}
                       >
@@ -3801,7 +3216,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           ...mono,
-                          fontSize: 13,
+                          fontSize: 14,
                           color:
                             convRate > 20
                               ? C.green
@@ -3816,7 +3231,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           ...mono,
-                          fontSize: 13,
+                          fontSize: 14,
                           color: C.text,
                         }}
                       >
@@ -3826,7 +3241,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           ...mono,
-                          fontSize: 13,
+                          fontSize: 14,
                           color: C.text,
                         }}
                       >
@@ -3836,7 +3251,7 @@ export function LeadsSection() {
                         style={{
                           padding: "12px 14px",
                           ...mono,
-                          fontSize: 13,
+                          fontSize: 14,
                           fontWeight: 500,
                           color: roiColor(roi || 0),
                         }}
@@ -3950,6 +3365,33 @@ export function LeadsSection() {
   // ROI ANALYTICS TAB
   // ═════════════════════════════════════════════════════════════════════════
   const renderAnalytics = () => {
+    const ov = overview || {};
+    const funnelByStage = new Map(funnel.map((f) => [f.stage, f]));
+    const countStages = (stages) =>
+      stages.reduce(
+        (sum, stage) => sum + Number(funnelByStage.get(stage)?.count || 0),
+        0,
+      );
+    const pipelineOrder = [
+      { stage: "new", label: "New Leads", count: countStages(["new"]) },
+      {
+        stage: "contacted",
+        label: "Contacted",
+        count: countStages(["contacted"]),
+      },
+      {
+        stage: "estimate_sent",
+        label: "Estimate Sent",
+        count: countStages(["estimate_sent", "estimate_viewed", "negotiating"]),
+      },
+      { stage: "won", label: "Won", count: countStages(["won"]) },
+      {
+        stage: "lost",
+        label: "Lost",
+        count: countStages(["lost", "unresponsive", "disqualified", "duplicate"]),
+      },
+    ];
+    const funnelData = pipelineOrder;
     const maxChannelVal = Math.max(
       ...byChannel.map((c) => Math.max(c.totalCost, c.totalRevenue)),
       1,
@@ -3981,6 +3423,108 @@ export function LeadsSection() {
 
     return (
       <>
+        {/* Metric Cards */}
+        <div
+          style={{
+            display: "flex",
+            gap: 16,
+            flexWrap: "wrap",
+            marginBottom: 24,
+          }}
+        >
+          {" "}
+          <MetricCard
+            label="New Leads (Month)"
+            value={ov.total || 0}
+            color={C.teal}
+          />{" "}
+          <MetricCard
+            label="Conversion Rate"
+            value={fmtPct(ov.conversionRate)}
+            color={C.green}
+          />{" "}
+          <MetricCard
+            label="Median Response Time"
+            value={fmtTime(ov.medianResponseTime)}
+            sub={
+              ov.recentMedianResponseTime != null
+                ? `7-day: ${fmtTime(ov.recentMedianResponseTime)}`
+                : undefined
+            }
+            color={C.amber}
+          />{" "}
+          <MetricCard
+            label="Cost per Acquisition"
+            value={fmtMoney(ov.cpa)}
+            color={C.purple}
+          />{" "}
+          <MetricCard
+            label="Avg Speed to Lead"
+            value={ov.avgSpeedToLead != null ? fmtTime(ov.avgSpeedToLead) : "--"}
+            sub={(() => {
+              const since = ov.speedToLeadSince
+                ? ` since ${fmtShortDate(ov.speedToLeadSince)}`
+                : "";
+              if (ov.avgSpeedToLead == null) return `None waiting${since}`;
+              const quality =
+                ov.avgSpeedToLead < 5
+                  ? "Great!"
+                  : ov.avgSpeedToLead < 15
+                    ? "Good"
+                    : "Needs work";
+              return `${ov.openUnansweredCount} waiting${since} · ${quality}`;
+            })()}
+            color={
+              ov.avgSpeedToLead == null
+                ? C.green
+                : ov.avgSpeedToLead < 5
+                  ? C.green
+                  : ov.avgSpeedToLead < 15
+                    ? C.amber
+                    : C.red
+            }
+          />{" "}
+          <MetricCard
+            label="Monthly ROI"
+            value={ov.roi != null ? fmtPct(ov.roi) : "--"}
+            color={roiColor(ov.roi || 0)}
+          />{" "}
+        </div>
+        {/* Pipeline status */}
+        <div style={{ marginBottom: 10 }}>
+          <h2
+            style={{
+              margin: "0 0 6px",
+              color: C.heading,
+              fontSize: 14,
+              fontWeight: 500,
+              fontFamily: ROBOTO,
+              letterSpacing: "0.02em",
+            }}
+          >
+            Pipeline status
+          </h2>
+          <div style={{ margin: 0, color: C.muted, fontSize: 12 }}>
+            Current lead counts by status for the selected month.
+          </div>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            marginBottom: 16,
+            flexWrap: "wrap",
+          }}
+        >
+          {funnelData.map((f) => (
+            <PipelineStatusCard
+              key={f.stage}
+              label={f.label || f.stage.replace(/_/g, " ")}
+              value={f.count}
+            />
+          ))}
+        </div>
         {/* Channel Comparison */}
         <Card style={{ marginBottom: 24 }}>
           {" "}
@@ -3988,7 +3532,7 @@ export function LeadsSection() {
             style={{
               margin: "0 0 16px",
               color: C.heading,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 500,
               fontFamily: ROBOTO,
               letterSpacing: "0.02em",
@@ -4008,7 +3552,7 @@ export function LeadsSection() {
                 style={{
                   display: "flex",
                   justifyContent: "space-between",
-                  fontSize: 12,
+                  fontSize: 14,
                   marginBottom: 4,
                 }}
               >
@@ -4046,7 +3590,7 @@ export function LeadsSection() {
                 style={{
                   display: "flex",
                   gap: 16,
-                  fontSize: 10,
+                  fontSize: 14,
                   color: C.muted,
                   marginTop: 2,
                 }}
@@ -4061,7 +3605,7 @@ export function LeadsSection() {
             style={{
               display: "flex",
               gap: 16,
-              fontSize: 11,
+              fontSize: 14,
               color: C.muted,
               marginTop: 8,
             }}
@@ -4104,7 +3648,7 @@ export function LeadsSection() {
             style={{
               margin: "0 0 16px",
               color: C.heading,
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 500,
               fontFamily: ROBOTO,
               letterSpacing: "0.02em",
@@ -4241,7 +3785,7 @@ export function LeadsSection() {
               style={{
                 margin: "0 0 16px",
                 color: C.heading,
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: 500,
                 fontFamily: ROBOTO,
                 letterSpacing: "0.02em",
@@ -4253,7 +3797,7 @@ export function LeadsSection() {
               style={{
                 margin: "-12px 0 14px",
                 color: C.muted,
-                fontSize: 11,
+                fontSize: 14,
                 fontFamily: ROBOTO,
               }}
             >
@@ -4280,7 +3824,7 @@ export function LeadsSection() {
                       {" "}
                       <div
                         style={{
-                          fontSize: 11,
+                          fontSize: 14,
                           color: C.heading,
                           ...mono,
                           marginBottom: 4,
@@ -4329,7 +3873,7 @@ export function LeadsSection() {
                       >
                         {b.label}
                       </div>{" "}
-                      <div style={{ fontSize: 10, color: C.muted, ...mono }}>
+                      <div style={{ fontSize: 14, color: C.muted, ...mono }}>
                         {b.total}
                       </div>{" "}
                     </div>
@@ -4341,7 +3885,7 @@ export function LeadsSection() {
               style={{
                 display: "flex",
                 gap: 12,
-                fontSize: 11,
+                fontSize: 14,
                 color: C.muted,
                 marginTop: 12,
               }}
@@ -4384,7 +3928,7 @@ export function LeadsSection() {
               style={{
                 margin: "0 0 16px",
                 color: C.heading,
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: 500,
                 fontFamily: ROBOTO,
                 letterSpacing: "0.02em",
@@ -4396,7 +3940,7 @@ export function LeadsSection() {
               style={{
                 margin: "-12px 0 14px",
                 color: C.muted,
-                fontSize: 11,
+                fontSize: 14,
                 fontFamily: ROBOTO,
               }}
             >
@@ -4453,7 +3997,7 @@ export function LeadsSection() {
                     <div
                       key={i}
                       style={{
-                        fontSize: 12,
+                        fontSize: 14,
                         marginBottom: 4,
                         display: "flex",
                         alignItems: "center",
@@ -4496,7 +4040,7 @@ export function LeadsSection() {
               style={{
                 margin: 0,
                 color: C.heading,
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: 500,
                 fontFamily: ROBOTO,
                 letterSpacing: "0.02em",
@@ -4524,7 +4068,7 @@ export function LeadsSection() {
                     style={{
                       padding: "10px 14px",
                       textAlign: "left",
-                      fontSize: 11,
+                      fontSize: 14,
                       color: C.muted,
                       fontWeight: 500,
                       textTransform: "uppercase",
@@ -4543,7 +4087,7 @@ export function LeadsSection() {
                       padding: "10px 14px",
                       color: C.teal,
                       ...mono,
-                      fontSize: 13,
+                      fontSize: 14,
                     }}
                   >
                     {s.source?.twilio_phone_number}
@@ -4552,7 +4096,7 @@ export function LeadsSection() {
                     style={{
                       padding: "10px 14px",
                       color: C.text,
-                      fontSize: 13,
+                      fontSize: 14,
                     }}
                   >
                     {s.source?.name?.slice(0, 30)}
@@ -4561,7 +4105,7 @@ export function LeadsSection() {
                     style={{
                       padding: "10px 14px",
                       ...mono,
-                      fontSize: 13,
+                      fontSize: 14,
                       color: C.text,
                     }}
                   >
@@ -4571,7 +4115,7 @@ export function LeadsSection() {
                     style={{
                       padding: "10px 14px",
                       ...mono,
-                      fontSize: 13,
+                      fontSize: 14,
                       color: C.heading,
                     }}
                   >
@@ -4581,7 +4125,7 @@ export function LeadsSection() {
                     style={{
                       padding: "10px 14px",
                       ...mono,
-                      fontSize: 13,
+                      fontSize: 14,
                       color: C.green,
                     }}
                   >
@@ -4591,7 +4135,7 @@ export function LeadsSection() {
                     style={{
                       padding: "10px 14px",
                       ...mono,
-                      fontSize: 13,
+                      fontSize: 14,
                       color: C.green,
                     }}
                   >
@@ -4601,7 +4145,7 @@ export function LeadsSection() {
                     style={{
                       padding: "10px 14px",
                       ...mono,
-                      fontSize: 13,
+                      fontSize: 14,
                       fontWeight: 500,
                       color: roiColor(s.roi),
                     }}
@@ -4664,6 +4208,31 @@ export function LeadsSection() {
             value={formData.email}
             onChange={(v) => setFormData((f) => ({ ...f, email: v }))}
           />{" "}
+          {contactMatches?.total > 0 && <div style={{ padding: 12, marginBottom: 12, border: `1px solid ${C.border}`, borderRadius: 8 }}>
+            <p style={{ fontSize: 14, margin: "0 0 8px" }}>Possible existing leads with this contact ({contactMatches.total}). Review before creating another record.</p>
+            {contactMatches.matches.map((match) => <Btn key={match.id} small onClick={() => {
+              setShowModal(null);
+              navigate(`/admin/pipeline?lead=${match.id}`);
+            }}>{[match.first_name, match.last_name].filter(Boolean).join(" ") || "Open lead"} · {match.status}</Btn>)}
+          </div>}
+          {contactMatches?.error && <p role="status" style={{ fontSize: 14 }}>Existing-contact check unavailable. Search the queue before creating another record.</p>}
+          <Input
+            label="Service Interest"
+            value={formData.service_interest}
+            onChange={(v) =>
+              setFormData((f) => ({ ...f, service_interest: v }))
+            }
+            placeholder="e.g. General Pest, Lawn Care, Termite"
+          />{" "}
+          <Input
+            label="Lead Source"
+            value={formData.lead_source_id}
+            onChange={(v) => setFormData((f) => ({ ...f, lead_source_id: v }))}
+            options={sources.map((s) => ({ value: s.id, label: s.name }))}
+          />{" "}
+          <Input label="Notes" value={formData.notes} onChange={(notes) => setFormData((f) => ({ ...f, notes }))} />
+          <details style={{ marginBottom: 16 }}>
+            <summary style={{ minHeight: 44, cursor: "pointer", fontSize: 14 }}>Property and intake details (optional)</summary>
           <Input
             label="Address"
             value={formData.address}
@@ -4695,14 +4264,6 @@ export function LeadsSection() {
               label: t.replace(/_/g, " "),
             }))}
           />{" "}
-          <Input
-            label="Service Interest"
-            value={formData.service_interest}
-            onChange={(v) =>
-              setFormData((f) => ({ ...f, service_interest: v }))
-            }
-            placeholder="e.g. General Pest, Lawn Care, Termite"
-          />{" "}
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             {" "}
             <div style={{ flex: "1 1 55%" }}>
@@ -4726,12 +4287,7 @@ export function LeadsSection() {
               />
             </div>{" "}
           </div>{" "}
-          <Input
-            label="Lead Source"
-            value={formData.lead_source_id}
-            onChange={(v) => setFormData((f) => ({ ...f, lead_source_id: v }))}
-            options={sources.map((s) => ({ value: s.id, label: s.name }))}
-          />{" "}
+          </details>
           <Btn onClick={submitForm} disabled={loading}>
             {loading ? "Saving..." : "Create Lead"}
           </Btn>{" "}
@@ -4761,7 +4317,7 @@ export function LeadsSection() {
               setFormData((f) => ({ ...f, builder_warranty_expires_on: v }))
             }
           />{" "}
-          <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
+          <div style={{ fontSize: 14, color: C.muted, marginBottom: 12 }}>
             Clearing both fields removes the warranty from this lead.
           </div>{" "}
           <Btn onClick={submitForm} disabled={loading}>
@@ -4828,7 +4384,7 @@ export function LeadsSection() {
             {" "}
             <label
               style={{
-                fontSize: 12,
+                fontSize: 14,
                 color: C.muted,
                 display: "block",
                 marginBottom: 4,
@@ -4850,7 +4406,7 @@ export function LeadsSection() {
                 borderRadius: 8,
                 padding: "8px 12px",
                 color: C.text,
-                fontSize: 13,
+                fontSize: 14,
                 resize: "vertical",
                 boxSizing: "border-box",
               }}
@@ -4994,7 +4550,8 @@ export function LeadsSection() {
   return (
     <div
       style={{
-        padding: 24,
+        padding: 0,
+        minWidth: 0,
         maxWidth: 1400,
         margin: "0 auto",
         color: C.text,
@@ -5002,6 +4559,21 @@ export function LeadsSection() {
       }}
     >
       {" "}
+      <style>{`
+        .lead-queue-table td { overflow-wrap: anywhere; }
+        .lead-queue-table :is(td, th) { padding-inline: 8px !important; }
+        .lead-queue-table :is(input, textarea) { min-width: 0; min-height: 44px; font-size: 16px !important; }
+        .lead-queue-table select { width: 100%; min-height: 44px; font-size: 16px !important; max-width: 100%; background: white !important; color: #27272a !important; }
+        @media (max-width: 1279px) {
+          .lead-queue-table, .lead-queue-table > tbody, .lead-queue-table > tbody > tr, .lead-queue-table > tbody > tr > td { display: block; width: 100%; }
+          .lead-queue-record { display: grid; grid-template-columns: minmax(0, 1fr); padding: 12px 16px; }
+          .lead-queue-table :is(button, input, select, textarea) { scroll-margin-block: 90px; }
+          .lead-queue-record > td { padding: 0 !important; }
+          .lead-queue-record > td:last-child { padding-top: 8px !important; }
+          .lead-queue-record select { width: 100%; }
+          .lead-queue-table > tbody > tr:not(.lead-queue-record) > td > div { padding: 16px !important; }
+        }
+      `}</style>
       <LeadsWorkspaceNav
         active={tab}
         onChange={setTab}
@@ -5019,7 +4591,7 @@ export function LeadsSection() {
             color: C.red,
             borderRadius: 8,
             padding: "10px 12px",
-            fontSize: 13,
+            fontSize: 14,
             marginBottom: 16,
           }}
         >
@@ -5035,7 +4607,7 @@ export function LeadsSection() {
               borderRadius: 6,
               padding: "3px 8px",
               cursor: "pointer",
-              fontSize: 12,
+              fontSize: 14,
             }}
           >
             Retry

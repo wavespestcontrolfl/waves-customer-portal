@@ -74,6 +74,7 @@ function toAvailability(slots) {
 
 export default function SlotPicker({
   token,
+  preview = false,
   askToken = null,
   selectedSlotId,
   onSelect,
@@ -177,6 +178,7 @@ export default function SlotPicker({
   }, [glass, selectedSlotId, selectedSlot, heldSelection, freshnessTick, loading, data]);
 
   useEffect(() => {
+    if (preview) return undefined;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -202,7 +204,11 @@ export default function SlotPicker({
       .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [token, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
+  }, [token, preview, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
+
+  if (preview) return <section style={{ padding: 20 }} aria-label="Scheduling preview">
+    <p style={{ margin: 0, fontSize: 16 }}>Customers choose from current appointment times here. Scheduling and date searches are disabled in staff preview.</p>
+  </section>;
 
   // ── custom date/time finder ──
   const pad2 = (n) => String(n).padStart(2, '0');

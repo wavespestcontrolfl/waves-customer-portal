@@ -6,6 +6,12 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MobileEstimateRow } from "./EstimatesPageV2";
 
+const { openMessages } = vi.hoisted(() => ({ openMessages: vi.fn() }));
+vi.mock("../../components/admin/customer360/CustomerSmsPanel", () => ({
+  useCustomerSms: () => openMessages,
+  CustomerSmsProvider: ({ children }) => children,
+}));
+
 const ESTIMATE = {
   id: "estimate-1",
   token: "customer-link-token",
@@ -41,7 +47,10 @@ describe("MobileEstimateRow accessibility", () => {
     expect(row).not.toHaveAttribute("tabindex");
     expect(summary.querySelector("button, a")).toBeNull();
     expect(screen.getByRole("button", { name: "Call via Waves" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "SMS" })).toBeInTheDocument();
+    const message = screen.getByRole("button", { name: "SMS" });
+    expect(message).toBeInTheDocument();
+    fireEvent.click(message);
+    expect(openMessages).toHaveBeenCalledWith({ id: "customer-1", firstName: "Ada Lovelace", phone: "+19415550100" });
 
     fireEvent.click(summary);
     expect(onOpenCustomerPanel).toHaveBeenCalledWith("customer-1");

@@ -1,3 +1,4 @@
+import { CustomerSmsProvider, useCustomerSms } from "../../components/admin/customer360/CustomerSmsPanel";
 // client/src/pages/admin/EstimatesPageV2.jsx
 // Monochrome V2 of EstimatePage. Strict 1:1 on data, endpoints, behavior:
 //   - GET   /admin/estimates
@@ -25,9 +26,9 @@ import {
 } from "./EstimatePage";
 import { LeadsSection } from "./LeadsTabs";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
-import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
+import { EstimateSendProvider, useEstimateSend } from "../../components/admin/EstimateSendDialog";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineComposerModal";
 import WinLossSlicesCard from "./WinLossSlicesCard";
@@ -136,61 +137,6 @@ async function fetchEstimatePipelineRows(filter) {
     // Any capped page means the pipeline list (and its KPIs) is incomplete.
     truncated: responses.some((d) => d?.truncated),
   };
-}
-
-function summarizeEstimateSend(data) {
-  const parts = [];
-  if (data?.channels?.sms) {
-    parts.push(
-      data.channels.sms.ok
-        ? "SMS sent"
-        : `SMS failed: ${data.channels.sms.error || "unknown error"}`,
-    );
-  }
-  if (data?.channels?.email) {
-    parts.push(
-      data.channels.email.ok
-        ? "Email sent"
-        : `Email failed: ${data.channels.email.error || "unknown error"}`,
-    );
-  }
-  if (parts.length === 0) return data?.error || "Estimate send failed";
-  return parts.join(" / ");
-}
-
-async function sendEstimateFromPipeline(
-  id,
-  sendMethod = "both",
-  { acknowledgeEngineReview = false } = {},
-) {
-  const r = await fetch(`${API_BASE}/admin/estimates/${id}/send`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      sendMethod,
-      idempotencyKey:
-        globalThis.crypto?.randomUUID?.() ||
-        `estimate-send-${Date.now()}-${Math.random()}`,
-      ...(acknowledgeEngineReview ? { acknowledgeEngineReview: true } : {}),
-    }),
-  });
-  const data = await r.json().catch(() => ({}));
-  // Engine-review gate: a yellow-lane AI draft's first send returns 409 with
-  // the review reasons. Surface them and retry with the acknowledgment only
-  // on the operator's explicit confirm.
-  if (r.status === 409 && data?.code === "ENGINE_REVIEW_REQUIRED" && !acknowledgeEngineReview) {
-    if (window.confirm(`${data.error}\n\nReviewed — send now?`)) {
-      return sendEstimateFromPipeline(id, sendMethod, { acknowledgeEngineReview: true });
-    }
-    throw new Error("Send cancelled — review the AI draft first (open AI Review on the estimate).");
-  }
-  const summary = summarizeEstimateSend(data);
-  if (!r.ok) throw new Error(summary || data?.error || `HTTP ${r.status}`);
-  if (data.partialFailure) window.alert(`Send had issues: ${summary}`);
-  return data;
 }
 
 // Status badge. V2 collapses to neutral; alert tone only for declined/expired.
@@ -948,28 +894,26 @@ function WorkQueueRail({ value, onChange, counts }) {
   );
 }
 
-function PipelineCommandHeader({ activeTab, onTabChange }) {
-  const activeConfig = TABS.find((t) => t.key === activeTab) || TABS[0];
-  const ActionIcon = activeTab === "new" ? ClipboardList : FilePlus2;
-  const actionLabel =
-    activeTab === "new" ? "View Estimates" : "Create Estimate";
-  const actionTarget = activeTab === "new" ? "estimates" : "new";
-
+function PipelineCommandHeader({ activeTab, onTabChange, onNewLead }) {
+  if (activeTab === "new") return null;
   return (
-    <AdminCommandHeader
-      title="Pipeline"
-      icon={activeConfig.Icon}
-      sections={TABS}
-      activeKey={activeTab}
-      onSectionChange={onTabChange}
-      ariaLabel="Pipeline section"
-      action={{
-        label: actionLabel,
-        icon: ActionIcon,
-        variant: activeTab === "new" ? "secondary" : "primary",
-        onClick: () => onTabChange(actionTarget),
-      }}
-    />
+    <header className="mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h1 className="text-22 font-medium text-zinc-900 m-0">Pipeline</h1>
+        <div className="flex gap-2">
+          <Button variant={activeTab === "leads" ? "secondary" : "primary"} onClick={() => onTabChange("new")} className="min-h-11 text-14 normal-case tracking-normal">
+            Create estimate
+          </Button>
+          {activeTab === "leads" && <Button onClick={onNewLead} className="min-h-11 text-14 normal-case tracking-normal">New lead</Button>}
+        </div>
+      </div>
+      <nav aria-label="Pipeline section" className="flex gap-4 border-b-hairline border-zinc-200">
+        {TABS.filter((item) => item.key !== "new").map(({ key, label }) => (
+          <button key={key} type="button" onClick={() => onTabChange(key)} aria-current={activeTab === key ? "page" : undefined}
+            className={cn("min-h-11 px-0 border-0 border-b-2 border-solid bg-transparent text-14 font-medium u-focus-ring cursor-pointer", activeTab === key ? "border-zinc-900 text-zinc-900" : "border-transparent text-ink-secondary")}>{label}</button>
+        ))}
+      </nav>
+    </header>
   );
 }
 
@@ -1384,9 +1328,7 @@ function estimatePreviewHref(estimate) {
   // routes staff to the REAL React customer page instead — the /data endpoint
   // verifies the staff JWT before serving a draft, so the link stays inert
   // for anyone else.
-  return ["draft", "scheduled"].includes(String(estimate?.status))
-    ? `${base}?adminPreview=1`
-    : base;
+  return `${base}?adminPreview=1`;
 }
 
 // Formats an appointment row from /admin/estimates as a short label like
@@ -1743,6 +1685,8 @@ function useEstimateDeepLinkHighlight({ targetId, token, rows }) {
 }
 
 function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }) {
+  const openMessages = useCustomerSms();
+  const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const navigate = useNavigate();
   const [estimates, setEstimates] = useState([]);
@@ -2389,16 +2333,15 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                           </button>
                         )}
                         {e.customerPhone && (
-                          <a
-                            href={`/admin/communications?phone=${encodeURIComponent(e.customerPhone)}`}
-                            onClick={(evt) => evt.stopPropagation()}
+                          <button type="button"
+                            onClick={(evt) => { evt.stopPropagation(); openMessages?.({ id: e.customerId, firstName: e.customerName, phone: e.customerPhone }); }}
                             aria-label={`Message ${e.customerName || "customer"}`}
                             title={`Message ${e.customerPhone}`}
                             className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
                           >
                             {" "}
                             <MessageSquare size={16} strokeWidth={1.75} />{" "}
-                          </a>
+                          </button>
                         )}
                         {/* Create-estimate icon — carries customer fields into the
                         new-estimate form via query string. Always shown when
@@ -2433,16 +2376,8 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             type="button"
                             onClick={async (evt) => {
                               evt.stopPropagation();
-                              const action =
-                                e.status === "draft" ? "Send" : "Resend";
-                              if (
-                                !window.confirm(
-                                  `${action} estimate to ${e.customerName || "customer"} via SMS + email?`,
-                                )
-                              )
-                                return;
                               try {
-                                await sendEstimateFromPipeline(e.id, "both");
+                                await sendEstimateFromPipeline(e.id);
                                 refreshEstimates();
                               } catch (err) {
                                 window.alert("Send failed: " + err.message);
@@ -2451,8 +2386,8 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             aria-label={`${e.status === "draft" ? "Send" : "Resend"} estimate to ${e.customerName || "customer"}`}
                             title={
                               e.status === "draft"
-                                ? "Send estimate via SMS + email"
-                                : "Resend estimate via SMS + email"
+                                ? "Review recipient and send estimate"
+                                : "Review recipient and resend estimate"
                             }
                             className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
                           >
@@ -2549,7 +2484,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                             className="w-full sm:w-auto rounded-full whitespace-nowrap"
                             onClick={async () => {
                               try {
-                                await sendEstimateFromPipeline(e.id, "both");
+                                await sendEstimateFromPipeline(e.id);
                                 refreshEstimates();
                               } catch (err) {
                                 window.alert("Send failed: " + err.message);
@@ -2735,14 +2670,8 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                               label: "Resend estimate",
                               icon: <RotateCw size={16} strokeWidth={1.75} />,
                               onClick: async () => {
-                                if (
-                                  !confirm(
-                                    `Resend estimate to ${e.customerName || "customer"} via SMS + email?`,
-                                  )
-                                )
-                                  return;
                                 try {
-                                  await sendEstimateFromPipeline(e.id, "both");
+                                  await sendEstimateFromPipeline(e.id);
                                   refreshEstimates();
                                 } catch (err) {
                                   window.alert("Send failed: " + err.message);
@@ -3176,6 +3105,8 @@ export function MobileEstimateRow({
   highlighted = false,
 }) {
   const navigate = useNavigate();
+  const sendEstimateFromPipeline = useEstimateSend();
+  const openMessages = useCustomerSms();
   const cfg = STATUS_CONFIG[estimate.status] || STATUS_CONFIG.draft;
   const amount = estimateAmountDisplay(estimate);
   const canSend = canSendEstimate(estimate);
@@ -3418,15 +3349,14 @@ export function MobileEstimateRow({
         </button>
       )}
       {estimate.customerPhone && (
-        <a
-          href={`/admin/communications?phone=${encodeURIComponent(estimate.customerPhone)}`}
-          onClick={(e) => e.stopPropagation()}
+        <button type="button"
+          onClick={(e) => { e.stopPropagation(); openMessages?.({ id: estimate.customerId, firstName: estimate.customerName, phone: estimate.customerPhone }); }}
           aria-label="SMS"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >
           {" "}
           <MessageSquare size={16} strokeWidth={1.75} />{" "}
-        </a>
+        </button>
       )}
       <LawnOutlineQuickButton estimate={estimate} onClick={onLawnOutline} compact />
       {/* Trailing actions — Call + Text (when phone) + Overflow. All
@@ -3449,15 +3379,8 @@ export function MobileEstimateRow({
             label: estimate.status === "draft" ? "Send estimate" : "Resend estimate",
             icon: <Send size={16} strokeWidth={1.75} />,
             onClick: async () => {
-              const action = estimate.status === "draft" ? "Send" : "Resend";
-              if (
-                !window.confirm(
-                  `${action} estimate to ${customerName} via SMS + email?`,
-                )
-              )
-                return;
               try {
-                await sendEstimateFromPipeline(estimate.id, "both");
+                await sendEstimateFromPipeline(estimate.id);
                 onSend?.();
               } catch (err) {
                 window.alert("Send failed: " + err.message);
@@ -3578,6 +3501,7 @@ function EstimatesMobileListView({
   deepLinkEstimateId = null,
   deepLinkToken = 0,
 }) {
+  const sendEstimateFromPipeline = useEstimateSend();
   const v3Flag = useFeatureFlag("estimates_v2_status_pills");
   const [estimates, setEstimates] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3766,14 +3690,8 @@ function EstimatesMobileListView({
         window.alert("Estimate needs a positive monthly or one-time total before it can be sent.");
         return;
       }
-      if (
-        !window.confirm(
-          `Resend estimate to ${e.customerName || "the customer"} via SMS + email?`,
-        )
-      )
-        return;
       try {
-        await sendEstimateFromPipeline(e.id, "both");
+        await sendEstimateFromPipeline(e.id);
         refreshEstimates();
       } catch (err) {
         window.alert("Send failed: " + err.message);
@@ -4039,9 +3957,10 @@ function EstimatesMobileListView({
   );
 }
 
-export default function EstimatesPageV2() {
+function EstimatesWorkspace() {
   const isMobile = useIsMobile(768);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [newLeadRequest, setNewLeadRequest] = useState(0);
   const readLeadPrefill = useCallback((params) => {
     const legacyName = [params.get("first_name"), params.get("last_name")]
       .filter(Boolean)
@@ -4152,15 +4071,12 @@ export default function EstimatesPageV2() {
       setActiveTab("estimates");
     }
     if (estimateId) setDeepLink((prev) => ({ id: estimateId, token: prev.token + 1 }));
-    // Strip one-shot params so a later tab change / refresh doesn't re-snap.
-    if (hasIncoming || estimateId) {
-      const stripped = new URLSearchParams(searchParams);
-      if (hasIncoming) {
-        PREFILL_PARAM_KEYS.forEach((k) => stripped.delete(k));
-        stripped.delete("tab");
-      }
-      if (estimateId) stripped.delete("estimateId");
-      setSearchParams(stripped, { replace: true });
+    // Keep editor identity in the URL so refresh reopens the saved draft.
+    // Notification highlights remain one-shot; selectTab clears editor keys.
+    if (estimateId) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("estimateId");
+      setSearchParams(next, { replace: true });
     }
   }, [searchParams, setSearchParams, readLeadPrefill]);
 
@@ -4197,6 +4113,7 @@ export default function EstimatesPageV2() {
 
   const selectTab = useCallback(
     (key) => {
+      setNewLeadRequest(0);
       setActiveTab(key);
       const next = new URLSearchParams(searchParams);
       PREFILL_PARAM_KEYS.forEach((k) => next.delete(k));
@@ -4210,8 +4127,8 @@ export default function EstimatesPageV2() {
   return (
     <div style={{ fontFamily: ROBOTO }}>
       {" "}
-      <PipelineCommandHeader activeTab={activeTab} onTabChange={selectTab} />
-      {activeTab === "leads" && <LeadsSection />}
+      <PipelineCommandHeader activeTab={activeTab} onTabChange={selectTab} onNewLead={() => setNewLeadRequest((value) => value + 1)} />
+      {activeTab === "leads" && <LeadsSection newLeadRequest={newLeadRequest} />}
       {activeTab === "estimates" &&
         // Estimates list: mobile gets the touch-optimized card list with its
         // own filters/sort; desktop gets the full table/board pipeline view.
@@ -4249,6 +4166,18 @@ export default function EstimatesPageV2() {
           initialCustomerEmail={prefill.customerEmail}
           initialServiceInterest={prefill.serviceInterest}
           editEstimateId={prefill.editEstimateId}
+          onBack={() => selectTab("leads")}
+          onStartNew={() => {
+            setPrefill(readLeadPrefill(new URLSearchParams()));
+            selectTab("new");
+          }}
+          onDraftSaved={(id) => {
+            const next = new URLSearchParams(searchParams);
+            PREFILL_PARAM_KEYS.forEach((key) => next.delete(key));
+            next.set("tab", "new");
+            next.set("editEstimateId", id);
+            setSearchParams(next, { replace: true });
+          }}
         />
       )}
       {activeTab === "pricing" && (
@@ -4259,4 +4188,8 @@ export default function EstimatesPageV2() {
       )}
     </div>
   );
+}
+
+export default function EstimatesPageV2() {
+  return <CustomerSmsProvider><EstimateSendProvider><EstimatesWorkspace /></EstimateSendProvider></CustomerSmsProvider>;
 }
