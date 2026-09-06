@@ -609,7 +609,7 @@ async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = fal
   try {
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'source_estimate_id', 'scheduled_date', 'window_start');
+      .first('id', 'reservation_service_mix', 'scheduled_date', 'window_start');
     if (!svc) return null;
     svc.window_start = await require('./combined-visit-capacity').arrivalStartForService(db, svc);
     return composeScheduledApptTime(svc);
@@ -892,7 +892,7 @@ async function confirmationArrivalWindow({ scheduledServiceId = null, windowStar
   try {
     let start = windowStart;
     if (scheduledServiceId) {
-      const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'source_estimate_id', 'window_start');
+      const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'reservation_service_mix', 'window_start');
       if (row) start = await require('./combined-visit-capacity').arrivalStartForService(db, row);
     }
     return spokenArrivalWindow(String(start || '').slice(0, 5));
@@ -2223,7 +2223,7 @@ const AppointmentReminders = {
   async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source, createdAt }) {
     if (!conn || !scheduledServiceId || !customerId) return null;
     const resolved = await this.resolveCommittedVisitTime(scheduledServiceId, appointmentTimeParts(appointmentTime), conn);
-    const apptTime = parseETDateTime(resolved?.appointmentTime || appointmentTime);
+    const apptTime = parseETDateTime(resolved ? resolved.appointmentTime : appointmentTime);
     if (isNaN(apptTime.getTime())) return null;
     const now = new Date();
     // Label recovery reads through the caller's conn — borrowing a second
@@ -2413,7 +2413,7 @@ const AppointmentReminders = {
       // reschedule UPDATE then waits until the reminder exists, so its
       // sync trigger finds a row to correct instead of nothing.
       if (lock) query = query.forShare();
-      const row = await query.first('id', 'source_estimate_id', 'scheduled_date', 'window_start');
+      const row = await query.first('id', 'reservation_service_mix', 'scheduled_date', 'window_start');
       if (row) {
         // The row is the whole truth once found: a NULL window means
         // "windowless" (08:00 convention), not "keep the caller's stale

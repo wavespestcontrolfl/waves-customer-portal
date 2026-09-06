@@ -138,6 +138,7 @@ postgres('combined capacity conversion on the migrated application schema', () =
         const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id });
         expect(children.length).toBeGreaterThan(0);
         expect(children.every((row) => row.service_id === catalog.id && row.recurring_pattern === line.pattern)).toBe(true);
+        expect(children.every((row) => row.reservation_service_mix == null)).toBe(true);
       }
     } finally { await trx.rollback(); }
   });
@@ -153,7 +154,7 @@ postgres('combined capacity conversion on the migrated application schema', () =
     } finally { await trx.rollback(); }
   });
 
-  test('cancelling the reminder owner promotes its sibling; moving that sibling gives it its new arrival', async () => {
+  test('changing the anchor assignment preserves sibling arrival ownership, including cancellation and a later individual move', async () => {
     const trx = await mockPg.transaction();
     try {
       const f = await fixture(trx, lines.slice(0, 2));
@@ -165,6 +166,11 @@ postgres('combined capacity conversion on the migrated application schema', () =
         scheduledServiceId: parent.id, customerId: f.customerId,
         appointmentTime: `${f.date}T${parent.window_start}`, serviceType: parent.service_type,
       });
+      await trx('scheduled_services').where({ id: parents[0].id }).update({ technician_id: null });
+      await expect(AppointmentReminders.resolveCommittedVisitTime(parents[1].id, {}, trx))
+        .resolves.toMatchObject({ appointmentTime: `${f.date}T09:00` });
+      const beforeCancel = await trx('appointment_reminders').where({ customer_id: f.customerId });
+      expect(beforeCancel.filter((row) => !row.suppressed_by_sibling)).toHaveLength(1);
       await trx('scheduled_services').where({ id: parents[0].id }).update({ status: 'cancelled' });
       let sibling = await trx('appointment_reminders').where({ scheduled_service_id: parents[1].id }).first();
       expect(sibling.suppressed_by_sibling).toBe(false);

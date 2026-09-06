@@ -3,6 +3,12 @@ const { parseHHMM, minutesToHHMM } = require('./scheduling/window-rules');
 const { serviceKeyFor } = require('./recurring-appointment-seeder');
 
 const SERVICE_MINUTES = 60;
+// Families the reserved-estimate converter can allocate as separate programs.
+// Other recurring work (including foam) remains office-scheduled.
+const ALLOCATABLE_FAMILIES = new Set([
+  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito',
+  'termite_bait', 'rodent_bait', 'palm_injection',
+]);
 
 function capacityUnavailable() {
   return Object.assign(new Error('The selected services cannot be booked together in this time. Please choose another time or contact the office.'), {
@@ -12,7 +18,8 @@ function capacityUnavailable() {
 
 function capacityForServices(services) {
   const keys = services.map((service) => service.service);
-  if (!keys.length || keys.some((key) => typeof key !== 'string' || !key)
+  if (!keys.length || keys.some((key) => !ALLOCATABLE_FAMILIES.has(key))
+    || services.some((service) => service.commercial)
     || new Set(keys).size !== keys.length) throw capacityUnavailable();
   return { version: 1, services: keys, durationMinutes: keys.length * SERVICE_MINUTES };
 }
@@ -52,9 +59,9 @@ function assertCapacityServices(anchor, members) {
 }
 
 // The DB reminder trigger consumes the same resolver on moves/cancellations.
-// Legacy rows have no estimate source and keep their ordinary work start.
+// Legacy rows have no allocation and keep their ordinary work start.
 async function arrivalStartForService(conn, row) {
-  if (!row?.id || !row.source_estimate_id) return row?.window_start || null;
+  if (!row?.id || !row.reservation_service_mix?.allocatedServiceIds) return row?.window_start || null;
   const result = await conn.raw('SELECT reservation_arrival_start(?) AS window_start', [row.id]);
   return result.rows[0]?.window_start || row.window_start || null;
 }

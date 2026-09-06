@@ -10,23 +10,17 @@ DECLARE
 BEGIN
   SELECT * INTO member FROM scheduled_services WHERE id = p_service_id;
   IF NOT FOUND THEN RETURN NULL; END IF;
-  IF member.source_estimate_id IS NULL OR member.window_start IS NULL THEN
+  IF member.window_start IS NULL THEN
     RETURN member.window_start;
   END IF;
-  SELECT anchor.reservation_service_mix, allocation.ordinality::integer - 1
-    INTO stamp, allocation_index
-    FROM scheduled_services anchor
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-      CASE WHEN jsonb_typeof(anchor.reservation_service_mix->'allocatedServiceIds') = 'array'
-        THEN anchor.reservation_service_mix->'allocatedServiceIds' ELSE '[]'::jsonb END
-    ) WITH ORDINALITY AS allocation(id, ordinality)
-   WHERE anchor.source_estimate_id = member.source_estimate_id
-     AND anchor.customer_id = member.customer_id
-     AND anchor.property_id IS NOT DISTINCT FROM member.property_id
-     AND anchor.technician_id IS NOT DISTINCT FROM member.technician_id
-     AND allocation.id = member.id::text
-   LIMIT 1;
-  IF stamp IS NULL OR stamp->>'scheduledDate' IS DISTINCT FROM member.scheduled_date::text
+  stamp := member.reservation_service_mix;
+  IF jsonb_typeof(stamp->'allocatedServiceIds') IS DISTINCT FROM 'array' THEN
+    RETURN member.window_start;
+  END IF;
+  allocation_index := array_position(ARRAY(
+    SELECT jsonb_array_elements_text(stamp->'allocatedServiceIds')
+  ), member.id::text) - 1;
+  IF allocation_index IS NULL OR stamp->>'scheduledDate' IS DISTINCT FROM member.scheduled_date::text
      OR COALESCE(stamp->>'arrivalWindowStart', '') !~ '^([01][0-9]|2[0-3]):00$' THEN
     RETURN member.window_start;
   END IF;

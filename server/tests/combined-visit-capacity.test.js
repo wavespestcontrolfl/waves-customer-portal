@@ -59,6 +59,12 @@ describe('combined visit booking capacity', () => {
       .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
   });
 
+  test.each(['foam_recurring', 'unknown_program'])('unsupported %s is refused before offering a combined slot', (service) => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    expect(() => resolveEstimateSlotProfile(estimateFor(['pest_control', service])))
+      .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
+  });
+
   test('one held block becomes sequential on-the-hour service windows', () => {
     const anchor = {
       window_start: '09:00:00',

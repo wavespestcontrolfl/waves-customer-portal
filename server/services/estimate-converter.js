@@ -5826,7 +5826,11 @@ const EstimateConverter = {
             allocatedServiceIds: capacityMembers.map((row) => row.id),
           },
         };
-        await database('scheduled_services').where({ id: reservedStart.id }).update(allocation);
+        await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)
+          .update({ reservation_service_mix: allocation.reservation_service_mix });
+        await database('scheduled_services').where({ id: reservedStart.id }).update(
+          VisitCapacity.windowForCapacityService(reservedStart, 0),
+        );
         Object.assign(reservedStart, allocation);
       }
 
