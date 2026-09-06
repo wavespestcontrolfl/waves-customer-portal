@@ -37,9 +37,15 @@
  */
 
 const logger = require('../logger');
-const { GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('../../config/models');
+const { GEMINI_IMAGE_PRO, GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('../../config/models');
 
-const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1,gemini-image-best,gemini-image';
+// Chain order (bake-off 2026-09-05, the same three prompts on every provider):
+// gpt-image-2 best on photo, cartoon and infographic (it honored an exact
+// caption list; ~75–90 s, ~$0.17); Nano Banana Pro (gemini-3-pro-image)
+// second — photo and cartoon close behind, ~16 s, ~$0.13, but it added
+// unrequested labels to the infographic; gpt-image-1.5 third (~35–40 s);
+// the flash Nano Banana fourth (~8 s, cheapest, weakest); gpt-image-1 last.
+const DEFAULT_CHAIN = 'gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1';
 
 const MODEL_MAP = {
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
@@ -49,6 +55,7 @@ const MODEL_MAP = {
   // accept generationConfig.imageConfig.aspectRatio; the legacy 'gemini' slug
   // below is a text model with image modality and 400s on imageConfig, so
   // aspect stays prompt-only there (imageAspect flag gates the field).
+  'gemini-image-pro':  { api: 'gemini', model: GEMINI_IMAGE_PRO, imageAspect: true },
   'gemini-image-best': { api: 'gemini', model: GEMINI_IMAGE_BEST, imageAspect: true },
   'gemini-image':      { api: 'gemini', model: GEMINI_IMAGE_STABLE, imageAspect: true },
   'gemini':        { api: 'gemini', model: 'gemini-2.5-flash' },
@@ -103,18 +110,110 @@ const BODY_IMAGE_FRAMING = {
   environment: 'Framing: a wide environmental view of where this happens around the home, with the subject clearly placed in it.',
 };
 
-function buildPrompt({ title, topic, keyword, city, mode, shot, avoid }) {
+// ── variation plan ───────────────────────────────────────────────────
+//
+// Owner direction 2026-09-05: the autopublished pictures all read as the same
+// postcard (palms, tile roof, cobalt sky, subject in front) because the prompt
+// pinned one setting and one style. Each image now gets a PLAN — a style, a
+// setting, a time of day and a vantage — chosen deterministically from the
+// post slug and the image's slot, so a post's hero and body images differ from
+// each other AND from the last post's, and a re-run reproduces the same plan.
+//
+// Styles: photo (documentary), illustration (flat vector), cartoon (friendly,
+// character-led), infographic (the one style that may carry text — ONLY the
+// exact captions the caller supplies; every other style forbids readable text
+// and all styles forbid logos and brand marks).
+const IMAGE_STYLES = Object.freeze({
+  photo: {
+    label: 'Photorealistic scene',
+    line: 'Style: candid documentary photograph, natural color and light, real-world detail; no illustration look.',
+    allowsText: false,
+  },
+  illustration: {
+    label: 'Flat illustration',
+    line: 'Style: clean flat-vector illustration with simple shapes, limited palette (Waves blue #009CDE, gold #FFD700, warm neutrals), soft shadows, no photorealism.',
+    allowsText: false,
+  },
+  cartoon: {
+    label: 'Cartoon illustration',
+    line: 'Style: friendly cartoon illustration with bold outlines, expressive characters, bright limited palette (Waves blue #009CDE and gold #FFD700 accents), playful but clear.',
+    allowsText: false,
+  },
+  infographic: {
+    label: 'Infographic',
+    line: 'Style: clean modern infographic on a plain light background — simple icons, numbered steps or labeled parts, generous white space, Waves blue #009CDE and gold #FFD700 accents, large legible sans-serif labels.',
+    allowsText: true,
+  },
+});
+// The hero leads with a photo most of the time (search thumbnails), then
+// alternates; body slots rotate through the styles the hero did not use.
+const HERO_STYLE_ROTATION = ['photo', 'photo', 'illustration', 'photo', 'cartoon', 'photo', 'infographic', 'illustration'];
+const BODY_STYLE_ROTATION = ['illustration', 'photo', 'cartoon', 'infographic', 'photo', 'illustration'];
+const SETTINGS = [
+  'inside a residential garage, controller and tools on the wall, driveway light through the open door',
+  'on a screened lanai looking out at the yard',
+  'along a front walk beside a stucco wall and mulched bed',
+  'at the curb of a quiet residential street at dusk',
+  'in a kitchen looking out through a window at the lawn',
+  'at the edge of a pool cage with turf and shrubs beyond',
+  'in a side yard between two homes, utility boxes and a hose bib',
+  'in a backyard at first light, dew on the grass',
+  'at a workbench with parts laid out on a towel',
+  'on a bright overcast day with soft, even light',
+];
+const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
+const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
+function hashString(input) {
+  let h = 2166136261;
+  const str = String(input || '');
+  for (let i = 0; i < str.length; i += 1) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+// planFor({ slug, mode, index }) — deterministic per post + slot. index 0 is
+// the hero; body slots are 1..n. A style the caller cannot support (an
+// infographic with no captions) degrades to illustration.
+function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], style: forced } = {}) {
+  const seed = hashString(`${slug || 'post'}:${mode}:${index}`);
+  const pick = (list, salt) => list[(seed + salt * 7919) % list.length];
+  const rotation = mode === 'blog-body' ? BODY_STYLE_ROTATION : HERO_STYLE_ROTATION;
+  let style = forced && IMAGE_STYLES[forced] ? forced : rotation[(hashString(slug || 'post') + index) % rotation.length];
+  if (style === 'infographic' && !(Array.isArray(captions) && captions.length)) style = 'illustration';
+  return {
+    style,
+    setting: pick(SETTINGS, 1),
+    timeOfDay: pick(TIMES_OF_DAY, 2),
+    vantage: pick(VANTAGES, 3),
+  };
+}
+// Relevance guards every image carries, plus caller-supplied "must not
+// depict" lines (a brief's rules — e.g. no repair scenes on a post that says
+// Waves does not repair irrigation; no competitor vehicles on a comparison).
+const STANDARD_GUARDS = [
+  'no company logos, brand names, or brand marks of any kind — equipment, vehicles and uniforms are generic and unbranded',
+  'no invented control-panel labels, dials with fake words, or gibberish lettering',
+];
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = null, captions = [], avoidDepicting = [] }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
-  const base = `A high-quality, photorealistic ${kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
+  const style = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style] : null;
+  const base = style
+    ? `A high-quality ${kind} (${style.label.toLowerCase()}) for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`
+    : `A high-quality, photorealistic ${kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
   // Body images name the SECTION (keyword) and carry its opening prose as
   // context (topic) — a generic heading ("What to expect") alone would
   // illustrate nothing in particular.
   const focus = (mode === 'blog-body' && keyword && topic && topic !== keyword)
     ? `Subject: ${keyword}. Context from the article: ${topic}`
     : `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
-  const local = city
-    ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
-    : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`;
+  // A planned image names ITS setting, time and vantage; the legacy line
+  // (one fixed postcard) only remains for callers that pass no plan.
+  const local = plan
+    ? `Setting: ${plan.setting}, ${plan.timeOfDay}, ${city ? `a ${city}-area Southwest Florida home` : 'a Southwest Florida home'}; Southwest Florida cues stay subtle (one palm or a stucco wall is plenty — do not fill the frame with palms and a tile roof). Vantage: ${plan.vantage}.`
+    : (city
+      ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
+      : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`);
   // Aspect/dimension lives in the prompt because Gemini's generateContent
   // doesn't accept a size parameter — without this, Gemini-only deploys
   // return arbitrary aspect ratios for both blog heroes and social tiles.
@@ -123,12 +222,19 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid }) {
     : `Composition: landscape 3:2 aspect ratio, 1536x1024.`;
   // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
   // brand brief explicitly forbids teal, so steer the grade, don't paint it.
-  const style = `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast). No text, words, watermarks, or logos in the image.`;
+  const styleLine = style
+    ? `${style.line} Brand palette: blue #009CDE, gold #FFD700 — no teal color cast.`
+    : `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast).`;
+  const captionList = (style && style.allowsText ? captions : []).map((c) => String(c || '').trim()).filter(Boolean);
+  const textRule = captionList.length
+    ? `The ONLY text in the image is exactly: ${captionList.map((c) => `"${c}"`).join(', ')} — spelled exactly, nothing else written anywhere.`
+    : 'No text, words, letters, numbers, watermarks, or logos anywhere in the image.';
+  const guards = `Must not depict: ${[...STANDARD_GUARDS, ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
   const framing = mode === 'blog-body' ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
-  return [base, focus, local, framing, composition, style, distinct].filter(Boolean).join(' ');
+  return [base, focus, local, framing, composition, styleLine, textRule, guards, distinct].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
@@ -136,7 +242,7 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid }) {
 // never describe a different picture than the one generated. Writers author
 // alt BEFORE the hero exists; publishers overwrite it with this at
 // generation time (astro-publisher stamps it alongside the hero src).
-function buildAltText({ title, topic, keyword, city, mode = 'blog-hero' } = {}) {
+function buildAltText({ title, topic, keyword, city, mode = 'blog-hero', plan = null } = {}) {
   let subject = String(keyword || topic || title || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
   // Body images are generated from heading + section lead; the alt describes
   // the same context (a generic heading alone tells a screen reader nothing).
@@ -148,13 +254,22 @@ function buildAltText({ title, topic, keyword, city, mode = 'blog-hero' } = {}) 
   const setting = city
     ? `a sunny ${city}-area Southwest Florida home with palm trees and sandy soil`
     : 'a sunny Southwest Florida home with palm trees and tropical landscaping';
-  const kind = mode === 'social-square' ? 'Photorealistic social tile' : 'Photorealistic scene';
+  const styled = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style].label : null;
+  const kind = styled
+    ? (mode === 'social-square' ? `${styled} social tile` : styled)
+    : (mode === 'social-square' ? 'Photorealistic social tile' : 'Photorealistic scene');
   return `${kind} of ${setting}, illustrating ${subject}.`;
 }
 
 // ── providers ────────────────────────────────────────────────────────
 
-const IMAGE_REQUEST_TIMEOUT_MS = 60_000;
+// gpt-image-2 at high quality routinely needs more than 60 s; at 60 s every
+// autonomous hero and body image fell through to gpt-image-1.5 (Rain Bird run
+// 2026-09-05: three timeouts, three fallbacks). Env-tunable for ops.
+const IMAGE_REQUEST_TIMEOUT_MS = (() => {
+  const n = Number(process.env.BLOG_IMAGE_TIMEOUT_MS);
+  return Number.isFinite(n) && n >= 10_000 ? n : 180_000;
+})();
 const imageRequestSignal = () => (
   typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
     ? AbortSignal.timeout(IMAGE_REQUEST_TIMEOUT_MS)
@@ -260,9 +375,9 @@ class ImageGenerator {
    *   generated image (null when a customPrompt made the fields unreliable).
    * Throws if every provider in the chain failed.
    */
-  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, prompt: customPrompt } = {}) {
-    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid });
-    const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode });
+  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt } = {}) {
+    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
+    const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
 
     for (const slug of this.chain) {
@@ -281,7 +396,7 @@ class ImageGenerator {
 
       if (result.dataUrl) {
         logger.info(`[image-generator] generated via ${slug} (${result.mimeType}, ${result.dataUrl.length} chars)`);
-        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt, alt };
+        return { dataUrl: result.dataUrl, mimeType: result.mimeType, model: slug, attempts, prompt, alt, plan: plan || null };
       }
       // Skipped / fatal / retryable → next provider. The whole point
       // of the chain is resilience: a 408/429/5xx on OpenAI should fall
@@ -362,6 +477,10 @@ module.exports._internals = {
   MODE_SIZES,
   MODE_ASPECTS,
   BODY_IMAGE_FRAMING,
+  IMAGE_STYLES,
+  planFor,
+  hashString,
+  IMAGE_REQUEST_TIMEOUT_MS,
   parseChain,
   isFatalOpenAIError,
   sizeFor,

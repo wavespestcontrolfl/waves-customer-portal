@@ -90,4 +90,78 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
   }
 }
 
-module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt };
+// ── generated-image screen (text / logos) ────────────────────────────
+//
+// The generators ignore "no text / no logos" often enough that an invented
+// control-panel with gibberish labels and a competitor's logo on a truck both
+// shipped (2026-09-05 audit). Ask the vision model one narrow question and
+// let the caller regenerate once. Fail-open by contract, like the alt pass:
+// a vision miss returns { ok: true, checked: false } — a screen must never
+// park a publish on its own outage.
+function buildScreenPrompt({ allowedText = [] } = {}) {
+  const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
+  return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "notes": string}.
+- readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
+- logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.
+- notes: one short sentence.
+${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}`;
+}
+function parseScreen(text) {
+  try {
+    const raw = String(text || '').replace(/```[a-z]*|```/gi, '').trim();
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    const obj = JSON.parse(raw.slice(start, end + 1));
+    return {
+      readableText: Array.isArray(obj.readable_text) ? obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean) : [],
+      logos: Array.isArray(obj.logos_or_brand_marks) ? obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean) : [],
+      notes: typeof obj.notes === 'string' ? obj.notes.slice(0, 200) : '',
+    };
+  } catch {
+    return null;
+  }
+}
+const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+/**
+ * screenGeneratedImage({ buffer, mimeType, allowedText })
+ * → { ok, checked, readableText, logos, reasons }
+ *   ok=false when the image carries a logo / brand mark, or readable text
+ *   beyond the captions the caller allowed (an infographic's own labels).
+ */
+async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [] } = {}) {
+  const open = { ok: true, checked: false, readableText: [], logos: [], reasons: [] };
+  if (!Buffer.isBuffer(buffer) || !buffer.length) return open;
+  try {
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+      text: buildScreenPrompt({ allowedText }),
+      images: [{ data: buffer.toString('base64'), mimeType }],
+      jsonMode: true,
+      maxTokens: 400,
+    });
+    if (!res.ok) {
+      logger.warn(`[hero-alt-vision] image screen failed (${res.reason}) — accepting image (fail-open)`);
+      return open;
+    }
+    const parsed = parseScreen(res.text);
+    if (!parsed) {
+      logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
+      return open;
+    }
+    const allowed = new Set(allowedText.map(normalizeText).filter(Boolean));
+    const strayText = parsed.readableText.filter((t) => {
+      const n = normalizeText(t);
+      // Allowed captions may come back split or joined; accept a string the
+      // allowed set contains or that is contained by an allowed caption.
+      return n && !allowed.has(n) && ![...allowed].some((a) => a.includes(n) || n.includes(a));
+    });
+    const reasons = [];
+    if (parsed.logos.length) reasons.push(`logo or brand mark: ${parsed.logos.slice(0, 3).join(', ')}`);
+    if (strayText.length) reasons.push(`readable text: ${strayText.slice(0, 3).join(', ')}`);
+    return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, reasons };
+  } catch (err) {
+    logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);
+    return open;
+  }
+}
+
+module.exports = { describeHeroForAlt, sanitizeAlt, buildAltPrompt, screenGeneratedImage, buildScreenPrompt, parseScreen };
