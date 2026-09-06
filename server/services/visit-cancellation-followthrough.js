@@ -70,6 +70,16 @@ async function runVisitCancellationFollowThrough({
       // A failed cleanup skips the fee and alerts, but tracker cleanup and
       // the other cancelled visits still proceed.
       await InvoiceService.voidOpenInvoicesForCancelledService(id);
+      // The void sweep deliberately skips unsafe invoices without throwing.
+      // Reuse its callers' resolved-status contract: paid/processing money,
+      // an unverifiable PI, and still-collectible invoices all need review.
+      const unresolvedInvoice = await db('invoices')
+        .where({ scheduled_service_id: id })
+        .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
+        .first('id');
+      if (unresolvedInvoice) {
+        throw new Error('Service invoice still needs money handling; fee requires review');
+      }
 
       // Explicit waivers need no history, including legacy cancelled visits.
       let cancelledAt = now || (waiveFee ? new Date() : null);
