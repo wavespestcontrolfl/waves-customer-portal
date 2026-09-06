@@ -2277,8 +2277,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           {selectedCustomer && propertyPickerActive && (
             <div role="radiogroup" aria-label="Service address" style={{ margin: '14px 0 0' }} data-testid="booking-property-picker">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                <span style={{ ...labelStyle, marginBottom: 0 }}>Service address</span>
-                <span style={{ fontSize: 11, color: D.muted }}>{bookingProperties.length} saved</span>
+                <span style={{ ...labelStyle, fontSize: 14, marginBottom: 0 }}>Service address</span>
+                <span style={{ fontSize: 14, color: D.muted }}>{bookingProperties.length} saved</span>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {bookingProperties.map((property) => {
@@ -2305,11 +2305,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                       />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 14, color: D.text, fontWeight: 500 }}>{address.street}</div>
-                        <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>{address.locality}</div>
+                        <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>{address.locality}</div>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                        {chip && <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, background: '#F4F4F5', color: '#52525B', fontWeight: 500 }}>{chip}</span>}
-                        {property.label && property.label !== 'Primary' && <span style={{ fontSize: 11, color: D.muted }}>{property.label}</span>}
+                        {chip && <span style={{ fontSize: 14, padding: '2px 8px', borderRadius: 6, background: '#F4F4F5', color: '#52525B', fontWeight: 500 }}>{chip}</span>}
+                        {property.label && property.label !== 'Primary' && <span style={{ fontSize: 14, color: D.muted }}>{property.label}</span>}
                       </div>
                     </label>
                   );
@@ -2318,7 +2318,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
           )}
           {selectedCustomer && bookingPropertyState === 'error' && (
-            <div role="alert" style={{ fontSize: 12, color: D.muted, marginTop: 10 }}>
+            <div role="alert" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
               Saved addresses could not be loaded — this appointment books to the customer's primary address.
             </div>
           )}
@@ -2367,7 +2367,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     ))}
                   </select>
                   {selectedBookingProperty && visibleScheduleEstimates.length !== scheduleEstimates.length && (
-                    <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 6 }}>
                       Showing estimates for {formatBookingPropertyAddress(selectedBookingProperty).street} only.
                     </div>
                   )}
