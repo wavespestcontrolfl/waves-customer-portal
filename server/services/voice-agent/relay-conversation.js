@@ -2420,10 +2420,10 @@ class RelayConversation {
       const owner = meta.relay_session_claim_owner || null;
       // A never-reconnected call's late append does not claim an empty
       // transcript. Only its still-current owner can complete that write.
-      if (owner && owner === this.sessionKey) {
+      if ((owner && owner === this.sessionKey) || (!owner && this._callTokenVerified)) {
         const { TRANSCRIPTION_PROVIDER } = require('./relay-transcript');
         await db('call_log').where('twilio_call_sid', this.callSid)
-          .whereRaw("metadata->>'relay_session_claim_owner' = ?", [this.sessionKey])
+          .whereRaw("(metadata->>'relay_session_claim_owner' = ? OR (?::boolean AND metadata->>'relay_session_claim_owner' IS NULL))", [this.sessionKey, this._callTokenVerified === true])
           .where((q) => q.whereNull('call_outcome').orWhereIn('call_outcome', ['ai_handled', 'relay_failed', 'ai_transferred']))
           .where((q) => q.whereNull('transcription_provider').orWhere('transcription_provider', TRANSCRIPTION_PROVIDER))
           .whereRaw("transcription_metadata->'recorded_segment_rejected' IS NULL")

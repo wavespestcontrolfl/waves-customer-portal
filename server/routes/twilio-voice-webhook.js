@@ -799,11 +799,11 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}, recoveryFa
   // The one voicemail stamp every fallback on this callback takes: owner +
   // eligible-state fenced, so a reconnect that took the row meanwhile keeps
   // its own reconcile (hook / codex r3 P1).
-  const transferRow = () => {
+  const transferRow = (allowClaimedTransfer = false) => {
     const q = db('call_log').where('twilio_call_sid', callSid);
-    return recoveryFallback ? require('../services/voice-agent/relay-recovery').fallbackFence(q, recoveryFallback) : q;
+    return recoveryFallback ? require('../services/voice-agent/relay-recovery').fallbackFence(q, { ...recoveryFallback, allowClaimedTransfer }) : q;
   };
-  const stampTransferVoicemail = () => transferRow()
+  const stampTransferVoicemail = (allowClaimedTransfer = false) => transferRow(allowClaimedTransfer)
     .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
     .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
     .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() });
@@ -858,7 +858,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}, recoveryFa
       // voicemail, and the claim itself skips voicemail rows).
       if (claimed === 'timeout') {
         void claimPromise
-          .then((rows) => (Number(rows) > 0 ? stampTransferVoicemail() : 0))
+          .then((rows) => (Number(rows) > 0 ? stampTransferVoicemail(true) : 0))
           .then((rows) => { if (Number(rows) > 0) logger.warn(`[relay-complete] late ring claim for ${maskSid(callSid)} re-stamped as voicemail`); })
           .catch((err) => logger.warn(`[relay-complete] late-claim voicemail re-stamp failed for ${maskSid(callSid)}: ${err.message}`));
       }
@@ -878,7 +878,7 @@ async function appendRelayTransfer(req, twiml, callSid, handoff = {}, recoveryFa
       // Bounded like every other stamp on this callback: a stalled pool must
       // not hold the voicemail TwiML past Twilio's timeout (hook P1).
       const stamped = await withDeadline(
-        stampTransferVoicemail().catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        stampTransferVoicemail(true).catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
         STAMP_DEADLINE_MS,
       );
       if (recoveryFallback && !(Number(stamped) > 0)) return stamped == null ? 'unconfirmed' : 'bare';

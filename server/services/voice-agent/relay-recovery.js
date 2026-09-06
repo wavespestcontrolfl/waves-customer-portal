@@ -97,10 +97,12 @@ function resumeGreeting(language) {
 }
 
 /** A failure callback may finalize only the generation it proved. */
-function fallbackFence(q, { generation, callbackGeneration }) {
-  return q.whereRaw("call_outcome IS DISTINCT FROM ?", ['ai_transferred'])
-    .whereRaw("metadata->>'relay_transfer_ring_at' IS NULL")
-    .whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [generation])
+function fallbackFence(q, { generation, callbackGeneration, allowClaimedTransfer = false }) {
+  // Only compensation after this callback's confirmed ring claim may pass
+  // the transfer guard. Generation and owner fences still apply.
+  if (!allowClaimedTransfer) q.whereRaw("call_outcome IS DISTINCT FROM ?", ['ai_transferred'])
+    .whereRaw("metadata->>'relay_transfer_ring_at' IS NULL");
+  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) = ?", [generation])
     .whereRaw("(?::bigint = 0 OR ?::bigint = ?::bigint OR COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) < ?)",
       [generation, callbackGeneration, generation, generation]);
 }
