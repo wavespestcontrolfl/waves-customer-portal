@@ -301,7 +301,9 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         });
       }
     } catch (err) {
-      outcomes.push({ error: err.message });
+      // Keep the library's error code (e.g. EMAIL_TEMPLATE_DISABLED) so a
+      // caller can tell a deterministic refusal from a transient failure.
+      outcomes.push({ error: err.message, code: err.code || null });
       await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'failed', failureReason: err.message, metadata });
       logger.error(`[appointment-email] ${eventType} failed for ${customer.id}: ${err.message}`);
     }
@@ -311,7 +313,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
   if (sent) return { ok: true, messageId: sent.message?.provider_message_id || null };
   if (outcomes.some((o) => o?.blocked)) return { ok: false, blocked: true, reason: 'suppressed' };
   const errored = outcomes.find((o) => o?.error);
-  if (errored) return { ok: false, error: errored.error };
+  if (errored) return { ok: false, error: errored.error, ...(errored.code ? { code: errored.code } : {}) };
   return { ok: false, reason: outcomes.find((o) => o?.reason)?.reason || 'email_not_sent' };
 }
 

@@ -261,32 +261,64 @@ async function resolveArrivalChannel(customerId, prefs, customer) {
 // so the scheduled date AND window start ride in the key — a same-day move
 // to another window is a new occurrence, while retries of the same
 // occurrence still dedupe.
-function arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, customerId }) {
+// The row's arrived_at for THIS arrival rides in the key too: a lifecycle
+// rewind (reschedule back to a used slot, tech reassignment) clears it and the
+// next arrival stamps a new one, while retries of the same arrival keep it.
+function arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId }) {
   if (!scheduledServiceId) return String(customerId);
   const day = scheduledDate instanceof Date
     ? scheduledDate.toISOString().slice(0, 10)
     : String(scheduledDate || "").slice(0, 10);
   const start = String(scheduledWindowStart || "").slice(0, 5);
   const when = [day, start].filter(Boolean).join("T");
-  return when ? `${scheduledServiceId}:${when}` : String(scheduledServiceId);
+  const attempt = arrivedAt ? new Date(arrivedAt).toISOString() : "";
+  return [scheduledServiceId, when, attempt].filter(Boolean).join(":");
 }
 
 // The email leg. Honors the portal-wide email opt-out (a deterministic
 // "skipped" so fallbacks and classification treat it like a missing address).
-async function sendArrivalEmailLeg({ customerId, scheduledServiceId, scheduledDate, scheduledWindowStart, techName, emailAllowed }) {
+async function sendArrivalEmailLeg({ customerId, scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, techName, emailAllowed }) {
   if (!emailAllowed) return { ok: false, skipped: true, reason: "email_disabled" };
   try {
     const AppointmentEmail = require("./appointment-email");
-    return await AppointmentEmail.sendTechArrivedEmail({
+    const res = await AppointmentEmail.sendTechArrivedEmail({
       customerId,
       scheduledServiceId,
       techName,
-      occurrence: arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, customerId }),
+      occurrence: arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId }),
     });
+    // The template is archived (the migration's rollback / kill switch): a
+    // deterministic refusal, not a transient failure — retrying can't change it.
+    if (res?.code === "EMAIL_TEMPLATE_DISABLED") return { ok: false, skipped: true, reason: "template_disabled" };
+    return res;
   } catch (e) {
+    if (e?.code === "EMAIL_TEMPLATE_DISABLED") return { ok: false, skipped: true, reason: "template_disabled" };
     logger.warn(`[twilio] tech-arrived email send failed for customer ${customerId}: ${e.message}`);
     return { ok: false, error: e.message };
   }
+}
+
+// Neither leg can reach the customer for an Email/Both arrival: ring the same
+// staff bell the en-route notice rings (dedupes per customer + visit for 24h).
+async function alertArrivalUnreachable({ customerId, scheduledServiceId, emailRes }) {
+  try {
+    const AppointmentReminders = require("./appointment-reminders");
+    await AppointmentReminders.alertNoReachableChannel({
+      customerId,
+      kind: "tech_arrived",
+      scheduledServiceId,
+      emailReason: emailRes?.blocked ? "suppressed" : "missing",
+    });
+  } catch (e) {
+    logger.warn(`[twilio] tech-arrived no-channel alert failed for customer ${customerId}: ${e.message}`);
+  }
+}
+
+// classifyArrivalMiss + the staff alert when the miss is terminal.
+async function settleArrivalMiss(ctx, emailRes) {
+  const verdict = classifyArrivalMiss({ results: ctx.results, emailRes, smsLegAvailable: ctx.smsLegAvailable });
+  if (verdict.suppressed && verdict.reason === "blocked") await alertArrivalUnreachable({ ...ctx, emailRes });
+  return verdict;
 }
 
 // Nothing delivered. Decide whether the caller releases its arrival guard.
@@ -317,7 +349,7 @@ const ARRIVAL_DELIVERY = {
     // SMS leg absent ONLY because the hold emptied a non-empty list: stay
     // retryable — a YES mid-job restores the SMS leg (#2956 r11).
     if (ctx.heldAllSms) return { success: false, results: ctx.results };
-    return classifyArrivalMiss({ results: ctx.results, emailRes, smsLegAvailable: ctx.smsLegAvailable });
+    return settleArrivalMiss(ctx, emailRes);
   },
   // SMS and email; success when either lands. Exception: when the opt-in
   // hold emptied a NON-empty SMS list, an email success alone stays a
@@ -328,7 +360,7 @@ const ARRIVAL_DELIVERY = {
     const emailRes = await sendArrivalEmailLeg(ctx);
     if (smsDelivered || (emailRes?.ok && !ctx.heldAllSms)) return { success: true, results: ctx.results, emailSent: !!emailRes?.ok };
     if (ctx.heldAllSms) return { success: false, results: ctx.results, emailSent: !!emailRes?.ok };
-    return classifyArrivalMiss({ results: ctx.results, emailRes, smsLegAvailable: ctx.smsLegAvailable });
+    return settleArrivalMiss(ctx, emailRes);
   },
   // sms (default). When the opt-in hold emptied a NON-empty recipient list
   // there is no SMS leg at all: send the email fallback and return a
@@ -1195,7 +1227,7 @@ const TwilioService = {
    * text. Copy must not say "on the way" (that's en-route). Fired from
    * track-transitions markOnProperty when the live tracker flips to on-site.
    */
-  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null } = {}) {
+  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -1280,6 +1312,7 @@ const TwilioService = {
       scheduledServiceId,
       scheduledDate,
       scheduledWindowStart,
+      arrivedAt,
       techName: customerTechName,
       emailAllowed,
       // The SMS leg exists when texting is enabled and there is someone to

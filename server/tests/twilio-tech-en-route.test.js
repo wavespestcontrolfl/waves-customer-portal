@@ -449,13 +449,45 @@ describe("TwilioService.sendTechEnRoute", () => {
     getAppointmentContacts.mockReturnValue([{ phone: "+15551112222", name: "Sam", role: "primary" }]);
     AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: true });
 
-    await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9", scheduledDate: "2026-09-11", scheduledWindowStart: "13:00:00" });
+    await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9", scheduledDate: "2026-09-11", scheduledWindowStart: "13:00:00", arrivedAt: "2026-09-11T13:07:12.000Z" });
 
     // A live reschedule reuses the scheduled_services row, so the key must
-    // change with the date AND the window (a same-day move to another slot
-    // is a new occurrence) or the next arrival dedupes against the old email.
+    // change with the date, the window AND this arrival's arrived_at (a
+    // lifecycle rewind back to the same slot is still a new arrival) — while
+    // retries of the same arrival keep the same key and dedupe.
     expect(AppointmentEmail.sendTechArrivedEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ occurrence: "job-9:2026-09-11T13:00" }),
+      expect.objectContaining({ occurrence: "job-9:2026-09-11T13:00:2026-09-11T13:07:12.000Z" }),
+    );
+  });
+
+  test("sendTechArrived treats an archived template (rollback kill switch) as handled, not retryable", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: null, email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([]);
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: false, error: "email template appointment.tech_arrived is archived", code: "EMAIL_TEMPLATE_DISABLED" });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
+  });
+
+  test("sendTechArrived rings the no-channel staff alert when neither leg can reach an Email customer", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: null }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([]);
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: false, blocked: true, reason: "suppressed" });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
+    expect(AppointmentReminders.alertNoReachableChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: "cust-1", kind: "tech_arrived", scheduledServiceId: "job-9", emailReason: "suppressed" }),
     );
   });
 
