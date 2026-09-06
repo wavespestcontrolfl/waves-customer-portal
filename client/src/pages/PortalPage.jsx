@@ -4042,11 +4042,11 @@ function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
 }
 
 // Square glass icon tile — the one icon treatment on the Visits tab.
-function GlassTile({ name, size = 36 }) {
+function GlassTile({ name, size = 36, color = B.glassNavy, background = GLASS_SUBTLE, border = '#E7E2D7' }) {
   return (
     <span className="glass-tile" style={{
-      width: size, height: size, borderRadius: 8, background: GLASS_SUBTLE,
-      border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex',
+      width: size, height: size, borderRadius: 8, background,
+      border: `1px solid ${border}`, color, display: 'inline-flex',
       alignItems: 'center', justifyContent: 'center', flexShrink: 0,
     }}>
       <Icon name={name} size={Math.round(size / 2)} strokeWidth={1.75} />
@@ -4698,24 +4698,26 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               You'll hear from us
             </div>
             {[
-              { enabled: prefs?.serviceReminder72h !== false, icon: 'smartphone', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
-              { enabled: prefs?.serviceReminder24h !== false, icon: 'smartphone', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
+              { enabled: prefs?.serviceReminder72h !== false, icon: 'clock', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
+              { enabled: prefs?.serviceReminder24h !== false, icon: 'bell', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
               { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival - live GPS', done: false, active: s.isToday },
-              { icon: 'checkCircle', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
+              { icon: 'document', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
             ].filter((step) => step.enabled !== false).map((step, i, steps) => (
-              <div key={step.label} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < steps.length - 1 ? 8 : 0 }}>
-                <div style={{
-                  width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
-                  background: step.done ? GLASS_SUBTLE : step.active ? '#FFF7ED' : '#fff',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: step.done ? B.green : step.active ? B.orange : muted,
-                  border: `1px solid ${step.done ? '#E7E2D7' : step.active ? '#FED7AA' : '#E7E2D7'}`,
-                }}><Icon name={step.icon} size={12} strokeWidth={2} /></div>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: step.done ? B.green : step.active ? B.orange : B.glassNavy }}>
-                    {step.label} {step.done && ''}
+              // One icon per step, the shared square tile, 16/14 text — the
+              // same row idiom as the notification lists (owner 2026-09-06).
+              <div key={step.label} style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: i < steps.length - 1 ? 10 : 0 }}>
+                <GlassTile
+                  name={step.icon}
+                  size={32}
+                  color={step.done ? B.green : step.active ? B.orange : B.glassNavy}
+                  background={step.active ? '#FFF7ED' : GLASS_SUBTLE}
+                  border={step.active ? '#FED7AA' : '#E7E2D7'}
+                />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: step.done ? B.green : step.active ? B.orange : B.glassNavy }}>
+                    {step.label}
                   </div>
-                  <div style={{ fontSize: 14, color: muted }}>{step.time}</div>
+                  <div style={{ fontSize: 14, color: muted, marginTop: 1 }}>{step.time}</div>
                 </div>
               </div>
             ))}
@@ -5017,9 +5019,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
           <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
               const items = [
-                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'checkCircle', locked: false, defaultOn: true },
-                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
-                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
+                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'calendar', locked: false, defaultOn: true },
+                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'clock', locked: false, defaultOn: true },
+                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'bell', locked: false, defaultOn: true },
                 { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
@@ -5027,7 +5029,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 // SMS-only (no channelKey): the arrival email twin was
                 // retired 2026-08-06 — offering Email/Both here would show a
                 // choice the server no longer honors.
-                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'door', locked: false, defaultOn: true },
                 // Weather & property advisories (portal roadmap bet 6, owner
                 // ruling 2026-08-13: push + bell). A NEW alert type must ship
                 // with its self-service opt-out on the live settings surface
@@ -5035,7 +5037,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 // extension of the 2026-07-09 "stops at appointment alerts"
                 // ruling, which predates this lane. No channelKey: these are
                 // app/bell advisories only — never SMS or email.
-                { key: 'weatherAlerts', label: 'Weather & Property Alerts', desc: 'Rain and lawn advisories for your property in the app', icon: 'checkCircle', locked: false, defaultOn: true },
+                { key: 'weatherAlerts', label: 'Weather & Property Alerts', desc: 'Rain and lawn advisories for your property in the app', icon: 'cloudRain', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked
