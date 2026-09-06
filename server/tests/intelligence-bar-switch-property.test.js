@@ -7,13 +7,15 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
-jest.mock('../services/appointment-address', () => ({ planAppointmentAddress: jest.fn(), lockAppointmentAddress: jest.fn(), applyAppointmentAddress: jest.fn(async () => ['stop']) }));
+jest.mock('../services/appointment-address', () => ({ planAppointmentAddress: jest.fn(), lockAppointmentAddress: jest.fn(), applyAppointmentAddress: jest.fn(async () => ['stop']), refreshAppointmentAddressBriefs: jest.fn(async () => {}) }));
+jest.mock('../services/appointment-tagger', () => ({ classifyAppointmentType: jest.fn(() => ({ tag: 'general_pest', label: 'General Pest' })) }));
 jest.mock('../services/scheduling/occupancy', () => ({ acquireOccupancyLocks: jest.fn() }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn() }));
 const db = require('../models/db');
 const address = require('../services/appointment-address');
 const gates = require('../config/feature-gates');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const tagger = require('../services/appointment-tagger');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
 const input = { appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002' };
@@ -55,6 +57,29 @@ test('confirmed execution holds locks and applies only the pinned preview', asyn
   expect(address.applyAppointmentAddress).toHaveBeenCalledWith(db, expect.objectContaining({ scope: 'visit' }), 'actor');
   expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'stop', actorId: 'actor' });
   expect(emitDispatchJobUpdate.mock.invocationCallOrder[0]).toBeGreaterThan(address.applyAppointmentAddress.mock.invocationCallOrder[0]);
+});
+
+test('confirmed execution rebuilds WDO research after commit, never inside the transaction', async () => {
+  const preview = await call();
+  await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true, technicianId: 'actor' });
+  expect(address.refreshAppointmentAddressBriefs).toHaveBeenCalledWith(db, ['stop']);
+  expect(address.refreshAppointmentAddressBriefs.mock.invocationCallOrder[0]).toBeGreaterThan(address.applyAppointmentAddress.mock.invocationCallOrder[0]);
+  // A refused confirmation never triggers research.
+  jest.clearAllMocks();
+  gates.isEnabled.mockReturnValue(true);
+  property.address_line1 = '300 Test Street';
+  await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true });
+  expect(address.refreshAppointmentAddressBriefs).not.toHaveBeenCalled();
+});
+
+test('effects keep the cleared-brief and no-regroup disclosures, and mention WDO research only for a WDO visit', async () => {
+  let preview = await call();
+  expect(preview.effects).toContain('clears the route position and cached pre-service brief.');
+  expect(preview.effects).toContain('keeps its current grouping and is not combined');
+  expect(preview.effects).not.toContain('WDO');
+  tagger.classifyAppointmentType.mockReturnValue({ tag: 'wdo_inspection', label: 'WDO Inspection' });
+  preview = await call();
+  expect(preview.effects).toContain('cached pre-service brief, then rebuilds WDO research for the new address.');
 });
 
 test('destination changes between approval and commit refuse without writes', async () => {

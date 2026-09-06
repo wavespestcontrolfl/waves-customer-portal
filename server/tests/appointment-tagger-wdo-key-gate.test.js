@@ -19,6 +19,7 @@ jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 
 const db = require('../models/db');
+db.transaction = async (cb) => cb(db);
 const { dispatchWithFallback } = require('../services/llm/call');
 const tagger = require('../services/appointment-tagger');
 
@@ -26,6 +27,8 @@ function chain() {
   const c = {
     where: jest.fn(() => c),
     whereNotIn: jest.fn(() => c),
+    forNoKeyUpdate: jest.fn(() => c),
+    first: jest.fn(async () => ({ id: 'cust-wdo-1' })),
     update: jest.fn(async () => 1),
     insert: jest.fn(async () => 1),
   };
@@ -119,6 +122,7 @@ describe('triggerWDOPrep provider-key gate', () => {
   }
 
   test.each([
+    ['customer_id', 'cust-merge-winner'],
     ['service_id', 'catalog-pest'],
     ['service_type', 'General Pest Control'],
     ['status', 'cancelled'],
@@ -155,6 +159,44 @@ describe('triggerWDOPrep provider-key gate', () => {
     expect(live.pre_service_brief_type).toBe('wdo_inspection');
     expect(live.status).toBe(to);
     expect(c.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('publication and the interaction note commit in one transaction', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service };
+    const trx = livePublication(live);
+    const outer = chain();
+    db.mockReturnValue(outer);
+    const transaction = jest.fn(async (cb) => cb(() => trx));
+    db.transaction = transaction;
+    try {
+      await tagger.triggerWDOPrep({ ...service });
+    } finally {
+      db.transaction = async (cb) => cb(db);
+    }
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(trx.update).toHaveBeenCalledTimes(1);
+    expect(trx.insert).toHaveBeenCalledTimes(1);
+    expect(outer.update).not.toHaveBeenCalled();
+    expect(outer.insert).not.toHaveBeenCalled();
+  });
+
+  test('publication locks the customer row before the service row (customer merge lock order)', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service };
+    const trx = livePublication(live);
+    db.transaction = jest.fn(async (cb) => cb(() => trx));
+    try {
+      await tagger.triggerWDOPrep({ ...service });
+    } finally {
+      db.transaction = async (cb) => cb(db);
+    }
+    expect(trx.where).toHaveBeenNthCalledWith(1, { id: service.customer_id });
+    expect(trx.forNoKeyUpdate).toHaveBeenCalledTimes(1);
+    expect(trx.forNoKeyUpdate.mock.invocationCallOrder[0]).toBeLessThan(trx.update.mock.invocationCallOrder[0]);
+    expect(trx.update.mock.invocationCallOrder[0]).toBeLessThan(trx.insert.mock.invocationCallOrder[0]);
   });
 
   test('no provider key at all → deterministic template, no AI dispatch', async () => {
