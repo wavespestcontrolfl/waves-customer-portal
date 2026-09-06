@@ -34,6 +34,7 @@ import lawnScores from '@lawn-scores';
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
@@ -5224,6 +5225,7 @@ export function ProtocolPanel({ service, onClose }) {
   // Fail closed: only an affirmative { enabled: true } opens the gated tab and
   // ask bar. A failed request is shown as a notice under the header instead.
   const jobCardEnabled = Boolean(jobCard?.enabled);
+  const protocolEnabled = Boolean(jobCard?.protocol?.enabled);
   const defaultSection = jobCardEnabled
     ? "job_card"
     : isLawn
@@ -5391,7 +5393,8 @@ export function ProtocolPanel({ service, onClose }) {
 
   const SECTIONS = [
     ...(jobCardEnabled ? [{ id: "job_card", label: " Job card", count: null }] : []),
-    ...(isLawn
+    ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
+    ...(!protocolEnabled && isLawn
       ? [
           {
             id: "lawn_protocol",
@@ -5400,7 +5403,7 @@ export function ProtocolPanel({ service, onClose }) {
           },
         ]
       : []),
-    ...(!isLawn && serviceProtocol
+    ...(!protocolEnabled && !isLawn && serviceProtocol
       ? [
           {
             id: "service_protocol",
@@ -5549,7 +5552,7 @@ export function ProtocolPanel({ service, onClose }) {
                 color: active ? D.white : D.muted,
                 cursor: "pointer",
                 whiteSpace: "nowrap",
-                fontSize: 11,
+                fontSize: 14,
                 fontWeight: 500,
                 textTransform: "uppercase",
                 letterSpacing: "0.06em",
@@ -5563,7 +5566,7 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {loadErrors.length > 0 && activeSection !== "job_card" && (
+        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && (
           <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
             <div>Could not load: {loadErrors.join(", ")}.</div>
             <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
@@ -5578,6 +5581,8 @@ export function ProtocolPanel({ service, onClose }) {
         )}
         {activeSection === "job_card" && jobCardEnabled ? (
           <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
+        ) : activeSection === "visit_protocol" && protocolEnabled ? (
+          <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
         ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
