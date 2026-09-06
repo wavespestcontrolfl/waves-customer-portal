@@ -460,6 +460,37 @@ describe('runRemediationForPr', () => {
     expect(db._tables.codex_remediation_state[0].rounds).toBe(1);
   });
 
+  test('a short read-after-write lag on both GitHub views waits for the pushed head before syncing', async () => {
+    const db = makeDb();
+    let reads = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: ++reads < 4 ? HEAD : 'newcommit999aaa', ref: CTX.branch } }),
+      getBranchSha: async () => HEAD,
+    } });
+    const onRemediated = jest.fn();
+    const result = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(result.remediated).toBe(true);
+    expect(onRemediated).toHaveBeenCalledTimes(1);
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ synced_sha: 'newcommit999aaa', sync_pending_sha: null });
+    expect(gh._calls.comments).toHaveLength(1);
+  });
+
+  test('a branch that keeps reporting the pre-push head exhausts the consistency wait and stays held', async () => {
+    const db = makeDb();
+    let reads = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => { reads += 1; return { state: 'open', head: { sha: HEAD, ref: CTX.branch } }; },
+      getBranchSha: async () => HEAD,
+    } });
+    const onRemediated = jest.fn();
+    const result = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(result.parked).toBe(true);
+    expect(reads).toBe(5);
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ park_phase: 'post_push', sync_pending_sha: 'newcommit999aaa' });
+    expect(gh._calls.comments).toHaveLength(0);
+  });
+
   test('ref confirms our push but the state re-read shows a NEWER head → park stamped with OUR push', async () => {
     // A concurrent push C lands between the ref confirmation and the state
     // re-read: syncing our B would mirror content the merge won't take.

@@ -2093,7 +2093,17 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // any post-commit synchronization. Best-effort on transient GitHub errors
   // (the recovery branch re-drives an interrupted round next tick).
   try {
-    const fresh = await gh.getPr(prNumber);
+    let fresh = await gh.getPr(prNumber);
+    // GitHub can briefly return the pre-push head from BOTH the PR and ref
+    // endpoints. Give that exact predecessor three seconds to catch up
+    // before withholding sync. A closed PR or any different head goes
+    // straight to the existing fail-closed checks below.
+    for (let retry = 0; retry < 3
+      && fresh?.state === 'open' && !fresh.merged && !fresh.merged_at
+      && fresh.head?.sha === headSha && headSha !== newHead; retry += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      fresh = await gh.getPr(prNumber);
+    }
     if (!fresh || fresh.merged || fresh.merged_at || fresh.state !== 'open') {
       const terminal = fresh && (fresh.merged || fresh.merged_at) ? 'merged' : 'closed';
       await markPrTerminal(prNumber, terminal, db);
