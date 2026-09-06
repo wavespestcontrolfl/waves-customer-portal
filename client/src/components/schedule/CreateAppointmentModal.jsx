@@ -711,17 +711,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Opened to book a quote that was priced for one specific property: land the
   // picker on that property so the estimate stays selectable.
+  // EVERY property change — the operator's pick or the estimate-driven
+  // switch below — goes through here: slot suggestions were scored at the
+  // previous address, so drop what is shown AND invalidate any search still
+  // in flight (handleFindTimes checks this counter before applying its
+  // response).
+  const applyBookingProperty = (propertyId) => {
+    if (String(propertyId) === String(selectedPropertyId)) return false;
+    setSelectedPropertyId(String(propertyId));
+    findTimesRequestRef.current += 1;
+    setTimeSlots(null);
+    setFindingTimes(false);
+    return true;
+  };
+
   useEffect(() => {
     if (!propertyPickerActive || !linkedEstimate?.propertyId) return;
     const match = bookingProperties.find((p) => String(p.id) === String(linkedEstimate.propertyId));
-    if (match && String(match.id) !== String(selectedPropertyId)) setSelectedPropertyId(String(match.id));
+    if (match) applyBookingProperty(match.id);
     // Runs when the link or the picker readiness changes — never on the
     // operator's own picker change (that path clears a mismatched link).
   }, [propertyPickerActive, linkedEstimate?.propertyId]);
 
   const chooseBookingProperty = (propertyId) => {
-    if (String(propertyId) === String(selectedPropertyId)) return;
-    setSelectedPropertyId(String(propertyId));
+    if (!applyBookingProperty(propertyId)) return;
     // A quote priced for another property cannot ride this booking — drop the
     // link AND the lines it filled (they carry sourceEstimateId), otherwise
     // the submit would book the other property at the quote's prices as a
@@ -730,12 +743,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       setLinkedEstimate(null);
       setServices((arr) => arr.filter((line) => !line.sourceEstimateId));
     }
-    // Slot suggestions were scored at the previous address — drop what is
-    // shown AND invalidate any search still in flight (handleFindTimes checks
-    // this counter before applying its response).
-    findTimesRequestRef.current += 1;
-    setTimeSlots(null);
-    setFindingTimes(false);
   };
   // Memoized: it is a dependency of the auto-apply effect below, so a fresh
   // array every render would re-run that effect on every keystroke.

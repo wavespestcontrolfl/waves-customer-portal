@@ -64,7 +64,9 @@ default.
   vocabulary `constants/property-relationships.js`): `own_home` /
   `rental_owned` / `family_home` / `managed_for_client`, nullable. Owner
   decision 2026-09-06: "family" is a RELATIONSHIP (payer's tie to the
-  address), not a seventh occupancy value. Editable on the Customer 360
+  address), not a seventh occupancy value. Backfilled only where the
+  contact role proves it (property managers → `managed_for_client`);
+  occupancy is never read as ownership evidence. Editable on the Customer 360
   Properties panel and the add form; the call pipeline may pass it to
   `recordCallProperty` but does not classify it yet.
 - Still deferred: per-property on-site contact / access notes, per-property
