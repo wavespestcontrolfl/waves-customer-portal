@@ -835,7 +835,7 @@ async function compressToWebp(buffer, { width = 1600 } = {}) {
 // regenerates ONCE in the retry style; a second failure ships the image with
 // a warning rather than parking the publish (the screen is a vision judgment
 // and must not become a hard gate on its own — owner direction 2026-09-05).
-async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, captions = [], avoidDepicting = [] }) {
+async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, captions = [], avoidDepicting = [], deadlineAt = null }) {
   const imageGenerator = require('../content/image-generator');
   const { screenGeneratedImage } = require('../content/hero-alt-vision');
   // The plan's subject is what the picture is about — title + keyword (the
@@ -844,8 +844,9 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
   const subject = [title, keyword].filter(Boolean).join(' ');
   let plan = imageGenerator.planFor({ slug, mode, index, captions, subject });
   // One deadline for the whole slot, screen retry included — a second call
-  // must not start a second budget (Codex r6 P2).
-  const deadlineAt = Date.now() + imageGenerator.IMAGE_CHAIN_BUDGET_MS;
+  // must not start a second budget (Codex r6 P2). A caller that re-frames a
+  // slot (the near-duplicate retry) passes the slot's deadline in.
+  if (!Number.isFinite(deadlineAt)) deadlineAt = Date.now() + imageGenerator.IMAGE_CHAIN_BUDGET_MS;
   const candidates = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     let gen;
@@ -871,7 +872,7 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
     // The screen runs inside the same slot deadline as the generation.
-    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, timeoutMs: deadlineAt - Date.now() });
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, timeoutMs: deadlineAt - Date.now() });
     const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
     if (screen.ok) return candidate;
     candidates.push(candidate);
@@ -885,7 +886,7 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
   }
   // Both failed: ship the safer one — no logo beats a logo, then fewer
   // detected marks and strings — with the reviewer note (Codex r6/r7 P2).
-  const violations = (c) => c.screen.logos.length + c.screen.readableText.length;
+  const violations = (c) => c.screen.logos.length + c.screen.readableText.length + (c.screen.forbidden || []).length;
   const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || violations(a) - violations(b))[0];
   logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${safest.screen.reasons.join('; ')}) — shipping the safer candidate with a reviewer note`);
   return safest;
@@ -2954,7 +2955,9 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     let hash;
     // Framing rotates with the slot; a near-duplicate of the hero or a
     // sibling regenerates ONCE with the next framing, then parks — three of
-    // the same picture never ship.
+    // the same picture never ship. Both framings share ONE slot deadline
+    // (Codex r8 P2).
+    const slotDeadline = Date.now() + require('../content/image-generator').IMAGE_CHAIN_BUDGET_MS;
     for (let attempt = 0; ; attempt++) {
       const shot = BODY_IMAGE_SHOTS[(k + attempt) % BODY_IMAGE_SHOTS.length];
       try {
@@ -2974,6 +2977,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
           index: k + 1 + attempt * 100,
           captions,
           avoidDepicting: imageExclusionsFor(brief),
+          deadlineAt: slotDeadline,
         });
         buffer = await compressToWebp(gen.buffer, { width: BODY_IMAGE_WIDTH });
       } catch (err) {

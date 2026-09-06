@@ -98,13 +98,16 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
 // let the caller regenerate once. Fail-open by contract, like the alt pass:
 // a vision miss returns { ok: true, checked: false } — a screen must never
 // park a publish on its own outage.
-function buildScreenPrompt({ allowedText = [] } = {}) {
+function buildScreenPrompt({ allowedText = [], avoidDepicting = [] } = {}) {
   const allowed = allowedText.map((t) => String(t || '').trim()).filter(Boolean);
-  return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "notes": string}.
+  const forbidden = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
+  return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": string[], "notes": string}.
 - readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
 - logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.
+- forbidden_scenes: which of the FORBIDDEN items below the image clearly depicts, quoted verbatim. Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
 - notes: one short sentence.
-${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}`;
+${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
+${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t) => `"${t}"`).join('; ')}.` : ''}`;
 }
 function parseScreen(text) {
   try {
@@ -119,6 +122,8 @@ function parseScreen(text) {
     return {
       readableText: obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean),
       logos: obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean),
+      // Optional: only asked for when the caller supplied exclusions.
+      forbidden: Array.isArray(obj.forbidden_scenes) ? obj.forbidden_scenes.map((t) => String(t || '').trim()).filter(Boolean) : [],
       notes: typeof obj.notes === 'string' ? obj.notes.slice(0, 200) : '',
     };
   } catch {
@@ -132,8 +137,8 @@ const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g
  *   ok=false when the image carries a logo / brand mark, or readable text
  *   beyond the captions the caller allowed (an infographic's own labels).
  */
-async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], timeoutMs = null } = {}) {
-  const open = { ok: true, checked: false, readableText: [], logos: [], reasons: [] };
+async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], avoidDepicting = [], timeoutMs = null } = {}) {
+  const open = { ok: true, checked: false, readableText: [], logos: [], forbidden: [], reasons: [] };
   if (!Buffer.isBuffer(buffer) || !buffer.length) return open;
   // timeoutMs bounds the whole vision chain (both legs) — the caller passes
   // what is left of its image-slot deadline; nothing left → unchecked
@@ -144,7 +149,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
   }
   try {
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
-      text: buildScreenPrompt({ allowedText }),
+      text: buildScreenPrompt({ allowedText, avoidDepicting }),
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
       maxTokens: 400,
@@ -198,7 +203,14 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     if (strayText.length) reasons.push(`readable text: ${strayText.slice(0, 3).join(', ')}`);
     if (incomplete.length) reasons.push(`incomplete caption: ${incomplete.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
     if (missing.length) reasons.push(`missing caption: ${missing.slice(0, 3).map((c) => `"${c}"`).join(', ')}`);
-    return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, reasons };
+    // A brief's exclusion the provider ignored (an irrigation repair scene on
+    // a post that says Waves does not repair irrigation) fails the screen
+    // like a logo would (Codex r8 P2 on #3964). Only exclusions the caller
+    // actually named count — the model cannot invent a forbidden item.
+    const named = new Set(avoidDepicting.map((t) => normalizeText(t)).filter(Boolean));
+    const forbidden = parsed.forbidden.filter((t) => named.has(normalizeText(t)));
+    if (forbidden.length) reasons.push(`forbidden scene: ${forbidden.slice(0, 3).join('; ')}`);
+    return { ok: reasons.length === 0, checked: true, readableText: parsed.readableText, logos: parsed.logos, forbidden, reasons };
   } catch (err) {
     logger.warn(`[hero-alt-vision] image screen threw — accepting image (fail-open): ${err.message}`);
     return open;

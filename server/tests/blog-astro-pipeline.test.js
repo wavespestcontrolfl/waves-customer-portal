@@ -3863,6 +3863,17 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
     expect(out.screen.readableText).toEqual(['ON']);
   });
 
+  test('a caller-supplied deadline is honoured by both generate calls (near-duplicate re-framing shares the slot budget — Codex r8 P2)', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage.mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    const deadlineAt = Date.now() + 1234;
+    await AstroPublisher.generatePlannedImage({ ...args, deadlineAt, avoidDepicting: ['irrigation repair scenes'] });
+    expect(imageGenerator.generate.mock.calls[0][0].deadlineAt).toBe(deadlineAt);
+    expect(screenGeneratedImage.mock.calls.at(-1)[0]).toMatchObject({ avoidDepicting: ['irrigation repair scenes'] });
+  });
+
   test('a clean first image returns without a retry', async () => {
     const imageGenerator = require('../services/content/image-generator');
     const { screenGeneratedImage } = require('../services/content/hero-alt-vision');

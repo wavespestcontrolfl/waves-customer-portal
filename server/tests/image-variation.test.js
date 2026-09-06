@@ -210,6 +210,15 @@ describe('screenGeneratedImage', () => {
     expect(buildScreenPrompt({ allowedText: ['1 OFF'] })).toMatch(/ALLOWED.*"1 OFF"/);
   });
 
+  test('a brief exclusion the provider ignored fails the screen; only exclusions the caller named count (Codex r8 P2 on #3964)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": [], "forbidden_scenes": ["irrigation repair scenes", "a made-up item"]}' });
+    const r = await screenGeneratedImage({ buffer, avoidDepicting: ['irrigation repair scenes'] });
+    expect(r).toMatchObject({ ok: false, forbidden: ['irrigation repair scenes'], reasons: [expect.stringMatching(/forbidden scene: irrigation repair scenes/)] });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toMatch(/FORBIDDEN .*"irrigation repair scenes"/);
+    // Without exclusions the field is ignored entirely.
+    expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, forbidden: [] });
+  });
+
   test('fails open on a vision miss, unusable output, or a throw', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, checked: false });
