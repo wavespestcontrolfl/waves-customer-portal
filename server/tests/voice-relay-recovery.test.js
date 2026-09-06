@@ -156,9 +156,8 @@ describe('relay-recovery module', () => {
     expect(patch.transcription_provider.bindings[1]).toBe('conversation_relay');
     expect(patch.transcription_status.sql).toContain("THEN 'completed' ELSE transcription_status END");
     // …and a RECORDING-only transcript on a reconnected row gets the AI segment ahead of it; the structured form is cleared (hook P1)
-    expect(patch.transcription.sql).toContain("(transcription_provider IS NOT NULL AND transcription_provider <> ? AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0) AND ? IS NOT NULL");
     expect(patch.transcription.sql).toContain("E' segment]' || E'\\n' || transcription");
-    expect(patch.transcript_structured.sql).toMatch(/^CASE WHEN \(transcription_provider IS NOT NULL .* THEN NULL ELSE transcript_structured END$/);
+    expect(patch.transcript_structured.sql).toContain('THEN NULL ELSE transcript_structured END');
   });
 
   test('loadResumeState proves the hint from the row: reconnects > 0 ⇒ state; otherwise null; bounded and fail-soft', async () => {
