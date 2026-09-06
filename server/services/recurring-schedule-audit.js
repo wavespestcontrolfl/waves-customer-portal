@@ -248,7 +248,7 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
   const evidenceKey = createHash('sha256').update(JSON.stringify({
     issues, pattern, expectedVisits,
     rows: rows.map((row) => [row.id, row.status, row.recurring_pattern, row.is_recurring,
-      row.recurring_interval_days, row.recurring_ongoing, row.date_exception,
+      row.recurring_interval_days, row.recurring_ongoing, row.date_exception, formatDateOnly(row.date_exception_cadence_date),
       row.recurring_nth, row.recurring_weekday, row.skip_weekends, row.weekend_shift,
       // A correction followed by the SAME bad state must be a new incident.
       row.updated_at, row.property_id, formatDateOnly(row.scheduled_date)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
@@ -259,12 +259,26 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
 }
 
 function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
-  const sorted = [...rows].sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date)));
-  const termRows = sorted.slice(0, seeder.plannedVisitCountForPattern(pattern));
-  const expectedTerm = seeder.buildRecurringFollowUpRows(termRows[0], { pattern, plannedCount: termRows.length });
-  const checkTermSpan = !termRows.some((row) => row.date_exception);
+  // Rebooker's stored cadence position keeps an exception in its original
+  // slot even if the actual appointment moved past another application.
+  const sorted = rows.map((row) => row.date_exception && row.date_exception_cadence_date
+    ? { ...row, scheduled_date: formatDateOnly(row.date_exception_cadence_date), date_exception: false }
+    : row).sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date)));
+  let anchorIndex = 0;
+  let expectedTerm = [];
   return sorted.some((row, index) => {
-    if (!index || row.date_exception || sorted[index - 1].date_exception) return false;
+    // Older exceptions may lack their canonical position. Break only at
+    // that unknown position; the following known run still gets span checks.
+    if (row.date_exception) {
+      anchorIndex = index + 1;
+      return false;
+    }
+    if (index === anchorIndex) {
+      expectedTerm = seeder.buildRecurringFollowUpRows(row, {
+        pattern, plannedCount: sorted.length - index,
+      });
+      return false;
+    }
     const previous = sorted[index - 1];
     const previousDate = formatDateOnly(previous.scheduled_date);
     const currentDate = formatDateOnly(row.scheduled_date);
@@ -275,8 +289,8 @@ function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
     // quarterly dates still pages even if all its stored patterns say monthly.
     const expectedDates = [next.scheduled_date];
     // Small delays cannot accumulate into an 18-month "year" of service.
-    // Explicit exceptions keep their office-approved date semantics.
-    if (checkTermSpan && expectedTerm[index - 1]) expectedDates.push(expectedTerm[index - 1].scheduled_date);
+    const anchored = expectedTerm[index - anchorIndex - 1];
+    if (anchored) expectedDates.push(anchored.scheduled_date);
     return expectedDates.some((date) => {
       const expected = parseETDateTime(`${date}T12:00`);
       const earliest = etDateString(addETDays(expected, -14));
@@ -314,6 +328,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
       's.status', 's.is_recurring', 's.recurring_pattern', 's.recurring_ongoing', 's.updated_at',
       's.date_exception', 's.recurring_nth', 's.recurring_weekday', 's.recurring_interval_days', 's.skip_weekends', 's.weekend_shift',
       'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
+      conn.raw("to_char(s.date_exception_cadence_date, 'YYYY-MM-DD') as date_exception_cadence_date"),
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   const retainedSeries = await conn('activity_log').whereIn('customer_id', customerIds)
     .where('action', 'recurring_series_skipped').select('customer_id', 'metadata');
@@ -323,10 +338,8 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
   const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
     .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
     .select('recurring_parent_id', 'resolved_action');
-  const latestDecision = new Map();
-  for (const row of decisions) {
-    if (!latestDecision.has(row.recurring_parent_id)) latestDecision.set(row.recurring_parent_id, row.resolved_action);
-  }
+  // Query is newest-first; Map's last value wins after reversing it.
+  const latestDecision = new Map(decisions.map((row) => [row.recurring_parent_id, row.resolved_action]).reverse());
   const stopped = new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
   // Index history once: each estimate only walks its explicitly linked roots.
   const customers = new Map(customerIds.map((id) => [id, { roots: new Map(), holds: new Set() }]));
@@ -347,6 +360,9 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
   for (const hold of holds) customers.get(hold.customer_id).holds.add(hold.family_key);
   const findings = [];
   for (const { estimate, roots } of estimatesById.values()) {
+    // Pre-mode acceptances and pre-lineage schedules were never backfilled.
+    // Without either evidence, "no link" cannot establish "no schedule".
+    if (!estimate.accepted_service_mode && !roots.size) continue;
     const customer = customers.get(estimate.customer_id);
     const linkedRows = [...roots].flatMap((root) => customer.roots.get(root) || []);
     findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));

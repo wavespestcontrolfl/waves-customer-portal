@@ -334,6 +334,22 @@ describe('accepted-plan and prepay coverage detection', () => {
     expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.issue).toBe('annual_coverage_unverified');
   });
 
+  test('unchanged prepay evidence dedupes but a later funding regression rings again', async () => {
+    const row = unpricedChild({ estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100,
+      annual_prepay_term_id: 'term-1', prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-01T12:00:00Z']] });
+    makeDbMock({ upcomingRows: [row] });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1 });
+    const key = NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey;
+    const alertedKeys = new Set([key]);
+    makeDbMock({ upcomingRows: [row], alertedKeys });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0 });
+    annualPrepayCoversVisit.mockResolvedValueOnce(true);
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0, prepayCoverageGaps: 0 });
+    makeDbMock({ upcomingRows: [{ ...row, prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-03T12:00:00Z']] }], alertedKeys });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1, prepayCoverageGaps: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.dedupeKey).not.toBe(key);
+  });
+
   test('manual coverage flags only children already present when the payment was allocated', () => {
     const row = unpricedChild({ parent_prepaid_amount: 400, parent_prepaid_method: 'check',
       parent_prepaid_at: '2026-08-01T16:00:00Z', created_at: '2026-08-01T15:59:00Z', parent_series_payment_evidence: true });

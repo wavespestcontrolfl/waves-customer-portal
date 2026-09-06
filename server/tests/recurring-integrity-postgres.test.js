@@ -10,7 +10,7 @@ jest.mock('../models/db', () => {
   Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
   return db;
 });
-const { randomUUID } = require('node:crypto');
+const { randomUUID, randomBytes } = require('node:crypto');
 const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-schedule-audit');
 const { stampSeriesPrepaid } = require('../services/prepaid-series');
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'synthetic-notification' })) }));
@@ -122,6 +122,24 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     expect(await findings()).toEqual([]);
   });
 
+  test('legacy acceptances require explicit lineage before asserting schedule gaps', async () => {
+    await trx('estimates').where({ id: estimateId }).update({ accepted_service_mode: null });
+    const existing = await visit({ source_estimate_id: null });
+    expect(await findings()).toEqual([]);
+    await trx('scheduled_services').where({ id: existing.id }).update({ source_estimate_id: estimateId });
+    expect((await findings())[0].issues).toContain('missing_applications');
+  });
+
+  test('stored exception cadence dates preserve the series position in the real reader', async () => {
+    const root = await visit();
+    for (let month = 2; month <= 12; month += 1) {
+      await visit({ recurring_parent_id: root.id, scheduled_date: `2040-${String(month).padStart(2, '0')}-15` });
+    }
+    await trx('scheduled_services').where({ id: root.id }).update({ scheduled_date: '2040-06-20',
+      date_exception: true, date_exception_cadence_date: '2040-01-15' });
+    expect(await findings()).toEqual([]);
+  });
+
   test('active holds suppress only their own accepted family until resume', async () => {
     await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: {
       services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6 }],
@@ -146,6 +164,34 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     const notifications = require('../services/notification-service');
     expect(notifications.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
       expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: child.id, issue: 'manual_series_stamp_missing' }) }));
+  });
+
+  test('payment-only refund changes refresh the same annual visit\'s alert evidence', async () => {
+    const invoiceId = randomUUID();
+    const paymentId = randomUUID();
+    const termId = randomUUID();
+    const intentId = `pi_fixture_${randomUUID()}`;
+    await trx('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `fixture-${invoiceId.slice(0, 20)}`,
+      token: randomBytes(32).toString('hex'), total: 400, subtotal: 400, status: 'paid', stripe_payment_intent_id: intentId });
+    await trx('payments').insert({ id: paymentId, customer_id: customerId, payment_date: '2040-01-01', amount: 400, status: 'refunded',
+      refund_status: 'full', stripe_payment_intent_id: intentId, updated_at: new Date('2040-01-01T12:00:00Z') });
+    await trx('annual_prepay_terms').insert({ id: termId, customer_id: customerId, prepay_invoice_id: invoiceId,
+      status: 'active', term_start: '2040-01-01', term_end: '2041-01-01', prepay_amount: 400 });
+    const root = await visit({ annual_prepay_term_id: termId, prepaid_method: 'annual_prepay_invoice',
+      prepaid_amount: 100, estimated_price: 100 });
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    const notifications = require('../services/notification-service');
+    const key = () => notifications.notifyAdmin.mock.calls.filter((call) => call[3].metadata?.scheduled_service_id === root.id
+      && call[3].metadata?.issue === 'annual_coverage_unverified').at(-1)[3].metadata.dedupeKey;
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    const originalKey = key();
+    await trx('payments').where({ id: paymentId }).update({ status: 'paid', refund_status: null,
+      updated_at: new Date('2040-01-02T12:00:00Z') });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx('payments').where({ id: paymentId }).update({ status: 'refunded', refund_status: 'full',
+      updated_at: new Date('2040-01-03T12:00:00Z') });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    expect(key()).not.toBe(originalKey);
   });
 
   test('manual allocation preserves exact cents across the locked series', async () => {

@@ -38,6 +38,7 @@
  */
 
 const db = require('../models/db');
+const { createHash } = require('node:crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { etDateString } = require('../utils/datetime-et');
@@ -181,6 +182,8 @@ async function runInner({ now = new Date() } = {}) {
   const horizon = new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 24 * 3600 * 1000);
   const upcomingRows = await db('scheduled_services as ss')
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
+    .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.id', 'ss.annual_prepay_term_id')
+    .leftJoin('invoices as prepay_invoice', 'prepay_invoice.id', 'prepay_term.prepay_invoice_id')
     .whereNotIn('ss.status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
     .where('ss.scheduled_date', '>=', todayET)
     .where('ss.scheduled_date', '<=', etDateString(horizon))
@@ -192,12 +195,28 @@ async function runInner({ now = new Date() } = {}) {
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
       'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
       'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.recurring_parent_id',
-      'ss.created_at',
+      'ss.created_at', 'ss.updated_at',
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
       'parent.prepaid_amount as parent_prepaid_amount',
       'parent.prepaid_method as parent_prepaid_method',
       'parent.prepaid_at as parent_prepaid_at',
+      'parent.updated_at as parent_updated_at',
+      // Fingerprints only: coverage authority remains annualPrepayCoversVisit.
+      // Include funding revisions so a repaired term can alert again after
+      // a later refund/void even when best-effort visit cleanup did not run.
+      db.raw(`jsonb_build_array(prepay_term.id, prepay_term.customer_id, prepay_term.status,
+        prepay_term.coverage_service_type, prepay_term.renewal_decision,
+        prepay_term.updated_at) as prepay_term_evidence`),
+      db.raw(`jsonb_build_array(prepay_invoice.id, prepay_invoice.status,
+        prepay_invoice.paid_at, prepay_invoice.updated_at) as prepay_invoice_evidence`),
+      db.raw(`(SELECT jsonb_agg(jsonb_build_array(p.id, p.status, p.refund_status,
+          p.updated_at) ORDER BY p.id)
+        FROM payments p
+        WHERE (p.stripe_payment_intent_id IS NOT NULL
+          AND p.stripe_payment_intent_id = prepay_invoice.stripe_payment_intent_id)
+          OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = prepay_invoice.stripe_charge_id)
+      ) as prepay_payment_evidence`),
       // Parent-only payment is a legitimate single-visit action. A sibling
       // sharing the writer's exact prepaid_at stamp establishes series scope.
       db.raw(`EXISTS (SELECT 1 FROM scheduled_services paid_sibling
@@ -270,14 +289,21 @@ async function runInner({ now = new Date() } = {}) {
     ];
   });
 
-  alerts.push(...prepayGaps.map(({ row, issue }) => [
-      `prepay-coverage:${row.id}:${issue}:${row.annual_prepay_term_id || row.parent_prepaid_at || 'no-term'}`,
+  alerts.push(...prepayGaps.map(({ row, issue }) => {
+    const evidenceKey = createHash('sha256').update(JSON.stringify([
+      row.updated_at, row.service_type, row.prepaid_amount, row.prepaid_method, row.annual_prepay_term_id,
+      row.parent_prepaid_amount, row.parent_prepaid_method, row.parent_prepaid_at, row.parent_updated_at,
+      row.prepay_term_evidence, row.prepay_invoice_evidence, row.prepay_payment_evidence,
+    ])).digest('hex').slice(0, 20);
+    return [
+      `prepay-coverage:${row.id}:${issue}:${evidenceKey}`,
       `Prepaid coverage needs review before ${row.service_date}`,
       issue === 'annual_coverage_unverified'
         ? 'This visit carries an annual-prepay stamp that the completion coverage check cannot validate. Reconcile the payment, term and covered service before billing; a stamp alone does not prove payment.'
         : 'This recurring child existed when its parent and siblings received the same manual series-payment stamp, but has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
       { scheduled_service_id: row.id, customer_id: row.customer_id, issue },
-  ]));
+    ];
+  }));
 
   let acceptedGaps = [];
   let acceptedScheduleCheckFailed = false;

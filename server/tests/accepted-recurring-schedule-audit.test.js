@@ -88,6 +88,23 @@ test('explicit date exceptions do not become inferred spacing errors', () => {
   expect(check(estimate(), rows)).toEqual([]);
 });
 
+test('a moved exception keeps its canonical position without masking later cadence drift', () => {
+  const rows = series();
+  const cadenceDate = rows[1].scheduled_date;
+  rows[1] = { ...rows[1], scheduled_date: '2040-06-20', date_exception: true, date_exception_cadence_date: cadenceDate };
+  expect(check(estimate(), rows)).toEqual([]);
+  const drifted = series('every_6_weeks', 12).map((row) => ({ ...row, recurring_pattern: 'monthly' }));
+  drifted[1] = { ...drifted[1], scheduled_date: '2040-06-20', date_exception: true,
+    date_exception_cadence_date: drifted[1].scheduled_date };
+  expect(check(estimate(), drifted)[0].issues).toContain('application_spacing_needs_review');
+});
+
+test('an old exception without a stored cadence position does not disable later span checks', () => {
+  const rows = series('every_6_weeks', 12).map((row) => ({ ...row, recurring_pattern: 'monthly' }));
+  rows[0].date_exception = true;
+  expect(check(estimate(), rows)[0].issues).toContain('application_spacing_needs_review');
+});
+
 test('one-time acceptance and explicit series stops create no recurring obligation', () => {
   expect(check(estimate({ accepted_service_mode: 'one_time' }))).toEqual([]);
   expect(check(estimate(), [parent()], new Set(['visit-1']))).toEqual([]);
