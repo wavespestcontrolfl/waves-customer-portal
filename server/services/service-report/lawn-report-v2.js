@@ -566,28 +566,31 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // Tan color alone can be ordinary edge wear; it does not establish dryness.
   // Preserve the vision scorer's explicit under-watering diagnosis without
   // treating tan color or curling alone as moisture evidence.
-  // Check each underwatering mention locally: a negated diagnosis must not
+  // Check each explicit moisture observation locally: a negated diagnosis must not
   // create advice or suppress a separate affirmative observation.
   // A comma/"and" can join a negated list; split only when it starts a new
   // subject or follows a completed observation ("no weeds seen, ...").
-  const underwateringSignal = obsText
+  const explicitMoistureSignal = obsText
     .replace(/\b(not|never|[a-z]+n['’]t)\s+yet\b/g, '$1')
+    // A trailing passive dismissal still belongs to the same diagnosis.
+    // Keep an explicit different object ("but excluded disease") separate.
+    .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|is|has|had|been)\s+)*(?:excluded|ruled out)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$))/g, ' ')
     // Two finite predicates joined by "and" are separate observations, unlike
     // a shared subject list ("no signs of overwatering and underwatering").
     .replace(/(\b(?:is|are|was|were|has|have|had|do|does|did)\b[^.!?;,]*?)\band\b(?=[^.!?;,]*\b(?:is|are|was|were|has|have|had|points? to|suggests?|indicates?|shows?|appears?|looks?|remains?|persists?)\b)/g, '$1;')
     .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?:,|\band\b)\s*(?=(?:the|this|that|these|those)\b)|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
-    .some(clause => [...clause.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
+    .some(clause => [...clause.matchAll(/\b(?:under[\s-]?water(?:ing|ed)|(?:sprinklers?|irrigation)\s+(?:(?:is|are|does|do)\s+)?(?:not|[a-z]+n['’]t)\s+(?:reach(?:ing)?|cover(?:ing)?))\b/g)].some(match => {
       const before = clause.slice(0, match.index).replace(/\bnot\s+(?:only|just)\b/g, '');
       const after = clause.slice(match.index + match[0].length);
       // Only the noun shares a predicate: "underwatering and disease were not
       // observed" differs from "under-watered and no disease was observed".
-      const predicate = match[0].endsWith('ing')
+      const predicate = match[0].startsWith('under') && match[0].endsWith('ing')
         ? after.replace(/^\s+(?:and|or|nor)\s+(?:[a-z'’-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ')
         : after;
       return !/\b(?:no|not|never|neither|nor|without|[a-z]+n['’]t|cannot|free of|absence of|exclude[ds]?|ruled out|inconsistent with)\b/.test(before)
         && !/^\s+(?:(?!(?:and|or|nor|with|without|because|due|from|not|never|neither)\b)[a-z'’-]+\s+)*?(?:absent|unlikely|excluded|inconsistent with|ruled out|no longer|(?:not|never|neither|[a-z]+n['’]t|cannot)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
     }));
-  const drySignal = underwateringSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
+  const drySignal = explicitMoistureSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
     // Reversed order — "irrigation is uneven across the west side"
     // (codex P2 r36). Bounded gap so the subject and qualifier stay in

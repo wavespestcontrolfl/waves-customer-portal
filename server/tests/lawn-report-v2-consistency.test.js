@@ -270,6 +270,9 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Underwatering is neither visible nor evident.',
     'Underwatering was excluded based on the even turf color.',
     'The photo is inconsistent with underwatering.',
+    'Underwatering was considered but excluded after reviewing the even turf color.',
+    'Underwatering was considered, but it was ruled out after reviewing the turf.',
+    'No signs of sprinklers not reaching the pavement are visible.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(false);
@@ -302,6 +305,10 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'No weeds are evident and tan blades point to under-watering near the pavement.',
     'No weeds are evident and the edges look under-watered.',
     'Underwatering is inconsistent across the lawn.',
+    'Tan blades and curling at the pavement edge suggest the sprinkler is not reaching that zone.',
+    'Tan blades suggest sprinklers aren’t reaching that zone.',
+    'Tan blades suggest the sprinkler does not reach that zone.',
+    'We observed underwatering but excluded disease.',
   ])('preserves moisture evidence in %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(true);
