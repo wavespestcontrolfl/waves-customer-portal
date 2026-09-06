@@ -464,6 +464,19 @@ describe('fulfillment proof', () => {
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
   });
 
+  test('fulfillment holds split SMS readbacks before exposing any body copy to the provider', async () => {
+    dispatchWithFallback.mockClear();
+    const records = [
+      { id: 'second', ref: 'sms:second', type: 'sms', created_at: '2040-03-11T15:01:00Z',
+        text: '4242 4242. Here is the answer.', message_body: '4242 4242. Here is the answer.' },
+      { id: 'first', ref: 'sms:first', type: 'sms', created_at: '2040-03-11T15:00:00Z',
+        text: 'My card is 4242 4242', message_body: 'My card is 4242 4242' },
+    ];
+    expect(await verifySmsFulfillment({ kind: 'other' }, { records, failures: [] }))
+      .toMatchObject({ verdict: 'uncertain', reason: 'split_message_payment_data' });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('provider failures pause retries without permanently caching the outage', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: false });
     const now = new Date('2040-03-12T15:00:00Z');
