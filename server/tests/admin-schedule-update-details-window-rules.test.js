@@ -415,3 +415,76 @@ describe('malformed SUPPLIED bounds are refused at intake (before the unchanged-
     expect(status).not.toBe(422);
   });
 });
+
+
+test('address regrouping uses final edit values inside the transaction', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const regroup = handler.indexOf('for (const id of addressUpdatedIds)');
+  const lastCountReconcile = handler.lastIndexOf('await reconcileRecurringSeriesVisitCount(trx,', regroup);
+  const postCommit = handler.indexOf('// Tech-facing notice for a same-tech date/time move');
+  expect(lastCountReconcile).toBeGreaterThan(-1);
+  expect(regroup).toBeGreaterThan(lastCountReconcile);
+  expect(regroup).toBeLessThan(postCommit);
+  expect(handler.slice(regroup, postCommit)).toContain("maybeGroupRow(id, { database: trx, createdBy: 'dispatch' })");
+});
+
+// These ordering guards cover the modal's transaction wiring; real PostgreSQL
+// concurrency remains a separate dev-database verification requirement.
+test('address saves fence destination partner technicians and reject changed snapshots before writes', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const partnerRead = handler.indexOf('const addressPartnersQuery =');
+  const partnerFence = handler.indexOf('for (const partner of addressPartners)');
+  const fence = handler.indexOf('await lockTechDays(trx, preFence)');
+  const stops = handler.indexOf('await lockAppointmentAddress(trx,');
+  const recheck = handler.indexOf('const lockedPartners =');
+  const write = handler.indexOf('await applyAppointmentAddress(trx,');
+  expect(partnerRead).toBeGreaterThan(handler.indexOf('await acquireOccupancyLocks(trx,'));
+  expect(partnerFence).toBeGreaterThan(partnerRead);
+  expect(fence).toBeGreaterThan(partnerFence);
+  expect(stops).toBeGreaterThan(fence);
+  expect(recheck).toBeGreaterThan(stops);
+  expect(write).toBeGreaterThan(recheck);
+  expect(handler.slice(partnerRead, partnerFence)).toContain("whereIn('scheduled_date', [...lockedRecurrenceDates])");
+  expect(handler.slice(partnerFence, fence)).toContain('techId: partner.technician_id, date: dateOnly(partner.scheduled_date)');
+  expect(handler.slice(recheck, write)).toContain('JSON.stringify(lockedPartners) !== JSON.stringify(addressPartners)');
+  expect(handler.slice(recheck, write)).toContain('throw httpError(409,');
+});
+
+test('address rows are fenced on every locked recurrence date (cadence rewrite + regroup adoption)', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const preFenceAt = handler.indexOf('const preFence = addressPlan ?');
+  const fence = handler.indexOf('await lockTechDays(trx, preFence)');
+  expect(preFenceAt).toBeGreaterThan(-1);
+  expect(fence).toBeGreaterThan(preFenceAt);
+  const block = handler.slice(preFenceAt, fence);
+  expect(block).toContain('[...lockedRecurrenceDates].map((date) => ({ techId, date }))');
+  expect(block).not.toContain('[row.scheduled_date, updates.scheduled_date]');
+});
+
+test('an address change combined with a collective series date move is refused before any write', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const plan = handler.indexOf('const seriesMovePlan = await planCollectiveEditDateMove(req);');
+  const refuse = handler.indexOf('if (seriesMovePlan && propertyId !== undefined)');
+  const firstTrx = handler.indexOf('await db.transaction(');
+  expect(plan).toBeGreaterThan(-1);
+  expect(refuse).toBeGreaterThan(plan);
+  expect(refuse).toBeLessThan(firstTrx);
+  expect(handler.slice(refuse, refuse + 700)).toContain('throw httpError(422,');
+});
+
+test('an address change combined with a cadence rewrite is refused under lock before the first write', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const trxStart = handler.indexOf('await db.transaction(');
+  const beforeRead = handler.indexOf('const recurringParentBefore = ');
+  const refuse = handler.indexOf('if (addressPlan && recurringParentBefore?.is_recurring');
+  const firstWrite = handler.indexOf('addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan');
+  expect(trxStart).toBeGreaterThan(-1);
+  expect(beforeRead).toBeGreaterThan(trxStart);
+  expect(refuse).toBeGreaterThan(beforeRead);
+  expect(refuse).toBeLessThan(firstWrite);
+  const block = handler.slice(refuse, firstWrite);
+  expect(block).toContain('shouldRewritePendingRecurringRows(recurringParentBefore, { ...recurringParentBefore, ...updates })');
+  expect(block).toContain("throw httpError(422, 'Change the address and the recurrence in separate saves.')");
+  // No scheduled_services write may precede the refusal inside the trx.
+  expect(handler.slice(trxStart, refuse)).not.toMatch(/\.(update|insert|del|delete)\(/);
+});

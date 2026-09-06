@@ -1,3 +1,7 @@
+jest.mock('../services/appointment-tagger', () => ({
+  classifyAppointmentType: jest.fn((type) => ({ tag: type === 'WDO' ? 'wdo_inspection' : 'general' })),
+  triggerWDOPrep: jest.fn(async () => {}),
+}));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn() }));
 jest.mock('../services/visit-groups', () => ({
@@ -39,7 +43,7 @@ function connection({ rows = [row], visits = [], selected = property } = {}) {
     const predicates = [];
     const filtered = () => result.filter((r) => predicates.every((p) => p(r)));
     const chain = {};
-    for (const name of ['where', 'whereIn', 'whereNotIn', 'orWhere', 'orderBy', 'forUpdate', 'forShare']) {
+    for (const name of ['where', 'whereIn', 'whereNotIn', 'orWhere', 'orderBy', 'forUpdate', 'forShare', 'forNoKeyUpdate']) {
       chain[name] = (...args) => {
         query.filters.push([name, ...args]);
         if (name === 'where') predicates.push(predicate(args));
@@ -235,4 +239,63 @@ test('rejects an anchor rescheduled after the address plan was read', async () =
   await expect(applyAppointmentAddress(conn, plan, 'admin-a'))
     .rejects.toMatchObject({ statusCode: 409, isOperational: true });
   expect(conn.calls.some((call) => call.patch)).toBe(false);
+});
+
+
+test.each(require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES)(
+  'propagation excludes a sibling with canonical join-ineligible status %s', async (status) => {
+    const sibling = { ...row, id: 'inactive-sibling', recurring_parent_id: row.id, status };
+    const conn = connection({ rows: [row, sibling] });
+    const plan = await planAppointmentAddress(conn, row.id, property.id);
+    expect(plan.rows.map((r) => r.id)).toEqual([row.id]);
+    await applyAppointmentAddress(conn, plan, 'admin-a');
+    const addressWrite = conn.calls.find((call) => call.patch?.service_address_line1);
+    expect(addressWrite.filters).toContainEqual(['whereIn', 'id', [row.id]]);
+  },
+);
+
+
+test('address stop locking takes the customer row lock first', async () => {
+  const conn = connection();
+  const plan = await planAppointmentAddress(conn, row.id, property.id);
+  lockStop.mockImplementationOnce(async () => {
+    expect(conn.calls.some((call) => call.table === 'customers'
+      && call.filters.some(([name]) => name === 'forNoKeyUpdate'))).toBe(true);
+  });
+  await lockAppointmentAddress(conn, plan);
+});
+
+test('address refresh rebuilds only WDO research', async () => {
+  const rows = [{ id: 'wdo', service_type: 'WDO' }, { id: 'pest', service_type: 'Pest' }];
+  const query = {};
+  for (const name of ['leftJoin', 'whereIn', 'whereNotIn']) query[name] = jest.fn(() => query);
+  query.select = jest.fn(async () => rows);
+  const conn = jest.fn(() => query);
+  await require('../services/appointment-address').refreshAppointmentAddressBriefs(conn, ['wdo', 'pest']);
+  expect(require('../services/appointment-tagger').triggerWDOPrep).toHaveBeenCalledTimes(1);
+  expect(require('../services/appointment-tagger').triggerWDOPrep).toHaveBeenCalledWith(rows[0]);
+  expect(query.whereNotIn).toHaveBeenCalledWith('ss.status', require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES);
+});
+
+test('address saves take maintenance and comms before customer and stop locks', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const handler = source.slice(source.indexOf("router.put('/:id/update-details'"));
+  const maintenance = handler.indexOf('await acquireRecurringSeriesMaintenanceLock(trx,');
+  const comms = handler.indexOf('await lockCustomerComms(trx,');
+  const customerAndStops = handler.indexOf('await lockAppointmentAddress(trx,');
+  expect(maintenance).toBeGreaterThan(-1);
+  expect(comms).toBeGreaterThan(maintenance);
+  expect(customerAndStops).toBeGreaterThan(comms);
+});
+
+test('combined-payment locking precedes address customer and stop locks on payer edits', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const handler = source.slice(source.indexOf("router.put('/:id/update-details'"));
+  const comms = handler.indexOf('await lockCustomerComms(trx,');
+  const combined = handler.indexOf('lockCombinedCustomers(trx,');
+  const addressLocks = handler.indexOf('await lockAppointmentAddress(trx,');
+  expect(combined).toBeGreaterThan(comms);
+  expect(combined).toBeLessThan(addressLocks);
+  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id");
+  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override");
 });

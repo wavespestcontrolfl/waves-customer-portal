@@ -1,4 +1,4 @@
-const { deductProductInventory } = require('../routes/admin-dispatch')._test;
+const { deductProductInventory } = require('../services/complete-scheduled-service');
 const { errorHandler } = require('../middleware/errors');
 
 // Fake knex trx whose forUpdate lock finds no row, so deductProductInventory

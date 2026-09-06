@@ -214,7 +214,7 @@ async function appointmentPropertyPreview(conn, plan) {
       status: row.status, service_type: row.service_type,
       current_address: formatAddress(effectiveServiceAddress(row, customer)),
     })),
-    effects: 'Changes the destination and map coordinates for these service lines; regroups their visit at the destination and clears the route position and cached pre-service brief. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
+    effects: 'Changes the destination and map coordinates for these service lines and clears the route position and cached pre-service brief. The visit keeps its current grouping and is not combined with other stops at the destination; regroup from Dispatch if needed. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
     navigation: 'An already-open navigation app may need its destination refreshed separately.',
   };
 }
@@ -231,8 +231,8 @@ async function switchAppointmentProperty(input, actionContext) {
   const result = await db.transaction(async trx => {
     await require('../scheduling/occupancy').acquireOccupancyLocks(trx, plan.rows.map(row => require('../visit-groups').dateOnly(row.scheduled_date)));
     await require('../scheduling/tech-day-lock').lockTechDays(trx, plan.rows.map(row => ({ techId: row.technician_id, date: require('../visit-groups').dateOnly(row.scheduled_date) })));
-    await lockAppointmentAddress(trx, plan);
     await require('../../utils/customer-comms-lock').lockCustomerComms(trx, plan.anchor.customer_id);
+    await lockAppointmentAddress(trx, plan);
     await trx('customers').where({ id: plan.anchor.customer_id }).forShare().first();
     await trx('customer_properties').where({ id: input.property_id }).forShare().first();
     await trx('scheduled_services').whereIn('id', plan.rows.map(row => row.id)).orderBy('id').forUpdate();

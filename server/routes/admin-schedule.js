@@ -3236,7 +3236,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   if (!fromAttachedInvoice && profileKnown
     && (['invoice', 'auto_charge'].includes(billingLane.prediction?.kind) || pricedPayer)) {
     try {
-      const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+      const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
       willMint = shouldAutoInvoiceCompletion({
         recapReviewOnly: false,
         alreadyPaid: false,
@@ -3357,7 +3357,7 @@ function recurringWithoutBillableAmount({
   // explicit lane/tier applies, and GATE_AUTOINVOICE_PRICED_VISITS is off.
   // Lazy require: admin-dispatch pulls admin-schedule helpers, so a
   // top-level import would close a cycle.
-  const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+  const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
   const { completionInvoiceAmount } = require('../services/billing-lane');
   const invoiceAmount = completionInvoiceAmount({
     estimatedPrice: Number(recurringFloorPrice) > 0 ? recurringFloorPrice : null,
@@ -7527,6 +7527,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
     const seriesMovePlan = await planCollectiveEditDateMove(req);
+    if (seriesMovePlan && propertyId !== undefined) {
+      // An address change regroups relocated occurrences on their OLD dates
+      // inside the edit transaction; the collective date move that follows
+      // refuses a grouped visit (VISIT_SERIES_MOVE_UNSUPPORTED), so the
+      // address would commit while the requested move 409s. Refuse the
+      // combination before any write.
+      throw httpError(422, 'Change the address and move the series date in separate saves.');
+    }
     if (seriesMovePlan) {
       // The series commit lands the date and the window (supplied, kept, or
       // explicitly cleared) after the per-row edit below; that edit saves
@@ -8561,13 +8569,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      // Regrouping can adopt a destination partner's technician. Include all
+      // destination rows (eligibility may change during this save), then
+      // revalidate after locking: an assignment may finish while we wait.
+      const addressPartnersQuery = addressPlan ? trx('scheduled_services')
+        .where({ customer_id: addressPlan.anchor.customer_id, property_id: addressPlan.propertyId })
+        .whereIn('scheduled_date', [...lockedRecurrenceDates])
+        .select('id', 'technician_id', 'scheduled_date').orderBy('id') : null;
+      const addressPartners = addressPartnersQuery ? await addressPartnersQuery.clone() : [];
       // Every save pre-acquires its complete tech-day fence before stop and
       // maintenance locks, including same-slot assignment echoes from the modal.
       // Otherwise an ordinary save and an address save can deadlock.
       {
+        // Address rows are fenced on EVERY locked date, not just their own
+        // and the requested move: a cadence rewrite in the same save can land
+        // an assigned child on any planned destination day, where regrouping
+        // onto an unassigned partner takes that technician's day lock.
         const preFence = addressPlan ? addressPlan.rows.flatMap((row) =>
           [row.technician_id, requestedTechnicianId].flatMap((techId) =>
-            [row.scheduled_date, updates.scheduled_date].filter(Boolean).map((date) => ({ techId, date: dateOnly(date) })))) : [];
+            [...lockedRecurrenceDates].map((date) => ({ techId, date })))) : [];
+        for (const partner of addressPartners) {
+          preFence.push({ techId: partner.technician_id, date: dateOnly(partner.scheduled_date) });
+        }
         if (assignmentShouldRun) {
           const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
           const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
@@ -8594,7 +8617,38 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           await lockTechDays(trx, preFence);
         }
       }
+      // Match customer editors and grouping: maintenance/comms, customer row,
+      // then stop locks. Tech-day fences remain ahead of all three.
+      const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
+        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
+        || wantsPriceServiceScope
+        // The no-scope override-coherence refresh (and the conversion
+        // override stamp) write the template too, from legacy surfaces
+        // that post no scope — EVERY template writer must serialize with
+        // the extension readers on this same lock (Codex #3505 r4 P1).
+        || (isEnabled('editApptPriceServiceScope')
+          && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key)));
+      if (wantsExistingPlanMutation && commsPeek) {
+        await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
+      }
+      if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
+      // Payer activation shares comms → combined → customer/appointment rows
+      // with customer editors and combined-payment setup. Take this before
+      // address locking too; the later release reacquires it re-entrantly.
+      if (detailsChanged && ((Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
+        || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override))) {
+        const provCust = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+        if (provCust?.customer_id) {
+          await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);
+        }
+      }
       if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
+      if (addressPartnersQuery) {
+        const lockedPartners = await addressPartnersQuery.clone();
+        if (JSON.stringify(lockedPartners) !== JSON.stringify(addressPartners)) {
+          throw httpError(409, 'Appointments changed while saving. Reload and choose the address again.');
+        }
+      }
       if (preReadVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
@@ -8631,19 +8685,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // overrides that auto-extend / top-up / alert-extend read, so it must
       // serialize against those writers (and against a concurrent scoped
       // save merging the same override JSON) — Codex #3505 r1 P1.
-      const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
-        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
-        || wantsPriceServiceScope
-        // The no-scope override-coherence refresh (and the conversion
-        // override stamp) write the template too, from legacy surfaces
-        // that post no scope — EVERY template writer must serialize with
-        // the extension readers on this same lock (Codex #3505 r4 P1).
-        || (isEnabled('editApptPriceServiceScope')
-          && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key)));
-      if (wantsExistingPlanMutation && commsPeek) {
-        await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
-      }
-      if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       // The plan's ongoing flag, read UNDER the maintenance lock (Codex #3337
       // r6 P1). A concurrent series mutation can hold that lock and commit the
       // opposite value while this request waits for it, so a pre-lock read is
@@ -8662,6 +8703,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
         : null;
+      // An address change and a cadence rewrite in one save would re-date the
+      // relocated children after their stop locks were taken for the ORIGINAL
+      // dates, so the regroup loop at the end of this trx acquires each
+      // rewritten destination stop late (deadlock window against
+      // handleChildStopChanged; the maybeGroupRow savepoint swallows the
+      // abort and the save commits ungrouped). Refuse the combination here —
+      // the locked read above is authoritative and no row has been written
+      // yet — rather than widen the pre-lock set again.
+      if (addressPlan && recurringParentBefore?.is_recurring && !recurringParentBefore.recurring_parent_id
+        && shouldRewritePendingRecurringRows(recurringParentBefore, { ...recurringParentBefore, ...updates })) {
+        throw httpError(422, 'Change the address and the recurrence in separate saves.');
+      }
 
       if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);
 
@@ -8701,20 +8754,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // Keys are read provisionally WITHOUT locking; after the locked read
         // below, a key mismatch (row moved concurrently) aborts the edit
         // rather than proceeding with the wrong day fenced.
-        // Combined-session lock BEFORE any scheduled_services row lock
-        // (codex #3427 r16 P1, same advisory-then-rows discipline as the
-        // tech-day fence below): the payer-activation release helper waits
-        // on pay.combined.customer, and taking row locks first would
-        // invert against /setup's advisory-then-reads order. Customer id
-        // read provisionally WITHOUT locking; the later release re-acquires
-        // re-entrantly.
-        if ((Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
-          || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override)) {
-          const provCust = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
-          if (provCust?.customer_id) {
-            await require('../services/pay-combined').lockCombinedCustomers(trx, [String(provCust.customer_id)]);
-          }
-        }
         let provFence = null;
         if (updates.scheduled_date !== undefined) {
           const prov = await trx('scheduled_services')
@@ -10295,6 +10334,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
       }
+      // Address changes can make unattached services share a physical stop.
+      // Use the final date/window/technician after all edits and count changes.
+      // The canonical seam owns eligibility, gates and savepoint isolation.
+      for (const id of addressUpdatedIds) {
+        await require('../services/visit-groups').maybeGroupRow(id, { database: trx, createdBy: 'dispatch' });
+      }
     });
 
     // Tech-facing notice for a same-tech date/time move (a tech change in the
@@ -10312,6 +10357,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         snapshot: techMoveForNotice.snapshot,
       });
     }
+
+    // Research must see committed address stamps and must not replay prep sends.
+    void require('../services/appointment-address').refreshAppointmentAddressBriefs(db, addressUpdatedIds).catch((err) => {
+      logger.error(`[schedule/update-details] address brief refresh failed: ${err.message}`);
+    });
 
     // Visit-group seam (visit-group-scope.md §2; codex #3590 r4/r8): a
     // direct Edit-Appointment change must repair grouped membership like

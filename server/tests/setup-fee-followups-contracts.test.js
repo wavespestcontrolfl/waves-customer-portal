@@ -5,7 +5,7 @@ const path = require('path');
 
 const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
 const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
-const dispatch = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+const dispatch = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
 
 describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
   test('solo wizard bookings run the waiver rechecks but NEVER stamp (plan not activated)', () => {
