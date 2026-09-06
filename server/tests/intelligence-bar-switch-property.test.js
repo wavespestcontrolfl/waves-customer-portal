@@ -7,43 +7,32 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
-jest.mock('../services/appointment-address', () => ({ planAppointmentAddress: jest.fn(), lockAppointmentAddress: jest.fn(), applyAppointmentAddress: jest.fn(async () => ['stop']), refreshAppointmentAddressBriefs: jest.fn(async () => {}) }));
-jest.mock('../services/visit-groups', () => ({ ...jest.requireActual('../services/visit-groups'), maybeGroupRow: jest.fn(async () => null) }));
+jest.mock('../services/appointment-address', () => ({ planAppointmentAddress: jest.fn(), lockAppointmentAddress: jest.fn(), applyAppointmentAddress: jest.fn(async () => ['stop']) }));
 jest.mock('../services/scheduling/occupancy', () => ({ acquireOccupancyLocks: jest.fn() }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn() }));
 const db = require('../models/db');
 const address = require('../services/appointment-address');
 const gates = require('../config/feature-gates');
 const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-const { maybeGroupRow } = require('../services/visit-groups');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
 const input = { appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002' };
 let plan;
 let property;
-// Rows already at the destination property on the moved dates, one list per
-// scheduled_services read inside the transaction (partner fence, row lock,
-// partner re-check); the last list repeats.
-let partnerReads;
 beforeEach(() => {
   jest.clearAllMocks();
   gates.isEnabled.mockReturnValue(true);
   property = { id: input.property_id, address_line1: '200 Test Street', city: 'Test City', state: 'FL', zip: '34201', customer_id: 'customer' };
   plan = { anchor: { id: input.appointment_id, customer_id: 'customer' }, propertyId: input.property_id, scope: 'visit', rows: [
-    { id: input.appointment_id, customer_id: 'customer', technician_id: 'tech-1', scheduled_date: '2099-01-02', status: 'en_route', recurring_parent_id: 'template' },
+    { id: input.appointment_id, customer_id: 'customer', scheduled_date: '2099-01-02', status: 'en_route', recurring_parent_id: 'template' },
   ] };
-  partnerReads = [[]];
   address.planAppointmentAddress.mockImplementation(async () => structuredClone(plan));
   db.mockImplementation(table => {
     const row = table === 'customers' ? { id: 'customer', address_line1: '100 Test Street' } : property;
     const chain = {};
-    for (const name of ['where', 'whereNull', 'whereIn', 'select', 'orderBy', 'forUpdate', 'forShare']) chain[name] = () => chain;
+    for (const name of ['where', 'whereNull', 'whereIn', 'orderBy', 'forUpdate', 'forShare']) chain[name] = () => chain;
     chain.first = async () => row;
-    chain.then = resolve => {
-      const rows = table === 'scheduled_services' ? (partnerReads.length > 1 ? partnerReads.shift() : partnerReads[0]) : [];
-      return Promise.resolve(rows).then(resolve);
-    };
+    chain.then = resolve => Promise.resolve([]).then(resolve);
     return chain;
   });
 });
@@ -66,38 +55,6 @@ test('confirmed execution holds locks and applies only the pinned preview', asyn
   expect(address.applyAppointmentAddress).toHaveBeenCalledWith(db, expect.objectContaining({ scope: 'visit' }), 'actor');
   expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: 'stop', actorId: 'actor' });
   expect(emitDispatchJobUpdate.mock.invocationCallOrder[0]).toBeGreaterThan(address.applyAppointmentAddress.mock.invocationCallOrder[0]);
-});
-
-test('confirmed execution regroups at the destination inside the transaction and refreshes WDO research after commit', async () => {
-  const preview = await call();
-  await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true, technicianId: 'actor' });
-  expect(maybeGroupRow).toHaveBeenCalledWith('stop', { database: db, createdBy: 'dispatch' });
-  expect(maybeGroupRow.mock.invocationCallOrder[0]).toBeGreaterThan(address.applyAppointmentAddress.mock.invocationCallOrder[0]);
-  expect(address.refreshAppointmentAddressBriefs).toHaveBeenCalledWith(db, ['stop']);
-  expect(address.refreshAppointmentAddressBriefs.mock.invocationCallOrder[0]).toBeGreaterThan(maybeGroupRow.mock.invocationCallOrder[0]);
-});
-
-test('destination partners are fenced in the ordered tech-day lock and a partner change refuses before writes', async () => {
-  const partner = { id: 'partner', technician_id: 'tech-2', scheduled_date: '2099-01-02' };
-  partnerReads = [[partner]];
-  const preview = await call();
-  const result = await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true, technicianId: 'actor' });
-  expect(result.success).toBe(true);
-  expect(lockTechDays).toHaveBeenCalledTimes(1);
-  expect(lockTechDays).toHaveBeenCalledWith(db, [
-    { techId: 'tech-1', date: '2099-01-02' },
-    { techId: 'tech-2', date: '2099-01-02' },
-  ]);
-  expect(lockTechDays.mock.invocationCallOrder[0]).toBeLessThan(address.lockAppointmentAddress.mock.invocationCallOrder[0]);
-
-  jest.clearAllMocks();
-  gates.isEnabled.mockReturnValue(true);
-  // fence read → row lock → re-check: the partner was reassigned in between.
-  partnerReads = [[partner], [partner], [{ ...partner, technician_id: 'tech-3' }]];
-  const drifted = await call({ ...input, confirmed: true, _verified_address_fingerprint: previewFingerprint(preview) }, { confirmed: true, technicianId: 'actor' });
-  expect(drifted.preview_changed).toBe(true);
-  expect(address.applyAppointmentAddress).not.toHaveBeenCalled();
-  expect(maybeGroupRow).not.toHaveBeenCalled();
 });
 
 test('destination changes between approval and commit refuse without writes', async () => {

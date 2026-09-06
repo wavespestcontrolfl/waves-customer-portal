@@ -223,28 +223,14 @@ async function switchAppointmentProperty(input, actionContext) {
   if (!require('../../config/feature-gates').isEnabled('editApptAddress')) return { error: 'Appointment address changes are not enabled.' };
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!uuid.test(input.appointment_id) || !uuid.test(input.property_id)) return { error: 'Resolve the appointment and saved property IDs first.' };
-  const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs } = require('../appointment-address');
+  const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../appointment-address');
   const { previewFingerprint } = require('./authorization-contract');
-  const { dateOnly, maybeGroupRow } = require('../visit-groups');
   const plan = await planAppointmentAddress(db, input.appointment_id, input.property_id, 'visit');
   if (input.confirmed !== true) return appointmentPropertyPreview(db, plan);
   if (!actionContext.confirmed || !input._verified_address_fingerprint) return { error: 'Use the confirmation card to approve this change.' };
   const result = await db.transaction(async trx => {
-    const dates = plan.rows.map(row => dateOnly(row.scheduled_date));
-    await require('../scheduling/occupancy').acquireOccupancyLocks(trx, dates);
-    // Destination partners: this customer's stops already at the destination
-    // property on these dates. Regrouping below can adopt a partner's
-    // technician, so their tech-days join the one ordered lockTechDays call
-    // (mirrors update-details) and a partner change under the row locks
-    // refuses instead of taking a new tech-day lock late.
-    const partnersQuery = () => trx('scheduled_services')
-      .where({ customer_id: plan.anchor.customer_id, property_id: plan.propertyId })
-      .whereIn('scheduled_date', dates).select('id', 'technician_id', 'scheduled_date').orderBy('id');
-    const partners = await partnersQuery();
-    await require('../scheduling/tech-day-lock').lockTechDays(trx, [
-      ...plan.rows.map(row => ({ techId: row.technician_id, date: dateOnly(row.scheduled_date) })),
-      ...partners.map(row => ({ techId: row.technician_id, date: dateOnly(row.scheduled_date) })),
-    ]);
+    await require('../scheduling/occupancy').acquireOccupancyLocks(trx, plan.rows.map(row => require('../visit-groups').dateOnly(row.scheduled_date)));
+    await require('../scheduling/tech-day-lock').lockTechDays(trx, plan.rows.map(row => ({ techId: row.technician_id, date: require('../visit-groups').dateOnly(row.scheduled_date) })));
     await require('../../utils/customer-comms-lock').lockCustomerComms(trx, plan.anchor.customer_id);
     await lockAppointmentAddress(trx, plan);
     await trx('customers').where({ id: plan.anchor.customer_id }).forShare().first();
@@ -253,21 +239,12 @@ async function switchAppointmentProperty(input, actionContext) {
     const fresh = await planAppointmentAddress(trx, input.appointment_id, input.property_id, 'visit');
     const preview = await appointmentPropertyPreview(trx, fresh);
     if (previewFingerprint(preview) !== input._verified_address_fingerprint) return { error: 'The visit or property changed. Request a fresh confirmation card.', preview_changed: true };
-    if (JSON.stringify(await partnersQuery()) !== JSON.stringify(partners)) return { error: 'Appointments at the destination changed. Request a fresh confirmation card.', preview_changed: true };
     // Apply against the original lock plan: a moved stop cannot silently use
     // advisory locks acquired for an old property/date.
     const ids = await applyAppointmentAddress(trx, plan, actionContext.technicianId);
-    // The card promises regrouping at the destination: same canonical seam as
-    // update-details (gate-checked, best-effort, savepoint-isolated).
-    for (const id of ids) await maybeGroupRow(id, { database: trx, createdBy: 'dispatch' });
     return { success: true, updated_service_ids: ids, destination: preview.destination, messages_sent: false };
   });
   if (result.success) {
-    // Research must see committed address stamps; the helper rebuilds WDO
-    // briefs only and never replays booking prep sends.
-    void refreshAppointmentAddressBriefs(db, result.updated_service_ids).catch(err => {
-      logger.error(`[intelligence-bar] address brief refresh failed: ${err.message}`);
-    });
     const { emitDispatchJobUpdate } = require('../dispatch-assignment');
     const broadcasts = await Promise.allSettled(result.updated_service_ids.map(jobId =>
       emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId })));
