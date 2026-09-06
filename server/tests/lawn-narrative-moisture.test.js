@@ -54,15 +54,23 @@ describe('structured moisture governs the optional whole-report narrative', () =
     expect(data.reportV2.diagnosis).toEqual(before.diagnosis);
   });
 
-  test.each([['minor', undefined], ['none', true]])('affirmative severity %s / technician %j retains narrative generation with structured grounding', async (severity, flag) => {
-    const lawnAssessment = assessment(severity, flag);
+  test.each([
+    ['minor', undefined, 'balanced', 'balanced', 'checking the flagged area\'s coverage'],
+    ['none', true, 'balanced', 'balanced', 'checking the flagged area\'s coverage'],
+    ['minor', undefined, 'deficit', 'low', 'more water'],
+    ['minor', undefined, 'surplus', 'high', 'easing back'],
+  ])('affirmative severity %s / technician %j grounds %s water advice in the report status', async (severity, flag, adviceStatus, reportStatus, instruction) => {
+    const lawnAssessment = assessment(severity, flag, adviceStatus);
     const v2 = buildLawnReportV2({ lawnAssessment });
-    const wording = 'Rain this week is near the target; check coverage in the flagged dry area.';
+    const wording = `Based on rain this week, the lawn needs ${instruction}.`;
     const callModel = jest.fn(async () => ({ ok: true, json: { water: wording } }));
     const out = await applyLawnReportNarrative(v2, { observations: `${lawnAssessment.observations} ${severity}` }, { callModel });
     expect(callModel).toHaveBeenCalledTimes(1);
     expect(callModel.mock.calls[0][0].text).toContain('"droughtSignal": true');
+    expect(callModel.mock.calls[0][0].text).toContain(`"status": "${reportStatus}"`);
+    expect(callModel.mock.calls[0][0].system).toContain(`"${reportStatus}" supports ${instruction}`);
     expect(out.water.explanation).toBe(wording);
+    expect(out.water.status).toBe(reportStatus);
     expect(out.water.droughtSignal).toBe(true);
     expect(out.water.totalInches).toBe(v2.water.totalInches);
   });
