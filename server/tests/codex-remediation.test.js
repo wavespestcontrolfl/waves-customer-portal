@@ -3867,6 +3867,18 @@ describe('production frontmatter remediation recovery', () => {
     expect(revalidateFix).toHaveBeenCalledWith(gh._calls.putFile[0].content);
   });
 
+  test('a schema reorder with unchanged content does not manufacture a formatting-only commit', async () => {
+    const original = '---\ntitle: "Exterior inspection"\nschema_types: [Article, BreadcrumbList]\n---\nInspect the exterior gaps.\n';
+    const reordered = fm.stringify({ ...fm.parse(original).data, schema_types: ['BreadcrumbList', 'Article'] }, fm.parse(original).content);
+    const gh = makeGh({ fileContent: original });
+    const result = await runRemediationForPr(CTX, {
+      db: makeDb(), gh, callAnthropic: makeCall(reordered), validateFixedBlogFile: PASS,
+    });
+    expect(result.parked).toBe(true);
+    expect(result.reason).toContain('produced no change');
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
   test.each([
     ['spoke_links', { spoke_links: [{ domain: 'example.com', anchor: 'outside site' }] }],
     ['meta_description', { meta_description: 'An unsolicited metadata rewrite.' }],

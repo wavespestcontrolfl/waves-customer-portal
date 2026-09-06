@@ -1091,6 +1091,10 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
   if (!result.violation && schemaTypes && canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
     result.changed.schema_types = schemaTypes;
   }
+  if (!result.violation && Object.keys(result.changed).length === 0
+    && original.content.trimEnd() === fixed.content.trimEnd()) {
+    markdown = originalMd;
+  }
   return { ...result, markdown };
 }
 
