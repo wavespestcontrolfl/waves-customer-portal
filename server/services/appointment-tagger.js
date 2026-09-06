@@ -183,18 +183,20 @@ class AppointmentTagger {
         brief = this.generateWDOBriefTemplate(service, propertyData);
       }
 
-      // Address, service and lifecycle edits invalidate research while providers run.
+      // Address and service edits invalidate research while providers run; a
+      // terminal transition does too, but a live status moving to another live
+      // status (pending → confirmed, confirmed → en_route) keeps the brief —
+      // nothing sweeps a WDO visit later (previsit-brief skips WDO).
       const written = await db('scheduled_services').where({ id: service.id,
         service_id: service.service_id ?? null,
         service_type: service.service_type ?? null,
-        status: service.status ?? null,
         property_id: service.property_id ?? null,
         service_address_line1: service.service_address_line1 ?? null,
         service_address_line2: service.service_address_line2 ?? null,
         service_address_city: service.service_address_city ?? null,
         service_address_state: service.service_address_state ?? null,
         service_address_zip: service.service_address_zip ?? null,
-      }).update({
+      }).whereNotIn('status', [...PREP_TERMINAL_STATUSES]).update({
         pre_service_brief: JSON.stringify(brief),
         pre_service_brief_type: 'wdo_inspection',
         pre_service_brief_generated_at: new Date(),

@@ -25,6 +25,7 @@ const tagger = require('../services/appointment-tagger');
 function chain() {
   const c = {
     where: jest.fn(() => c),
+    whereNotIn: jest.fn(() => c),
     update: jest.fn(async () => 1),
     insert: jest.fn(async () => 1),
   };
@@ -98,22 +99,35 @@ describe('triggerWDOPrep provider-key gate', () => {
     expect(c.insert).not.toHaveBeenCalled();
   });
 
+  // Publication predicate: exact match on the stamped columns, plus a
+  // terminal-status exclusion (whereNotIn) rather than an exact status pin.
+  function livePublication(live) {
+    const c = chain();
+    let publication; let excludedStatuses = [];
+    c.where.mockImplementation((where) => { publication = where; return c; });
+    c.whereNotIn.mockImplementation((column, values) => {
+      if (column === 'status') excludedStatuses = values;
+      return c;
+    });
+    c.update.mockImplementation(async (patch) => {
+      const matches = Object.entries(publication).every(([key, expected]) => (live[key] ?? null) === expected)
+        && !excludedStatuses.includes(live.status);
+      if (matches) Object.assign(live, patch);
+      return matches ? 1 : 0;
+    });
+    return c;
+  }
+
   test.each([
     ['service_id', 'catalog-pest'],
     ['service_type', 'General Pest Control'],
     ['status', 'cancelled'],
+    ['status', 'rescheduled'],
   ])('discards research when %s changes during the provider call', async (field, value) => {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
     const live = { ...service };
-    const c = chain();
-    let publication;
-    c.where.mockImplementation((where) => { publication = where; return c; });
-    c.update.mockImplementation(async (patch) => {
-      const matches = Object.entries(publication).every(([key, expected]) => (live[key] ?? null) === expected);
-      if (matches) Object.assign(live, patch);
-      return matches ? 1 : 0;
-    });
+    const c = livePublication(live);
     db.mockReturnValue(c);
     require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio
       .mockImplementationOnce(async () => { live[field] = value; return null; });
@@ -122,6 +136,25 @@ describe('triggerWDOPrep provider-key gate', () => {
 
     expect(live.pre_service_brief).toBeUndefined();
     expect(c.insert).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['pending', 'confirmed'],
+    ['confirmed', 'en_route'],
+  ])('keeps the brief when a live status moves %s → %s during the provider call', async (from, to) => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service, status: from };
+    const c = livePublication(live);
+    db.mockReturnValue(c);
+    require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio
+      .mockImplementationOnce(async () => { live.status = to; return null; });
+
+    await tagger.triggerWDOPrep({ ...service, status: from });
+
+    expect(live.pre_service_brief_type).toBe('wdo_inspection');
+    expect(live.status).toBe(to);
+    expect(c.insert).toHaveBeenCalledTimes(1);
   });
 
   test('no provider key at all → deterministic template, no AI dispatch', async () => {
