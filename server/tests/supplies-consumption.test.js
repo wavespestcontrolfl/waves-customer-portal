@@ -134,6 +134,22 @@ test('an internal-only completion profile (Waves Assessment) consumes nothing ev
   expect(inserts).toHaveLength(0);
 });
 
+test('a WDO inspection on the termite line consumes the termite-scoped notice (owner ruling 2026-09-06)', async () => {
+  const notice = { ...sign, id: 'prod-notice', name: 'Termite protection notice', per_completion_service_lines: '["termite"]', inventory_on_hand: '10' };
+  const { db, inserts } = fakeDb({ products: [notice] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite' });
+  expect(res.skipped).toEqual([]);
+  expect(res.consumed).toEqual([{ productId: 'prod-notice', name: 'Termite protection notice', usage: 1, unit: 'each', before: 10, after: 9, costUsed: null }]);
+  expect(inserts).toHaveLength(1);
+});
+
+test('a WDO inspection still leaves the pest-scoped yard sign alone', async () => {
+  const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: '["pest"]' }] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite' });
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'service_line_excluded' }]);
+  expect(inserts).toHaveLength(0);
+});
+
 test('a treatment service type is not an inspection', async () => {
   const { db, inserts } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control' });

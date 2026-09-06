@@ -43,8 +43,11 @@ const { gateEnvValue } = require('../config/feature-gates');
 
 const SOURCE = 'completion_consumable';
 const GATE = 'GATE_AUTO_REORDER';
-// A scheduled inspection (no application) leaves no yard sign.
+// A scheduled inspection (no application) leaves no yard sign — except on
+// the termite line: a WDO inspection posts the termite protection notice
+// (owner ruling 2026-09-06), so termite-scoped kit still consumes there.
 const INSPECTION_SERVICE_RE = /\binspection\b/i;
+const INSPECTION_CONSUMES_LINE = 'termite';
 
 // Reasons to do nothing at all, in order, decided before any read.
 const SKIP_WHEN = [
@@ -57,7 +60,7 @@ const SKIP_WHEN = [
   // detectServiceLine reads it as pest — the completion's own posture is the
   // authority (Codex r9 P2).
   [(a) => a.isInternalOnlyCompletion === true, 'internal_only_completion'],
-  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)), 'inspection_service'],
+  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)) && a.serviceLine !== INSPECTION_CONSUMES_LINE, 'inspection_service'],
 ];
 
 // SQL NULL = every line. Anything else must be an array of line keys —
@@ -217,7 +220,7 @@ async function consumeCompletionSupplies(db, {
   serviceType = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
-  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType }));
+  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType, serviceLine }));
   if (skip) { result.skipped.push({ reason: skip[1] }); return result; }
 
   let products;
