@@ -84,6 +84,18 @@ function scrubStoredSegments(segments) {
   return ordered.map((segment, index) => ({ ...segment, text: texts[index].join('\n') }));
 }
 
+/** Called only for a server-authenticated socket, before it can run a model turn. */
+async function registerSegmentSession(db, callSid, sessionKey) {
+  if (!callSid || !sessionKey) return false;
+  const written = await db('call_log').where('twilio_call_sid', callSid)
+    .whereRaw("COALESCE(metadata->>'relay_segments_sealed', 'false') <> 'true'")
+    .update({ metadata: db.raw(
+      "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segment_owners', COALESCE(metadata->'relay_segment_owners', '[]'::jsonb) || ?::jsonb)",
+      [JSON.stringify([sessionKey])],
+    ) });
+  return Number(written) > 0;
+}
+
 /**
  * Serialize closes on the call row. Repair prior fragments and append the new
  * leg in one transaction, so no reader sees a reconstructed card number and
@@ -94,6 +106,7 @@ async function appendSegment(db, callSid, segment) {
     const query = trx('call_log').where('twilio_call_sid', callSid)
       .where((q) => q
         .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
+        .orWhereRaw("metadata->'relay_segment_owners' @> ?::jsonb", [JSON.stringify([segment.session_key || ''])])
         .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND (COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ? OR (COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) = ? AND COALESCE(metadata->>'relay_session_claim_owner', '') > ?)))", [segment.generation || 0, segment.generation || 0, segment.session_key || '']));
     const row = await query.clone().forUpdate().first('metadata');
     if (!row) return 0;
@@ -132,8 +145,7 @@ async function sealSegmentsForExtraction(db, callId, processingToken) {
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     const owners = meta.relay_segment_owners;
     const segments = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
-    if (!Array.isArray(owners) || owners.length === 0
-      || owners.some((owner) => !segments.some((segment) => segment.session_key === owner))) {
+    if (Array.isArray(owners) && owners.some((owner) => !segments.some((segment) => segment.session_key === owner))) {
       return { status: 'pending' };
     }
     await query.update({ metadata: trx.raw(
@@ -237,7 +249,7 @@ const FILL_EMPTY_SQL = "(COALESCE(transcription, '') = '' AND transcription_prov
 // A recorded transcript on a reconnected call or a durably proven transfer: the
 // processor finished before this segment landed (a silent resumed leg wrote
 // no stash). The recording is preserved; the AI segment goes ahead of it.
-const RECORDED_ONLY_SQL = "((transcription_provider <> ? OR (transcription_provider IS NULL AND transcription_metadata->'recorded_segment_rejected' IS NOT NULL)) AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND (COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 OR call_outcome = 'ai_transferred' OR jsonb_typeof(metadata->'relay_handoff') = 'object' OR metadata->>'relay_transfer_ring_at' IS NOT NULL))";
+const RECORDED_ONLY_SQL = "((transcription_provider <> ? OR (transcription_provider IS NULL AND transcription_metadata->'recorded_segment_rejected' IS NOT NULL)) AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND (COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 OR call_outcome = 'ai_transferred' OR jsonb_typeof(metadata->'relay_handoff') = 'object' OR metadata->>'relay_transfer_ring_at' IS NOT NULL OR jsonb_array_length(COALESCE(metadata->'relay_segment_owners', '[]'::jsonb)) > 0))";
 const RELAY_PROVIDER = require('./relay-transcript').TRANSCRIPTION_PROVIDER;
 // The recorded half of a processor composite, from its segment header to the end (non-capturing!).
 const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
@@ -258,9 +270,10 @@ function callerTurnsFromText(text) {
 }
 
 
-/** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
-function generationFenceSql(q, generation) {
-  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0]);
+/** A close must remain both the current owner and no older than a pending reconnect. */
+function closeFenceSql(q, generation, sessionKey) {
+  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0])
+    .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [sessionKey || '']);
 }
 
 /** The latest promise per kind across a row's segments, in generation order. */
@@ -279,6 +292,6 @@ function latestPromises(segments) {
 
 
 module.exports = {
-  appendSegment, sealSegmentsForExtraction, scrubStoredSegments, generationFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
+  appendSegment, registerSegmentSession, sealSegmentsForExtraction, scrubStoredSegments, closeFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
   appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText,
 };
