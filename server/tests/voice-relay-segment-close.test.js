@@ -305,6 +305,6 @@ describe('the conversation side', () => {
       convo._runCaptureFloor = jest.fn(async () => {});
       await convo.end('ws_close');
       expect(register).toHaveBeenCalledWith(expect.anything(), 'CA-silent', 'silent');
-      expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-silent', expect.objectContaining({ session_key: 'silent', text: '', turns: 0 }));
+      expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-silent', expect.objectContaining({ session_key: 'silent', text: '', turns: 0 }), { allowUnclaimed: true });
     } finally { register.mockRestore(); append.mockRestore(); }
   });
