@@ -454,20 +454,6 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       // leaves follow-ups resolving by mutable label while the parent keeps
       // its key (pre-push P1). Cols-guarded like the rest of the row.
       'service_key_snapshot',
-      'lat',
-      'lng',
-      // Stamped service address (property linkage): a series booked for a
-      // secondary/rental property carries a visit-level stamp; follow-ups
-      // must inherit it or every reader's COALESCE(service_address_*,
-      // customers.address_*) falls back to the customer's PRIMARY address
-      // and the visit dispatches to the wrong property. Cols-guarded like
-      // the rest of the row — the insert path maps through filterByColumns.
-      'property_id',
-      'service_address_line1',
-      'service_address_line2',
-      'service_address_city',
-      'service_address_state',
-      'service_address_zip',
       // Inert legacy names: scheduled_services has no plain
       // address/city/state/zip columns, so a real parent row never carries
       // these keys (copyIfPresent skips) and filterByColumns would strip
@@ -480,6 +466,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'state',
       'zip',
     ]);
+    Object.assign(row, require('./booking/visit-financial-stamps').recurringServiceAddress(parent));
     // Resolved identity outranks the parent's copied link AND snapshot (the
     // parent may be unlinked, linked to a row since renamed, or carry a
     // stale snapshot that must not ride into the child — codex #3604 r5

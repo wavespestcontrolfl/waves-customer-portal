@@ -3177,6 +3177,7 @@ module.exports = {
   ensureLegacyCompletable,
   dissolveForLegacyCompletion,
   stopBaseKey,
+  lockStop,
   lockStopForRow,
   openMembers,
   visitActivity,
