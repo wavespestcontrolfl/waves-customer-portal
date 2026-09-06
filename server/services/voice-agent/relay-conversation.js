@@ -487,7 +487,7 @@ function getVoiceProfileTextNonBlocking() {
 }
 
 class RelayConversation {
-  constructor({ callSid, sessionKey, sessionGeneration, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
+  constructor({ callSid, sessionKey, sessionGeneration, callTokenVerified = false, from, to, language, send, endSession, relayProfileId = null, ttsVoice = null, sandbox = false, resumed = false }) {
     this.callSid = callSid || null;
     // ⭐ A SANDBOX CALL IS A DRY RUN. Proven at ws upgrade from the call_log
     // row's source (never the setup frame): the transcript, latency record and
@@ -567,6 +567,7 @@ class RelayConversation {
     // (CallSid, from)? Independent of whether an account matched — an
     // unmatched-but-real caller is verified; a WS client that declared an ANI
     // is not. Read by the tool ctx below.
+    this._callTokenVerified = callTokenVerified === true;
     this._callerVerified = false;
     this._contextReady = null;
     // Session language PROOF (codex #3561 r3). `this.language` is the setup
@@ -1743,7 +1744,7 @@ class RelayConversation {
     // PR 2B: the earlier segment(s) of a reconnected call ride the USER role
     // the same way, ONCE, as played text — the model resumes instead of
     // starting over. Only when the row proved the reconnect.
-    if (!this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS && require('./relay-recovery').isRecoveryGateOn()) {
+    if (this._callerVerified === true && !this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS && require('./relay-recovery').isRecoveryGateOn()) {
       // The previous socket appends its segment only after draining its turn
       // chain and in-flight writes; a reconnect that wins that race read an
       // empty list. Reload (bounded) on each of the first turns until the
@@ -2087,10 +2088,10 @@ class RelayConversation {
     // P1): verification IS that proof (the claim is won inside the caller
     // resolution, verified callers only), and the statement re-checks it —
     // the row's current owner, or an older generation on a row a reconnect
-    // has since taken over (the superseded first leg). An unverified socket
-    // (capture-only, never claimed) writes through today's owner-fenced
-    // reconcile alone.
-    if (recoveryOn && this.callSid && this._transcript.length && this._callerVerified === true) {
+    // has since taken over. A server-verified call token also permits storing
+    // this socket's own text when ANI verification cannot claim the row; it
+    // grants no account access or permission to load prior dialogue.
+    if (recoveryOn && this.callSid && this._transcript.length && (this._callerVerified === true || this._callTokenVerified)) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
         segment = segmentStore.buildSegment({
@@ -2101,6 +2102,7 @@ class RelayConversation {
           turns: this._transcript.length,
           latency: summarizeTurnStats(this._turnStats),
           versions: this._versionStamps(),
+          leadId: this._leadId,
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
           noLeadCreated: this._noLeadCreated === true,
@@ -2113,7 +2115,7 @@ class RelayConversation {
           lookupResults: this._lookupResults,
           slotRefs: [...this._slotRefs],
         });
-        segmentWrite = segmentStore.appendSegment(db, this.callSid, segment);
+        segmentWrite = segmentStore.appendSegment(db, this.callSid, segment, { allowUnclaimed: this._callTokenVerified });
         const appended = await withTimeout(
           segmentWrite,
           WRITE_DRAIN_TIMEOUT_MS,

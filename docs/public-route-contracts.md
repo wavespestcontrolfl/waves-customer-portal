@@ -1137,19 +1137,27 @@ bounded, fenced UPDATE claims the reconnect on the call_log row
 NULL / status in-progress; a voicemail / transferred / relay_failed row is
 never resumed; an unconfirmed claim never re-renders, a late-landing one is
 put back) and the handler renders the same `<Connect><ConversationRelay>`
-the call started with (same action incl. `?lang=es` / `?sandbox=1`, plus
+the call started with (an explicit untuned stamp stays untuned); production
+reconnect rendering rechecks `voiceAiAgent` and the recovery gate after async
+lookups. It retains the same action incl. `?lang=es` / `?sandbox=1`, plus
 `gen=<the row's relay_reconnect_ms>` so the resumed leg's own failure is
 told apart from a Twilio retry of the first leg's — a retry on a row that
 already reconnected gets a bare `<Response/>` and never ends the healthy
 session; a resumed welcome greeting, `<Parameter resumed="1">`, a token
-minted AFTER the stamp so the new socket's generation is ≥ the fence). The session
+minted AFTER the stamp so the new socket's generation is ≥ the fence. The session
 treats `resumed` as a hint and re-proves it from the row before seeding the
-earlier turns or skipping its capture floor. A second failure: office open
+earlier turns or skipping its capture floor. Close-time segment storage may
+also use the server-verified, burned call token to retain that socket's own
+text on an unclaimed row or after reconnect; this proof never grants account
+access or prior-dialogue hydration. Captured lead ids persist in the segment
+as a fallback when the call linkage stamp did not land. A second failure: office open
 AND `GATE_VOICE_RELAY_TRANSFER` ⇒ the staff ring above (owner-bound to the
 row's current claim owner, generic whisper); otherwise today's voicemail.
 With recovery enabled, an unconfirmed reconnect claim/state read returns
 503 with no fallback instructions. Voicemail, sandbox failure, and staff-ring
-claims are fenced to the proven reconnect generation; a predicate that loses
+claims are fenced to the proven reconnect generation; voicemail/failure
+writes also atomically refuse rows with a claimed staff ring or transferred
+outcome, even if the replacement socket never acquired a session claim; a predicate that loses
 to a newer reconnect returns a bare response instead of stale fallback TwiML.
 Any change to the claim, the owner fence, the reconnect fence, the sandbox
 branch or what the whisper may speak is security-critical).

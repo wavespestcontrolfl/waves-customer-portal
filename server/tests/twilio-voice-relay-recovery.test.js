@@ -66,6 +66,7 @@ beforeEach(() => {
   process.env.VOICE_RELAY_WS_SECRET = 'test-secret';
   process.env.PUBLIC_PORTAL_URL = 'https://portal.wavespestcontrol.com';
   jest.clearAllMocks();
+  require('../config/feature-gates').isEnabled.mockReturnValue(true);
   loadOfficeHours.mockResolvedValue({ open: true });
   isOfficeOpenAt.mockReturnValue(true);
 });
@@ -109,6 +110,37 @@ describe('/relay-complete — first failure reconnects ONCE', () => {
     expect(res.body).toContain('<Parameter name="resumed" value="1" />');
     expect(res.body).not.toContain('<Record');
     expect(res.body).not.toContain('<Dial');
+  });
+
+  test.each(['before', 'during'])('the production AI kill switch stops reconnect %s routing', async (when) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const gates = require('../config/feature-gates');
+    if (when === 'before') gates.isEnabled.mockImplementation((name) => name !== 'voiceAiAgent');
+    else require('../services/call-routing-config').getCallRoutingConfig.mockImplementationOnce(async () => {
+      gates.isEnabled.mockImplementation((name) => name !== 'voiceAiAgent');
+      return { agentEndpoint: 'wss://portal.wavespestcontrol.com/ws/voice-agent' };
+    });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    expect(res.body).not.toContain('<ConversationRelay');
+    expect(res.body).toContain('<Record');
+  });
+
+  test('an explicitly untuned first leg remains untuned after the active profile changes', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const saved = process.env.VOICE_RELAY_PROFILE;
+    process.env.VOICE_RELAY_PROFILE = 'flux_fast_v1';
+    try {
+      primeDb({ firstRow: { metadata: { relay_profile_id: null, relay_attrs: null } } });
+      const res = mockRes();
+      await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+      expect(res.body).toContain('<ConversationRelay');
+      expect(res.body).not.toContain('name="relay_profile"');
+      expect(res.body).not.toContain('speechModel="flux"');
+    } finally {
+      if (saved === undefined) delete process.env.VOICE_RELAY_PROFILE; else process.env.VOICE_RELAY_PROFILE = saved;
+    }
   });
 
   test('a reissue during routing cannot mint a token newer than this response action', async () => {
@@ -309,6 +341,18 @@ describe('/relay-complete — the second failure', () => {
     const res = mockRes();
     await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
     expect(res.body).toContain('<Record');
+  });
+
+  test.each([{ call_outcome: 'ai_transferred' }, { metadata: { relay_transfer_ring_at: '2026-01-01T00:00:00Z' } }])('a stale callback cannot replace a transfer before a resumed claim: %j', async (transfer) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb({ claimRows: 0, firstRow: { ...transfer, metadata: {
+      relay_reconnects: 1, relay_reconnect_ms: 777, relay_session_claim_gen: 500, ...transfer.metadata,
+    } } });
+    const res = mockRes();
+    await handlerFor('/relay-complete')({ body: FAILED, query: {} }, res);
+    expect(res.body).not.toContain('<Record');
+    expect(res.body).not.toContain('<ConversationRelay');
+    expect(updates.some((patch) => patch.call_outcome === 'voicemail')).toBe(false);
   });
 
   test('a retry of the first leg\'s callback whose reconnect RESPONSE was lost (row reconnected, claim still the first leg\'s) re-issues the reconnect on a FRESH stamp — never ends the call (codex r2 P1)', async () => {

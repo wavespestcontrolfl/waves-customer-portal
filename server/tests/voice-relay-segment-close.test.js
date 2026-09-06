@@ -81,6 +81,21 @@ describe('the conversation side', () => {
     expect(typeof updates[0].transcription).toBe('string');
   });
 
+  test('a call-token-authenticated unverified first leg preserves text after reconnect supersedes it', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb();
+    const convo = convoWithTurns({ callTokenVerified: true });
+    convo._callerVerified = false;
+    expect(convo._callTokenVerified).toBe(true);
+    convo._sessionSuperseded.mockResolvedValue(true);
+    await convo.end('ws_close');
+    const append = updates.find((patch) => JSON.stringify(patch.metadata).includes('relay_segments'));
+    expect(append).toBeDefined();
+    expect(JSON.stringify(append)).toContain('my ants are back');
+    expect(convo._buildToolCtx().callerVerified).toBe(false);
+    expect(convo._buildToolCtx().sessionKey).toBeNull();
+  });
+
   test('an unconfirmed append never publishes an unscrubbed local/older-leg composite', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const update = jest.fn(async () => 0);

@@ -320,6 +320,7 @@ describe('setup frame — bound to the authenticated CallSid', () => {
     expect(RelayConversation).toHaveBeenCalledTimes(1);
     expect(RelayConversation.mock.calls[0][0].callSid).toBe('CA-authed');
     expect(RelayConversation.mock.calls[0][0].sandbox).toBe(false);
+    expect(RelayConversation.mock.calls[0][0].callTokenVerified).toBe(true);
   });
 
   test('the upgrade-time sandbox proof reaches the session — the frame cannot set it', () => {
