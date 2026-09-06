@@ -77,7 +77,7 @@ describe('public estimate SMS templates', () => {
       '2026-06-01T10:00',
       'General Pest Control',
       'estimate_accept_slot',
-      { sendConfirmation: false },
+      { sendConfirmation: false, fromCommittedRow: true },
     );
   });
 
