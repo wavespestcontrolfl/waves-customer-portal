@@ -220,6 +220,9 @@ async function main() {
       await mobile.getByRole('button', { name: 'Promises', exact: true }).waitFor();
       await mobile.getByText('Nothing owed.', { exact: false }).waitFor();
       await shot(mobile, 'communications-mobile-390');
+      await mobile.getByRole('button', { name: 'Message Automations', exact: true }).click();
+      await mobile.getByText('Catalog entries: 0', { exact: true }).waitFor();
+      await shot(mobile, 'communications-automations-mobile-390');
     });
     const tech = await openPage('technician', 390);
     await scenario('technician Settings retain identity and hide owner workflows', async () => {

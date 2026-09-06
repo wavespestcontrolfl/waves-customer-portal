@@ -32,7 +32,7 @@ The supplied main checkout was at `a2bb0bc49`, behind main, with many unrelated 
 
 Node `20.20.2` matches `.nvmrc`; dependencies were installed from the existing lockfile with `npm ci --ignore-scripts --no-audit --no-fund` in this worktree. No dependencies were added. `worktree:setup` and frontend doctor passed. Managed integration credentials are excluded and background jobs disabled. No `.env` or `DATABASE_URL` is present. All interactive QA uses loopback Vite with intercepted synthetic API responses and blocked external traffic/service workers. The server suite uses an additional test-only external-network block.
 
-Feature state: production gate values and per-user flags were **not queried**. Existing release gates remain unchanged. The source inventory records flag reads. Relevant conditional destinations include `agent_estimate`, `dashboard-ai-charts`, estimate status pills, invoice feature flags, Agent Ops hub features (`queue`, `ledger`, `runs`), bank import and other server-returned availability. Browser fixtures explicitly exercise admin/technician and enabled/disabled/unavailable variants where relevant. Gate-off does not mean dead.
+Feature state: production gate values and per-user flags were **not queried**. Existing release gates remain unchanged. The source inventory records flag reads. Relevant conditional destinations include `agent_estimate`, `dashboard-ai-charts`, estimate status pills, invoice feature flags, Agent Ops hub features (`queue`, `ledger`, `runs`), bank import and other server-returned availability. Browser fixtures exercise admin/technician/guest with optional flags off and unavailable diagnostic reads; flag-on destination counts come from the unchanged metadata. Existing flag tests run in the client suite. Gate-off does not mean dead.
 
 Usage: the confirmed Waves Pest Control PostHog organization/project `489072` exposes mostly public booking/estimate events. A read-only `$pageview` trend filtered to `$pathname` matching `^/admin(/|$)` returned **0** for the tool-reported UTC window 2026-08-07–2026-09-06. This is a telemetry coverage limitation, not evidence of zero admin use. The app deliberately records private admin navigation through `client/src/lib/adminUsage.js` → `server/routes/admin-usage.js` → `portal_usage_events` instead. Its production report was not queried; no account-level activity was exported. No traffic-based deletion or time-saving claim is made.
 
@@ -90,7 +90,43 @@ Contracts remain available from Customers/Pipeline and through the canonical Con
 | 3. Retire Settings Team duplication; link Tool Health to Settings integrations | RETIRE UI / MERGE presentation | Self-profile fields already exist under General; integration catalog is the identical shared component. Low/medium risk, verify failure, role, Back and no duplicate requests. | No employee or provider data changes; explicit legacy `?tab=team` behavior. |
 | 4. Delete private unreferenced PPC SEO declarations and newly obsolete props/helper | DELETE VERIFIED DEAD CODE | Lexical binding + export/route/dynamic consumer proof in deletion ledger; PPC/SEO workflows tested with mocks. | Isolated deletion commit; no endpoint or dependency removal. |
 
-Larger recommendations are **DEFER PENDING EVIDENCE** for implementation. Their parity gaps are listed in the matrix. This selection does not imply that the 17-home target is already implemented or that reducing the sidebar count is the acceptance metric.
+Larger recommendations are **DEFER PENDING EVIDENCE** for implementation. Their parity gaps are listed in the matrix. This selection does not imply that the broader target is already implemented or that reducing the sidebar count is the acceptance metric.
+
+## Implemented navigation and behavior
+
+The review branch implements this tree, using the existing registry and individual
+role/flag filters. Every leaf is still a direct link. Service operations stays
+second so Schedule remains the second desktop destination.
+
+```text
+Overview: Dashboard
+Service operations: Schedule, Reports, Assessments, Services, Pricing, Equipment, Inventory, Compliance, Knowledge
+Customers & Sales: Customers, Pipeline, Agent Estimate [flag], Price Match, Contracts
+Communications: Communications, Email
+Billing & Finance: Invoices, Recovery, Payers, Banking, Taxes
+People: Staff, Recruiting
+Marketing: PPC, SEO, Social Media, Blog, Newsletter, Reviews, Referrals
+System: Agent Ops, Tool Health, Settings
+```
+
+Implemented: three clearer panel labels, nine context-preserving aliases, Account
+instead of the self-only Team view, one integration catalog under Settings, two
+fewer mobile Settings links, and verified private PPC code deletion. The
+Intelligence Bar, every business queue, all six PPC tabs, SEO, employee/applicant
+entities, pricing and every backend/API remain intact.
+
+The separate skeptical parity pass found two additional failures and added
+regressions before fixing them: the Account profile must remain available when
+the unrelated health endpoint fails, and a technician's restricted route child
+must not mount before the existing redirect effect runs. Independent settlement
+of the existing reads and the existing role predicate on the Outlet fix those
+cases. The shell also supplies the original URL to login's existing validated
+`next` mechanism. No new authorization policy, route registry or redirect helper
+was introduced. Login's existing technician-to-`/tech` policy is retained.
+
+Exact measurements, verification limits and per-slice rollback are in
+[verification.md](verification.md). This is a local review implementation; no
+push, PR, merge, deployment, production data change or provider action occurred.
 
 ## Remaining decisions
 

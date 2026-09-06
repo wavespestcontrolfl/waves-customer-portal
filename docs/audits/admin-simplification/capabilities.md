@@ -48,7 +48,7 @@ Every route is listed in [routes.csv](routes.csv), including the owner-only defa
 | Route/surface | Disposition and dependency |
 |---|---|
 | `/admin`, index | **KEEP** shell + default dashboard redirect; technicians are redirected to Schedule by server-verified shell role. Native app uses separate routing. |
-| `/admin/login`, `/admin/change-password` | **KEEP** auth entry points outside shell; bearer version/employment/password-change constraints. Login return URL carries the original path/query/hash. Never substitute an API redirect for this flow. |
+| `/admin/login`, `/admin/change-password`, `/admin/forgot-password`, `/admin/reset-password` | **KEEP** auth entry points outside shell; bearer version/employment/password-change constraints. Baseline shell dropped the guest/expired-session destination. It now supplies path/query/hash to login's existing validated `?next=` reader; the existing technician login policy still selects `/tech`. The Outlet applies the same role predicate as its redirect before mounting children. Backend authorization and reset flows are unchanged. |
 | `/admin/customers/new`, `/admin/customers/duplicates` | **KEEP** quick-add entry and owner-only duplicate manager; duplicate manager is not dead because absent from sidebar. No merge/dedupe action exercised live. |
 | `/admin/estimates/:estimateId/proposal` | **KEEP** commercial proposal editor/PDF/send; route ID and nested owner guard. |
 | `/admin/turf-height` | **KEEP** hidden review queue for discrepancy/OCR failure; only supported client resolver. `TurfHeightReviewPage` → `/admin/turf-height/review` and `/:id/resolve`. Dormant state is not dead. |

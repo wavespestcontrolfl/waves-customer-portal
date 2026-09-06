@@ -47,6 +47,25 @@ All aliases below already redirect at baseline. Their canonical target, tab and 
 
 Tests read the actual `App.jsx` alias configuration and render the existing redirect, checking IDs, repeated query values, hash, canonical leaf, history replacement, direct refresh and technician/guest restrictions. Passing transport tests does **not** create new selected-record support in panels that never implemented it.
 
+The shell now preserves its initial guest/expired-session URL in `?next=` using
+the existing `AdminLoginPage` reader, which already rejects external/scheme and
+double-slash/backslash targets. A browser fixture signs in through the real form
+with an intercepted login response, then reaches Data Hygiene with the original
+status and fragment. Technicians retain login's existing `/tech` destination
+policy; an expired staff admin-workspace bookmark is not newly promised to return
+there after technician login. No login API contract or token validation changed.
+
+The shell previously rendered a restricted child for one frame before its role
+redirect effect ran. The same existing role/path predicate now gates the Outlet.
+Nine negative tests assert both the final Schedule destination and zero restricted
+child renders. API permission checks remain authoritative and unchanged.
+
+The self-profile parity test also caught a health-outage case: General coupled
+health and profile success, while old Team's extra profile read could succeed
+independently. Both existing reads now settle independently, preserving the
+identity without retaining the duplicate request. Failed profile reads show the
+existing Unknown fallback and expose no owner configuration.
+
 All other routes have a **KEEP** or **DEFER** disposition in routes.csv/capabilities.md. Existing Schedule/Fleet/Assessment and remapping adapters are retained. `revenue`, `ads`, `call-recordings`, `phone-numbers`, `pricing-reality-check` still need a historical-context decision before broadening their redirect contract. No detailed record is claimed to resolve if it only reaches a generic dashboard.
 
 ## Proposed merges that are not ready for retirement
