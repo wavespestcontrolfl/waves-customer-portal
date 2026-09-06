@@ -182,4 +182,26 @@ postgres('atomic relay segment append and composition', () => {
     }
   });
 
+  test('authenticated unclaimed sockets join the same barrier without gaining a customer claim', async () => {
+    const { registerSegmentSession, sealSegmentsForExtraction } = require('../services/voice-agent/relay-segments');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', processing_token: 'processor' });
+    expect(await registerSegmentSession(db, 'CA-fixture', 'withheld')).toBe(true);
+    expect(await sealSegmentsForExtraction(db, 'fixture', 'processor')).toEqual({ status: 'pending' });
+    expect(await appendSegment(db, 'CA-fixture', buildSegment({ sessionKey: 'withheld', text: 'Caller: ants' }))).toBe(1);
+    expect((await sealSegmentsForExtraction(db, 'fixture', 'processor')).status).toBe('ready');
+    const row = await db('call_log').first();
+    expect(row.metadata.relay_session_claim_owner).toBeUndefined();
+    expect(row.metadata.relay_segments[0].text).toContain('ants');
+    expect(await registerSegmentSession(db, 'CA-fixture', 'late')).toBe(false);
+  });
+
+  test('legacy recordings seal their existing evidence without requiring retroactive close records', async () => {
+    const { registerSegmentSession, sealSegmentsForExtraction } = require('../services/voice-agent/relay-segments');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', processing_token: 'processor', transcription: 'Legacy recording' });
+    const result = await sealSegmentsForExtraction(db, 'fixture', 'processor');
+    expect(result.status).toBe('ready');
+    expect(result.row.transcription).toBe('Legacy recording');
+    expect(await registerSegmentSession(db, 'CA-fixture', 'late')).toBe(false);
+  });
+
 });
