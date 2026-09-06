@@ -716,6 +716,11 @@ const gates = {
   // customer SMS, so prod requires explicit opt-in.
   smsShadowDrafts: isProd ? process.env.GATE_SMS_SHADOW_DRAFTS === 'true' : true,
 
+  // SMS private-profile capture + existing admin exception bells. Runtime reads the gate again before writes. Activation
+  // also requires GATE_SMS_OPERATIONAL_ACTIONS_SINCE (an offset ISO instant)
+  // so enabling this lane never applies the historical training corpus.
+  smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
+
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
   // voice_corpus_examples (redacted text only, reader-not-ingestor).

@@ -1308,6 +1308,14 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] SMS reaction detected; skipping legacy AI draft');
     }
 
+    // The operational half shares this SMS intake, independently of whether
+    // a reply is drafted. Durable sms_log + extraction receipts let the
+    // existing commitment watcher recover a deploy-interrupted kick.
+    if (Body && customer && !smsReaction && !isAiNumber) {
+      void require('../services/sms-operational-actions').runSmsOperationalActions()
+        .catch(() => logger.warn('[sms-operations] inbound kick deferred to commitment watcher'));
+    }
+
     // SMS SHADOW DRAFTER (brand-voice loop, Phase B) — silently record what
     // the house-voice AI would have replied. status='shadow' rows never send
     // and never enter the approval queue; a later judge pass scores them
