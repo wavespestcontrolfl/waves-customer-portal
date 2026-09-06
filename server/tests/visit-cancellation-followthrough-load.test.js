@@ -7,8 +7,14 @@
  * require and the empty-target fast path.
  */
 
+let mockCancellationTime = '2030-01-09T18:00:00Z';
 jest.mock('../models/db', () => {
-  const mock = jest.fn(() => { throw new Error('db should not be touched on the empty-target path'); });
+  const mock = jest.fn(() => ({
+    where: jest.fn().mockReturnThis(),
+    whereNot: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    first: jest.fn(async () => ({ transitioned_at: mockCancellationTime })),
+  }));
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn();
   mock.transaction = jest.fn();
@@ -33,20 +39,20 @@ jest.mock('../services/track-transition-alerts', () => ({
 jest.mock('../services/invoice', () => ({ voidOpenInvoicesForCancelledService: jest.fn(async () => {}) }));
 
 describe('visit-cancellation-followthrough', () => {
-  beforeEach(() => { jest.clearAllMocks(); });
+  beforeEach(() => { jest.clearAllMocks(); mockCancellationTime = '2030-01-09T18:00:00Z'; });
 
   it('requires cleanly (no phantom imports) and no-ops on empty targets', async () => {
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
     await expect(runVisitCancellationFollowThrough({ targetIds: [] })).resolves.toEqual({ settled: 0 });
   });
 
-  it('a NON-CLEAN hold outcome (charge_failed) raises the unresolved-fee alert with the normalized released:false shape', async () => {
-    mockHoldCancel.mockResolvedValueOnce({ charged: false, reason: 'charge_failed' });
+  it.each(['charge_failed', 'charge_review', 'lane_check_failed'])('a NON-CLEAN hold outcome (%s) raises the unresolved-fee alert', async (reason) => {
+    mockHoldCancel.mockResolvedValueOnce({ charged: false, reason });
     const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
     await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
     expect(mockAlertUnresolved).toHaveBeenCalledWith({
       scheduledServiceId: 'svc-1',
-      outcome: { released: false, reason: 'charge_failed' },
+      outcome: { released: false, reason },
     });
   });
 
@@ -64,5 +70,40 @@ describe('visit-cancellation-followthrough', () => {
     mockHoldCancel.mockResolvedValueOnce({ handled: false, reason: 'no_hold' });
     await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
     expect(mockApptCancel).toHaveBeenCalled();
+  });
+});
+
+
+describe('cancellation fee clock', () => {
+  beforeEach(() => { jest.clearAllMocks(); mockCancellationTime = '2030-01-09T18:00:00Z'; });
+  afterEach(() => jest.useRealTimers());
+
+  it('a retry keeps the original free-cancel instant for both fee rails', async () => {
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    mockHoldCancel.mockResolvedValue({ reason: 'no_hold' });
+    jest.useFakeTimers().setSystemTime(new Date('2030-01-10T18:00:00Z'));
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
+    const originalTime = new Date(mockCancellationTime);
+    expect(mockHoldCancel).toHaveBeenCalledWith(expect.objectContaining({ now: originalTime }));
+    expect(mockApptCancel).toHaveBeenCalledWith(expect.objectContaining({ now: originalTime }));
+  });
+
+  it('missing history alerts without charging and still cleans up the cancelled visit', async () => {
+    mockCancellationTime = null;
+    const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockApptCancel).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).toHaveBeenCalledWith(expect.objectContaining({ outcome: { released: false, reason: 'fee_step_error' } }));
+    expect(require('../services/invoice').voidOpenInvoicesForCancelledService).toHaveBeenCalledWith('svc-1');
+    expect(require('../services/track-transitions').cancel).toHaveBeenCalled();
+  });
+
+  it('preserves an explicitly supplied cancellation instant', async () => {
+    mockHoldCancel.mockResolvedValue({ released: true });
+    const now = new Date('2030-01-08T18:00:00Z');
+    await require('../services/visit-cancellation-followthrough').runVisitCancellationFollowThrough({ targetIds: ['svc-1'], now });
+    expect(require('../models/db')).not.toHaveBeenCalled();
+    expect(mockHoldCancel).toHaveBeenCalledWith(expect.objectContaining({ now }));
   });
 });

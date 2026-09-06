@@ -60,3 +60,26 @@ describe('confirmCardHoldFeeChoice — undetermined verdicts', () => {
     expect(prompts).toHaveLength(1);
   });
 });
+
+
+describe('unavailable cancellation preview', () => {
+  afterEach(() => { delete global.fetch; });
+
+  it.each(['http', 'network'])('offers the warning and waiver after a %s failure', async (failure) => {
+    global.fetch = vi.fn(async () => {
+      if (failure === 'network') throw new Error('offline');
+      return { ok: false, status: 500 };
+    });
+    const prompts = queueConfirms(true, true);
+    await expect(confirmCardHoldFeeChoice('svc-1')).resolves.toEqual({ proceed: true, waiveCardHoldFee: true });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("Couldn't check the saved card");
+    expect(prompts[1]).toContain('waive it?');
+  });
+
+  it('lets the operator abort when the preview is unavailable', async () => {
+    global.fetch = vi.fn(async () => ({ ok: false }));
+    queueConfirms(false);
+    await expect(confirmCardHoldFeeChoice('svc-1')).resolves.toEqual({ proceed: false, waiveCardHoldFee: false });
+  });
+});

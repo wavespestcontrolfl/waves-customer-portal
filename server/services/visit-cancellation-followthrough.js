@@ -32,6 +32,7 @@
  * the visit's committed state on its own connection.
  */
 const logger = require('./logger');
+const db = require('../models/db');
 const trackTransitions = require('./track-transitions');
 const {
   recordTrackTransitionFailure,
@@ -47,13 +48,9 @@ const {
  *   the role, it honors what it is told (same contract as the dispatch path).
  * @param {string}   [opts.reason]   Cancellation reason for the tracker stamp.
  * @param {string}   [opts.source]   Log prefix, e.g. 'admin-dispatch'.
- * @param {Date}     [opts.now]      The CANCELLATION instant the fee rails
- *   judge their windows against. Defaults to the wall clock — correct for
- *   the immediate post-commit call — but a REPLAY (retrying a follow-through
- *   that failed after the cancel committed) MUST pass the committed
- *   transition time (job_status_history.transitioned_at): a retry clock
- *   would re-decide the fee window at a different instant than the cancel
- *   actually happened (PR pre-push r7 P0).
+ * @param {Date} [opts.now] Explicit cancellation instant for callers that
+ *   already retain it. Otherwise read the latest real cancellation transition;
+ *   same-status retries must never evaluate fees against the retry clock.
  */
 async function runVisitCancellationFollowThrough({
   targetIds,
@@ -61,7 +58,7 @@ async function runVisitCancellationFollowThrough({
   waiveFee = false,
   reason = null,
   source = 'cancellation',
-  now = new Date(),
+  now,
 } = {}) {
   const ids = (Array.isArray(targetIds) ? targetIds : []).filter(Boolean);
   if (ids.length === 0) return { settled: 0 };
@@ -72,10 +69,25 @@ async function runVisitCancellationFollowThrough({
     const ApptCardRequests = require('./appointment-card-request');
     for (const id of ids) {
       try {
+        // A waiver never evaluates the fee window, including legacy visits
+        // without transition history. Preserve that explicit no-charge choice.
+        let cancelledAt = now || (waiveFee ? new Date() : null);
+        if (!cancelledAt) {
+          const transition = await db('job_status_history')
+            .where({ job_id: id, to_status: 'cancelled' })
+            .whereNot('from_status', 'cancelled')
+            .orderBy('transitioned_at', 'desc')
+            .first('transitioned_at');
+          cancelledAt = transition?.transitioned_at;
+        }
+        const feeTime = new Date(cancelledAt);
+        if (!cancelledAt || !Number.isFinite(feeTime.getTime())) {
+          throw new Error('Cancellation time unavailable; fee requires review');
+        }
         const holdResult = await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: id,
           waiveFee,
-          now,
+          now: feeTime,
         });
         // Non-clean hold outcomes must ALERT, not just return (pre-push
         // r16 P1): the rail reports charge_failed / charge_review /
@@ -101,7 +113,7 @@ async function runVisitCancellationFollowThrough({
           const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
             scheduledServiceId: id,
             waiveFee,
-            now,
+            now: feeTime,
           });
           await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: apptFeeOutcome });
         }

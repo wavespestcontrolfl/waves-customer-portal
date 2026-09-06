@@ -47,8 +47,8 @@ export async function fetchCardHoldCancelPreview(serviceId) {
  * the UI would falsely imply the fee was waived. Techs get the fee warning
  * only and always proceed with waiveCardHoldFee: false.
  *
- * The preview is best-effort: if it can't be fetched the cancel proceeds
- * with today's behavior (no waive) rather than blocking the operator.
+ * An unavailable preview uses the undetermined confirmation and waiver
+ * choices, just like an unsuccessful server-side fee lookup.
  *
  * Always fetches fresh at confirm time — the CancelFeeNotice at the foot of
  * the cancel card fetched its own copy when the card opened, but that copy
@@ -59,7 +59,13 @@ export async function fetchCardHoldCancelPreview(serviceId) {
  * @returns {Promise<{proceed: boolean, waiveCardHoldFee: boolean}>}
  */
 export async function confirmCardHoldFeeChoice(serviceId, { scope = 'this_only' } = {}) {
-  const preview = await fetchCardHoldCancelPreview(serviceId);
+  const preview = await fetchCardHoldCancelPreview(serviceId) || {
+    rule: {
+      code: 'unresolved',
+      willCharge: null,
+      text: "Couldn't check the saved card right now. Cancelling may charge a late-cancel fee. Check billing after cancelling if the fee remains unverified.",
+    },
+  };
   const isAdmin = () => getAdminUser()?.role === 'admin';
   // Series cancel (following / all): the server applies ONE waive choice to
   // every target, and siblings are judged on their own saved cards without
