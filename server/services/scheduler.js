@@ -1081,16 +1081,22 @@ function initScheduledJobs() {
   // =========================================================================
   // DAILY 4:10AM — Auto-Dispatch: optimize FUTURE recurring visits more than
   // 14 days out (route proximity + customer scheduling preferences). Double-
-  // gated (cronJobs AND autoDispatch). Runs in the configured mode — dry_run
-  // by default; it only applies moves when AUTO_DISPATCH_MODE=apply.
+  // gated (cronJobs AND autoDispatch). Existing handoff alerts still run when
+  // autoDispatch is off. Placement runs in the configured mode — dry_run by
+  // default; it only applies moves when AUTO_DISPATCH_MODE=apply.
   // =========================================================================
   cron.schedule('10 4 * * *', async () => {
-    if (!isEnabled('autoDispatch')) return;
-    logger.info('Running: Auto-Dispatch recurring optimizer');
+    logger.info('Running: Auto-Dispatch scheduling maintenance');
     try {
       // runExclusive: read-then-act job — a Railway deploy overlap or a slow
       // prior tick must not double-run and bypass the per-run change cap.
       await runExclusive('auto-dispatch-recurring', async () => {
+        if (!isEnabled('autoDispatch')) {
+          const { flagUnplacedVisits } = require('./auto-dispatch/audit');
+          const { getAutoDispatchConfig } = require('./auto-dispatch/config');
+          await flagUnplacedVisits(getAutoDispatchConfig());
+          return;
+        }
         const { runAutoDispatch } = require('./auto-dispatch');
         const result = await runAutoDispatch({ triggeredBy: 'cron' });
         logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
