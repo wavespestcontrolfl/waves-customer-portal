@@ -17,7 +17,7 @@ afterEach(() => { delete process.env.GATE_VOICE_RELAY_RECOVERY; delete process.e
 
 function primeDb({ firstRow = null, updateImpl, db = require('../models/db') } = {}) {
   const updates = [];
-  const guardQ = { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
+  const guardQ = { where: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(), orWhereIn: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis(), orWhereRaw: jest.fn().mockReturnThis() };
   const builder = {
     update: updateImpl || jest.fn(async (patch) => { updates.push(patch); return 1; }),
     where: jest.fn((arg) => { if (typeof arg === 'function') arg(guardQ); return builder; }),
@@ -91,6 +91,78 @@ describe('the conversation side', () => {
     expect(update.mock.calls[1][0]).not.toHaveProperty('transcription');
   });
 
+  test('a never-reconnected append confirmed after the deadline still finalizes and records promises', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const row = { transcription: null, metadata: { relay_session_claim_owner: 'nonce-1' } };
+    const { updates } = primeDb({ firstRow: row });
+    let settle;
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockImplementationOnce(async (_db, _sid, segment) => {
+      await new Promise((resolve) => { settle = resolve; });
+      row.metadata.relay_segments = [segment];
+      return 1;
+    });
+    const convo = convoWithTurns();
+    convo._promises.set('send_estimate', { verdict: true, expectation: 'about_15_minutes', at: new Date() });
+    const repair = jest.spyOn(convo, '_reconcileLateSegment');
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const closing = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(10010);
+      await closing;
+      expect(updates.find((u) => u.call_outcome === 'ai_handled')).not.toHaveProperty('transcription');
+      expect(recordRelayCommitments).not.toHaveBeenCalled();
+      settle();
+      await jest.advanceTimersByTimeAsync(0);
+      await repair.mock.results[0].value;
+      expect(updates.some((u) => u.transcription_status === 'completed' && u.transcription)).toBe(true);
+      expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ sessionKey: 'nonce-1', estimateQueued: true }));
+    } finally { append.mockRestore(); jest.useRealTimers(); }
+  });
+
+  test('an append settling during the capture floor records commitments after the outcome is final', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const row = { call_outcome: null, transcription: null, metadata: { relay_session_claim_owner: 'nonce-1' } };
+    primeDb({ firstRow: row, updateImpl: jest.fn(async (patch) => {
+      if (patch.call_outcome) row.call_outcome = patch.call_outcome;
+      return 1;
+    }) });
+    let settleAppend;
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockImplementationOnce(async (_db, _sid, segment) => {
+      await new Promise((resolve) => { settleAppend = resolve; });
+      row.metadata.relay_segments = [segment];
+      return 1;
+    });
+    let finishFloor;
+    const convo = convoWithTurns();
+    convo._runCaptureFloor = jest.fn(() => new Promise((resolve) => { finishFloor = resolve; }));
+    convo._promises.set('send_estimate', { verdict: true, expectation: 'about_15_minutes', at: new Date() });
+    const owed = [];
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    recordRelayCommitments.mockImplementation(async (_db, evidence) => {
+      // Mirrors the separately PostgreSQL-tested durable eligibility guard.
+      if (row.call_outcome === 'ai_handled') owed.push(evidence);
+      return { found: owed.length, written: owed.length };
+    });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const closing = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(10010);
+      expect(convo._runCaptureFloor).toHaveBeenCalled();
+      settleAppend();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(owed).toEqual([]);
+      finishFloor();
+      await closing;
+      await jest.advanceTimersByTimeAsync(0);
+      expect(owed).toEqual([expect.objectContaining({ sessionKey: 'nonce-1', estimateQueued: true })]);
+    } finally {
+      append.mockRestore();
+      recordRelayCommitments.mockImplementation(async () => ({ found: true, written: 1 }));
+      jest.useRealTimers();
+    }
+  });
+
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {
     const { builder, updates } = primeDb();
     const convo = convoWithTurns();
@@ -98,6 +170,26 @@ describe('the conversation side', () => {
     expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
     expect(typeof updates[0].transcription).toBe('string');
     expect(builder.whereRaw.mock.calls.some(([sql]) => String(sql).includes('relay_reconnect_ms'))).toBe(false);
+  });
+
+  test.each(['ai_transferred', 'voicemail'])('a silent resumed close records prior promises after the outcome becomes %s', async (callOutcome) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const row = { call_outcome: callOutcome, transcription: null, metadata: {
+      relay_session_claim_owner: 'nonce-2', relay_reconnects: 1,
+      relay_segments: [{ generation: 1, session_key: 'nonce-1', text: 'Agent: I will send you an estimate.',
+        promises: [{ kind: 'send_estimate', verdict: true }] }],
+    } };
+    primeDb({ firstRow: row, updateImpl: jest.fn(async () => 0) });
+    const convo = convoWithTurns({ sessionKey: 'nonce-2' });
+    convo._transcript = [];
+    convo._resume = { reconnects: 1, callerTurns: [] };
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    await convo.end('ws_close');
+    // The production writer reads the durable segments and eligibility under
+    // its row lock even though this close has no transcript of its own.
+    expect(recordRelayCommitments).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      callSid: 'CA-rec', sessionKey: 'nonce-2',
+    }));
   });
 
   test('a superseded socket still appends its segment (recomposing a finalized call), resyncs the message row, then skips every column write', async () => {

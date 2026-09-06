@@ -29,6 +29,7 @@
  *     correct; only the fleet-level detour score is approximate. Commit
  *     can copy coords from the linked customer row if needed later.
  */
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
 const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
@@ -1004,7 +1005,7 @@ async function reserveSlot({
       const conflict = await trx('scheduled_services')
         .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
-        .whereNotIn('status', ['cancelled'])
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
         .andWhere((q) => {
           q.whereNull('reservation_expires_at')
             .orWhereRaw('reservation_expires_at > NOW()');
@@ -1030,7 +1031,7 @@ async function reserveSlot({
           .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
           .where('scheduled_services.scheduled_date', date)
           .whereNull('scheduled_services.technician_id')
-          .whereNotIn('scheduled_services.status', ['cancelled'])
+          .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
           .where((q) => {
             q.whereNull('scheduled_services.reservation_expires_at')
               .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
@@ -1344,7 +1345,7 @@ async function commitReservation({
         .where({ scheduled_date: scheduledDate })
         .modify((q) => { if (row.technician_id) q.where('technician_id', row.technician_id); })
         .whereNot('id', scheduledServiceId)
-        .whereNotIn('status', ['cancelled'])
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
         .andWhere((q) => {
           q.whereNull('reservation_expires_at')
             .orWhereRaw('reservation_expires_at > NOW()');

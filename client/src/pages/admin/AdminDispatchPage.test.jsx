@@ -6,8 +6,9 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../components/admin/AdminCommandHeader", () => ({
-  default: ({ sections, activeKey, onSectionChange, ariaLabel }) => (
+  default: ({ sections, activeKey, onSectionChange, ariaLabel, actions = [] }) => (
     <nav aria-label={ariaLabel}>
+      {actions.map(({ label, onClick }) => <button key={label} onClick={onClick}>{label}</button>)}
       {sections.map(({ key, label, className }) => (
         <button
           key={key}
@@ -52,7 +53,7 @@ afterEach(() => {
 
 function LocationProbe() {
   const location = useLocation();
-  return <output data-testid="location-search">{location.search}</output>;
+  return <output data-testid="location-search">{location.pathname}{location.search}{location.hash}</output>;
 }
 
 function renderSchedule(entry = "/admin/dispatch") {
@@ -68,33 +69,27 @@ function renderSchedule(entry = "/admin/dispatch") {
             </>
           )}
         />
+        <Route path="/admin/agents" element={<LocationProbe />} />
       </Routes>
     </MemoryRouter>,
   );
 }
 
 describe("AdminDispatchPage", () => {
-  it("deep-links to the embedded Auto-Dispatch workspace", () => {
-    renderSchedule("/admin/dispatch?source=bookmark&tab=automation");
-
-    expect(screen.getByText("Embedded automation workspace")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Automation" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+  it("redirects legacy Automation links to Agent Ops with run, query, and hash intact", async () => {
+    renderSchedule("/admin/dispatch?source=bookmark&tab=automation&run=run-123#audit");
+    await waitFor(() => expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "/admin/agents?source=bookmark&tab=dispatch&run=run-123#audit",
+    ));
   });
 
-  it("switches to Automation without dropping query context", async () => {
-    renderSchedule("/admin/dispatch?source=alert&tab=board");
-
-    fireEvent.click(screen.getByRole("button", { name: "Automation" }));
-
-    expect(screen.getByText("Embedded automation workspace")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByTestId("location-search")).toHaveTextContent(
-        "?source=alert&tab=automation",
-      );
-    });
+  it("links to Agent Ops from Schedule without embedding a duplicate workspace", async () => {
+    renderSchedule("/admin/dispatch?tab=board");
+    fireEvent.click(screen.getByRole("button", { name: "Auto-Dispatch" }));
+    await waitFor(() => expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "/admin/agents?tab=dispatch",
+    ));
+    expect(screen.queryByText("Embedded automation workspace")).not.toBeInTheDocument();
   });
 
   it("hides the admin-only Automation tab from technician accounts", () => {
@@ -104,7 +99,7 @@ describe("AdminDispatchPage", () => {
     renderSchedule("/admin/dispatch?tab=automation");
 
     expect(
-      screen.queryByRole("button", { name: "Automation" }),
+      screen.queryByRole("button", { name: "Auto-Dispatch" }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByText("Embedded automation workspace"),
@@ -116,7 +111,7 @@ describe("AdminDispatchPage", () => {
   it("keeps the phone workspace focused on mobile-capable sections", () => {
     renderSchedule("/admin/dispatch?tab=schedule");
 
-    for (const label of ["Board", "Schedule", "Protocols", "Automation"]) {
+    for (const label of ["Board", "Schedule", "Protocols"]) {
       expect(screen.getByRole("button", { name: label })).not.toHaveClass("hidden");
     }
     for (const label of ["Tech Match", "CSR Booking", "Job Scores", "Insights"]) {

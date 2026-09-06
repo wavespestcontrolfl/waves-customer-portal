@@ -181,6 +181,12 @@ is refused. The execution service and Postgres must be in the same verified
 nonproduction environment. Production is refused by both its environment ID
 and the environment-name allowlist.
 
+Start with `npm run dev:doctor -- --remote`. On a fresh checkout, run
+`npm run worktree:setup` and `npm ci` first using the Node version in `.nvmrc`.
+Select the verified dev cluster in `.tmp/dev/database.env` as described above,
+then explicitly run `npm run qa:database` to create this worktree's empty database.
+Do not copy another worktree's private database selection or context file.
+
 After selecting the dev cluster and running `qa:database`, write the service IDs
 in the ignored `.tmp/dev/remote.json` (these are UUIDs from Railway):
 
@@ -207,7 +213,23 @@ override the connection target. Credentials travel on SSH stdin, not argv, and
 only the migration child receives the private-network URL. Provider credentials,
 background jobs and `.env` loading are excluded.
 
+`dev:doctor -- --remote` checks local dependencies/ports, configuration, the
+Railway CLI version, a clean commit with a matching running dev deployment, and
+the selected database's worktree name and service endpoint. It works before any
+migrations have run. Failures give the next setup step; fix that prerequisite
+and rerun. Commit and push your changes, open the PR, and wait for its successful
+preview before the deployment check can pass.
+
+This mode reads Railway metadata and the selected dev database service variables.
+It never connects to PostgreSQL, starts SSH, creates a database, or migrates.
+A successful report means configuration was verified, not that the database is
+ready. Its `nextSteps` include a deployment-scoped SSH command to check the remote
+Node version, followed by the explicit migration and ordinary doctor commands.
+SSH authorization and the remote runtime remain unverified until you run that
+command; the migration worker enforces runtime and identity again before Knex.
+
 ```sh
+npm run dev:doctor -- --remote
 npm run dev:migrate -- --remote
 npm run dev:doctor
 npm run qa:e2e

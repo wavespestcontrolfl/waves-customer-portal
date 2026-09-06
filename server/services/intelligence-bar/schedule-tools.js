@@ -17,6 +17,19 @@ const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-r
 
 const SCHEDULE_TOOLS = [
   {
+    name: 'switch_appointment_property',
+    description: 'Change only this scheduled visit (including its grouped service lines) to an active saved property on the same customer. Use get_customer_detail to resolve the property ID first. Preserves the primary customer address and future recurring visits. En-route visits are allowed; external navigation may need manual refresh. Call once to prepare the confirmation card; never ask permission to prepare it. Recurrence templates require the Dispatch editor.',
+    _sideEffects: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        appointment_id: { type: 'string', format: 'uuid' },
+        property_id: { type: 'string', format: 'uuid' },
+      },
+      required: ['appointment_id', 'property_id'],
+    },
+  },
+  {
     name: 'optimize_all_routes',
     description: `Run full route optimization for a date using Google Routes API. Reorders all technician stops to minimize total drive time and distance. Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
@@ -34,14 +47,14 @@ const SCHEDULE_TOOLS = [
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD' },
-        technician_name: { type: 'string', description: 'Tech name (Adam, Jose, Jacob)' },
+        technician_name: { type: 'string', description: 'Technician name as shown on the schedule' },
       },
       required: ['date', 'technician_name'],
     },
   },
   {
     name: 'assign_technician',
-    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to Adam" or "assign the Parrish stops to Jose." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
+    description: `Assign a technician to one or more unassigned services. Useful when the operator says "give those to <technician>" or "assign the Parrish stops to <technician>." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -67,7 +80,7 @@ const SCHEDULE_TOOLS = [
   },
   {
     name: 'swap_tech_assignments',
-    description: `Swap all stops between two technicians for a date. Use when "give Adam's route to Jose and Jose's to Adam." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion. This touches every stop for both techs on the date — preview is essential.`,
+    description: `Swap all stops between two technicians for a date. Use when "swap those two techs' routes for today." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion. This touches every stop for both techs on the date — preview is essential.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -127,7 +140,7 @@ Use for: "find time for", "when can we schedule", "best slot for", "fit in a new
         duration_minutes: { type: 'number', description: 'How long the service takes (default 60)' },
         date_from: { type: 'string', description: 'YYYY-MM-DD start of search range (default: today)' },
         date_to: { type: 'string', description: 'YYYY-MM-DD end of search range (default: today + 7 days)' },
-        technician_name: { type: 'string', description: 'Optional: restrict to one tech (Adam, Jose, Jacob)' },
+        technician_name: { type: 'string', description: 'Optional: restrict to one technician (name as shown on the schedule)' },
         top_n: { type: 'number', description: 'How many slots to return (default 10)' },
       },
     },
@@ -152,6 +165,7 @@ Use for: "find time for", "when can we schedule", "best slot for", "fit in a new
 async function executeScheduleTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
+      case 'switch_appointment_property': return await switchAppointmentProperty(input, actionContext);
       case 'optimize_all_routes': return await optimizeAllRoutes(input);
       case 'optimize_tech_route': return await optimizeTechRoute(input);
       case 'assign_technician': return await assignTechnician(input, actionContext);
@@ -170,6 +184,77 @@ async function executeScheduleTool(toolName, input, actionContext = {}) {
   }
 }
 
+
+// Both proposal and locked commit use this exact effect description.
+async function appointmentPropertyPreview(conn, plan) {
+  const { formatAddress } = require('../../utils/address-normalizer');
+  const { effectiveServiceAddress } = require('../stamped-address');
+  const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
+  if (plan.rows.some(row => TERMINAL_APPOINTMENT_STATUSES.includes(row.status))) {
+    throw new Error('This visit contains a completed or cancelled service. Review it in Dispatch.');
+  }
+  if (plan.rows.some(row => row.is_recurring && !row.recurring_parent_id)) {
+    throw new Error('This appointment is also the recurring plan template. Use the Dispatch address editor to review the recurring-plan effects.');
+  }
+  const property = await conn('customer_properties').where({ id: plan.propertyId, customer_id: plan.anchor.customer_id, active: true }).first();
+  if (!property || !['address_line1', 'city', 'state', 'zip'].every(field => typeof property[field] === 'string' && property[field].trim())) {
+    throw new Error('Choose an active saved customer property with a street, city, state and ZIP code.');
+  }
+  const customer = await conn('customers').where({ id: plan.anchor.customer_id }).whereNull('deleted_at').first();
+  if (!customer) throw new Error('Customer not found');
+  return {
+    proposal: true,
+    customer_id: customer.id,
+    destination: formatAddress({ line1: property.address_line1, line2: property.address_line2, city: property.city, state: property.state, zip: property.zip }),
+    destination_coordinates: { latitude: property.latitude ?? null, longitude: property.longitude ?? null },
+    property_id: property.id,
+    stops: plan.rows.map(row => ({
+      id: row.id, customer_id: row.customer_id, property_id: row.property_id,
+      visit_id: row.visit_id, date: require('../visit-groups').dateOnly(row.scheduled_date), technician_id: row.technician_id,
+      status: row.status, service_type: row.service_type,
+      current_address: formatAddress(effectiveServiceAddress(row, customer)),
+    })),
+    effects: 'Changes the destination and map coordinates for these service lines; regroups their visit at the destination and clears the route position and cached pre-service brief. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
+    navigation: 'An already-open navigation app may need its destination refreshed separately.',
+  };
+}
+
+async function switchAppointmentProperty(input, actionContext) {
+  if (!require('../../config/feature-gates').isEnabled('editApptAddress')) return { error: 'Appointment address changes are not enabled.' };
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuid.test(input.appointment_id) || !uuid.test(input.property_id)) return { error: 'Resolve the appointment and saved property IDs first.' };
+  const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../appointment-address');
+  const { previewFingerprint } = require('./authorization-contract');
+  const plan = await planAppointmentAddress(db, input.appointment_id, input.property_id, 'visit');
+  if (input.confirmed !== true) return appointmentPropertyPreview(db, plan);
+  if (!actionContext.confirmed || !input._verified_address_fingerprint) return { error: 'Use the confirmation card to approve this change.' };
+  const result = await db.transaction(async trx => {
+    await require('../scheduling/occupancy').acquireOccupancyLocks(trx, plan.rows.map(row => require('../visit-groups').dateOnly(row.scheduled_date)));
+    await require('../scheduling/tech-day-lock').lockTechDays(trx, plan.rows.map(row => ({ techId: row.technician_id, date: require('../visit-groups').dateOnly(row.scheduled_date) })));
+    await lockAppointmentAddress(trx, plan);
+    await require('../../utils/customer-comms-lock').lockCustomerComms(trx, plan.anchor.customer_id);
+    await trx('customers').where({ id: plan.anchor.customer_id }).forShare().first();
+    await trx('customer_properties').where({ id: input.property_id }).forShare().first();
+    await trx('scheduled_services').whereIn('id', plan.rows.map(row => row.id)).orderBy('id').forUpdate();
+    const fresh = await planAppointmentAddress(trx, input.appointment_id, input.property_id, 'visit');
+    const preview = await appointmentPropertyPreview(trx, fresh);
+    if (previewFingerprint(preview) !== input._verified_address_fingerprint) return { error: 'The visit or property changed. Request a fresh confirmation card.', preview_changed: true };
+    // Apply against the original lock plan: a moved stop cannot silently use
+    // advisory locks acquired for an old property/date.
+    const ids = await applyAppointmentAddress(trx, plan, actionContext.technicianId);
+    return { success: true, updated_service_ids: ids, destination: preview.destination, messages_sent: false };
+  });
+  if (result.success) {
+    const { emitDispatchJobUpdate } = require('../dispatch-assignment');
+    const broadcasts = await Promise.allSettled(result.updated_service_ids.map(jobId =>
+      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId })));
+    if (broadcasts.some(item => item.status === 'rejected')) {
+      logger.warn('[intelligence-bar] address saved but dispatch refresh broadcast failed');
+      result.warning = 'Address saved. Live refresh failed; refresh the technician schedule to see the new destination.';
+    }
+  }
+  return result;
+}
 
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 

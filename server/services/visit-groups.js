@@ -2776,7 +2776,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               await acquireOccupancyLock(t, newDateStr);
               await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
               // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
-              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes').catch(() => null);
+              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type').catch(() => null);
               const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
               const windowEnd = (row && row.window_end) || landed.window_end || null;
               const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);
@@ -2799,6 +2799,18 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
                 throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', conflictId: clashId });
               }
               if (clashId) warnings.push(`service ${target.id} overlaps another job on the destination technician's route (${clashId})`);
+              // Destination capability fence for THIS member on the transaction
+              // that assigns it (auto-dispatch's options.moveGuard). The member
+              // guard ran under the planning lock, which is released by now, so
+              // a category turned Off since planning is caught here, before the
+              // assignment write; the row lands on its old technician and is
+              // reported failed like any other refused member.
+              if (typeof options.moveGuard === 'function') {
+                const memberRow = row && row.service_type !== undefined
+                  ? { id: target.id, ...row }
+                  : await t('scheduled_services').where({ id: target.id }).first('id', 'service_type', 'technician_id');
+                await options.moveGuard({ trx: t, technicianId: options.technicianId, service: memberRow || { id: target.id } });
+              }
             }
             await alignMemberTechnician(t, target.id, options.technicianId || null, {
               skipVisitSeam: true,
@@ -3165,6 +3177,7 @@ module.exports = {
   ensureLegacyCompletable,
   dissolveForLegacyCompletion,
   stopBaseKey,
+  lockStop,
   lockStopForRow,
   openMembers,
   visitActivity,

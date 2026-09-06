@@ -283,6 +283,35 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(offPrompt).not.toContain('WRITE CONFIRMATION (conversational mode)');
   });
 
+  test.each(['get_customer_detail', 'query_customers', 'get_schedule_view'])('%s redacts query telemetry', async name => {
+    mockExecuteTool.mockResolvedValue({ address: '200 Test Street' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_pii', name, input: { customer_id: 'fixture-customer' } }],
+      [{ type: 'text', text: '200 Test Street' }],
+    ]);
+    await withServer(async baseUrl => {
+      await postQuery(baseUrl, { prompt: 'show the address', context: 'customers' });
+    });
+    expect(mockDbInsert).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: '[redacted — PII-bearing tools used]', response: '[redacted — PII-bearing tools used]',
+    }));
+  });
+
+  test('current ET date refreshes after midnight without reloading the route', async () => {
+    jest.useFakeTimers({ doNotFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'setImmediate', 'clearImmediate', 'nextTick', 'performance'] });
+    try {
+      scriptModelTurns([[{ type: 'text', text: 'Ready.' }], [{ type: 'text', text: 'Ready.' }]]);
+      await withServer(async baseUrl => {
+        jest.setSystemTime(new Date('2099-01-01T23:59:00-05:00'));
+        await postQuery(baseUrl, { prompt: 'today', context: 'customers' });
+        jest.setSystemTime(new Date('2099-01-02T00:01:00-05:00'));
+        await postQuery(baseUrl, { prompt: 'today', context: 'customers' });
+      });
+      expect(JSON.stringify(mockMessagesCreate.mock.calls[0][0].messages)).toContain('CURRENT EASTERN DATE: 2099-01-01');
+      expect(JSON.stringify(mockMessagesCreate.mock.calls[1][0].messages)).toContain('CURRENT EASTERN DATE: 2099-01-02');
+    } finally { jest.useRealTimers(); }
+  });
+
   test('prompt caching: system block breakpoint, one message breakpoint per round (no accumulation), pageData on the user turn not the system prompt', async () => {
     mockExecuteTool.mockResolvedValue({ preview: true });
     scriptModelTurns([
@@ -405,6 +434,7 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
       const firstCallMessages = mockMessagesCreate.mock.calls[0][0].messages;
       const userTurn = firstCallMessages[firstCallMessages.length - 1];
       expect(userTurn.content).toEqual([
+        { type: 'text', text: expect.stringContaining('CURRENT EASTERN DATE:') },
         {
           type: 'image',
           source: { type: 'base64', media_type: 'image/png', data: validImageData },

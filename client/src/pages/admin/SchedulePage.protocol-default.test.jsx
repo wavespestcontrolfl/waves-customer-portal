@@ -23,8 +23,11 @@ it('does not load a default protocol after a failed profile lookup', async () =>
   const fetchMock = vi.fn().mockRejectedValue(new Error('Profile unavailable'));
   vi.stubGlobal('fetch', fetchMock);
   render(<ProtocolPanel service={{ id: 'test-visit', customerId: 'test-property', serviceType: 'Lawn Care', lawnSqft: 5000 }} onClose={() => {}} />);
-  await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-  expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/programs'))).toBe(false);
+  // The panel also fetches the job card on mount (GATE_JOB_CARD probe), so
+  // the sync point is the line loads that follow the failed profile, not a
+  // call count: none of them may be a track-keyed protocol load.
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/equipment'))).toBe(true));
+  expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/programs') || url.includes('/protocols/lawn-mix'))).toBe(false);
 });
 
 it.each(['unknown', 'mixed'])('does not replace explicit %s turf with legacy St. Augustine', async (grass_type) => {

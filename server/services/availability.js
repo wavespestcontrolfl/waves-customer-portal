@@ -4,6 +4,7 @@
  * Only shows slots when a tech is already working in the customer's zone.
  * Finds 1-hour gaps between existing jobs with buffer enforcement.
  */
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
@@ -204,7 +205,12 @@ class AvailabilityEngine {
       const scheduledInZone = await db('scheduled_services')
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', dateStr)
-        .whereNotIn('scheduled_services.status', ['cancelled'])
+        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+        .whereNotNull('scheduled_services.window_start')
+        .where((q) => {
+          q.whereNull('scheduled_services.reservation_expires_at')
+            .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+        })
         .modify((q) => {
           // Empty city list matches nothing — same as knex's empty whereIn.
           if (!zoneCitiesLower.length) return q.whereRaw('1 = 0');
@@ -230,15 +236,20 @@ class AvailabilityEngine {
 
       // Build occupied slots from scheduled_services
       const occupied = scheduledInZone.map(s => ({
-        start: this.timeToMin(s.window_start || '09:00'),
-        end: this.timeToMin(s.window_end || (s.window_start ? this.addMinutes(s.window_start, 60) : '10:00')),
+        start: this.timeToMin(s.window_start),
+        end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
       }));
 
-      // Add existing self-bookings
+      // Only unlinked legacy bookings use the copied date/time. Once a visit
+      // exists, its live status and window above are authoritative.
       const selfBooked = await db('self_booked_appointments')
         .where('service_zone_id', zone.id)
         .where('date', dateStr)
-        .whereNot('status', 'cancelled');
+        .whereNot('status', 'cancelled')
+        .whereNotExists(function linkedVisit() {
+          this.select('id').from('scheduled_services')
+            .whereColumn('scheduled_services.self_booking_id', 'self_booked_appointments.id');
+        });
       selfBooked.forEach(b => {
         occupied.push({ start: this.timeToMin(b.start_time), end: this.timeToMin(b.end_time) });
       });
@@ -500,7 +511,12 @@ class AvailabilityEngine {
         const scheduledInZone = await trx('scheduled_services')
           .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
           .where('scheduled_services.scheduled_date', dateStr)
-          .whereNotIn('scheduled_services.status', ['cancelled'])
+          .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+          .whereNotNull('scheduled_services.window_start')
+          .where((q) => {
+            q.whereNull('scheduled_services.reservation_expires_at')
+              .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+          })
           .modify((q) => {
             // Case-insensitive city match — same reasoning as the slot
             // builder above; empty list matches nothing like an empty whereIn.
@@ -514,17 +530,21 @@ class AvailabilityEngine {
           .modify((q) => {
             if (options.excludeServiceId) q.whereNot('scheduled_services.id', options.excludeServiceId);
           })
-          .select('scheduled_services.window_start', 'scheduled_services.window_end');
+          .select('scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes');
         for (const s of scheduledInZone) {
           occupied.push({
-            start: this.timeToMin(s.window_start || '09:00'),
-            end: this.timeToMin(s.window_end || (s.window_start ? this.addMinutes(s.window_start, 60) : '10:00')),
+            start: this.timeToMin(s.window_start),
+            end: this.timeToMin(s.window_end || this.addMinutes(s.window_start, s.estimated_duration_minutes || 60)),
           });
         }
         const selfBooked = await trx('self_booked_appointments')
           .where('service_zone_id', zone.id)
           .where('date', dateStr)
           .whereNot('status', 'cancelled')
+          .whereNotExists(function linkedVisit() {
+            this.select('id').from('scheduled_services')
+              .whereColumn('scheduled_services.self_booking_id', 'self_booked_appointments.id');
+          })
           .modify((q) => {
             if (options.excludeSelfBookingId) q.whereNot('id', options.excludeSelfBookingId);
           });

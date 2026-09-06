@@ -39,7 +39,7 @@ Use for: "any unanswered messages?", "who's waiting for a reply?", "unread inbox
   },
   {
     name: 'get_conversation_thread',
-    description: `Get the full SMS conversation thread with a specific customer. Shows all messages in order.
+    description: `Read a page of SMS history with a specific customer, newest page first and messages in chronological order. Follow next_offset for older messages; a page is not the full history.
 Use for: "show me the conversation with Henderson", "what did we say to the customer on 941-555-0142?", "pull up the thread with Smith"`,
     input_schema: {
       type: 'object',
@@ -47,7 +47,8 @@ Use for: "show me the conversation with Henderson", "what did we say to the cust
         customer_name: { type: 'string', description: 'Customer name (partial match OK)' },
         phone: { type: 'string', description: 'Phone number' },
         customer_id: { type: 'string' },
-        limit: { type: 'number', description: 'Max messages to return (default 20)' },
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset for older messages' },
+        limit: { type: 'number', description: 'Max messages to return (default 20, max 50)' },
       },
     },
   },
@@ -58,6 +59,7 @@ Use for: "find messages about rescheduling", "who texted us about lawn care?", "
     input_schema: {
       type: 'object',
       properties: {
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset' },
         search: { type: 'string', description: 'Search in message body text' },
         customer_name: { type: 'string' },
         phone: { type: 'string' },
@@ -86,6 +88,9 @@ Use for: "what calls came in this morning?", "show me today's calls", "any misse
     input_schema: {
       type: 'object',
       properties: {
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset' },
+        call_id: { type: 'string', format: 'uuid', description: 'Read one known call; ignores days_back. Returns a transcript page.' },
+        transcript_offset: { type: 'integer', minimum: 0, description: 'Continue a call transcript from transcript_next_offset' },
         direction: { type: 'string', enum: ['inbound', 'outbound', 'all'] },
         has_recording: { type: 'boolean', description: 'Only calls with recordings' },
         has_transcript: { type: 'boolean', description: 'Only calls with transcripts' },
@@ -291,7 +296,7 @@ async function getUnansweredThreads(input) {
       'sms_log.created_at', 'sms_log.customer_id', 'sms_log.is_read',
       'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
     )
-    .orderBy('sms_log.created_at', 'desc');
+    .orderBy('sms_log.created_at', 'desc').orderBy('sms_log.id', 'desc');
 
   // For each inbound, check if there's a later outbound to the same number
   const unanswered = [];
@@ -340,7 +345,8 @@ async function getUnansweredThreads(input) {
 
 async function getConversationThread(input) {
   const { limit: rawLimit } = input;
-  const limit = Math.min(rawLimit || 20, 50);
+  const limit = Math.max(1, Math.min(Math.trunc(rawLimit || 20), 50));
+  const offset = Math.max(0, Math.trunc(input.offset || 0));
 
   let phone;
   if (input.phone) {
@@ -355,7 +361,7 @@ async function getConversationThread(input) {
   if (!phone) return { error: 'No phone number found' };
   const digits = phone.replace(/\D/g, '').slice(-10);
 
-  const messages = await db('sms_log')
+  const fetched = await db('sms_log')
     .where(function () {
       this.whereRaw("RIGHT(REPLACE(from_phone, '+', ''), 10) = ?", [digits])
         .orWhereRaw("RIGHT(REPLACE(to_phone, '+', ''), 10) = ?", [digits]);
@@ -368,7 +374,8 @@ async function getConversationThread(input) {
       'customers.first_name', 'customers.last_name',
     )
     .orderBy('sms_log.created_at', 'desc')
-    .limit(limit);
+    .orderBy('sms_log.id', 'desc').limit(limit + 1).offset(offset);
+  const messages = fetched.slice(0, limit);
 
   const customerName = messages.find(m => m.first_name)
     ? `${messages.find(m => m.first_name).first_name} ${messages.find(m => m.first_name).last_name}`
@@ -384,7 +391,9 @@ async function getConversationThread(input) {
       time: m.created_at,
       from: m.direction === 'inbound' ? (customerName || m.from_phone) : 'Waves',
     })),
-    total: messages.length,
+    returned_count: messages.length,
+    has_more: fetched.length > limit,
+    next_offset: fetched.length > limit ? offset + limit : null,
   };
 }
 
@@ -392,6 +401,7 @@ async function getConversationThread(input) {
 async function searchMessages(input) {
   const { search, customer_name, phone, direction, message_type, days_back = 7, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 100);
+  const offset = Math.max(0, Math.trunc(input.offset || 0));
   const since = new Date(Date.now() - days_back * 86400000).toISOString();
 
   let query = db('sms_log')
@@ -401,7 +411,7 @@ async function searchMessages(input) {
       'sms_log.*',
       'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
     )
-    .orderBy('sms_log.created_at', 'desc');
+    .orderBy('sms_log.created_at', 'desc').orderBy('sms_log.id', 'desc');
 
   if (search) query = query.whereILike('sms_log.message_body', `%${search}%`);
   if (direction) query = query.where('sms_log.direction', direction);
@@ -410,7 +420,8 @@ async function searchMessages(input) {
   if (customer_name) {
     query = query.where(function () {
       this.whereILike('customers.first_name', `%${customer_name}%`)
-        .orWhereILike('customers.last_name', `%${customer_name}%`);
+        .orWhereILike('customers.last_name', `%${customer_name}%`)
+        .orWhereRaw("TRIM(customers.first_name || ' ' || COALESCE(customers.last_name, '')) ILIKE ?", [`%${customer_name}%`]);
     });
   }
   if (phone) {
@@ -421,9 +432,13 @@ async function searchMessages(input) {
     });
   }
 
-  const messages = await query.limit(limit);
+  const fetched = await query.limit(limit + 1).offset(offset);
+  const messages = fetched.slice(0, limit);
 
   return {
+    has_more: fetched.length > limit,
+    next_offset: fetched.length > limit ? offset + limit : null,
+    coverage: { days_back: input.call_id ? null : days_back, offset, limit },
     messages: messages.filter(m => !isAdminPhone(m.from_phone) && !isAdminPhone(m.to_phone)).map(m => ({
       id: m.id,
       direction: m.direction,
@@ -527,32 +542,38 @@ async function getOpenCommitments(input) {
 async function getCallLog(input) {
   const { direction, has_recording, has_transcript, customer_name, days_back = 7, limit: rawLimit } = input;
   const limit = Math.min(rawLimit || 20, 50);
+  const offset = Math.max(0, Math.trunc(input.offset || 0));
   const since = new Date(Date.now() - days_back * 86400000).toISOString();
 
   let query = db('call_log')
-    .where('call_log.created_at', '>=', since)
+    .modify(qb => input.call_id ? qb.where('call_log.id', input.call_id) : qb.where('call_log.created_at', '>=', since))
     .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb, 'call_log.source')) // bake-off calls are not customer calls
     .leftJoin('customers', 'call_log.customer_id', 'customers.id')
     .select(
       'call_log.*',
       'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
     )
-    .orderBy('call_log.created_at', 'desc');
+    .orderBy('call_log.created_at', 'desc').orderBy('call_log.id', 'desc');
 
   if (direction && direction !== 'all') query = query.where('call_log.direction', direction);
   if (has_recording) query = query.whereNotNull('call_log.recording_url').where('call_log.recording_url', '!=', '');
-  if (has_transcript) query = query.whereNotNull('call_log.transcript');
+  if (has_transcript) query = query.whereNotNull('call_log.transcription');
   if (customer_name) {
     query = query.where(function () {
       this.whereILike('customers.first_name', `%${customer_name}%`)
-        .orWhereILike('customers.last_name', `%${customer_name}%`);
+        .orWhereILike('customers.last_name', `%${customer_name}%`)
+        .orWhereRaw("TRIM(customers.first_name || ' ' || COALESCE(customers.last_name, '')) ILIKE ?", [`%${customer_name}%`]);
     });
   }
 
-  const calls = await query.limit(limit);
+  const fetched = await query.limit(limit + 1).offset(offset);
+  const calls = fetched.slice(0, limit).filter(c => !isAdminPhone(c.from_phone) || !isAdminPhone(c.to_phone));
 
   return {
-    calls: calls.filter(c => !isAdminPhone(c.from_phone) || !isAdminPhone(c.to_phone)).map(c => ({
+    has_more: fetched.length > limit,
+    next_offset: fetched.length > limit ? offset + limit : null,
+    coverage: { days_back: input.call_id ? null : days_back, offset, limit },
+    calls: calls.map(c => ({
       id: c.id,
       direction: c.direction,
       from: c.from_phone,
@@ -562,12 +583,16 @@ async function getCallLog(input) {
       status: c.status,
       duration_seconds: c.duration_seconds,
       has_recording: !!(c.recording_url),
-      has_transcript: !!(c.transcript),
-      transcript_excerpt: c.transcript ? c.transcript.substring(0, 200) + '...' : null,
+      has_transcript: !!(c.transcription),
+      transcript_excerpt: c.transcription ? c.transcription.substring(0, 200) : null,
+      ...(input.call_id ? {
+        transcript: c.transcription ? c.transcription.slice(Math.max(0, input.transcript_offset || 0), Math.max(0, input.transcript_offset || 0) + 12000) : null,
+        transcript_next_offset: c.transcription?.length > Math.max(0, input.transcript_offset || 0) + 12000 ? Math.max(0, input.transcript_offset || 0) + 12000 : null,
+      } : { transcript_coverage: 'First 200 characters only; use call_id to read the transcript' }),
       sentiment: c.sentiment,
       time: c.created_at,
     })),
-    total: calls.length,
+    returned_count: calls.length,
   };
 }
 

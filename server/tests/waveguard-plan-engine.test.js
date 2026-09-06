@@ -151,7 +151,7 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.blocks.map((b) => b.code)).toContain('nitrogen_blackout');
   });
 
-  test('summarizeCalibration hard-blocks missing and expired calibration', () => {
+  test('mix inputs remain required but calibration expiry and verification are not approvals', () => {
     expect(summarizeCalibration({
       calibration: null,
       date: new Date('2026-05-01T12:00:00'),
@@ -167,7 +167,8 @@ describe('waveguard-plan-engine helpers', () => {
       date: new Date('2026-05-01T12:00:00'),
     });
 
-    expect(expired.blocks[0].code).toBe('expired_calibration');
+    expect(expired.blocks).toEqual([]);
+    expect(expired.selected.carrier_gal_per_1000).toBe(2);
   });
 
   test('summarizeCalibration blocks ambiguous active equipment calibrations', () => {
@@ -932,6 +933,37 @@ describe('waveguard-plan-engine helpers', () => {
   });
 });
 
+describe('buildPlanForService strict mode (job-card hook P1)', () => {
+  const { buildPlanForService } = require('../services/waveguard-plan-engine');
+  const service = { id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' };
+  const knex = (table) => {
+    const chain = {};
+    for (const m of ['leftJoin', 'where', 'select', 'orderBy']) chain[m] = () => chain;
+    chain.first = () => (table === 'scheduled_services as ss'
+      ? Promise.resolve(service)
+      : Promise.reject(new Error('db down')));
+    return chain;
+  };
+  knex.schema = { hasTable: async () => false };
+
+  test('strict: a failed safety read (turf profile) throws instead of reading as "nothing on file"', async () => {
+    await expect(buildPlanForService('svc1', { db: knex, strict: true })).rejects.toThrow('db down');
+  });
+
+  test('strict: a failed product_aliases read throws too — aliases are how de-branded lines find their product (hook P1)', async () => {
+    const aliasesDown = (table) => {
+      const chain = {};
+      for (const m of ['leftJoin', 'where', 'whereIn', 'select', 'orderBy']) chain[m] = () => chain;
+      chain.first = () => (table === 'scheduled_services as ss' ? Promise.resolve(service) : { catch: () => Promise.resolve(null) });
+      chain.catch = (fn) => (table === 'product_aliases'
+        ? Promise.resolve().then(() => fn(new Error('aliases down')))
+        : Promise.resolve(table === 'products_catalog' ? [{ id: 'p', name: 'Celsius WG' }] : []));
+      return chain;
+    };
+    aliasesDown.schema = { hasTable: async () => false };
+    await expect(buildPlanForService('svc1', { db: aliasesDown, strict: true })).rejects.toThrow('aliases down');
+  });
+});
 
 describe('missing grass protocol fallback', () => {
   const date = new Date('2026-09-05T16:00:00Z');

@@ -628,6 +628,10 @@ office, never converted against its card), and
 accept with no resolved per-application amount — never the monthly
 display rate). Same contract via the admin manual-acceptance path, which
 preserves these 4xx verbatim.
+Overlapping annual coverage on public `/accept` returns 409
+`{ error, code: 'ANNUAL_PREPAY_OVERLAP' }` with the existing call-the-office
+explanation and no acceptance committed. Clients preserve the appointment
+selection and display that billing conflict instead of a slot-taken message.
 A clarify RE-PRICE HOLD (`estimate_data.estimatorEngine.reprice_pending_at`
 non-empty — stamped by `estimate-clarify-asks` when a customer's unit or
 bedroom reply proves the row's address or dollars stale; lifted only by the
@@ -864,7 +868,9 @@ carries its own `nearby` boolean, true when its detour is within
 roll-ups. The per-slot flag is shared by every consumer of that engine:
 `/api/booking/availability`, this GET, re-service, and the find-slots
 searches — added in #3888 so the picker labels each time from its own
-route-fit, not the day's). POST is a WRITE with two owner-authorized
+route-fit, not the day's). Day lists contain all feasible starts; only the
+separate recommendations are curated. Moving an existing self-booked visit
+excludes that booking from its own day-cap count. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day

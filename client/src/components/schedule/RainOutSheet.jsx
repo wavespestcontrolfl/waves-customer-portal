@@ -63,7 +63,6 @@ const ERROR_COPY = {
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
   note_too_long: 'Note is too long — keep it under 200 characters.',
   note_link_blocked: "Links can't go in the note — the text already includes the reschedule link.",
-  note_emoji_blocked: "Emoji can't go in customer texts — remove them.",
   note_guard_blocked: 'That note would trip the SMS safety guard — avoid {braces} and the words null, undefined, or 1970.',
   note_compliance_blocked: 'That wording isn’t allowed in customer texts — no "safe" claims (say "safe once dry — your technician confirms timing"), no EPA-approved, no fixed re-entry times.',
   note_invalid: 'That note could not be sent — plain text only.',
@@ -106,11 +105,6 @@ function noteContainsBareHost(text) {
   }
   return false;
 }
-// Customer-facing SMS are emoji-free (messaging validator EMOJI_FOR_CUSTOMER)
-// — catching it here keeps the move from committing with a text that the
-// send layer would then block. Same three families the server detects:
-// pictographic, regional-indicator flags, keycap sequences.
-const NOTE_EMOJI_RE = /\p{Extended_Pictographic}|[\u{1F1E6}-\u{1F1FF}]|[0-9#*]\uFE0F?\u20E3/u;
 // Mirror of the outbound sms-guard (server/services/sms-guard.js): bodies
 // containing unsubstituted {vars} or broken-render markers are rejected at
 // send time, AFTER the move would have committed.
@@ -432,14 +426,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(noteCanonical)
     || noteContainsBareHost(note) || noteContainsBareHost(noteCanonical);
   const noteFolded = foldNote(note);
-  const noteEmoji = NOTE_EMOJI_RE.test(note);
   const noteGuard = noteGuardTrips(noteFolded);
   const noteCompliance = noteComplianceTrips(noteFolded);
-  const noteBlocked = notify && (noteLink || noteEmoji || noteGuard || noteCompliance);
+  const noteBlocked = notify && (noteLink || noteGuard || noteCompliance);
   const noteBlockedCopy = noteLink ? ERROR_COPY.note_link_blocked
-    : noteEmoji ? ERROR_COPY.note_emoji_blocked
-      : noteGuard ? ERROR_COPY.note_guard_blocked
-        : ERROR_COPY.note_compliance_blocked;
+    : noteGuard ? ERROR_COPY.note_guard_blocked
+      : ERROR_COPY.note_compliance_blocked;
 
   // Custom-reason state: the message is OPTIONAL (owner ruling 2026-08-24
   // — a blank box sends the server's standard opener instead of blocking

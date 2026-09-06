@@ -235,6 +235,33 @@ describe('live-status reschedule override (allowLive)', () => {
     },
   );
 
+  test('options.moveGuard runs on the move trx with the kept tech before the CAS write; a refusal aborts before any write', async () => {
+    let { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    const seen = [];
+    const moveGuard = jest.fn(async ({ trx, technicianId, service }) => {
+      seen.push({ trxIsFn: typeof trx === 'function', technicianId, serviceId: service.id, writesSoFar: updateQuery.update.mock.calls.length });
+    });
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch',
+      { allowLive: true, moveGuard },
+    );
+    expect(moveGuard).toHaveBeenCalledTimes(1);
+    expect(seen[0]).toEqual({ trxIsFn: true, technicianId: 'tech-1', serviceId: 'svc-1', writesSoFar: 0 });
+    expect(updateQuery.update).toHaveBeenCalledTimes(1);
+
+    // With a tech change the guard sees the RECEIVING tech; a throw stops the move.
+    ({ updateQuery } = wireRescheduleMocks(liveService('confirmed')));
+    const refusing = jest.fn(async ({ technicianId }) => {
+      throw Object.assign(new Error(`deactivated for ${technicianId}`), { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    });
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch',
+      { allowLive: true, moveGuard: refusing, technicianId: 't2' },
+    )).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    expect(refusing).toHaveBeenCalledWith(expect.objectContaining({ technicianId: 't2' }));
+    expect(updateQuery.update).not.toHaveBeenCalled();
+  });
+
   test('a non-live reschedule does not touch tracker lifecycle or tech_status', async () => {
     const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
 
