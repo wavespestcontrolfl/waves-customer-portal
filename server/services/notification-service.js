@@ -166,7 +166,7 @@ const NotificationService = {
     // event skips the bell rather than risking a duplicate.
     // refreshOnDedupe (opt-in): when the keyed bell already exists and this
     // emission's CONTENT differs (a retried run whose failure set changed),
-    // rewrite the standing row's title/body/metadata and surface it unread
+    // rewrite the standing row's title/body/link/metadata and surface it unread
     // again — the office must never keep reading an obsolete error list
     // while the response says the alert has the details. Identical content
     // stays a plain dedupe (no re-bell).
@@ -202,11 +202,13 @@ const NotificationService = {
           // or an emoji title would read as "changed" on every emission.
           const nextTitle = stripEmoji(title) || title;
           const nextBody = stripEmoji(body) || null;
-          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody)) {
+          const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
+          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
             const existingMeta = typeof existing.metadata === 'string'
               ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
               : (existing.metadata || {});
-            const refreshed = { title: nextTitle, body: nextBody, metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
+            const refreshed = { title: nextTitle, body: nextBody, link: nextLink,
+              metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: { ...existingMeta, ...metadata } }, deduped: true, refreshed: true };
           }
