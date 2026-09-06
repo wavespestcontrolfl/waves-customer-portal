@@ -68,6 +68,31 @@ describe("AdminLayoutV2", () => {
     expect(await screen.findByText("Admin child")).toBeInTheDocument();
   });
 
+  it.each(["content-engine", "content-registry", "data-hygiene", "agent-decisions", "drafts", "health", "documents", "document-requests", "discounts"])("blocks a technician at the %s alias before mounting its child", async (path) => {
+    adminFetch.mockResolvedValue({ id: 2, name: "Fixture technician", role: "technician" });
+    render(<MemoryRouter initialEntries={[`/admin/${path}?id=fixture#context`]}>
+      <Routes><Route element={<AdminLayoutV2 />}>
+        <Route path={`/admin/${path}`} element={<div>Forbidden child</div>} />
+        <Route path="/admin/schedule" element={<div>Authorized schedule</div>} />
+      </Route></Routes>
+    </MemoryRouter>);
+    expect(await screen.findByText("Authorized schedule")).toBeInTheDocument();
+    expect(screen.queryByText("Forbidden child")).not.toBeInTheDocument();
+  });
+
+  it("sends an unauthenticated alias to login without mounting its child", async () => {
+    localStorage.clear();
+    render(<MemoryRouter initialEntries={["/admin/data-hygiene?status=auto_applied#evidence"]}>
+      <Routes>
+        <Route element={<AdminLayoutV2 />}><Route path="/admin/data-hygiene" element={<div>Forbidden child</div>} /></Route>
+        <Route path="/admin/login" element={<div>Sign in required</div>} />
+      </Routes>
+    </MemoryRouter>);
+    expect(await screen.findByText("Sign in required")).toBeInTheDocument();
+    expect(screen.queryByText("Forbidden child")).not.toBeInTheDocument();
+    expect(adminFetch).not.toHaveBeenCalled();
+  });
+
   it("no longer owns the Safari bookmark identity (moved to AdminSafariShell in App)", async () => {
     // Regression pin: the manifest/title swap lives in useAdminBookmarkMeta,
     // mounted app-wide so /admin/login (outside this layout) is covered. A
