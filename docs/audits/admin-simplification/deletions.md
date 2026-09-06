@@ -25,6 +25,16 @@ Database-held links, external bookmarks, native clients and service workers can 
 
 ## Deliberately retained
 
+Second-pass candidates, recorded before deletion: `AdsPage.jsx` private
+`isAdminUser` has zero remaining references after removing the nine declarations;
+all prior callers were inside those declarations. The seven named Recharts
+imports (`BarChart`, `Bar`, `XAxis`, `YAxis`, `CartesianGrid`, `Tooltip`,
+`ResponsiveContainer`) likewise have no remaining references. This is a named
+component import, not an intentional side-effect import. The Recharts dependency
+and live PPC dashboard/chart consumers remain. No other helper or import is
+proposed for deletion. The live-node comparison excludes precisely these eight
+bindings and the nine functions above.
+
 | Candidate/class | Disposition and missing deletion proof |
 |---|---|
 | `SchedulePage.jsx`, `CustomersPage.jsx`, `EstimatePage.jsx`, `CommunicationsPage.jsx` | **KEEP** mandated shared exports; current V2, schedule/customer/tech components import them. Old filenames are not dead evidence. |
