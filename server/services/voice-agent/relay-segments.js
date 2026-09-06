@@ -38,7 +38,7 @@ function buildSegment({ generation, sessionKey, reason, text, turns, latency, ve
       expectation: p.expectation || null,
       at: p.at instanceof Date ? p.at.toISOString() : (p.at || null),
     })).filter((p) => p.kind),
-    text: String(text || '').slice(0, MAX_SEGMENT_TEXT_CHARS),
+    text: Array.from(String(text || '')).slice(0, MAX_SEGMENT_TEXT_CHARS).join(''),
     turn_counts: turnCounts,
     turn_stats: turnStats,
     lead_captured: leadCaptured === true,
@@ -229,6 +229,8 @@ function composeSegmentsSql(db, segment = null) {
 function appendSegmentPatch(db, segment) {
   const compose = () => composeSegmentsSql(db, segment);
   const appended = appendSegmentSql(db, segment);
+  const { composeRelayTranscriptSql } = require('./relay-transcript');
+  const recorded = db.raw("E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]\\n' || transcription");
   return {
     metadata: db.raw(
       "CASE WHEN (metadata->'relay_transcript') IS NOT NULL AND ? IS NOT NULL THEN jsonb_set(?, '{relay_transcript,text}', to_jsonb(?::text), false) ELSE ? END",
@@ -249,12 +251,14 @@ function appendSegmentPatch(db, segment) {
          WHEN transcription_provider = ? AND COALESCE(transcription, '') <> '' AND ? IS NOT NULL THEN ?
          WHEN ${FILL_EMPTY_SQL} AND ? IS NOT NULL THEN ?
          WHEN transcription LIKE '[AI segment]%' AND transcription ~ ? AND ? IS NOT NULL
-           THEN '[AI segment]' || E'\\n' || ? || substring(transcription from ?)
+           THEN ?
          WHEN ${RECORDED_ONLY_SQL} AND ? IS NOT NULL
-           THEN '[AI segment]' || E'\\n' || ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || transcription
+           THEN ?
          ELSE transcription
        END`,
-      [RELAY_PROVIDER, compose(), compose(), compose(), compose(), COMPOSITE_RECORDED_RE, compose(), compose(), COMPOSITE_RECORDED_RE, RELAY_PROVIDER, compose(), compose()],
+      [RELAY_PROVIDER, compose(), compose(), compose(), compose(), COMPOSITE_RECORDED_RE, compose(),
+        composeRelayTranscriptSql(db, compose(), db.raw('substring(transcription from ?)', [COMPOSITE_RECORDED_RE])),
+        RELAY_PROVIDER, compose(), composeRelayTranscriptSql(db, compose(), recorded)],
     ),
     // The fill above also claims provider/status for the row; every other
     // branch leaves them as they are.

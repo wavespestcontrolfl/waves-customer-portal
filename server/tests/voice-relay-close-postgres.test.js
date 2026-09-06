@@ -44,6 +44,34 @@ postgres('atomic relay segment append and composition', () => {
   });
   beforeEach(async () => { await db('call_commitments').delete(); await db('call_log').delete(); });
 
+  test.each([20000, 70000])('a transfer close preserves a %s-character recording under the shared budget', async (length) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const { buildTranscriptText, composeRelayTranscript } = require('../services/voice-agent/relay-transcript');
+    const priorGate = process.env.GATE_VOICE_RELAY_RECOVERY;
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'false';
+    const recorded = '🌊'.repeat(length);
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: 'voicemail',
+      transcription: recorded, transcription_provider: 'fixture-recording', transcription_metadata: { source: 'fixture-recording' },
+      metadata: { relay_handoff: { intent: 'office' } }, transcript_structured: { recorded: true } });
+    const convo = new RelayConversation({ callSid: 'CA-fixture', sessionKey: 'first', send: jest.fn() });
+    convo.leadCaptured = true;
+    convo._transferRequested = true;
+    convo._sessionSuperseded = jest.fn(async () => false);
+    convo._recordCommitments = jest.fn(async () => {});
+    convo._transcript = Array.from({ length: 20 }, () => ({ role: 'caller', text: 'x'.repeat(3900) }));
+    try {
+      await convo.end('transfer');
+      const row = await db('call_log').first();
+      expect(row.transcription).toBe(composeRelayTranscript(buildTranscriptText(convo._transcript), '\n\n[Voicemail segment]\n' + recorded));
+      expect(row.transcription_provider).toBe('fixture-recording');
+      expect(row.transcription_metadata.source).toBe('fixture-recording');
+      expect(row.transcript_structured).toBeNull();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_VOICE_RELAY_RECOVERY;
+      else process.env.GATE_VOICE_RELAY_RECOVERY = priorGate;
+    }
+  });
+
   test.each(['conversation_relay', 'recorded_fixture'])('late close metrics cover both sockets without replacing %s provenance', async (provider) => {
     const { RelayConversation } = require('../services/voice-agent/relay-conversation');
     const makeLeg = (key, generation, firstSendAt) => buildSegment({ sessionKey: key, generation,
