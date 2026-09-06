@@ -10,12 +10,12 @@ const retry = () => Object.assign(new Error('Appointments changed while saving. 
 // The template remains the address source for future recurrence generation.
 // Completed history stays intact except the explicitly edited row. Future
 // defaults live in template overrides. A grouped stop stays at one property.
-async function planAppointmentAddress(conn, serviceId, propertyId) {
+async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'series') {
   const anchor = await conn('scheduled_services').where({ id: serviceId }).first();
   if (!anchor) throw Object.assign(new Error('Appointment not found'), { statusCode: 404, isOperational: true });
   // A stale editor must not relocate the placeholder left by a reschedule.
   if (anchor.status === 'rescheduled') throw retry();
-  const parentId = anchor.recurring_parent_id || (anchor.is_recurring ? anchor.id : null);
+  const parentId = scope === 'visit' ? null : (anchor.recurring_parent_id || (anchor.is_recurring ? anchor.id : null));
   let rows = await conn('scheduled_services').where({ customer_id: anchor.customer_id })
     .where((q) => {
       q.where('id', anchor.id);
@@ -34,10 +34,10 @@ async function planAppointmentAddress(conn, serviceId, propertyId) {
   const stopKeys = [...new Set(rows.flatMap((row) => [row.property_id, propertyId].map((id) => stopBaseKey({
     propertyId: id, customerId: row.customer_id, scheduledDate: row.scheduled_date,
   }))).concat(visits.map((visit) => visit.stop_base_key)))].sort();
-  return { anchor, parentId, propertyId, rows, visits, stopKeys };
+  return { anchor, parentId, propertyId, scope, rows, visits, stopKeys };
 }
 
-// Called after the date-wide occupancy locks, before maintenance/comms/rows.
+// Called after occupancy, tech-day, maintenance and comms locks, before stop/appointment rows.
 async function lockAppointmentAddress(trx, plan, updates = {}) {
   // Match createOrJoinVisit: customer row before every stop lock.
   await trx('customers').where({ id: plan.anchor.customer_id }).forNoKeyUpdate().first('id');
@@ -53,7 +53,7 @@ async function lockAppointmentAddress(trx, plan, updates = {}) {
 }
 
 async function applyAppointmentAddress(trx, plan, actorId) {
-  const fresh = await planAppointmentAddress(trx, plan.anchor.id, plan.propertyId);
+  const fresh = await planAppointmentAddress(trx, plan.anchor.id, plan.propertyId, plan.scope);
   const fingerprint = (p) => JSON.stringify(p.rows.map((row) => [row.id, row.customer_id, row.recurring_parent_id,
     row.property_id, dateOnly(row.scheduled_date), row.technician_id, row.visit_id, row.status]));
   if (fingerprint(fresh) !== fingerprint(plan) || JSON.stringify(fresh.stopKeys) !== JSON.stringify(plan.stopKeys)) throw retry();

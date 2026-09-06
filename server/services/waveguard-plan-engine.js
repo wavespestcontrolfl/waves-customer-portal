@@ -1006,13 +1006,13 @@ async function getApplicableOrdinances(knex, profile, cities = {}) {
   return query;
 }
 
-async function getLatestAssessment(knex, customerId) {
+async function getLatestAssessment(knex, customerId, { strict = false } = {}) {
   const row = await knex('lawn_assessments')
     .where({ customer_id: customerId })
     .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
     .first()
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
   if (!row) return null;
   return {
     ...row,
@@ -1046,7 +1046,10 @@ async function getActiveCalibrations(knex, filters = {}) {
   return query.catch(() => []);
 }
 
-async function getProducts(knex) {
+// strict: a failed catalog read throws instead of reading as an empty
+// catalog (the job card treats that plan as unavailable; the Lawn plan and
+// closeout keep the lenient default).
+async function getProducts(knex, { strict = false } = {}) {
   const products = await knex('products_catalog')
     .where(function () {
       this.where({ active: true }).orWhereNull('active');
@@ -1061,7 +1064,7 @@ async function getProducts(knex) {
       'label_verified_at',
       'active', 'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
     )
-    .catch(() => []);
+    .catch((err) => { if (strict) throw err; return []; });
 
   if (!products.length) return products;
 
@@ -1070,7 +1073,9 @@ async function getProducts(knex) {
     ? await knex('product_aliases')
       .whereIn('product_id', productIds)
       .select('product_id', 'alias_name')
-      .catch(() => [])
+      // strict: aliases are how de-branded protocol lines find their
+      // product — a failed read would silently drop them, so it throws too.
+      .catch((err) => { if (strict) throw err; return []; })
     : [];
   const aliasesByProduct = aliases.reduce((acc, row) => {
     if (!acc[row.product_id]) acc[row.product_id] = [];
@@ -1084,7 +1089,7 @@ async function getProducts(knex) {
   }));
 }
 
-async function getAppointmentSubstitutions(knex, serviceId, products) {
+async function getAppointmentSubstitutions(knex, serviceId, products, { strict = false } = {}) {
   if (!(await knex.schema.hasTable('lawn_protocol_product_substitutions'))) return new Map();
   const rows = await knex('lawn_protocol_product_substitutions as lpps')
     .leftJoin('products_catalog as op', 'lpps.original_product_id', 'op.id')
@@ -1096,7 +1101,7 @@ async function getAppointmentSubstitutions(knex, serviceId, products) {
       'op.name as original_product_name',
       'sp.name as substitute_product_name',
     )
-    .catch(() => []);
+    .catch((err) => { if (strict) throw err; return []; });
   const productById = new Map((products || []).map((product) => [String(product.id), product]));
   const map = new Map();
   for (const row of rows) {
@@ -1135,7 +1140,9 @@ function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {
   };
 }
 
-async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date()) {
+// strict: a failed ledger / service-product read throws instead of reading
+// as "nothing applied this year" (an annual-N block must not vanish).
+async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date(), { strict = false } = {}) {
   const year = etParts(serviceDate).year;
   const ledgerRows = await knex('property_nutrient_ledger')
     .where({ customer_id: customerId, application_year: year })
@@ -1155,7 +1162,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
       'service_product_id',
     )
     .orderBy('application_date', 'asc')
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
 
   const ledgerSummary = Array.isArray(ledgerRows) && ledgerRows.length
     ? summarizeLedgerRows(ledgerRows, year)
@@ -1174,7 +1181,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
     serviceProductQuery.whereNotIn('sp.id', ledgerServiceProductIds);
   }
 
-  const rows = await serviceProductQuery.catch(() => []);
+  const rows = await serviceProductQuery.catch((err) => { if (strict) throw err; return []; });
   const fallbackSummary = calculateNutrientLedgerFromRows(rows, products, lawnSqft, year);
   if (ledgerSummary) {
     return {
@@ -1294,13 +1301,18 @@ async function buildPlanForService(serviceId, options = {}) {
   }
 
   const serviceDate = toServiceDate(service.scheduled_date, now);
+  // strict (job card): every safety read below throws on failure instead of
+  // reading as "nothing on file" — turf profile, catalog, substitutions,
+  // latest assessment, ordinance context, manager approvals. The Lawn plan
+  // and closeout keep the lenient default.
+  const strict = options.strict === true;
   const profile = await knex('customer_turf_profiles')
     .where({ customer_id: service.customer_id, active: true })
     .first();
   const profileCompleteness = summarizeTurfProfileCompleteness(profile);
-  const products = await getProducts(knex);
-  const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
-  const latestAssessment = await getLatestAssessment(knex, service.customer_id);
+  const products = await getProducts(knex, { strict });
+  const substitutions = await getAppointmentSubstitutions(knex, service.id, products, { strict });
+  const latestAssessment = await getLatestAssessment(knex, service.customer_id, { strict });
   const stressFlags = latestAssessment?.stress_flags || {};
   // One resolved city for BOTH the ordinance query and the property gate the
   // panel displays — the restriction must be labeled with the city it was
@@ -1316,14 +1328,14 @@ async function buildPlanForService(serviceId, options = {}) {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,
   });
-  const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate);
+  const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate, service.lawn_type);
   const structuredProtocolContext = await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
-  }).catch(() => null);
+  }).catch((err) => { if (strict) throw err; return null; });
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const baseLines = parseProtocolLines(visit?.primary, 'base');
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
@@ -1546,6 +1558,7 @@ async function buildPlanForService(serviceId, options = {}) {
         rateUnit: item.mix?.rateUnit,
       })),
     serviceDate: etDateString(serviceDate),
+    strict,
   });
   for (const block of managerApprovals.blocks) blocks.push(block);
   for (const warning of managerApprovals.warnings) warnings.push(warning);
@@ -1638,6 +1651,7 @@ async function buildPlanForService(serviceId, options = {}) {
 }
 
 module.exports = {
+  buildProductInventorySnapshot,
   buildPlanForService,
   selectProtocolVisit,
   calculateProductAmount,
@@ -1660,6 +1674,10 @@ module.exports = {
   MAY_FERTILIZER_BRANCH,
   isConditionalSelected,
   summarizeCalibration,
+  getActiveCalibrations,
+  itemHasNitrogen,
+  itemHasPhosphorus,
+  itemIsPgr,
   summarizeOrdinanceStatus,
   summarizeTurfProfileCompleteness,
 };

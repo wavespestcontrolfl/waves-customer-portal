@@ -2447,10 +2447,14 @@ router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, 
 
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
+    const canChangeAppointmentAddress = require('../config/feature-gates').isEnabled('editApptAddress');
+    if (req.query?.context === 'appointment_address' && !canChangeAppointmentAddress) {
+      return res.json({ properties: [], canChangeAppointmentAddress: false });
+    }
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
-    res.json({ properties, canChangeAppointmentAddress: require('../config/feature-gates').isEnabled('editApptAddress') });
+    res.json({ properties, canChangeAppointmentAddress });
   } catch (err) { next(err); }
 });
 
@@ -2729,12 +2733,23 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
     const customer = await db('customers')
       .where({ id: req.params.id })
       .whereNull('deleted_at')
-      .first('id');
+      .first('id', 'phone', 'email');
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
+    // Mirror the booking route's estimateContactMatchesCustomer guard: lead
+    // quotes may still be unowned before acceptance. Match captured contact,
+    // never a name, and never include a quote owned by another customer.
+    // Only discover pending quotes this way: accepted quotes auto-select in
+    // the UI, so a shared household contact must not silently claim one.
+    const phoneLast10 = String(customer.phone || '').replace(/\D/g, '').slice(-10);
+    const email = String(customer.email || '').trim().toLowerCase();
     const [estimates, serviceRows] = await Promise.all([
       db('estimates')
-        .where({ customer_id: customer.id })
+        .where((owned) => owned.where({ customer_id: customer.id })
+          .orWhere((unowned) => unowned.whereNull('customer_id').whereIn('status', ['sent', 'viewed']).whereRaw(
+            "(right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ? OR lower(trim(customer_email)) = ?)",
+            [phoneLast10.length === 10 ? phoneLast10 : null, email || null],
+          )))
         .whereNull('archived_at')
         // Accepted estimates always qualify. Open quotes (sent / viewed)
         // qualify too — that's the phone-acceptance case — but only while

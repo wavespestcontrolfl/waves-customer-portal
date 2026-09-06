@@ -309,7 +309,7 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const isTechnicianRequest = (req) => req.techRole === 'technician';
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
 
 // Board/list scoping for technician tokens: the FULL current-assignment
 // predicate, not just technician_id — otherwise ?from=<years ago> or
@@ -319,34 +319,9 @@ function scopeToAssignedTech(req, q) {
   technicianCurrentVisitFilter(req, q);
 }
 
-// Assignment currency: a dead or ancient row must not keep authorizing.
-// Statuses below never authorize; everything else (pending/confirmed/
-// en_route/on_site/completed) additionally has to sit inside the ET date
-// window — completed visits stay accessible for post-visit paperwork, and
-// a stale never-actioned pending row from months ago grants nothing.
-const TECH_DEAD_ASSIGNMENT_STATUSES = ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'];
-const TECH_ACCESS_WINDOW_DAYS = 7;
-const techAccessCutoff = () => etDateString(addETDays(new Date(), -TECH_ACCESS_WINDOW_DAYS));
-
-// READ access: a current-or-recent assignment (completed allowed in window).
-function technicianCurrentVisitFilter(req, q) {
-  if (isTechnicianRequest(req)) {
-    q.where('scheduled_services.technician_id', req.technicianId)
-      .whereNotIn('scheduled_services.status', TECH_DEAD_ASSIGNMENT_STATUSES)
-      .where('scheduled_services.scheduled_date', '>=', techAccessCutoff());
-  }
-  return q;
-}
-
-// MUTATION access (prepaid, invoice mint, status): a LIVE visit only — a
-// completed one is settled; corrections on it are office work.
-function technicianLiveVisitFilter(req, q) {
-  if (isTechnicianRequest(req)) {
-    technicianCurrentVisitFilter(req, q)
-      .whereNot('scheduled_services.status', 'completed');
-  }
-  return q;
-}
+// Assignment currency (dead statuses + the ET date window) is the shared
+// predicate in services/technician-visit-scope.js — the job-card routes
+// apply the same one.
 
 // Ownership gate for per-visit endpoints. Callers 404 (not 403) on failure
 // so an unowned id doesn't confirm the row exists. Money endpoints ALSO

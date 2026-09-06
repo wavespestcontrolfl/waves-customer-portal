@@ -192,6 +192,19 @@ test('address changes discard the stale route position echoed by the modal', () 
 });
 
 
+test('visit scope changes the child and its grouped lines without selecting the recurrence template or siblings', async () => {
+  const template = { ...row, id: 'template', status: 'completed' };
+  const child = { ...row, id: 'child', recurring_parent_id: template.id, visit_id: 'visit-a' };
+  const grouped = { ...child, id: 'grouped', is_recurring: false };
+  const sibling = { ...child, id: 'future', visit_id: null, scheduled_date: '2099-02-01' };
+  const conn = connection({ rows: [template, child, grouped, sibling] });
+  const plan = await planAppointmentAddress(conn, child.id, property.id, 'visit');
+  expect(plan.rows.map(r => r.id)).toEqual(['child', 'grouped']);
+  await applyAppointmentAddress(conn, plan, 'fixture-admin');
+  const changed = conn.calls.find(call => call.table === 'scheduled_services' && call.patch);
+  expect(changed.filters).toContainEqual(['whereIn', 'id', ['child', 'grouped']]);
+});
+
 test('address propagation leaves a rescheduled placeholder and its obsolete stop unchanged', async () => {
   const template = { ...row, id: 'template', status: 'completed' };
   const child = { ...row, id: 'child', recurring_parent_id: template.id };
