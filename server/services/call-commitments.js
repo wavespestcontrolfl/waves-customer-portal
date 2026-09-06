@@ -30,6 +30,9 @@
  *
  * Dark behind GATE_CALL_COMMITMENTS (checked by the processor). Reads
  * happen regardless of the gate so already-recorded rows stay visible.
+ * SMS actions share this ledger through sms_log_id and sms_context. The
+ * call readers below require a linked call record: SMS work surfaces in its
+ * customer profile Comms tab and conversation-linked admin bells.
  */
 
 const crypto = require('crypto');
@@ -1021,6 +1024,29 @@ async function directEstimatesSentAfter(conn, probes) {
   return judge();
 }
 
+// Shared ownership fence for delivered estimates, including commercial
+// proposals whose estimate is unowned but whose live lead has a customer.
+function whereEstimateCustomerOwnership(query, customerId) {
+  return query.whereRaw(`(estimates.customer_id = ? OR (
+          estimates.customer_id IS NULL
+          AND (estimates.id IN (
+            SELECT l.estimate_id FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id = ? AND l.estimate_id IS NOT NULL
+          ) OR estimates.estimate_data ->> 'lead_id' IN (
+            SELECT l.id::text FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id = ?
+          ))
+          AND estimates.id NOT IN (
+            SELECT l.estimate_id FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ? AND l.estimate_id IS NOT NULL
+          )
+          AND COALESCE(estimates.estimate_data ->> 'lead_id', '') NOT IN (
+            SELECT l.id::text FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ?
+          )
+        ))`, [customerId, customerId, customerId, customerId, customerId]);
+}
+
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
   const after = callEndedAt(call);
@@ -1082,24 +1108,7 @@ async function resolveFulfillment(conn, commitment, call) {
         // the unowned-estimate fallback in either linkage direction.
         // Uncorrelated membership sets avoid rescanning leads per estimate.
         // Exclude NULL FK values so NOT IN does not reject unrelated rows.
-        estQ.whereRaw(`(estimates.customer_id = ? OR (
-          estimates.customer_id IS NULL
-          AND (estimates.id IN (
-            SELECT l.estimate_id FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id = ? AND l.estimate_id IS NOT NULL
-          ) OR estimates.estimate_data ->> 'lead_id' IN (
-            SELECT l.id::text FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id = ?
-          ))
-          AND estimates.id NOT IN (
-            SELECT l.estimate_id FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ? AND l.estimate_id IS NOT NULL
-          )
-          AND COALESCE(estimates.estimate_data ->> 'lead_id', '') NOT IN (
-            SELECT l.id::text FROM leads l
-            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ?
-          )
-        ))`, [customerId, customerId, customerId, customerId, customerId]);
+        whereEstimateCustomerOwnership(estQ, customerId);
       } else if (phone) {
         estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
       } else {
@@ -1826,6 +1835,11 @@ module.exports = {
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,
+  whereEstimateCustomerOwnership,
+  handedOffWithin,
+  handoffOrder,
+  HANDOFF_COLS,
+  witnessAt,
   directEstimatesSentAfter,
   implicitDueAt,
   staleAiRowSql,

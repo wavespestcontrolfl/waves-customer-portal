@@ -13,6 +13,13 @@
  *     re-save a tech reading (codex #3565 gh-r19 … r25).
  * One resolver shared by the sweep and the report so the two never disagree.
  */
+// Any explicit irrigation edit confirms that a system exists, including
+// legacy rows whose retired toggle is false. Shared by all profile writers.
+const IRRIGATION_INPUT_FIELDS = [
+  'irrigation_controller_location', 'irrigation_zones', 'irrigation_inches_per_week',
+  'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
+  'irrigation_system_type', 'rain_sensor', 'irrigation_issues',
+];
 const IRRIGATION_SIZING_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week'];
 // Watering JURISDICTION after a move: the turf profile's county is evidence
 // about the former home until a technician re-saves the profile's county
@@ -125,4 +132,4 @@ async function confirmIrrigationFields(conn, customerId, fields) {
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
-module.exports = { IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, confirmIrrigationFields, parseConfirmedFields: parseConfirmed };
+module.exports = { IRRIGATION_INPUT_FIELDS, IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, confirmIrrigationFields, parseConfirmedFields: parseConfirmed };

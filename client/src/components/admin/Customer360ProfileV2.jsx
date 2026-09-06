@@ -5182,6 +5182,10 @@ export default function Customer360ProfileV2({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
+  const activeTabButtonRef = useRef(null);
+  useEffect(() => {
+    if (!loading) activeTabButtonRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [loading, activeTab]);
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
@@ -6266,6 +6270,8 @@ export default function Customer360ProfileV2({
           {TABS.map((t) => (
             <button
               key={t.key}
+              ref={activeTab === t.key ? activeTabButtonRef : null}
+              aria-pressed={activeTab === t.key}
               onClick={() => setActiveTab(t.key)}
               className={cn(
                 "h-11 px-4 text-12 uppercase tracking-label font-medium whitespace-nowrap u-focus-ring transition-colors border-b-2",
@@ -7146,6 +7152,7 @@ export default function Customer360ProfileV2({
             <div className="flex flex-col h-full">
               {" "}
               <OwedCommitmentsSummary customerId={customerId} />
+              <OwedCommitmentsSummary customerId={customerId} source="sms" />
               <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
               <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]">
                 {commsLoading && (
