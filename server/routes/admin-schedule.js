@@ -21,6 +21,7 @@ const { openInvoiceFacts } = require('../services/visit-context/balance');
 const { previewText } = require('../utils/visit-notes');
 const { compilePropertyAlerts } = require('../services/nextstop-alerts');
 const { loadLastServices } = require('../utils/last-line-service');
+const { whereLiveCustomer } = require('../services/customer-stages');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -16591,6 +16592,42 @@ router.get('/recommend-slots', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Queue rows are historical hints, not current plan eligibility. Revalidate
+// derived rows too, so both sources share the same customer/catalog fences.
+async function refreshRecurringPlanAlert(conn, alert) {
+  const parent = await conn('scheduled_services').where({ id: alert.parentId }).first();
+  if (!parent?.is_recurring || !parent.recurring_pattern
+    || parent.recurring_pattern === 'one_time'
+    || ['cancelled', 'rescheduled'].includes(parent.status)) return null;
+  const customer = await conn('customers').modify(whereLiveCustomer)
+    .where({ id: parent.customer_id }).first('billing_mode');
+  if (!customer || customer.billing_mode === 'annual_prepay' || parent.annual_prepay_term_id) return null;
+  const profile = await resolveCompletionProfileForScheduledService(parent, conn, { strict: true });
+  if (profile.billingType === 'one_time') return null;
+
+  // An accepted estimate awaiting its first service is not a renewal.
+  const completedVisit = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
+    .where({ is_recurring: true, status: 'completed' }).first('id');
+  if (!completedVisit) return null;
+
+  const remainingVisits = await countUpcomingSeriesVisits(conn, parent.id);
+  if (remainingVisits > (parent.recurring_ongoing ? 0 : 1)) return null;
+  const lastVisit = await conn('scheduled_services')
+    .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
+    .where('is_recurring', true)
+    .modify((query) => remainingVisits > 0
+      ? query.whereIn('status', UPCOMING_VISIT_STATUSES)
+      : query.whereNotIn('status', ['cancelled', 'rescheduled']))
+    .orderBy('scheduled_date', 'desc').first('scheduled_date');
+  const lastVisitDate = dateOnly(lastVisit?.scheduled_date);
+  if (remainingVisits > 0 && lastVisitDate > etDateString(addETDays(new Date(), 14))) return null;
+  // A queue row left behind by an ownership correction must not display
+  // the old customer's identity with another customer's plan actions.
+  if (String(alert.customerId) !== String(parent.customer_id)) return null;
+  return { ...alert, remainingVisits, lastVisitDate, serviceType: parent.service_type, pattern: parent.recurring_pattern };
+}
+
 // GET /api/admin/schedule/recurring-alerts — end-of-plan alerts + upcoming fixed plans ending soon
 router.get('/recurring-anomalies', requireAdmin, async (req, res, next) => {
   try {
@@ -16751,12 +16788,18 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
       }
     } catch (e) { logger.warn(`[recurring-alerts] derived scan failed: ${e.message}`); }
 
+    const currentAlerts = [];
+    for (const alert of alerts) {
+      const current = await refreshRecurringPlanAlert(db, alert);
+      if (current) currentAlerts.push(current);
+    }
+
     // 3. Annual prepay terms: surface renewal/cancel/switch-plan touchpoints
     // when either the term end or the last scheduled service is close.
     try {
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const annualAlerts = await AnnualPrepayRenewals.getOpenRenewalAlerts({ daysAhead: 30 });
-      alerts.push(...annualAlerts.map((a) => ({
+      currentAlerts.push(...annualAlerts.map((a) => ({
         id: `annual-${a.id}`,
         source: 'annual_prepay',
         parentId: null,
@@ -16778,7 +16821,7 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
       })));
     } catch (e) { logger.warn(`[recurring-alerts] annual prepay scan failed: ${e.message}`); }
 
-    res.json({ alerts, total: alerts.length });
+    res.json({ alerts: currentAlerts, total: currentAlerts.length });
   } catch (err) { next(err); }
 });
 
@@ -17527,6 +17570,7 @@ router._test = {
   sendPrepaidReceiptForInvoice,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
+  refreshRecurringPlanAlert,
   liveUpcomingSeriesVisits,
   findBillingCoveredVisits,
   reconcileRecurringSeriesVisitCount,

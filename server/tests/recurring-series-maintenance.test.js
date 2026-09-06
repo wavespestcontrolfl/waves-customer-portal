@@ -30,7 +30,7 @@ const fs = require('fs');
 const path = require('path');
 
 const adminScheduleRouter = require('../routes/admin-schedule');
-const { runRecurringSeriesMaintenance, runRecurringAlertAction } = adminScheduleRouter._test;
+const { runRecurringSeriesMaintenance, runRecurringAlertAction, refreshRecurringPlanAlert } = adminScheduleRouter._test;
 const AppointmentReminders = require('../services/appointment-reminders');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -91,6 +91,7 @@ function makeConn(handler, opts = {}) {
     for (const m of ['where', 'orWhere', 'whereIn', 'whereNotIn', 'whereBetween', 'whereNull', 'whereNotNull', 'whereNot', 'whereRaw', 'orWhereRaw', 'orderBy', 'count', 'select', 'del', 'update', 'limit', 'forShare']) {
       b[m] = record(m);
     }
+    b.modify = (fn) => { fn(b); return b; };
     b.first = (...args) => {
       calls.push(['first', ...args]);
       return Promise.resolve(handler({ table, calls, op: 'first' }));
@@ -1082,5 +1083,76 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     // cancel lives in the shared helper.
     expect(src).toContain("['recurring-series-maintenance', String(parentId)],");
     expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(2);
+  });
+});
+
+
+describe('renewal banner revalidates historical recurring alerts', () => {
+  const profileResolver = require('../services/service-completion-profiles').resolveCompletionProfileForScheduledService;
+  const alert = { id: 1, parentId: 'series-a', customerId: 'customer-a', remainingVisits: 0 };
+  function scenario({ parent = {}, customer = { billing_mode: 'per_application' }, upcoming = 1, lastDate = daysOut(7), completed = true } = {}) {
+    return makeConn(({ table, calls }) => {
+      if (table === 'customers') {
+        if (!customer) return null;
+        const row = { id: 'customer-a', active: true, pipeline_stage: 'active_customer', ...customer };
+        // Evaluate the actual predicates, so removing the shared customer
+        // fence makes the archived/former-customer regressions fail.
+        for (const [op, key, value] of calls) {
+          if (op === 'where' && typeof key === 'string' && row[key] !== value) return null;
+          if (op === 'whereNull' && row[key] != null) return null;
+          if (op === 'whereIn' && !value.includes(row[key])) return null;
+        }
+        return row;
+      }
+      if (calls.some(([op, fields]) => op === 'where' && fields?.status === 'completed')) return completed ? { id: 'completed-a' } : null;
+      if (calls.some(([op]) => op === 'count')) return { c: String(upcoming) };
+      if (calls.some(([op]) => op === 'orderBy')) return { scheduled_date: lastDate };
+      return { id: 'series-a', customer_id: 'customer-a', is_recurring: true,
+        recurring_pattern: 'quarterly', recurring_ongoing: false, status: 'completed',
+        service_type: 'Quarterly Pest Control Service', ...parent };
+    });
+  }
+  beforeEach(() => profileResolver.mockResolvedValue({ billingType: 'recurring' }));
+  test.each([
+    { is_recurring: false }, { recurring_pattern: 'one_time' },
+    { status: 'cancelled' }, { status: 'rescheduled' }, { annual_prepay_term_id: 'term-a' },
+  ])('omits an ineligible series: %j', async (parent) => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent }), alert)).toBeNull();
+  });
+  test.each([
+    null, { active: false }, { deleted_at: 'archived' },
+    { pipeline_stage: 'churned' }, { pipeline_stage: 'past_customer' },
+    { pipeline_stage: 'dormant' }, { billing_mode: 'annual_prepay' },
+  ])('omits former/deleted customers and the separate annual-prepay lane: %j', async (customer) => {
+    expect(await refreshRecurringPlanAlert(scenario({ customer }), alert)).toBeNull();
+  });
+  test('rejects catalog one-time work even with legacy recurring flags', async () => {
+    profileResolver.mockResolvedValue({ billingType: 'one_time' });
+    expect(await refreshRecurringPlanAlert(scenario(), alert)).toBeNull();
+  });
+  test('does not treat an accepted plan awaiting its first service as a renewal', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ completed: false }), alert)).toBeNull();
+  });
+  test('drops a queued alert once two appointments exist', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ upcoming: 2 }), alert)).toBeNull();
+  });
+  test('drops a refilled ongoing plan and a fixed plan not ending soon', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { recurring_ongoing: true } }), alert)).toBeNull();
+    expect(await refreshRecurringPlanAlert(scenario({ lastDate: daysOut(30) }), alert)).toBeNull();
+  });
+  test('keeps a genuinely exhausted ongoing plan', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { recurring_ongoing: true }, upcoming: 0, lastDate: daysOut(-2) }), alert))
+      .toMatchObject({ remainingVisits: 0, lastVisitDate: daysOut(-2) });
+  });
+  test('refreshes stale counts and dates for a plan ending soon', async () => {
+    expect(await refreshRecurringPlanAlert(scenario(), alert))
+      .toMatchObject({ remainingVisits: 1, lastVisitDate: daysOut(7), pattern: 'quarterly' });
+  });
+  test('does not pair a historical customer identity with a reassigned plan', async () => {
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { customer_id: 'customer-b' } }), alert)).toBeNull();
+  });
+  test('fails closed when catalog resolution fails', async () => {
+    profileResolver.mockRejectedValueOnce(new Error('catalog unavailable'));
+    await expect(refreshRecurringPlanAlert(scenario(), alert)).rejects.toThrow('catalog unavailable');
   });
 });
