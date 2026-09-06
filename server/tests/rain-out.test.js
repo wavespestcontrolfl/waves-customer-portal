@@ -1994,7 +1994,7 @@ describe('rain-out service', () => {
         // Same exclusions the rebooker's commit gate enforces — the badge
         // must warn on exactly what commit would SLOT_TAKEN.
         expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
-          excludeStatuses: ['cancelled', 'completed'],
+          excludeStatuses: ['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'],
         }));
         // ONE snapshot for the whole payload, not a query per option.
         expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
@@ -2183,7 +2183,7 @@ describe('rain-out service', () => {
       expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
         dateFrom: '2026-08-12',
         dateTo: '2026-08-12',
-        excludeStatuses: ['cancelled', 'completed'],
+        excludeStatuses: ['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'],
       }));
     });
 

@@ -868,7 +868,9 @@ carries its own `nearby` boolean, true when its detour is within
 roll-ups. The per-slot flag is shared by every consumer of that engine:
 `/api/booking/availability`, this GET, re-service, and the find-slots
 searches — added in #3888 so the picker labels each time from its own
-route-fit, not the day's). POST is a WRITE with two owner-authorized
+route-fit, not the day's). Day lists contain all feasible starts; only the
+separate recommendations are curated. Moving an existing self-booked visit
+excludes that booking from its own day-cap count. POST is a WRITE with two owner-authorized
 scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
 to the token's own customer/visit and never live/terminal visits (409),
 and only to a slot the availability engine still offers for that day
