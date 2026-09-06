@@ -272,7 +272,7 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 
     const nap = napFromLocation(profile, loc); // per-location NAP (Venice/Parrish/… address+phone)
     const result = await fillCitationForm({ submitUrl, expectedHost: domain, nap }, { launchBrowser, anthropic,
-      beforeSubmit: () => require('./link-execution-authority').beginSubmission(db, { prospectId: p.id, leaseToken: p.lease_token }) });
+      beforeSubmit: () => require('./link-execution-authority').beginSubmission(db, { prospectId: p.id, leaseToken: p.lease_token, citation: { website: nap.website, location: loc.id } }) });
 
     // Run-level/environment/outage error (no LLM client, no browser, planning-LLM
     // outage) — same for EVERY prospect and not theirs to pay for. ABORT the batch

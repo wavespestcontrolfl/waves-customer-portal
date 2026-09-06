@@ -2964,20 +2964,20 @@ function OutreachDraftModal({ prospect, onClose, onSaved }) {
     else setErr(OUTREACH_CODE_MSG[data.code] || data.error || "Could not save draft.");
   };
 
-  const field = { width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 13, background: D.white, color: D.text, boxSizing: "border-box" };
+  const field = { width: "100%", padding: "8px 10px", borderRadius: 6, border: `1px solid ${D.inputBorder}`, fontSize: 14, background: D.white, color: D.text, boxSizing: "border-box" };
 
   return createPortal(
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: isMobile ? 0 : 20 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 20, width: 580, maxWidth: "100%", maxHeight: "90vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, ...(isMobile ? { width: "100%", maxWidth: "none", height: "100%", maxHeight: "none", borderRadius: 0, boxSizing: "border-box", overflowY: "auto", paddingTop: "calc(20px + env(safe-area-inset-top, 0px))", paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))", paddingLeft: "calc(20px + env(safe-area-inset-left, 0px))", paddingRight: "calc(20px + env(safe-area-inset-right, 0px))" } : {}) }}>
         <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>Outreach draft — {prospect.target_domain}</div>
-        <div style={{ fontSize: 11, color: D.muted }}>One-to-one only. Saving does not send; an admin approves + sends from the primary inbox.</div>
-        <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Recipient email</label>
+        <div style={{ fontSize: 14, color: D.muted }}>One-to-one only. Saving does not send; an admin approves + sends from the primary inbox.</div>
+        <label style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>Recipient email</label>
         <input style={field} value={to} onChange={(e) => setTo(e.target.value)} placeholder="editor@example.com" />
-        <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Subject</label>
+        <label style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>Subject</label>
         <input style={field} value={subject} onChange={(e) => setSubject(e.target.value)} />
-        <label style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>Body</label>
+        <label style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>Body</label>
         <textarea style={{ ...field, minHeight: 200, resize: "vertical", fontFamily: "inherit" }} value={body} onChange={(e) => setBody(e.target.value)} />
-        {err && <div style={{ fontSize: 12, color: D.amber }}>{err}</div>}
+        {err && <div style={{ fontSize: 14, color: D.amber }}>{err}</div>}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button onClick={onClose} style={outreachBtn(D.muted, false)}>Cancel</button>
           <button onClick={save} disabled={busy || !to || !subject || !body} style={outreachBtn(D.teal, true, busy)}>{busy ? "Saving…" : "Save draft"}</button>
@@ -3508,6 +3508,8 @@ const compact = (n) => (n == null ? "—" : n >= 1000 ? `${(n / 1000).toFixed(n 
 
 function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   const [data, setData] = useState(null);
+  const [drafting, setDrafting] = useState(null);
+  const [placementUrls, setPlacementUrls] = useState({});
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
   const [amounts, setAmounts] = useState({});
@@ -3533,6 +3535,20 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
   }, [refreshKey]);
   // after a mutation: the parent refreshes every panel when it owns the key, else this panel reloads itself
   const refresh = () => (onMutated ? onMutated() : load());
+
+  const recordSubmissionVerdict = async (card, verdict) => {
+    if (!window.confirm(verdict === "placed" ? "Confirm this submission reached the publisher at the URL entered below." : "Confirm you reviewed the evidence and no submission reached the publisher. This releases the automatic retry hold.")) return;
+    setBusy(card.domain.id);
+    setError(null);
+    try {
+      await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ submission_verdict: verdict, submission_attempt_id: card.submission_ambiguity.id, ...(verdict === "placed" ? { live_url: placementUrls[card.placement.id] || "" } : {}) }),
+      });
+      refresh();
+    } catch (e) { setError(e?.message || "Submission verdict failed"); }
+    finally { setBusy(null); }
+  };
 
   // what the inline bridge run did with the click — or why the nightly run will
   const bridgeNote = (b) => {
@@ -3698,6 +3714,21 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         const p = c.path;
         return (
           <div key={c.placement.id} style={{ border: `1px solid ${D.border}`, borderRadius: 10, padding: 14, marginBottom: 12 }}>
+            {c.submission_ambiguity && <div style={{ fontSize: 14, marginBottom: 14 }}>
+              <p>The submission may have reached the publisher. Review the evidence before recording a verdict. Automatic retry remains held.</p>
+              {c.submission_ambiguity.evidence_url ? <a href={c.submission_ambiguity.evidence_url} target="_blank" rel="noopener noreferrer">View submission screenshot</a> : <p>Screenshot unavailable. Verify the submission directly with the publisher before recording a verdict.</p>}
+              <label style={{ display: "block", marginTop: 12 }}>Confirmed publisher URL
+                <input type="url" value={placementUrls[c.placement.id] || ""} onChange={(event) => setPlacementUrls({ ...placementUrls, [c.placement.id]: event.target.value })} placeholder="https://publisher.example/listing" style={{ width: "100%", boxSizing: "border-box", padding: 8, marginTop: 4, border: `1px solid ${D.border}`, borderRadius: 6, fontSize: 14 }} />
+              </label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+                <button disabled={busy !== null || Boolean(c.placement.claimed_at) || !placementUrls[c.placement.id]} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => recordSubmissionVerdict(c, "placed")}>Confirm submitted</button>
+                <button disabled={busy !== null || Boolean(c.placement.claimed_at)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => recordSubmissionVerdict(c, "not_submitted")}>Confirm not submitted</button>
+              </div>
+            </div>}
+            {c.outreach_draft_exhausted && <div style={{ fontSize: 14, marginBottom: 14 }}>
+              <p>Automatic drafting stopped without a pitch. Create or revise its outreach draft to continue.</p>
+              <button disabled={busy !== null || Boolean(c.placement.claimed_at)} style={{ ...btn(busy !== null), fontSize: 14 }} onClick={() => setDrafting({ ...c.placement, target_domain: c.domain.domain })}>Create outreach draft</button>
+            </div>}
             {c.backlink_match && <div style={{ fontSize: 14, marginBottom: 12 }}>
               <p>A backlink was found, but more than one placement could match it. Review the source page before assigning it to this placement.</p>
               <a href={c.backlink_match.source_url} target="_blank" rel="noreferrer" style={{ color: D.text }}>Review source page</a>
@@ -3864,14 +3895,15 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
                   </button>
                 </>
               ) : (
-                <span style={{ fontSize: 12, color: D.muted }}>
-                  {`Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
+                <span style={{ fontSize: 14, color: D.muted }}>
+                  {c.submission_ambiguity ? "Recording a submission verdict does not reopen acquisition for this domain." : `Domain is ${String(c.domain.agent_state).replace(/_/g, " ")} — a sibling placement is approved or in flight; reject or watch it from the Link Building board`}
                 </span>
               )}
             </div>
           </div>
         );
       })}
+      {drafting && <OutreachDraftModal prospect={drafting} onClose={() => setDrafting(null)} onSaved={() => { setDrafting(null); refresh(); }} />}
     </Card>
   );
 }
