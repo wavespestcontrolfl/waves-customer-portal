@@ -679,7 +679,7 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
 // `customer` = the customers row the billable-amount gate reads; null (the
 // default for the older scenarios) models an unreadable customer, which skips
 // the gate exactly as the make-recurring spawn does.
-function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [], customer = null } = {}) {
+function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow = null, clashDates = [], customer = null, decision = null } = {}) {
   const state = {
     parent: {
       id: 10, customer_id: 5, is_recurring: true, recurring_pattern: 'quarterly',
@@ -771,6 +771,7 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
     // Series-child eligibility read (technician-eligibility.js): the parent's tech is assignable.
     if (table === 'technicians') { if (op === 'first') return { id: data?.id || 't1', employment_status: 'active', field_dispatchable: true }; return []; }
     if (table === 'recurring_plan_alerts') {
+      if (calls.some(c => c[0] === 'whereNotNull' && c[1] === 'resolved_at')) return decision;
       if (op === 'first') return state.alert ? { ...state.alert } : null;
       if (op === 'await') {
         const update = calls.find((c) => c[0] === 'update');
@@ -1034,16 +1035,31 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(state.alert.resolved_at).toBeNull();
   });
 
-  test('a series cancelled before the click is refused under the lock (409), inserting nothing', async () => {
+  test('an explicitly stopped series is refused under the lock (409), inserting nothing', async () => {
     const { state, handler } = alertActionScenario({
       parentOverrides: { status: 'cancelled' },
-      seriesRows: [{ scheduled_date: '2098-07-15', status: 'cancelled' }],
+      decision: { resolved_action: 'cancel_series' },
+      seriesRows: [{ scheduled_date: '2098-04-15', status: 'completed' }, { scheduled_date: '2098-07-15', status: 'cancelled' }],
       alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
     });
     const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
     expect(out.status).toBe(409);
     expect(state.insertedVisits).toHaveLength(0);
     expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test.each(['extend', 'convert_ongoing', 'let_lapse'])('%s preserves an exhausted series with individually cancelled first and last visits', async (action) => {
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { status: 'cancelled' },
+      seriesRows: [
+        { scheduled_date: daysOut(-90), status: 'completed' },
+        { scheduled_date: daysOut(-1), status: 'cancelled' },
+      ],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action, count: 2, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.alert.resolved_at).toBeTruthy();
   });
 
   test.each(['extend', 'convert_ongoing', 'let_lapse'])('%s works when only the anchor was cancelled', async (action) => {
@@ -1214,9 +1230,10 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   const profileResolver = require('../services/service-completion-profiles').resolveCompletionProfileForScheduledService;
   const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   const alert = { id: 1, parentId: 'series-a', customerId: 'customer-a', remainingVisits: 0 };
-  function scenario({ parent = {}, customer = { billing_mode: 'per_application' }, upcoming = 1, lastDate = daysOut(7), completed = true, lastVisit = {} } = {}) {
+  function scenario({ parent = {}, customer = { billing_mode: 'per_application' }, upcoming = 1, lastDate = daysOut(7), completed = true, lastVisit = {}, decision = null } = {}) {
     return makeConn(({ table, calls, op }) => {
       if (op === 'columnInfo') return { recurring_template_overrides: {} };
+      if (table === 'recurring_plan_alerts') return decision;
       if (table === 'customers') {
         if (!customer) return null;
         const row = { id: 'customer-a', active: true, pipeline_stage: 'active_customer', ...customer };
@@ -1266,7 +1283,7 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   });
   test('omits a cancelled series even when older completed appointments remain', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ parent: { status: 'cancelled' }, upcoming: 0,
-      lastVisit: { status: 'cancelled' } }), alert)).toBeNull();
+      lastVisit: { status: 'cancelled' }, decision: { resolved_action: 'cancel_series' } }), alert)).toBeNull();
   });
   test.each(['new_lead', null])('keeps a serviced recurring plan despite stale CRM stage %j', async (pipeline_stage) => {
     expect(await refreshRecurringPlanAlert(scenario({ customer: { pipeline_stage } }), alert))
@@ -1280,7 +1297,7 @@ describe('renewal banner revalidates historical recurring alerts', () => {
     expect(await refreshRecurringPlanAlert(scenario({ lastVisit }), alert))
       .toMatchObject({ remainingVisits: 1 });
     AnnualPrepayRenewals.annualPrepayCoversVisit.mockRejectedValueOnce(new Error('coverage unavailable'));
-    expect(await refreshRecurringPlanAlert(scenario({ lastVisit }), alert)).toBeNull();
+    await expect(refreshRecurringPlanAlert(scenario({ lastVisit }), alert)).rejects.toThrow('coverage unavailable');
   });
   test('an old prepaid anchor cannot hide a later per-application series end', async () => {
     AnnualPrepayRenewals.annualPrepayCoversVisit.mockImplementationOnce(async (visit) => visit?.prepaid_method === 'annual_prepay_invoice');
@@ -1339,10 +1356,35 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   test('does not pair a historical customer identity with a reassigned plan', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ parent: { customer_id: 'customer-b' } }), alert)).toBeNull();
   });
-  test('omits only the affected alert when catalog resolution fails', async () => {
+  test('propagates lookup failures so callers can roll back before handling them', async () => {
     profileResolver.mockRejectedValueOnce(new Error('catalog unavailable'));
-    await expect(refreshRecurringPlanAlert(scenario(), alert)).resolves.toBeNull();
+    await expect(refreshRecurringPlanAlert(scenario(), alert)).rejects.toThrow('catalog unavailable');
     await expect(refreshRecurringPlanAlert(scenario(), { ...alert, id: 2 }))
       .resolves.toMatchObject({ id: 2, remainingVisits: 1 });
+  });
+});
+
+(process.env.DATABASE_URL ? describe : describe.skip)('renewal revalidation savepoint (PostgreSQL)', () => {
+  let conn;
+  beforeAll(() => {
+    const config = require('../knexfile');
+    conn = require('knex')(config.development || config);
+  });
+  afterAll(async () => { if (conn) await conn.destroy(); });
+
+  test('a SQL error rejects the savepoint and leaves the outer transaction usable', async () => {
+    await conn.transaction(async trx => {
+      let queryError;
+      const current = await trx.transaction(async sp => {
+        // Session-local shadow: the production table is never altered. Its
+        // missing id column makes the real revalidation SELECT fail in PG.
+        await sp.raw('CREATE TEMP TABLE scheduled_services (not_an_id integer) ON COMMIT DROP');
+        return refreshRecurringPlanAlert(sp, { id: 1, parentId: 'series-a', customerId: 'customer-a' });
+      }).catch(err => { queryError = err; return null; });
+      expect(current).toBeNull();
+      expect(queryError?.code).toBe('42703');
+      const probe = await trx.raw('SELECT 1 AS usable');
+      expect(probe.rows[0].usable).toBe(1);
+    });
   });
 });
