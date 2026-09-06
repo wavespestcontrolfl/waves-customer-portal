@@ -107,7 +107,9 @@ advice retains its `area_estimated` label.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots
-retain their existing behavior. Lawn PDF render strategy `p4` regenerates
+retain their existing behavior. The optional whole-report AI narrative runs
+only when `droughtSignal` is `true`; otherwise all deterministic report copy
+is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
 older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
