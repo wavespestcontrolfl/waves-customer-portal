@@ -64,7 +64,7 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('sms_log').insert(message);
     result = { dropped: 0, facts: [{ field: 'irrigation_controller_location', value: 'beside the garage',
       quote: 'The controller is beside the garage', duration: 'durable', property_id: propertyId }],
-    obligations: [{ party: 'waves', kind: 'send_estimate', description: 'Send the requested estimate',
+    obligations: [{ party: 'waves', kind: 'send_estimate', description: 'send the estimate',
       quote: 'Please send the estimate', basis: 'request', property_id: propertyId, due_text: null, due_at: null }] };
     context = await loadMessageContext(mockPg, message);
   });
@@ -119,8 +119,8 @@ postgres('SMS operations on PostgreSQL', () => {
     message.message_body = 'Please send the inspection report and the treatment report';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
     const first = { ...result.obligations[0], kind: 'send_report', quote: message.message_body,
-      description: 'Send the inspection report' };
-    result = { dropped: 0, facts: [], obligations: [first, { ...first, description: 'Send the treatment report' }] };
+      description: 'the inspection report' };
+    result = { dropped: 0, facts: [], obligations: [first, { ...first, description: 'the treatment report' }] };
     await recordMessageOperations(mockPg, message, result, context);
     expect(await mockPg('call_commitments')).toHaveLength(2);
   });
@@ -131,6 +131,22 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect(await mockPg('call_commitments')).toHaveLength(0);
   });
+
+  test.each([['call', true], ['call', false], ['email', true], ['email', false]])(
+    'a new-row batch applies %s preference independently of its position (first=%s)', async (value, first) => {
+      const preference = { field: 'contact_preference', value, quote: `I prefer ${value}`,
+        duration: 'durable', property_id: context.properties[0].id };
+      message.message_body += ` I prefer ${value}`;
+      await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+      result.facts = first ? [preference, ...result.facts] : [...result.facts, preference];
+      await recordMessageOperations(mockPg, message, result, context);
+      expect(await mockPg('property_preferences').first()).toMatchObject({
+        contact_preference: value, irrigation_controller_location: 'beside the garage',
+      });
+      expect((await mockPg('sms_log').first()).operational_analysis.facts.every((fact) => fact.outcome === 'applied')).toBe(true);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    },
+  );
 
   test('all cross-channel query shapes execute against the migrated schema', async () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date());
@@ -203,6 +219,27 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(verify).toHaveBeenCalledTimes(1);
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('reading a bell leaves work open and the real notification writer re-alerts after its rolling window', async () => {
+    const actualNotifications = jest.requireActual('../services/notification-service');
+    NotificationService.notifyAdmin.mockImplementation(actualNotifications.notifyAdmin.bind(actualNotifications));
+    result.obligations[0].due_at = new Date(message.created_at.getTime() + 1000).toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const verify = jest.fn().mockResolvedValue({ verdict: 'open' });
+    const now = new Date(message.created_at.getTime() + 2000);
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    const first = await mockPg('notifications').first();
+    expect(first.read_at).toBeNull();
+    await mockPg('notifications').where({ id: first.id }).update({ read_at: now });
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(await mockPg('notifications')).toHaveLength(1);
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    await mockPg('notifications').where({ id: first.id }).update({ created_at: new Date(Date.now() - 25 * 3600000) });
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(await mockPg('notifications')).toHaveLength(2);
+    expect(await mockPg('notifications').whereNull('read_at')).toHaveLength(1);
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
   });
 
   test('suppressed estimate sends and manual acceptance are not delivery witnesses', async () => {

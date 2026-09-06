@@ -7,7 +7,7 @@ const { dispatch } = require('./llm/call');
 const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-commitments');
 const { parseQuotedETDeadline } = require('../utils/datetime-et');
 
-const VERSION = 'sms-operations-v1';
+const VERSION = 'sms-operations-v2';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -49,6 +49,23 @@ const SCHEMA = {
 };
 const validate = new Ajv({ strict: false, allErrors: true }).compile(SCHEMA);
 const normalize = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+// Unlike the call extractor's loose quoteExpressesAction association
+// check, automatic SMS obligations require their typed deliverable in the
+// literal description. Generic "send" cannot establish a report or a call.
+const KIND_EVIDENCE = {
+  send_estimate: /\b(?:estimate|quote|pricing|price|proposal)\b/i,
+  send_appointment_confirmation: /\bconfirm(?:ation)?\b/i,
+  callback: /\b(?:call|phone|ring)\b/i,
+  call_back: /\b(?:call|phone|ring)\b/i,
+  send_report: /\b(?:report|summary)\b/i,
+  send_paperwork: /\b(?:paperwork|form|agreement|contract|document|certificate)\b/i,
+  technician_follow_up: /\b(?:technician|tech|recheck|revisit|visit)\b|\b(?:come|return)\s+(?:back|out|by)\b/i,
+  schedule_visit: /\b(?:schedule|reschedule|appointment|visit|book|booking)\b|\bcome\s+(?:out|by|over)\b/i,
+  send_photos: /\b(?:photos?|pictures?|pics?)\b/i,
+  confirm_date: /\b(?:confirm|date|day|time)\b/i,
+  provide_info: /\b(?:info(?:rmation)?|address|email|number|code|details?)\b/i,
+  make_payment: /\b(?:pay|payment)\b/i,
+};
 
 function explicitContactPreference(quote) {
   const match = /^(?:please )?(?:(?:i|we) )?(?:prefer (?:a )?(text|call|email)|(text|call|email) only|only (text|call|email))(?: please)?[.!]?$/.exec(normalize(quote));
@@ -64,6 +81,7 @@ Obligations:
 - An inbound customer request is Waves-owned even when staff has not acknowledged it. A customer's own promise ("I'll send photos") is customer-owned.
 - An outbound human promise is Waves-owned. Never infer a staff promise from a draft, reaction, automated reminder, or quotation of somebody else's message.
 - Separate distinct deliverables, recipients, services and properties: a report to a realtor and a payment link are two obligations. Use kind=other for invoice questions, payment support, incomplete work, cancellations, missing materials or requests the enumerated kinds do not represent.
+- description MUST be a verbatim phrase from quote naming that specific action/deliverable. Never add a report subtype, service, recipient, or other detail that the quote does not say. For two reports in one quote, use their distinct quoted names; a generic "the report" never becomes two more-specific reports. If the quote does not support an enumerated kind, use other with the quoted wording.
 - Preserve exclusions, partial approvals, dependencies, reported product failures and whether the customer only wants advice. A bare thanks, reaction, spam, or acknowledgment creates no new work.
 - Do not call a reply fulfillment. "I'll send the estimate" still means an estimate is owed.
 - due_text must quote the timing actually stated in the current message. due_at is an ISO timestamp ONLY for an explicitly stated date AND clock time, resolved from that message's timestamp in America/New_York. For tomorrow/afternoon/end of day without a clock time, keep due_at=null. Never invent a default deadline.
@@ -88,6 +106,8 @@ function groundExtraction(parsed, { message, properties = [] }) {
     && (!item.property_id || propertyIds.has(item.property_id));
   const obligations = parsed.obligations.filter((item) => {
     if (!grounded(item) || !kindBelongsToParty(item.party, item.kind)) return false;
+    if (!normalize(item.quote).includes(normalize(item.description))) return false;
+    if (item.kind !== 'other' && !KIND_EVIDENCE[item.kind]?.test(item.description)) return false;
     if (message.direction === 'outbound') return item.party === 'waves' && item.basis === 'promise';
     return item.basis === 'request' ? item.party === 'waves' : item.party === 'customer';
   }).map((item) => {

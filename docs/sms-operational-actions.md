@@ -9,7 +9,8 @@ The existing SMS intake now has an operational extension alongside its voice-tra
 - Extend `call_commitments` with an exclusive SMS source. Existing call readers still join `call_log`, so SMS rows do not enter the Owed/Agent Ops queues.
 - Reuse extraction receipts for retries; persist profile changes, critical audits, obligations and the processed receipt atomically. The existing commitment watcher recovers interrupted intake processing every five minutes; the call lane retains its daily cadence.
 - For explicitly timed overdue SMS obligations, inspect SMS, call transcripts, synchronized email, email delivery records, sent estimates and invoices. A source failure or truncated evidence is unverified, not proof of non-response. Fulfillment requires a grounded, admissible outcome; an acknowledgment, automatic reminder or unrelated invoice cannot complete the work. A text cannot fulfill a promised call.
-- Link admin notifications directly to `/admin/customers?customerId=<customerId>`. Private codes and source quotes stay out of bell previews. Reading a notification does not complete an obligation.
+- Link admin notifications directly to `/admin/customers?customerId=<customerId>`. Private codes and source quotes stay out of bell previews. Reading a notification does not complete an obligation; still-open work re-alerts after a rolling 24-hour window through the existing admin dedupe mechanism.
+- Obligation descriptions quote the customer's/staff's actual words and must name the typed deliverable. Unsupported specifics become review exceptions. SMS/email answers require confirmed delivery; a provider's initial sent status or a Gmail SENT label is context only.
 
 ## Activation
 

@@ -60,18 +60,23 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
 
 async function applyFacts(trx, message, facts, context) {
   const outcomes = [];
+  let persistedCurrent = context.current;
   for (const fact of facts) {
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
     const verdict = duplicateField ? 'conflicting_facts' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
-    const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: context.current?.id || null };
-    const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: context.current?.[fact.field] ?? null });
+    const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
+    const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: persistedCurrent?.[fact.field] ?? null });
     await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: fact.value });
     await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.property_preference.updated',
       resource_type: 'property_preferences', resource_id: target.id,
       metadata: { sms_log_id: message.id, customer_id: message.customer_id, property_id: fact.property_id,
         field: fact.field, extractor_version: VERSION, value_hash: hashExtractionSource(fact.value) } });
-    context.current = { ...target, [fact.field]: fact.value };
+    persistedCurrent = { ...target, [fact.field]: fact.value };
+    // A row created by this batch hydrates DB defaults, not customer
+    // choices. Keep untouched logical fields empty while CAS uses the
+    // actual persisted values under the transaction's row lock.
+    context.current = { ...context.current, id: target.id, [fact.field]: fact.value };
     outcomes.push({ ...fact, outcome: 'applied' });
   }
   return outcomes;
@@ -255,7 +260,8 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
         ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`
         : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`;
       const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
-        { trx, bell: true, dedupeKey, refreshOnDedupe: true, link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}`,
+        { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
+          link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}`,
           metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
             sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
       if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');

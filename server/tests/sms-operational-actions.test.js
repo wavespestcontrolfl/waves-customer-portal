@@ -19,7 +19,7 @@ const source = (message_body, direction = 'inbound') => ({
   created_at: '2040-03-10T15:00:00Z', from_phone: '+12025550101', to_phone: numbers.locations.parrish.number,
 });
 const obligation = (quote, extra = {}) => ({
-  party: 'waves', kind: 'send_estimate', description: 'Send the requested estimate', quote,
+  party: 'waves', kind: 'send_estimate', description: quote, quote,
   basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, ...extra,
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'side of the house',
@@ -75,7 +75,7 @@ describe('SMS operational evidence and ownership', () => {
     const message = source('Please send the report to the realtor and send me a payment link');
     const result = groundExtraction(extracted([
       obligation('send the report to the realtor', { kind: 'send_report', description: 'Send the report to the realtor' }),
-      obligation('send me a payment link', { kind: 'other', description: 'Send the customer a payment link' }),
+      obligation('send me a payment link', { kind: 'other', description: 'send me a payment link' }),
     ]), { message, properties });
     expect(result.obligations).toHaveLength(2);
   });
@@ -83,7 +83,7 @@ describe('SMS operational evidence and ownership', () => {
   test('ungrounded due wording cannot establish a deadline', () => {
     const message = source('Please send the report');
     const result = groundExtraction(extracted([obligation(message.message_body, {
-      due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+      kind: 'send_report', due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
     })]), { message, properties });
     expect(result.obligations[0]).toMatchObject({ due_text: null, due_at: null });
   });
@@ -103,6 +103,29 @@ describe('SMS operational evidence and ownership', () => {
       fact({ field: 'lockbox_code', quote: message.message_body, value: '#AB12*' }),
     ]), { message, properties });
     expect(result.facts.map((f) => f.value)).toEqual(['#aB12*']);
+  });
+
+  test('generic report wording cannot create invented report subtypes or a callback', () => {
+    const message = source('Please send the report');
+    const result = groundExtraction(extracted([
+      obligation(message.message_body, { kind: 'send_report', description: 'the inspection report' }),
+      obligation(message.message_body, { kind: 'send_report', description: 'the treatment report' }),
+      obligation(message.message_body, { kind: 'callback' }),
+      obligation(message.message_body, { kind: 'send_paperwork' }),
+      obligation(message.message_body, { kind: 'send_report', description: 'send the report' }),
+    ]), { message, properties });
+    expect(result.obligations.map((item) => [item.kind, item.description])).toEqual([['send_report', 'send the report']]);
+    expect(result.dropped).toBe(4);
+  });
+
+  test('two explicitly named reports retain their separate grounded descriptions', () => {
+    const message = source('Please send the inspection report and the treatment report');
+    const result = groundExtraction(extracted([
+      obligation(message.message_body, { kind: 'send_report', description: 'the inspection report' }),
+      obligation(message.message_body, { kind: 'send_report', description: 'the treatment report' }),
+    ]), { message, properties });
+    expect(result.obligations).toHaveLength(2);
+    expect(result.dropped).toBe(0);
   });
 
   test.each([['Text only please', 'text'], ['I prefer a call.', 'call'], ['Email only', 'email']])(
@@ -222,6 +245,19 @@ describe('fulfillment proof', () => {
   test('a text cannot fulfill a promised phone call', () => {
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, { kind: 'callback' })).toBe(false);
     expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 0 }, { kind: 'callback' })).toBe(false);
+  });
+
+  test('provider acceptance or a SENT label cannot close an answer before delivery succeeds', () => {
+    const answer = { kind: 'other' };
+    const sms = { type: 'sms', message_type: 'manual' };
+    const email = { type: 'email_delivery', sent_at: '2040-03-11T15:00:00Z' };
+    expect(admissibleWitness({ ...sms, status: 'sent' }, answer)).toBe(false);
+    expect(admissibleWitness({ ...sms, status: 'undelivered' }, answer)).toBe(false);
+    expect(admissibleWitness({ ...sms, status: 'delivered' }, answer)).toBe(true);
+    expect(admissibleWitness({ ...email, status: 'sent' }, answer)).toBe(false);
+    expect(admissibleWitness({ ...email, status: 'bounced', bounced_at: '2040-03-11T15:01:00Z' }, answer)).toBe(false);
+    expect(admissibleWitness({ ...email, status: 'delivered' }, answer)).toBe(true);
+    expect(admissibleWitness({ type: 'email', label_ids: ['SENT'] }, answer)).toBe(false);
   });
 
   test('a visit needs post-request scheduling or completion activity', () => {
