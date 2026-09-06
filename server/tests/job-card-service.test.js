@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/epa-product-label', () => ({ ...jest.requireActual('../services/epa-product-label'), currentEpaSourceStatus: jest.fn() }));
 
 const jobCard = require('../services/job-card');
 
@@ -650,6 +651,24 @@ describe('mixForProduct', () => {
   const at = { now: new Date('2026-09-04T12:00:00Z') };
 
   const approve = () => jest.fn().mockResolvedValue({ blocks: [], warnings: [] });
+
+  test.each([
+    ['2026-09-05', 27.4, -82.5, false, 'Judged on the visit day'],
+    ['2026-09-04', null, null, false, 'No property pin on file — no forecast'],
+    ['2026-09-04', 27.4, -82.5, true, 'Current EPA label could not be verified — try again'],
+  ])('mix source checks run only when the verdict can use them (%s, %s)', async (date, lat, lng, shouldCheck, reason) => {
+    const sourceCheck = require('../services/epa-product-label').currentEpaSourceStatus;
+    sourceCheck.mockReset().mockResolvedValue('unavailable');
+    process.env.GATE_LABEL_PIPELINE = 'true';
+    try {
+      const reviewed = { ...product, name: 'Synthetic label product', epa_reg_number: '123-456', formulation: 'SC' };
+      reviewed.label_weather_review = { active: { status: 'approved', source: { registration: '123-456' }, productSnapshot: require('../services/product-label-weather').labelProductSnapshot(reviewed), facts: {} } };
+      const dbh = makeDb({ scheduled_services: [{ ...visit, scheduled_date: date, latitude: lat, longitude: lng }], products_catalog: [reviewed], equipment_calibrations: [live] });
+      const out = await jobCard.mixForProduct('p1', 1, { serviceId: 'svc1', dbh, ...at, deps: { getHourly: jest.fn().mockResolvedValue([]) } });
+      expect(sourceCheck).toHaveBeenCalledTimes(shouldCheck ? 1 : 0);
+      expect(out.sprayCheck).toMatchObject({ verdict: 'unknown', reason });
+    } finally { delete process.env.GATE_LABEL_PIPELINE; }
+  });
 
   test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });

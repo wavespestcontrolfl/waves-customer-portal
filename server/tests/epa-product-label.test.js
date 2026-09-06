@@ -54,6 +54,28 @@ test('EPA body-stream failure stays operational and retryable', async () => {
   await expect(findEpaLabel('123-456')).rejects.toMatchObject({ statusCode: 502, isOperational: true });
 });
 
+test.each(['<html>upstream error</html>', '{"items":', '{"items":{}}'])('malformed EPA payload is operational (%s)', async payload => {
+  jest.spyOn(global, 'fetch').mockResolvedValue(new Response(payload));
+  await expect(findEpaLabel('123-456')).rejects.toMatchObject({ statusCode: 502, isOperational: true });
+});
+
+test('a malformed PDF is a document-review error', async () => {
+  jest.spyOn(global, 'fetch').mockResolvedValue(new Response('%PDF-1.7\ninvalid document'));
+  await expect(downloadEpaLabel(selectEpaSource({ items: [row()] }, '123-456'))).rejects.toMatchObject({ statusCode: 422, isOperational: true });
+});
+
+test('a successful forced source check replaces cached unavailability immediately', async () => {
+  const pdf = await PDFDocument.create(); pdf.setTitle('Synthetic cache refresh fixture'); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
+  const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: require('crypto').createHash('sha256').update(bytes).digest('hex') };
+  jest.spyOn(Date, 'now').mockReturnValue(4000000);
+  const fetched = jest.spyOn(global, 'fetch').mockRejectedValue(new TypeError('network unavailable'));
+  expect(await currentEpaSourceStatus(source)).toBe('unavailable');
+  fetched.mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [row()] }) : bytes));
+  expect(await currentEpaSourceStatus(source, { refresh: true })).toBe('current');
+  expect(await currentEpaSourceStatus(source)).toBe('current');
+  expect(fetched).toHaveBeenCalledTimes(3);
+});
+
 test('source checks coalesce, then invalidate a superseded label after at most 60 seconds', async () => {
   const pdf = await PDFDocument.create(); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
   const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: require('crypto').createHash('sha256').update(bytes).digest('hex') };

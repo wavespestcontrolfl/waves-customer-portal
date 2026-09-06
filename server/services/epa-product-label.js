@@ -60,8 +60,12 @@ async function downloadEpaLabel(source) {
   }
   const bytes = await readBounded(source.url, MAX_PDF_BYTES);
   if (bytes.subarray(0, 5).toString('ascii') !== '%PDF-') throw labelError('The EPA source did not return a PDF.');
-  const pdf = await PDFDocument.load(bytes, { updateMetadata: false });
-  const pageCount = pdf.getPageCount();
+  let pageCount;
+  try {
+    const pdf = await PDFDocument.load(bytes, { updateMetadata: false });
+    pageCount = pdf.getPageCount();
+  }
+  catch { throw labelError('The EPA PDF could not be read. Review the source manually.'); }
   if (!pageCount || pageCount > 100) throw labelError('This document needs manual review; the supported limit is 100 pages.');
   return { bytes, pageCount, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
@@ -71,7 +75,11 @@ async function findEpaSource(registration) {
     throw labelError('An exact two-part EPA registration is required. Transferred, distributor, and exempt products need manual source review.');
   }
   const bytes = await readBounded(`https://ordspub.epa.gov/ords/pesticides/cswu/ppls/${registration}`, 1024 * 1024);
-  return selectEpaSource(JSON.parse(bytes.toString('utf8')), registration);
+  try { return selectEpaSource(JSON.parse(bytes.toString('utf8')), registration); }
+  catch (err) {
+    if (err.isOperational) throw err;
+    throw labelError('EPA source is unavailable. Try again later.', 502);
+  }
 }
 
 async function findEpaLabel(registration) {
@@ -79,10 +87,10 @@ async function findEpaLabel(registration) {
   return { source, ...await downloadEpaLabel(source) };
 }
 
-async function currentEpaSourceStatus(source) {
+async function currentEpaSourceStatus(source, { refresh = false } = {}) {
   const key = `${source?.registration}:${source?.filename}:${source?.sha256}`;
   const cached = sourceChecks.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+  if (!refresh && cached && cached.expiresAt > Date.now()) return cached.promise;
   const promise = (async () => {
     try {
       const latest = await findEpaSource(source?.registration);

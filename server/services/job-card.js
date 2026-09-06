@@ -1574,11 +1574,16 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   const coords = propertyCoords(svc.latitude, svc.longitude);
   const { isToday, hourly } = await forecastAt({ coords, scheduledDate: etCalendarDayOf(svc.scheduled_date || now), now, deps });
   // Limits are judged from the appointment start, as on the card.
-  const labelSources = await checkReviewedWeatherSources([product]);
-  const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
-  const sprayCheck = !isToday
-    ? { verdict: 'unknown', reason: 'Judged on the visit day' }
-    : (!coords ? { verdict: 'unknown', reason: 'No property pin on file — no forecast' } : { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason });
+  let sprayCheck;
+  if (!isToday) {
+    sprayCheck = { verdict: 'unknown', reason: 'Judged on the visit day' };
+  } else if (!coords) {
+    sprayCheck = { verdict: 'unknown', reason: 'No property pin on file — no forecast' };
+  } else {
+    const labelSources = await checkReviewedWeatherSources([product]);
+    const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
+    sprayCheck = { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason };
+  }
   // Withhold reasons in guard order — the first that applies wins; the
   // catalog contract (label_verified_at) and a spray Hold sit among them.
   const withheld = [

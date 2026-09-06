@@ -7,7 +7,7 @@ const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { recordAuditEvent } = require('./audit-log');
-const { findEpaLabel, labelError } = require('./epa-product-label');
+const { findEpaLabel, currentEpaSourceStatus, labelError } = require('./epa-product-label');
 const { WEATHER_FIELDS, labelProductSnapshot, sameLabelProduct, reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
 
 const PROMPT_VERSION = 'epa_weather_v1';
@@ -155,8 +155,9 @@ async function decideLabelReview(productId, actorId, { candidateId, decision, id
   const product = await productById(productId);
   const draft = currentDraft(product, candidateId, decision);
   if (decision === 'approve') {
-    const latest = await findEpaLabel(draft.source.registration);
-    if (latest.source.filename !== draft.source.filename || latest.sha256 !== draft.source.sha256) throw labelError('The source document changed. Extract it again before approval.', 409);
+    const sourceStatus = await currentEpaSourceStatus(draft.source, { refresh: true });
+    if (sourceStatus === 'unavailable') throw labelError('EPA source is unavailable. Try again later.', 502);
+    if (sourceStatus !== 'current') throw labelError('The source document changed. Extract it again before approval.', 409);
   }
   return db.transaction(async (trx) => {
     const locked = await productById(productId, trx, true);

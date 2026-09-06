@@ -84,7 +84,7 @@ test('review responses distinguish stored approval from currently effective evid
 test('source changes or product changes block approval', async () => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   const body = { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true };
-  findEpaLabel.mockResolvedValueOnce({ source: { filename: review.draft.source.filename }, sha256: 'different-document' });
+  currentEpaSourceStatus.mockResolvedValueOnce('superseded');
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, body)).rejects.toMatchObject({ statusCode: 409 });
   currentEpaSourceStatus.mockResolvedValue('current');
   row.epa_reg_number = '123-457';
@@ -100,8 +100,16 @@ test('stale extraction never overwrites a concurrent catalog edit', async () => 
 
 test('a newly published EPA filename blocks approval even when the old PDF checksum still matches', async () => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
-  findEpaLabel.mockResolvedValueOnce({ source: { filename: '000123-00456-20260202.pdf' }, sha256: 'source-hash' });
+  currentEpaSourceStatus.mockResolvedValueOnce('superseded');
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true })).rejects.toMatchObject({ statusCode: 409 });
+  expect(currentEpaSourceStatus).toHaveBeenCalledWith(review.draft.source, { refresh: true });
+});
+
+test('EPA unavailability during uncached approval returns a retryable error without activating', async () => {
+  const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  currentEpaSourceStatus.mockResolvedValueOnce('unavailable');
+  await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true })).rejects.toMatchObject({ statusCode: 502, isOperational: true });
+  expect(row.label_weather_review.active).toBeUndefined();
 });
 
 test.each(['superseded', 'unavailable'])('approved evidence becomes inactive when EPA source is %s without any catalog edit', async status => {
