@@ -37,7 +37,7 @@ function serviceLocationSelects(db) {
   ];
 }
 
-async function resolveServiceLocation(row, addressOverride) {
+async function resolveServiceLocation(row, addressOverride, { cacheOnly = false } = {}) {
   const { buildAddress, geocodeAddress } = require('../geocoder');
   // Legacy ranged searches accept a free-form address override. Arrival
   // callers pass only the stored row, so they cannot certify a client pin.
@@ -47,11 +47,28 @@ async function resolveServiceLocation(row, addressOverride) {
     && Number(row.lat) !== 0 && Number(row.lng) !== 0;
   // The existing geocoder rejects partial, coarse, and out-of-area results
   // and caches by address. Never persist a pin during an advisory lookup.
-  const pin = hasPin ? row : (address ? await geocodeAddress(address) : null);
+  const pin = hasPin ? row : (address ? await geocodeAddress(address, { cacheOnly }) : null);
   return {
     lat: pin?.lat ?? null, lng: pin?.lng ?? null, address,
     source: hasPin ? 'visit_stamp' : (pin ? 'address_geocoded_now' : null),
   };
+}
+
+// Call before acquiring scheduling locks. One attempt per missing address
+// also bounds transient provider failures across a long recurring series.
+async function preloadServiceLocations(conn, serviceIds) {
+  const { buildAddress } = require('../geocoder');
+  const rows = await conn('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.id', serviceIds)
+    .select(...serviceLocationSelects(conn));
+  const attempted = new Set();
+  for (const row of rows) {
+    const address = buildAddress(row);
+    if (attempted.has(address)) continue;
+    const location = await resolveServiceLocation(row);
+    if (location.source !== 'visit_stamp') attempted.add(address);
+  }
 }
 
 /**
@@ -75,4 +92,4 @@ function dayStopsQuery(db, { dateStr, technicianId = null, excludeStatuses, sele
     .select(...select);
 }
 
-module.exports = { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation };
+module.exports = { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation, preloadServiceLocations };

@@ -61,7 +61,7 @@ async function loadArrivalRouteContext({
     ? (Object.prototype.hasOwnProperty.call(changes, 'technician_id') ? changes.technician_id : stored.technician_id)
     : technicianId;
   const target = { ...stored, ...changes, technician_id: techId, scheduled_date: date };
-  const location = await resolveServiceLocation(target);
+  const location = await resolveServiceLocation(target, undefined, { cacheOnly: conn.isTransaction === true });
   target.lat = location.lat;
   target.lng = location.lng;
   if (dateOnly(stored.scheduled_date) !== date || (stored.technician_id || null) !== (techId || null)) {

@@ -8528,6 +8528,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       delete updates.zone;
       delete updates.route_order;
     }
+    const occupancyRouteTouched = updates.scheduled_date !== undefined
+      || updates.window_start !== undefined
+      || updates.window_end !== undefined
+      || updates.estimated_duration_minutes !== undefined
+      || (useArrivalWindows && (assignmentShouldRun || updates.route_order !== undefined));
+    // Warm only the destinations this save will probe. The locked reads use
+    // the geocoder's existing address cache and cannot wait on Google.
+    if (useArrivalWindows && (occupancyRouteTouched || addressPlan)) {
+      const { preloadServiceLocations, resolveServiceLocation } = require('../services/scheduling/day-stops');
+      if (addressPlan) {
+        const property = await db('customer_properties').where({
+          id: addressPlan.propertyId, customer_id: addressPlan.anchor.customer_id, active: true,
+        }).first();
+        if (property) await resolveServiceLocation({ ...property, lat: property.latitude, lng: property.longitude });
+      } else {
+        await preloadServiceLocations(db, assignmentPlan?.targetIds || [req.params.id]);
+      }
+    }
     let addressUpdatedIds = [];
     await db.transaction(async (trx) => {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
@@ -8549,11 +8567,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Duration counts as a window edit: the shared predicate derives the
       // occupied block from estimated_duration_minutes when window_end is
       // NULL, so a longer duration can widen occupancy too.
-      const occupancyRouteTouched = updates.scheduled_date !== undefined
-        || updates.window_start !== undefined
-        || updates.window_end !== undefined
-        || updates.estimated_duration_minutes !== undefined
-        || (useArrivalWindows && (assignmentShouldRun || updates.route_order !== undefined));
       const occupancyDateKey = updates.scheduled_date !== undefined
         ? dateOnly(updates.scheduled_date)
         : dateOnly(commsPeek?.scheduled_date);
@@ -8645,7 +8658,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         || (isEnabled('editApptPriceServiceScope')
           && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key)));
       if (wantsExistingPlanMutation && commsPeek) {
-        await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
+        // Extension can hold maintenance while grouping takes a tech-day
+        // fence. Never wait on that reverse order with our fences held.
+        await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id, false);
       }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       // Payer activation shares comms → combined → customer/appointment rows
@@ -11654,11 +11669,18 @@ router.post('/:id/invoice', async (req, res, next) => {
 // don't import each other), and the recurring-alert action route. Key
 // derivation must stay byte-identical across all of them or they silently
 // stop contending.
-async function acquireRecurringSeriesMaintenanceLock(conn, parentId) {
-  await conn.raw(
-    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+async function acquireRecurringSeriesMaintenanceLock(conn, parentId, wait = true) {
+  const result = await conn.raw(
+    wait
+      ? 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))'
+      : 'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
     ['recurring-series-maintenance', String(parentId)],
   );
+  if (!wait && result.rows[0]?.locked !== true) {
+    throw Object.assign(httpError(409, 'This plan is being updated — reload and save again.'), {
+      code: 'VISIT_CHANGED_RETRY',
+    });
+  }
 }
 
 // Latest LIVE visit of the BASE recurring series — the anchor every extension

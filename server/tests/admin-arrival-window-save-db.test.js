@@ -62,6 +62,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { gates } = require('../config/feature-gates');
 const router = require('../routes/admin-schedule');
 const { maybeGroupRow, dateOnly } = require('../services/visit-groups');
+const { geocodeAddress } = require('../services/geocoder');
 const connection = process.env.ARRIVAL_ROUTE_TEST_DATABASE_URL;
 const describeDb = connection ? describe : describe.skip;
 const DAY = etDateString(addETDays(new Date(), 10));
@@ -105,6 +106,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     jest.clearAllMocks();
     mockBeforeSave = null;
     maybeGroupRow.mockReset().mockResolvedValue(null);
+    geocodeAddress.mockReset().mockResolvedValue(null);
     process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
     mockConn = await database.transaction();
     for (const table of ['scheduled_services', 'customers', 'technicians', 'customer_properties', 'service_visits']) {
@@ -183,6 +185,54 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
     const child = await mockConn('scheduled_services').where({ id: CHILD }).first();
     expect(dateOnly(child.scheduled_date)).toBe(rewrittenDay);
     expect(child.technician_id).toBe(TECH);
+  });
+
+  test('busy series maintenance returns a retry before any reassignment instead of waiting with route locks', async () => {
+    const maintenance = await database.transaction();
+    try {
+      await maintenance.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['recurring-series-maintenance', PARENT]);
+      // A blocking implementation would time out and return a PG error.
+      await mockConn.raw("SET LOCAL lock_timeout = '250ms'");
+      const result = await save({ technicianId: TECH, assignmentScope: 'series' });
+      expect(result.status).toBe(409);
+      expect(result.body.code).toBe('VISIT_CHANGED_RETRY');
+      expect((await mockConn('scheduled_services').where({ id: PARENT }).first()).technician_id).toBe(OLD_TECH);
+    } finally { await maintenance.rollback(); }
+  });
+
+  test('a missing property pin is geocoded before scheduling locks and only read from cache inside the save', async () => {
+    await mockConn('customer_properties').where({ id: PROPERTY }).update({ latitude: null, longitude: null });
+    const events = [];
+    const listener = query => { if (query.sql.includes('pg_advisory_xact_lock')) events.push('lock'); };
+    const cache = new Map();
+    geocodeAddress.mockImplementation(async (address, { cacheOnly }) => {
+      events.push(cacheOnly ? 'cache' : 'provider');
+      if (!cacheOnly) cache.set(address, { lat: 27.55, lng: -82.4 });
+      return cache.get(address) || null;
+    });
+    mockConn.on('query', listener);
+    try {
+      expect((await save({ propertyId: PROPERTY })).status).toBe(200);
+    } finally { mockConn.removeListener('query', listener); }
+    expect(events.filter(event => event === 'provider')).toHaveLength(1);
+    expect(events.indexOf('provider')).toBeLessThan(events.indexOf('lock'));
+    expect(events.indexOf('cache')).toBeGreaterThan(events.indexOf('lock'));
+    expect(await mockConn('scheduled_services').where({ id: CHILD }).first('lat', 'lng'))
+      .toEqual({ lat: null, lng: null });
+  });
+
+  test('an unavailable address is attempted once for the whole series and remains advisory', async () => {
+    await mockConn('customers').where({ id: CUSTOMER }).update({
+      address_line1: '100 Fixture Series Street', city: 'Parrish', state: 'FL', zip: '34219',
+    });
+    await mockConn('scheduled_services').whereIn('id', [PARENT, CHILD]).update({ lat: null, lng: null });
+    const result = await save({ technicianId: TECH, assignmentScope: 'series' });
+    expect(result.status).toBe(200);
+    expect(result.body.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining(DAY), expect.stringContaining(LATER),
+    ]));
+    expect(geocodeAddress.mock.calls.filter(([, options]) => options.cacheOnly === false)).toHaveLength(1);
   });
 
   test('an address-only series edit warns for a later route and keeps other arrival promises unchanged', async () => {

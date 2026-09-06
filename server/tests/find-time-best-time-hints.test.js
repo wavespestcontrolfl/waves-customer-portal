@@ -253,7 +253,7 @@ test('a divergent coordless stamp geocodes the STAMPED address, not the primary'
   geocodeAddress.mockResolvedValue({ lat: 27.5, lng: -82.4 });
   const res = await post({ hint: true, serviceId: 'svc-9', customerId: 'c9', durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
   expect(res.status).toBe(200);
-  expect(geocodeAddress).toHaveBeenCalledWith('9 Rental Way, Parrish, FL, 34219');
+  expect(geocodeAddress).toHaveBeenCalledWith('9 Rental Way, Parrish, FL, 34219', { cacheOnly: false });
   expect((await res.json()).target.source).toBe('address_geocoded_now');
   const opts = findAvailableSlots.mock.calls[0][0];
   expect([opts.lat, opts.lng]).toEqual([27.5, -82.4]);
