@@ -555,7 +555,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // satisfy the dry regex (codex P1 r11), alongside the r8 removals of
   // 'moisture'/'irrigation' (both appear in wet observations and flipped a
   // confirmed-overwatering read into a dry-coverage story).
-  const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`
+  const obsText = `${lawnAssessment.observations || ''}. ${lawnAssessment.aiSummary || ''}`
     .toLowerCase()
     .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '');
   // DRY-specific signals only — not generic "stress" (heat/insect).
@@ -566,7 +566,15 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // Tan color alone can be ordinary edge wear; it does not establish dryness.
   // Preserve the vision scorer's explicit under-watering diagnosis without
   // treating tan color or curling alone as moisture evidence.
-  const drySignal = /\b(dry|drier|drought|wilt|under[\s-]?water(?:ing|ed))\b/.test(obsText)
+  // Check each underwatering mention locally: a negated diagnosis must not
+  // create advice or suppress a separate affirmative observation.
+  const underwateringSignal = [...obsText.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
+    const before = obsText.slice(0, match.index);
+    const after = obsText.slice(match.index + match[0].length);
+    return !/\b(?:no|not|never|without|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|free of|absence of)\s+(?:(?!(?:but|however|yet|while|whereas)\b)[a-z'’-]+\s+){0,3}$/.test(before)
+      && !/^\s+(?:(?:is|was|are|were)\s+)?(?:absent|(?:not|never)\s+(?:seen|observed|visible|present|evident)|(?:isn['’]t|wasn['’]t)\s+(?:seen|observed|visible|present|evident))\b/.test(after);
+  });
+  const drySignal = underwateringSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
     // Reversed order — "irrigation is uneven across the west side"
     // (codex P2 r36). Bounded gap so the subject and qualifier stay in

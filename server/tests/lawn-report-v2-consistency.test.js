@@ -231,6 +231,21 @@ describe('Tan edge wear does not establish a watering problem', () => {
   });
 
   test.each([
+    'No signs of underwatering are visible.',
+    'The lawn is not under-watered.',
+    'No current signs of under watering are visible.',
+    'The turf is without signs of underwatering.',
+    'The lawn isn’t under-watered.',
+    'Underwatering was not observed.',
+    'Underwatering is absent.',
+  ])('does not invent sprinkler advice from %s', observation => {
+    const report = renderObservation(observation);
+    expect(report.water.coverageWatch).toBe(false);
+    expect(report.insights.some(card => card.category === 'water')).toBe(false);
+    expect(report.smsSummary).not.toMatch(/sprinkler|watching watering/i);
+  });
+
+  test.each([
     'Tan patches near the pavement look dry.',
     'Tan blades and curling point to under-watering.',
     'Tan blades and curling point to underwatering.',
@@ -238,8 +253,24 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'The tan turf looks under-watered.',
     'Tan patches suggest uneven irrigation coverage.',
     'No weeds were seen and uneven irrigation coverage is visible near the driveway.',
+    'No signs of underwatering in the center, but the edges are under-watered.',
+    'The edges are under-watered. No weeds were seen.',
+    'No weeds were seen and the edges look under-watered.',
+    'No underwatering in the center; dry patches remain near the pavement.',
   ])('preserves moisture evidence in %s', observation => {
     const report = renderObservation(observation);
+    expect(report.water.coverageWatch).toBe(true);
+    expect(report.insights.some(card => card.category === 'water')).toBe(true);
+  });
+
+  test('keeps an affirmative summary independent of a negated observation', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: baseAssessment({
+        ...CASES.healthy,
+        observations: 'No weeds',
+        aiSummary: 'Underwatering is visible near the pavement.',
+      }),
+    });
     expect(report.water.coverageWatch).toBe(true);
     expect(report.insights.some(card => card.category === 'water')).toBe(true);
   });
