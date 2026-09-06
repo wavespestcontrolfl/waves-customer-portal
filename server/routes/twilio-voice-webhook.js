@@ -133,12 +133,47 @@ function spokenCallerName(customer) {
 // by name; everyone else is announced as an unknown number (the digits
 // themselves are intentionally not read aloud).
 function connectingAnnouncement(row) {
-  const name = String(parseJsonObject(row?.metadata).screen_caller_name || '')
+  const meta = parseJsonObject(row?.metadata);
+  const name = String(meta.screen_caller_name || '')
     .replace(/[^\p{L}\p{N}\s.'’-]/gu, '')
     .trim()
     .slice(0, 60);
+  // Sandy PR 2A: a transferred call carries its ≤20-word whisper — read from
+  // the persisted packet only, spoken only here (after press-1; the screen
+  // leg stays generic). No packet ⇒ today's line.
+  // A transfer whose BOTH packet writes failed still carries the outcome
+  // stamp: the generic whisper prompts the recap (codex r1 P2).
+  if ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || row?.call_outcome === 'ai_transferred') {
+    const { transferWhisper } = require('../services/voice-agent/relay-transfer');
+    return transferWhisper(meta.relay_handoff, name);
+  }
   if (name) return `Connecting your call from ${name}.`;
   return 'Connecting your call from an unknown number.';
+}
+
+/**
+ * The staff simul-ring: <Dial record> with the press-1 screen on every leg
+ * and /call-complete as the action. Shared by /voice and the PR 2A transfer
+ * in /relay-complete — one shape, so the screen URLs never diverge.
+ */
+function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec, { language = null } = {}) {
+  const dial = twiml.dial({
+    record: 'record-from-answer-dual',
+    recordingStatusCallback: '/api/webhooks/twilio/recording-status',
+    recordingStatusCallbackEvent: 'completed',
+    timeout: ringTimeoutSec,
+    // A Spanish caller's selection rides the action (the ?lang=es the relay
+    // leg already uses), so an unanswered ring's voicemail stays Spanish.
+    action: /^es/i.test(String(language || '')) ? '/api/webhooks/twilio/call-complete?lang=es' : '/api/webhooks/twilio/call-complete',
+    answerOnBridge: true,
+  });
+  for (const number of forwardNumbers) {
+    dial.number({
+      url: '/api/webhooks/twilio/inbound-forward-screen',
+      method: 'POST',
+    }, number);
+  }
+  return dial;
 }
 
 async function fetchTwilioCall(callSid) {
@@ -285,8 +320,23 @@ function builtinTranscriptMayReplace(row) {
   if (!row) return false;
   if (!row.transcription) return true;
   const provider = row.transcription_provider ? String(row.transcription_provider) : null;
-  return !provider || provider === 'twilio_builtin';
+  if (!provider || provider === 'twilio_builtin') return true;
+  // Sandy PR 2A: a transferred call's row may still carry the relay's OWN
+  // transcript when the recording's built-in text arrives (Sandy closed
+  // before the unanswered ring reached voicemail). That text is the only
+  // recording transcript the row will get if the providers fail — and the
+  // AI segment is durable in metadata.relay_transcript (end()'s stash), from
+  // which the processor rebuilds the composite. Never for a non-transfer.
+  return provider === 'conversation_relay' && isTransferredRow(row) && relayTranscriptStashed(row);
 }
+
+/** The AI segment is safe in metadata.relay_transcript (PR 2A). */
+function relayTranscriptStashed(row) {
+  const meta = parseJsonObject(row && row.metadata);
+  return Boolean(meta.relay_transcript && typeof meta.relay_transcript === 'object' && String(meta.relay_transcript.text || '').trim());
+}
+// The SQL twin of the rule above, re-checked in the write.
+const RELAY_STASHED_TRANSFER_SQL = "(transcription_provider = 'conversation_relay' AND COALESCE(metadata->'relay_transcript'->>'text', '') <> '' AND (metadata->'relay_handoff' IS NOT NULL OR COALESCE(metadata->>'relay_transfer_ring_at', '') <> '' OR call_outcome = 'ai_transferred'))";
 
 // A second recording that arrived while the row's recording was load-bearing
 // (decideRecordingAttach → park). Nothing is lost: the recording rides in
@@ -722,6 +772,130 @@ function queueVoiceMessageSync(callSid) {
 
 const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
+/**
+ * Sandy PR 2A: the relay ended with reason 'transfer' — hand the caller to
+ * the staff simul-ring. The outcome stamp is idempotent (the tool already
+ * wrote ai_transferred with the packet; this covers a packet write that
+ * never landed — still terminal for the socket's reconcile). No summary and
+ * no id ride the URL; the whisper is read from the row after press-1. A
+ * sandbox call (?sandbox=1) never rings staff: the transfer is on its own
+ * row already, the leg simply ends. No staff numbers ⇒ voicemail, never a
+ * stranded caller.
+ */
+async function appendRelayTransfer(req, twiml, callSid, handoff = {}) {
+  if ((req.query || {}).sandbox === '1') {
+    logger.info(`[relay-complete] sandbox transfer for ${maskSid(callSid)} — hanging up (no staff ring on the sandbox)`);
+    twiml.hangup();
+    return;
+  }
+  // The frame names the socket's claim owner (owner-bound writes below).
+  const owner = typeof handoff.owner === 'string' && handoff.owner ? handoff.owner.slice(0, 128) : null;
+  // The one voicemail stamp every fallback on this callback takes: owner +
+  // eligible-state fenced, so a reconnect that took the row meanwhile keeps
+  // its own reconcile (hook / codex r3 P1).
+  const stampTransferVoicemail = () => db('call_log').where('twilio_call_sid', callSid)
+    .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
+    .where((q) => q.whereNull('call_outcome').orWhere('call_outcome', 'ai_transferred'))
+    .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() });
+  if (callSid) {
+    // ONE staff ring per call, claimed atomically: Twilio may retry this
+    // action callback, and every retry would otherwise render a fresh
+    // <Dial> (hook P1). The claim stamps metadata.relay_transfer_ring_at
+    // and, in the same statement, the ai_transferred outcome when the row
+    // is not already terminal (the tool normally wrote it; this covers a
+    // packet write that never landed). 0 rows = already rung ⇒ a bare
+    // terminal response. BOUNDED: a stalled pool may never hold the TwiML
+    // past Twilio's webhook timeout (codex r1 P1) — and a claim that did not
+    // CONFIRM (timeout / error) falls to voicemail, never to a ring that a
+    // retry could duplicate (hook P1): the one-ring guarantee needs a
+    // durable claim, and voicemail is the non-duplicating fallback every
+    // other relay failure already takes.
+    const { RELAY_TERMINAL_OUTCOMES } = require('../services/voice-agent/relay-protocol');
+    // OWNER-BOUND (hook P1): the frame names the socket's claim owner; a
+    // row now owned by a reconnect (or claimed while this frame says
+    // unclaimed) matches 0 rows, so a superseded socket cannot ring staff.
+    const claimPromise = db('call_log').where('twilio_call_sid', callSid)
+        .whereRaw("COALESCE(metadata->>'relay_transfer_ring_at', '') = ''")
+        .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [owner])
+        // A row already sent to voicemail (the fallback below, or a failed
+        // session) is never rung: a Twilio retry after that fallback would
+        // otherwise match again and Dial staff over the recorder (codex r4 P1).
+        .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['voicemail', 'relay_failed']))
+        .update({
+          call_outcome: db.raw('CASE WHEN call_outcome IS NULL OR call_outcome NOT IN (?, ?, ?) THEN ? ELSE call_outcome END', [...RELAY_TERMINAL_OUTCOMES, 'ai_transferred']),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transfer_ring_at', ?::text)", [new Date().toISOString()]),
+          updated_at: new Date(),
+        })
+        .catch((err) => { logger.warn(`[relay-complete] transfer ring claim failed for ${maskSid(callSid)}: ${err.message}`); return 'error'; });
+    const claimed = await withDeadline(claimPromise, STAMP_DEADLINE_MS, 'timeout');
+    if (claimed === 0) {
+      logger.warn(`[relay-complete] transfer ring already claimed for ${maskSid(callSid)} — retry gets a bare response`);
+      return;
+    }
+    if (!(Number(claimed) > 0)) {
+      // The recorder's action is /voicemail-complete, which never
+      // re-classifies: stamp voicemail here (bounded, best-effort) so a
+      // transfer that reached nobody is not reported as a success (codex r2 P1).
+      logger.error(`[relay-complete] transfer ring claim ${claimed} for ${maskSid(callSid)} — voicemail instead of an unconfirmed ring`);
+      await withDeadline(
+        stampTransferVoicemail().catch((err) => logger.warn(`[relay-complete] unconfirmed-ring voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        STAMP_DEADLINE_MS,
+      );
+      // The deadline does not cancel the queued claim (codex r6 P1): if it
+      // lands later — the row then reads ai_transferred + ring claimed while
+      // the caller is in voicemail — re-stamp voicemail when it does
+      // (detached, same fence; the claim's CASE keeps an already-landed
+      // voicemail, and the claim itself skips voicemail rows).
+      if (claimed === 'timeout') {
+        void claimPromise
+          .then((rows) => (Number(rows) > 0 ? stampTransferVoicemail() : 0))
+          .then((rows) => { if (Number(rows) > 0) logger.warn(`[relay-complete] late ring claim for ${maskSid(callSid)} re-stamped as voicemail`); })
+          .catch((err) => logger.warn(`[relay-complete] late-claim voicemail re-stamp failed for ${maskSid(callSid)}: ${err.message}`));
+      }
+      queueVoiceMessageSync(callSid);
+      appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
+      return;
+    }
+  }
+  const forwardNumbers = getFallbackForwardNumbers();
+  if (forwardNumbers.length === 0) {
+    // The recorder's action is /voicemail-complete, so /call-complete never
+    // runs to re-classify this call: stamp voicemail here, exactly as the
+    // relay-failure path does, or it reports as transferred to nobody.
+    logger.error(`[relay-complete] transfer for ${maskSid(callSid)} but no staff forward numbers configured — voicemail`);
+    if (callSid) {
+      // Bounded like every other stamp on this callback: a stalled pool must
+      // not hold the voicemail TwiML past Twilio's timeout (hook P1).
+      await withDeadline(
+        stampTransferVoicemail().catch((err) => logger.warn(`[relay-complete] no-staff voicemail stamp failed for ${maskSid(callSid)}: ${err.message}`)),
+        STAMP_DEADLINE_MS,
+      );
+      queueVoiceMessageSync(callSid);
+    }
+    appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
+    return;
+  }
+  appendStaffRingDial(twiml, forwardNumbers, 30, { language: relayCompleteLanguage(req) });
+}
+
+/** A call_log row that went through a Sandy transfer: the packet, the ring claim, or the outcome. */
+function isTransferredRow(row) {
+  if (!row) return false;
+  const meta = parseJsonObject(row.metadata);
+  return Boolean((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)
+    || row.call_outcome === 'ai_transferred';
+}
+
+/** The relay end frame's HandoffData: a JSON object string, or nothing. Never throws. */
+function parseHandoffData(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
 // The production relay profile (STT / turn-taking tuning attributes + the
 // telemetry <Parameter>s). relay-profiles is the only chooser; every relay
 // leg spreads this in. Unset ⇒ {} ⇒ byte-identical TwiML.
@@ -1304,21 +1478,7 @@ router.post('/voice', async (req, res) => {
       return res.type('text/xml').send(twiml.toString());
     }
 
-    const dial = twiml.dial({
-      record: 'record-from-answer-dual',
-      recordingStatusCallback: '/api/webhooks/twilio/recording-status',
-      recordingStatusCallbackEvent: 'completed',
-      timeout: ringTimeoutSec,
-      action: '/api/webhooks/twilio/call-complete',
-      answerOnBridge: true,
-    });
-
-    for (const number of forwardNumbers) {
-      dial.number({
-        url: '/api/webhooks/twilio/inbound-forward-screen',
-        method: 'POST',
-      }, number);
-    }
+    appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec);
 
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
@@ -1361,7 +1521,15 @@ router.post('/call-complete', async (req, res) => {
 
     const callUpdate = {
       status,
-      duration_seconds: duration,
+      // A Sandy transfer (PR 2A) reaches this Dial AFTER the relay leg: the
+      // AI portion (row created → packet transferred_at) is added back so the
+      // saved duration is the whole call, not the staff leg (codex r1 P2).
+      // One expression, no extra read; rows without a packet keep `duration`.
+      duration_seconds: db.raw(
+        "? + COALESCE(CASE WHEN (metadata->'relay_handoff'->>'transferred_at') IS NOT NULL "
+        + "THEN GREATEST(0, EXTRACT(EPOCH FROM ((metadata->'relay_handoff'->>'transferred_at')::timestamptz - created_at)))::int ELSE 0 END, 0)",
+        [duration],
+      ),
       answered_by: answeredBy,
       updated_at: new Date(),
     };
@@ -1398,12 +1566,26 @@ router.post('/call-complete', async (req, res) => {
     if (shouldRecordVoicemail) {
       const twiml = new VoiceResponse();
       let handedToAgent = false;
+      // Sandy PR 2A: an UNANSWERED transfer ring must not hand the caller —
+      // who asked for a person — straight back to Sandy (hook P1). The
+      // durable transfer markers decide; a read that fails or times out
+      // reads as "not a transfer" (today's path).
+      // An UNCONFIRMED read (error / timeout — not "no row") fails CLOSED to
+      // voicemail: a transient DB incident must not route a caller who asked
+      // for a person back to Sandy (hook P1).
+      const transferRow = await withDeadline(
+        db('call_log').where('twilio_call_sid', CallSid).first('metadata', 'call_outcome').then((r) => r || false),
+        STAMP_DEADLINE_MS,
+        'unconfirmed',
+      );
+      const wasTransfer = transferRow === 'unconfirmed' || isTransferredRow(transferRow);
+      if (wasTransfer) logger.info(`[call-complete] ${transferRow === 'unconfirmed' ? 'transfer lookup unconfirmed' : 'unanswered Sandy transfer'} ${maskSid(CallSid)} — voicemail, no AI backstop`);
       // Fail-open AI backstop: replace dumb voicemail with the bilingual agent
       // when enabled (the greeting/disclosure already played at /voice, so
       // consent persists). Any error → fall through to voicemail below.
       try {
         const { isEnabled } = require('../config/feature-gates');
-        if (isEnabled('voiceAiAgent')) {
+        if (isEnabled('voiceAiAgent') && !wasTransfer) {
           const routingConfig = await getCallRoutingConfig(db);
           const decision = decideVoiceRoute({
             phase: 'after_dial',
@@ -1418,18 +1600,45 @@ router.post('/call-complete', async (req, res) => {
             if (handoffKind === 'relay') {
               logger.info(`[call-complete] AI backstop relay (${decision.reason}) for ${maskSid(CallSid)}`);
               // Handed to the agent — correct the voicemail outcome stamped above
-              // (the final outcome resolves when the relay session ends).
-              await db('call_log').where('twilio_call_sid', CallSid)
-                .update({ answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
-                .catch(() => {});
-              // CallSid binds the upgrade token to THIS call (relay-protocol).
-              // Profile stamped before the relay opens — same reason as /voice.
-              const relayOpts = activeRelayTwiMLOptions();
-              await withDeadline(stampRelayProfile(CallSid, relayOpts));
-              return res.type('text/xml').send(buildRelayTwiML({
-                wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
-                ...relayOpts,
-              }));
+              // (the final outcome resolves when the relay session ends), and
+              // the STATUS: the row carries the unanswered staff dial's
+              // 'no-answer' / 'busy', but the parent call is live again with
+              // Sandy — a terminal status here would read as a closed call
+              // to the transfer packet's fence (PR 2A). /call-status stamps
+              // completed on the real hangup.
+              // CONFIRMED before the relay renders (codex r6 P2): a reset that
+              // failed would leave the terminal status on a live Sandy call
+              // and every later transfer refused; with the DB down the
+              // session could not claim the row either — voicemail is the
+              // coherent fallback.
+              const resetPromise = db('call_log').where('twilio_call_sid', CallSid)
+                .update({ status: 'in-progress', answered_by: 'ai_agent', call_outcome: null, updated_at: new Date() })
+                .catch((err) => { logger.warn(`[call-complete] backstop status reset failed for ${maskSid(CallSid)}: ${err.message}`); return 0; });
+              const reset = await withDeadline(resetPromise, STAMP_DEADLINE_MS, 'timeout');
+              if (reset === 'timeout') {
+                // The deadline does not cancel the queued UPDATE: if it lands
+                // after the recorder started it would re-open a call Sandy
+                // never took — put the voicemail classification back when it
+                // does (detached; codex r6 P1).
+                void resetPromise
+                  .then((rows) => (Number(rows) > 0
+                    ? db('call_log').where('twilio_call_sid', CallSid).where('answered_by', 'ai_agent').whereNull('call_outcome')
+                      .update({ status, answered_by: answeredBy, call_outcome: 'voicemail', updated_at: new Date() })
+                    : 0))
+                  .then((rows) => { if (Number(rows) > 0) logger.warn(`[call-complete] late backstop reset for ${maskSid(CallSid)} put back to voicemail`); })
+                  .catch((err) => logger.warn(`[call-complete] late backstop reset compensation failed for ${maskSid(CallSid)}: ${err.message}`));
+              }
+              if (Number(reset) > 0) {
+                // CallSid binds the upgrade token to THIS call (relay-protocol).
+                // Profile stamped before the relay opens — same reason as /voice.
+                const relayOpts = activeRelayTwiMLOptions();
+                await withDeadline(stampRelayProfile(CallSid, relayOpts));
+                return res.type('text/xml').send(buildRelayTwiML({
+                  wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
+                  ...relayOpts,
+                }));
+              }
+              logger.warn(`[call-complete] backstop relay skipped for ${maskSid(CallSid)} — status reset unconfirmed; voicemail`);
             }
             if (handoffKind === 'dial') {
               logger.info(`[call-complete] AI backstop dial (${decision.reason}) for ${maskSid(CallSid)}`);
@@ -1441,7 +1650,7 @@ router.post('/call-complete', async (req, res) => {
       } catch (agentErr) {
         logger.error(`[call-complete] backstop routing failed; using voicemail: ${agentErr.message}`);
       }
-      if (!handedToAgent) appendVoicemailRecording(twiml);
+      if (!handedToAgent) appendVoicemailRecording(twiml, { language: relayCompleteLanguage(req) });
       return res.type('text/xml').send(twiml.toString());
     }
 
@@ -1492,6 +1701,14 @@ router.post('/relay-complete', async (req, res) => {
   const failed = !!errorCode || ['failed', 'error', 'disconnected'].includes(sessionStatus);
   const failure = errorCode || sessionStatus || 'unknown';
   const twiml = new VoiceResponse();
+  // The relay's own end frame (`HandoffData`, a JSON string Twilio passes
+  // through verbatim; absent on a caller hang-up or a failure). Tolerated,
+  // never trusted beyond `reason`.
+  const handoff = parseHandoffData(body.HandoffData);
+  if (!failed && handoff.reason === 'transfer') {
+    await appendRelayTransfer(req, twiml, callSid, handoff);
+    return res.type('text/xml').send(twiml.toString());
+  }
   // A sandbox call (the signed ?sandbox=1 the sandbox route itself rendered)
   // never falls to voicemail: a recording on a test call would enter the
   // voicemail pipeline as a customer message. It ends with the failure
@@ -1874,7 +2091,7 @@ router.post('/inbound-forward-accept', async (req, res) => {
         try {
           callRow = await db('call_log')
             .where('twilio_call_sid', parentCallSid)
-            .select('metadata', 'from_phone')
+            .select('metadata', 'from_phone', 'call_outcome')
             .first();
         } catch (lookupErr) {
           logger.warn(`[voice] forward-accept caller lookup failed for ${maskSid(parentCallSid)}: ${lookupErr.message}`);
@@ -2387,7 +2604,7 @@ router.post('/transcription', async (req, res) => {
       // recording-status/recovery guards key on that stamp
       // (Codex #2676 round-10 P1).
       let targetRow = null;
-      const TRANSCRIPTION_COLUMNS = ['id', 'twilio_call_sid', 'recording_sid', 'transcription', 'transcription_provider', 'transcription_metadata'];
+      const TRANSCRIPTION_COLUMNS = ['id', 'twilio_call_sid', 'recording_sid', 'transcription', 'transcription_provider', 'transcription_metadata', 'metadata', 'call_outcome'];
       if (ParentCallSid) {
         targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first(...TRANSCRIPTION_COLUMNS);
       }
@@ -2440,7 +2657,8 @@ router.post('/transcription', async (req, res) => {
             .where(function builtinMayReplace() {
               this.whereNull('transcription')
                 .orWhereNull('transcription_provider')
-                .orWhere('transcription_provider', 'twilio_builtin');
+                .orWhere('transcription_provider', 'twilio_builtin')
+                .orWhereRaw(RELAY_STASHED_TRANSFER_SQL);
             })
             // …and still the recording this text describes (a swap landing
             // between the read and this write makes it skip).
@@ -2839,6 +3057,9 @@ router._test = {
   knownCallerPhoneExists,
   preconnectScreenDecision,
   connectingAnnouncement,
+  appendStaffRingDial,
+  parseHandoffData,
+  isTransferredRow,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,
   foldVoiceMetadata,

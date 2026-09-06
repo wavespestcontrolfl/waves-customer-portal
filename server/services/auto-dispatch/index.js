@@ -21,6 +21,7 @@ const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
 const { toDateStr, shiftDateStr } = require('./dates');
+const { stampedAddressDiverges } = require('../stamped-address');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
 const routeTiers = require('./route-tiers');
@@ -104,6 +105,9 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
     .select(
       'scheduled_services.*',
       'customers.active as customer_active',
+      'customers.address_line1 as customer_address_line1',
+      'customers.city as customer_city',
+      'customers.zip as customer_zip',
       'customers.latitude as customer_latitude',
       'customers.longitude as customer_longitude',
       'customers.phone as customer_phone',
@@ -259,7 +263,7 @@ async function runAutoDispatch(opts = {}) {
         // plan-active gate (don't spend the geocode budget on a lapsed plan we'd
         // skip anyway) and deduped per customer (a customer's later visits would
         // just read the coords the first row saved, so they must not re-attempt).
-        if (!elig.eligible && elig.reason_code === 'MISSING_GEO') {
+        if (!elig.eligible && elig.reason_code === 'MISSING_GEO' && !stampedAddressDiverges(service)) {
           planCheck = await isRecurringPlanActive(service, db);
           if (!planCheck.active) {
             totals.skipped++;

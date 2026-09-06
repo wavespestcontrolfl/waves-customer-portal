@@ -15,6 +15,13 @@ jest.mock('../services/logger', () => ({
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
 }));
+// Tech-facing notices (tech-visit-notifications.js) ride the rebooker's
+// post-commit tail; the hook contract (sides, actor, previous slot) is
+// asserted below, the service itself in tech-visit-notifications.test.js.
+jest.mock('../services/tech-visit-notifications', () => ({
+  notifyAssignmentChange: jest.fn().mockResolvedValue(undefined),
+  notifyVisitRescheduled: jest.fn().mockResolvedValue(undefined),
+}));
 // Inert blackout lookups: rescheduleSeries' non-admin guards (blackout, then
 // seasonal winter) lazy-require this module, and the real one queries the db.
 jest.mock('../services/scheduling/blackout-dates', () => ({
@@ -59,6 +66,18 @@ const SIB1_SHIFTED = dayOffset(19); // sibling 1 recomputed from the new anchor 
 const SIB2 = dayOffset(24); // weekly sibling 2 (BASE + 14)
 const SIB2_SHIFTED = dayOffset(26); // sibling 2 recomputed (TARGET + 14)
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed row (the reschedule writer reads the
+// committed technician_id off the CAS write).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : [])),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -78,7 +97,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn(),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -106,7 +125,7 @@ function liveService(status) {
 // Wire db/trx mocks for a full single-job reschedule pass.
 function wireRescheduleMocks(service) {
   const serviceLookup = chain({ first: jest.fn().mockResolvedValue(service) });
-  const updateQuery = chain({ update: jest.fn().mockResolvedValue(1) });
+  const updateQuery = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
   const historyInsert = chain();
   const logInsert = chain();
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
@@ -117,6 +136,7 @@ function wireRescheduleMocks(service) {
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
     if (table === 'series_moves') return chain();
+    if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -215,6 +235,33 @@ describe('live-status reschedule override (allowLive)', () => {
     },
   );
 
+  test('options.moveGuard runs on the move trx with the kept tech before the CAS write; a refusal aborts before any write', async () => {
+    let { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    const seen = [];
+    const moveGuard = jest.fn(async ({ trx, technicianId, service }) => {
+      seen.push({ trxIsFn: typeof trx === 'function', technicianId, serviceId: service.id, writesSoFar: updateQuery.update.mock.calls.length });
+    });
+    await SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch',
+      { allowLive: true, moveGuard },
+    );
+    expect(moveGuard).toHaveBeenCalledTimes(1);
+    expect(seen[0]).toEqual({ trxIsFn: true, technicianId: 'tech-1', serviceId: 'svc-1', writesSoFar: 0 });
+    expect(updateQuery.update).toHaveBeenCalledTimes(1);
+
+    // With a tech change the guard sees the RECEIVING tech; a throw stops the move.
+    ({ updateQuery } = wireRescheduleMocks(liveService('confirmed')));
+    const refusing = jest.fn(async ({ technicianId }) => {
+      throw Object.assign(new Error(`deactivated for ${technicianId}`), { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    });
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch',
+      { allowLive: true, moveGuard: refusing, technicianId: 't2' },
+    )).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    expect(refusing).toHaveBeenCalledWith(expect.objectContaining({ technicianId: 't2' }));
+    expect(updateQuery.update).not.toHaveBeenCalled();
+  });
+
   test('a non-live reschedule does not touch tracker lifecycle or tech_status', async () => {
     const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
 
@@ -277,6 +324,93 @@ describe('live-status reschedule override (allowLive)', () => {
     });
   });
 
+  test('a same-tech move tells the holder, with the previous slot and the acting staff row', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin',
+      { allowLive: true, actorId: 'virginia' },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+    expect(notifyVisitRescheduled).toHaveBeenCalledWith({
+      visitId: 'svc-1',
+      technicianId: 'tech-1',
+      actorId: 'virginia',
+      previous: { date: BASE, windowStart: '09:00:00', windowEnd: '11:00:00' },
+      snapshot: { date: TARGET, windowStart: '13:00', windowEnd: '15:00' },
+    });
+  });
+
+  test('a same-tech move names the tech on the COMMITTED row (RETURNING), not the unlocked pre-read', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    // Dispatch reassigned tech-1 → tech-7 between the pre-read and the write:
+    // the move commits for tech-7 (the CAS does not pin technician_id on a
+    // same-tech move), so tech-7 is the one told.
+    updateQuery.update.mockImplementation(() => updateResult(1, [{ id: 'svc-1', technician_id: 'tech-7' }]));
+
+    // The result names the committed holder too — callers that suppressed
+    // the per-move notice (the cancel-flow hold) tell them later.
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin',
+      { allowLive: true, actorId: 'virginia' },
+    )).resolves.toMatchObject({ success: true, technicianId: 'tech-7' });
+
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    expect(notifyVisitRescheduled.mock.calls[0][0]).toMatchObject({ visitId: 'svc-1', technicianId: 'tech-7' });
+    // The CAS carried no technician pin — the tech was not part of this move.
+    const casWheres = updateQuery.where.mock.calls.map((c) => c[0]).filter((a) => a && typeof a === 'object');
+    expect(casWheres.some((w) => Object.prototype.hasOwnProperty.call(w, 'technician_id'))).toBe(false);
+  });
+
+  test('a tech CHANGE pins the observed prior tech in the CAS — a raced reassignment misses instead of naming the wrong "from" tech', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    const { updateQuery } = wireRescheduleMocks(liveService('confirmed'));
+    updateQuery.update.mockImplementation(() => updateResult(0));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin',
+      { technicianId: 'tech-2', actorId: 'virginia' },
+    )).rejects.toMatchObject({ statusCode: 409 });
+
+    const casWheres = updateQuery.where.mock.calls.map((c) => c[0]).filter((a) => a && typeof a === 'object');
+    expect(casWheres).toEqual(expect.arrayContaining([{ technician_id: 'tech-1' }]));
+    expect(notifyVisitRescheduled).not.toHaveBeenCalled();
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+  });
+
+  test('a move that also changes the tech tells both techs (no duplicate "moved" card); system callers are named by initiatedBy', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+      { technicianId: 'tech-2' },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(notifyVisitRescheduled).not.toHaveBeenCalled();
+    expect(notifyAssignmentChange).toHaveBeenCalledWith({
+      visitId: 'svc-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: 'customer_self_serve',
+      snapshot: { date: TARGET, windowStart: '09:00', windowEnd: '11:00' },
+    });
+  });
+
+  test('suppressTechNotice (unit mover member moves) sends neither card — the canonical reassignment right after does', async () => {
+    const { notifyVisitRescheduled, notifyAssignmentChange } = require('../services/tech-visit-notifications');
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin',
+      { allowLive: true, actorId: 'virginia', suppressTechNotice: true },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(notifyVisitRescheduled).not.toHaveBeenCalled();
+    expect(notifyAssignmentChange).not.toHaveBeenCalled();
+  });
+
   test('a successful reschedule delta-shifts the pending call-created follow-up child', async () => {
     const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
     wireRescheduleMocks(liveService('confirmed'));
@@ -294,6 +428,9 @@ describe('live-status reschedule override (allowLive)', () => {
       parentServiceId: 'svc-1',
       fromDate: BASE,
       toDate: TARGET,
+      // The child's own move card carries the parent move's actor / suppression.
+      noticeActorId: 'admin',
+      suppressTechNotice: false,
     });
   });
 
@@ -355,7 +492,7 @@ describe('live-status reschedule override (allowLive)', () => {
     // Same-series date-collision probe (codex r6 on #2725) runs once before
     // any row updates — no clash by default.
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const updates = siblings.map(() => chain({ update: jest.fn().mockResolvedValue(1) }));
+    const updates = siblings.map(() => chain({ update: jest.fn().mockImplementation(() => updateResult(1)) }));
     const historyInsert = chain();
     const logInsert = chain();
 
@@ -368,6 +505,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -574,7 +712,7 @@ describe('live-status reschedule override (allowLive)', () => {
     ]);
     // Tech completes the job between the sibling SELECT and the UPDATE —
     // the status-guarded write matches 0 rows.
-    updates[0].update.mockResolvedValue(0);
+    updates[0].update.mockImplementation(() => updateResult(0));
 
     await expect(SmartRebooker.rescheduleSeries(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
@@ -712,10 +850,10 @@ describe('live-status reschedule override (allowLive)', () => {
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     // No same-series date collision…
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     // …the conflict now surfaces via the shared tech-blind check below, not a
     // local tech-scoped probe. This sibling update must NEVER be reached.
-    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const sibUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
 
@@ -726,6 +864,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue({ id: 't2', employment_status: 'active', field_dispatchable: true }) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -762,7 +901,7 @@ describe('live-status reschedule override (allowLive)', () => {
   // only the date lock, which slot-reservation writers never take, so both
   // could commit an overlap under READ COMMITTED. The gate span is now
   // derived BEFORE the guard (stored end wins, else duration-or-60).
-  function wireNullEndAnchorSeries({ techGuardRuns = true } = {}) {
+  function wireNullEndAnchorSeries({ techGuardRuns = true, techRow = { id: 't2', employment_status: 'active', field_dispatchable: true } } = {}) {
     const anchorFull = {
       ...liveService('confirmed'),
       window_end: null,
@@ -784,7 +923,7 @@ describe('live-status reschedule override (allowLive)', () => {
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
     const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
     const techOverlapProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
-    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const anchorUpdate = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const historyInsert = chain();
     const logInsert = chain();
     // Under the kill switch the tech guard skips, so its probe query never
@@ -798,6 +937,7 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
+      if (table === 'technicians') return chain({ first: jest.fn().mockResolvedValue(techRow) });
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -814,6 +954,16 @@ describe('live-status reschedule override (allowLive)', () => {
     });
     return { trx, techOverlapProbe, anchorUpdate };
   }
+
+  test('a caller-chosen tech who became ineligible since availability is refused as SLOT_TAKEN (customer re-picks), never as an internal 422 naming staff', async () => {
+    const { anchorUpdate } = wireNullEndAnchorSeries({ techRow: { id: 'tech-5', name: 'Tech Five', employment_status: 'inactive', field_dispatchable: true } });
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: null }, 'customer_request', 'customer_self_serve',
+      { technicianId: 'tech-5' },
+    )).rejects.toMatchObject({ code: 'SLOT_TAKEN', statusCode: 409, message: expect.not.stringContaining('Tech Five') });
+    expect(anchorUpdate.update).not.toHaveBeenCalled();
+  });
 
   test('a null-end series anchor with a caller-chosen tech takes the tech lock and probes the derived span', async () => {
     const { trx, techOverlapProbe } = wireNullEndAnchorSeries();

@@ -479,6 +479,7 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     config,
     today: new Date(),
     excludeServiceIds: [svc.id],
+    excludeSelfBookingId: svc.self_booking_id || null,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —

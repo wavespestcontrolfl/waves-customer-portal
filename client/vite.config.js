@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { createRequire } from 'node:module';
+const devContext = createRequire(import.meta.url)('../scripts/dev/context.js');
+import { fileURLToPath } from 'node:url';
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://localhost:3001';
 
@@ -20,8 +23,18 @@ const capShimAlias = capShim ? {
 } : {};
 
 export default defineConfig({
-  plugins: [react()],
-  resolve: { alias: { ...capShimAlias } },
+  plugins: [react(), {
+    name: 'waves-preview-checkout',
+    apply: 'serve',
+    configureServer(server) {
+      const stamp = devContext.checkoutStamp(fileURLToPath(new URL('..', import.meta.url)));
+      server.middlewares.use((_req, res, next) => {
+        res.setHeader('X-Waves-Checkout', stamp);
+        next();
+      });
+    },
+  }],
+  resolve: { alias: { ...capShimAlias, '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)) } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
   // every customer surface.
@@ -59,8 +72,14 @@ export default defineConfig({
       },
     },
   },
+  // Managed runners never load VITE_* values from a copied production .env.
+  envDir: process.env.WAVES_LOCAL_DEV === '1' ? '../.tmp/dev/vite-env' : undefined,
   server: {
     port: 5173,
+    strictPort: true,
+    // Keep Vite's default secret exclusions and also block managed dev state.
+    // /@fs/ otherwise exposes workspace files outside the client directory.
+    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/.tmp/**'] },
     proxy: {
       '/api': {
         target: apiProxyTarget,
@@ -96,7 +115,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
+    include: ['@lawn-scores', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',
@@ -108,7 +127,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
+      include: [/shared\/lawn-scores\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
     },
   },
 });

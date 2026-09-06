@@ -829,9 +829,9 @@ describe('POST /admin/leads/:id/schedule-appointment — sequential retry + rebo
       expect(body.code).toBe('DUPLICATE_VISIT');
       expect(body.scheduled_service_id).toBe('appt-existing');
       expect(calls.filter((c) => c.op === 'insert')).toHaveLength(0);
-      // The dedupe lookup excludes cancelled visits and ran under the locks.
+      // The dedupe lookup excludes inactive visits and ran under the locks.
       const lookup = calls.find((c) => c.table === 'scheduled_services' && c.op === 'first');
-      expect(lookup.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled']]);
+      expect(lookup.ops.find((o) => o.op === 'whereNotIn').args).toEqual(['status', ['cancelled', 'skipped', 'no_show', 'rescheduled']]);
       expect(lookup.ops[0].args[0]).toMatchObject({ customer_id: 'cust-linked', scheduled_date: '2027-01-15', window_start: '10:00', service_type: 'Pest Control' });
       const forUpdateIdx = calls.findIndex((c) => c.table === 'leads' && c.op === 'first' && c.ops.some((o) => o.op === 'forUpdate'));
       expect(calls.indexOf(lookup)).toBeGreaterThan(forUpdateIdx);

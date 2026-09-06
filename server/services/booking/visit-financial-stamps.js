@@ -66,21 +66,30 @@ function copyBillToFields(target, source, cols) {
 // plus property_id and stamped coords. A spawned row must inherit the stamp
 // or every reader's COALESCE(scheduled_services.service_address_*,
 // customers.address_*) falls back to the customer's PRIMARY address and the
-// visit is scheduled/dispatched to the wrong property. Parent-sourced, same
-// as the recurring seeder's follow-up rows. (scheduled_services has no
+// visit is scheduled/dispatched to the wrong property. Future address edits
+// live in template overrides so a completed parent keeps its history. Both
+// the recurring seeder and route generators use this reader. (scheduled_services has no
 // plain address/city/state/zip columns — the seeder's legacy names there
 // are inert; these are the live stamp columns from the property-linkage
 // migration, plus lat/lng.)
+function recurringServiceAddress(source) {
+  if (!source) return {};
+  let overrides = source.recurring_template_overrides;
+  if (typeof overrides === 'string') {
+    try { overrides = JSON.parse(overrides); } catch { overrides = null; }
+  }
+  const address = { ...source, ...overrides?.appointment_address };
+  return Object.fromEntries([
+    'property_id', 'service_address_line1', 'service_address_line2',
+    'service_address_city', 'service_address_state', 'service_address_zip',
+    'lat', 'lng', 'zone',
+  ].filter((field) => address[field] !== undefined).map((field) => [field, address[field]]));
+}
+
 function copyStampedServiceAddressFields(target, source, cols) {
   if (!target || !source || !cols) return;
-  const stampFields = [
-    'property_id',
-    'service_address_line1', 'service_address_line2',
-    'service_address_city', 'service_address_state', 'service_address_zip',
-    'lat', 'lng',
-  ];
-  for (const f of stampFields) {
-    if (cols[f] && source[f] !== undefined) target[f] = source[f];
+  for (const [field, value] of Object.entries(recurringServiceAddress(source))) {
+    if (cols[field]) target[field] = value;
   }
 }
 
@@ -90,4 +99,5 @@ module.exports = {
   copyAppointmentDiscountFields,
   copyBillToFields,
   copyStampedServiceAddressFields,
+  recurringServiceAddress,
 };

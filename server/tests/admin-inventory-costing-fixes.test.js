@@ -91,7 +91,10 @@ describe('POST /restock-requests/:id/action', () => {
     const movements = [];
     const stockUpdates = [];
     const statusUpdates = [];
+    const orderUpdates = [];
+    const bellRetires = [];
     const route = (q) => {
+      if (q._table === 'notifications') { bellRetires.push(q.args('update')[0]); return 1; } // settleRequestLedgerBells
       if (q._table === 'product_restock_requests') {
         if (q.called('update')) {
           statusUpdates.push(q.args('update')[0]);
@@ -106,6 +109,10 @@ describe('POST /restock-requests/:id/action', () => {
         }
         return { id: 'prod-1', inventory_on_hand: 10, inventory_unit: 'gal' };
       }
+      if (q._table === 'vendor_orders') {
+        if (q.called('update')) { orderUpdates.push(q.args('update')[0]); return 1; } // settleLandedAfterReceive
+        return requestRow.ledger || null; // assertManualActionAllowed's one read
+      }
       if (q._table === 'product_inventory_movements') {
         movements.push(q.args('insert')[0]);
         return [{ id: 'movement-1', ...q.args('insert')[0] }];
@@ -114,9 +121,10 @@ describe('POST /restock-requests/:id/action', () => {
     };
     const trx = (table) => makeChain(table, route);
     trx.fn = { now: jest.fn(() => 'NOW()') };
+    trx.raw = jest.fn((sql) => sql); // settleLandedAfterReceive's evidence patch
     db.transaction.mockImplementation(async (fn) => fn(trx));
     db.mockImplementation((table) => makeChain(table, route));
-    return { movements, stockUpdates, statusUpdates };
+    return { movements, stockUpdates, statusUpdates, orderUpdates, bellRetires };
   }
 
   test('receives an open request once: stock updated, movement written, status received', async () => {
@@ -150,6 +158,102 @@ describe('POST /restock-requests/:id/action', () => {
       expect(res.status).toBe(409);
       expect(stockUpdates).toHaveLength(0);
       expect(movements).toHaveLength(0);
+    });
+  });
+
+  test('ONE more receive on a received request whose automatic order landed after that receipt: stock added, marker settled (Codex r27 P1)', async () => {
+    const { movements, stockUpdates, statusUpdates, orderUpdates } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'received', requested_quantity: 2, unit: 'gal',
+      ledger: { id: 'vo-9', status: 'needs_review', placed_at: new Date(), external_order_number: 'S1-9', evidence: { landedAfterReceive: '2026-09-05T01:00:00Z' } },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'receive' }),
+      });
+      expect(res.status).toBe(200);
+      expect(stockUpdates).toHaveLength(1);
+      expect(stockUpdates[0].inventory_on_hand).toBe(12);
+      expect(movements).toHaveLength(1);
+      expect(movements[0].metadata.secondReceive).toBe(true);
+      expect(statusUpdates.some((u) => u.status === 'received')).toBe(true);
+      expect(orderUpdates.some((u) => String(u.evidence).includes("- 'landedAfterReceive'"))).toBe(true); // the marker comes off in the same transaction
+    });
+  });
+
+  test.each(['cancel', 'mark_ordered'])('%s on a received request whose automatic order landed after the receipt → 409 (only the receive is admitted)', async (action) => {
+    const { statusUpdates } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'received', requested_quantity: 2, unit: 'gal',
+      ledger: { id: 'vo-9', status: 'needs_review', placed_at: new Date(), external_order_number: 'S1-9', evidence: { landedAfterReceive: '2026-09-05T01:00:00Z' } },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+      });
+      expect(res.status).toBe(409);
+      expect(statusUpdates).toHaveLength(0);
+    });
+  });
+
+  test.each(['cancel', 'mark_ordered', 'receive'])('%s while the automatic order is placing → 409, request untouched (pre-push P0)', async (action) => {
+    const { statusUpdates, stockUpdates } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger: { id: 'vo-1', status: 'placing', placed_at: null, evidence: {} },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/being placed right now/);
+      expect(statusUpdates).toHaveLength(0);
+      expect(stockUpdates).toHaveLength(0);
+    });
+  });
+
+  test('receive defaults to what the automatic order actually bought (packages round up), not the requested figure (r2 P1)', async () => {
+    const { stockUpdates, movements } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'ordered', requested_quantity: 2, unit: 'gal',
+      ledger: { id: 'vo-7', status: 'placed', placed_at: new Date(), evidence: {}, request_payload: JSON.stringify({ quantity: 2, unit: 'gal', vendorQuantity: 2, packSize: '2.5 gal', orderedQuantity: 5 }) },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'receive' }),
+      });
+      expect(res.status).toBe(200);
+      expect(stockUpdates[0].inventory_on_hand).toBe(15); // 10 on hand + 5 gal (two 2.5 gal jugs), not + 2
+      expect(movements).toHaveLength(1);
+    });
+  });
+
+  test('cancel while a dispatched automatic order is unreceived and unrevoked → 409 naming the revoke script (pre-push P0)', async () => {
+    const { statusUpdates } = wireRestock({
+      id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal',
+      ledger: { id: 'vo-7', status: 'needs_review', placed_at: new Date(), external_order_number: null, evidence: {} },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cancel' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/may already have gone out.*auto-order-revoke\.js --order=vo-7/);
+      expect(statusUpdates).toHaveLength(0);
+    });
+  });
+
+  test.each([
+    ['cancel', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: { revokedAt: '2026-09-03T10:00:00Z' } }, 'cancelled'],
+    ['mark_ordered', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: {} }, 'ordered'],
+  ])('%s proceeds once the order is revoked / when it only confirms the order — and retires the ledger bell it resolves (Codex r28 P2)', async (action, ledger, expected) => {
+    const { statusUpdates, bellRetires } = wireRestock({ id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+      });
+      expect(res.status).toBe(200);
+      expect(statusUpdates.some((u) => u.status === expected)).toBe(true);
+      expect(bellRetires).toHaveLength(1); // the parked row's "order manually" bell must not outlive the action
+      expect(bellRetires[0].read_at).toBeInstanceOf(Date);
     });
   });
 

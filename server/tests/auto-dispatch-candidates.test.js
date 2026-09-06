@@ -298,3 +298,29 @@ describe('customer recurring due-date placement', () => {
     expect(findAvailableSlots).not.toHaveBeenCalled();
   });
 });
+
+test('current placement excludes an ungeocoded secondary-property neighbor', async () => {
+  const { computeCurrentPlacement } = require('../services/auto-dispatch/candidate-slots');
+  const selected = [];
+  const fixture = {
+    service_address_line1: '200 Sample Avenue', service_address_city: 'Sample City', service_address_zip: '00001',
+    customer_address_line1: '100 Example Street', customer_city: 'Example City', customer_zip: '00000',
+    svc_lat: null, svc_lng: null, customer_latitude: 27.4, customer_longitude: -82.5,
+    window_start: '08:00', window_end: '09:00',
+  };
+  const db = () => {
+    const c = {};
+    ['where', 'whereNot', 'whereNotIn', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async (...fields) => {
+      selected.push(...fields);
+      return [Object.fromEntries(fields.map((field) => {
+        const alias = field.split(' as ').pop().split('.').pop();
+        return [alias, fixture[alias]];
+      }))];
+    };
+    return c;
+  };
+  const result = await computeCurrentPlacement(SERVICE, 'general', { ...ctx(), db });
+  expect(result.stops_that_day).toBe(1);
+  expect(selected).toContain('scheduled_services.service_address_line1');
+});

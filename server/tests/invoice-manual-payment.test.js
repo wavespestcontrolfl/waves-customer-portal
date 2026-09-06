@@ -50,7 +50,7 @@ const { recordManualPayment, VALID_PAYMENT_METHODS } = require('../services/invo
 
 function recorder({ first = null, returning = [] } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'orderBy', 'limit', 'forUpdate'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereIn', 'whereNotIn', 'andWhere', 'orderBy', 'limit', 'forUpdate', 'noWait'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => first);
   q.update = jest.fn(() => q);
   q.insert = jest.fn(async () => undefined);
@@ -134,6 +134,75 @@ describe('recordManualPayment — refusal contract', () => {
     expect(err.currentStatus).toBe('paid');
   });
 
+  test.each(['cancelled', 'no_show', 'skipped'])('invoice whose visit is %s under the lock → 409 visitNeverRan, no paid flip, no ledger row (#3878 r2 fence)', async (visitStatus) => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
+    let invoiceUpdate = null;
+    let paymentsInsert = null;
+    let visitLocked = false;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] }); invoiceUpdate = r.update; return r; }
+        if (table === 'scheduled_services') { const r = recorder({ first: { id: 'svc-1', status: visitStatus } }); r.forUpdate = jest.fn(() => { visitLocked = true; return r; }); return r; }
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash' }));
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toMatch(new RegExp(`visit is ${visitStatus.replace('_', '-')}`));
+    expect(err.visitNeverRan).toBe(visitStatus);
+    expect(visitLocked).toBe(true);
+    expect(invoiceUpdate).not.toHaveBeenCalled();
+    expect(paymentsInsert).toBeNull();
+  });
+
+  test('a visit held by a concurrent schedule edit (NOWAIT 55P03) → 409 visit_busy, nothing recorded — the fence never waits on the visit while holding the invoice (Codex #3882 r3 P2)', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
+    let invoiceUpdate = null;
+    let paymentsInsert = null;
+    let noWaitUsed = false;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] }); invoiceUpdate = r.update; return r; }
+        if (table === 'scheduled_services') {
+          const r = recorder();
+          r.noWait = jest.fn(() => { noWaitUsed = true; return r; });
+          r.first = jest.fn(async () => { const e = new Error('could not obtain lock on row'); e.code = '55P03'; throw e; });
+          return r;
+        }
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'cash' }));
+    expect(err.statusCode).toBe(409);
+    expect(err.code).toBe('visit_busy');
+    expect(noWaitUsed).toBe(true);
+    expect(invoiceUpdate).not.toHaveBeenCalled();
+    expect(paymentsInsert).toBeNull();
+  });
+
+  test("a 'rescheduled' visit (pending reschedule request parks the same row) still takes the payment", async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
+    let invoiceUpdate = null;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') { const r = recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [openInvoice({ scheduled_service_id: 'svc-1', status: 'paid' })] }); invoiceUpdate = r.update; return r; }
+        if (table === 'scheduled_services') return recorder({ first: { id: 'svc-1', status: 'rescheduled' } });
+        if (table === 'payments') return recorder();
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    await recordManualPayment('inv-1', { method: 'cash' });
+    expect(invoiceUpdate).toHaveBeenCalled();
+  });
+
   test('a new standalone PI minted under the lock → 409 retry message', async () => {
     db.mockImplementation(() => recorder({ first: openInvoice() }));
     db.transaction.mockImplementation(async () => ({ racedNewPaymentIntent: 'pi_new' }));
@@ -192,6 +261,35 @@ describe('recordManualPayment — refusal contract', () => {
     expect(customerLock).toHaveBeenCalled();
     expect(payersLock).toHaveBeenCalled(); // the (possibly inactive) payer the customer points at is locked too
     if (!resolvesSelfPay) expect(rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', expect.objectContaining({ id: 'inv-1' }), expect.objectContaining({ database: expect.any(Function) }));
+    expect(paymentsInsert).toBeNull();
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+  });
+
+  test('requireSelfPay: a visit held by a concurrent schedule edit (NOWAIT 55P03) on the payer-source lock → 409 visit_busy before any resolution (Codex #3882 r4 P2)', async () => {
+    db.mockImplementation(() => recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }) }));
+    rowIsSelfPayDue.mockResolvedValue(true);
+    let paymentsInsert = null;
+    let noWaitUsed = false;
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => {
+        if (table === 'invoices') return recorder({ first: openInvoice({ scheduled_service_id: 'svc-1' }), returning: [] });
+        if (table === 'customers') return recorder({ first: { id: 'cust-1', payer_id: null } });
+        if (table === 'scheduled_services') {
+          const r = recorder();
+          r.noWait = jest.fn(() => { noWaitUsed = true; return r; });
+          r.first = jest.fn(async () => { const e = new Error('could not obtain lock on row'); e.code = '55P03'; throw e; });
+          return r;
+        }
+        if (table === 'payments') { const r = recorder(); paymentsInsert = r.insert; return r; }
+        throw new Error(`unexpected trx table ${table}`);
+      });
+      trx.fn = { now: () => 'NOW()' };
+      return fn(trx);
+    });
+    const err = await refusalOf(recordManualPayment('inv-1', { method: 'zelle', expectedAmountCents: 11700, requireSelfPay: true }));
+    expect(err.statusCode).toBe(409);
+    expect(err.code).toBe('visit_busy');
+    expect(noWaitUsed).toBe(true);
     expect(paymentsInsert).toBeNull();
     expect(sendReceiptEmail).not.toHaveBeenCalled();
   });

@@ -5,6 +5,15 @@ const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
+const {
+  listCapabilities,
+  normalizeCapabilityEntries,
+  seedNewHireCapabilities,
+  summarizeCapabilities,
+  writeCapabilities,
+} = require('../services/technician-capabilities');
+const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 const {
   addStaffWorkDays,
@@ -59,8 +68,8 @@ router.use(adminAuthenticate);
 // become API fields by default.
 const TECH_ROSTER_RESPONSE_FIELDS = [
   'id', 'name', 'phone', 'email', 'role',
-  'active', 'auto_flip_enabled',
-  'avatar_url',
+  'active', 'employment_status', 'field_dispatchable', 'auto_flip_enabled',
+  'avatar_url', 'capability_summary',
   'created_at', 'updated_at',
 ];
 
@@ -499,7 +508,9 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // without exposing each coworker's wage, DOB, address, etc.
 async function listTechnicians(req, res, next) {
   try {
-    const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
+    const techs = await db('technicians')
+      .orderByRaw("CASE employment_status WHEN 'active' THEN 0 WHEN 'prospective' THEN 1 ELSE 2 END")
+      .orderBy('name');
     // Presign photo_s3_key into avatar_url for the response. After
     // PR #344 photo uploads write only photo_s3_key (no row-level URL
     // baked in); consumers (TeamTab list, dispatch board /board)
@@ -507,10 +518,15 @@ async function listTechnicians(req, res, next) {
     // This route is admin-authed so presigning is safe.
     const { resolveTechPhotoUrl } = require('../services/tech-photo');
     const callerIsAdmin = isAdminCaller(req);
+    // One grouped read for the roster's capability counts (qualified /
+    // needs review / off / not set) — the editor itself lives at
+    // GET /technicians/:id/capabilities.
+    const summaries = await summarizeCapabilities(db, techs.map((t) => t.id));
     const enriched = await Promise.all(techs.map(async (t) => {
       const row = {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
+        capability_summary: summaries.get(t.id),
       };
       return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
@@ -583,6 +599,35 @@ function disconnectRevokedStaffSessions(technicianId, reason) {
   }
 }
 
+// Non-terminal visits from today (ET) forward still assigned to a tech —
+// listed on offboarding for manual reassignment, never modified.
+function listFutureAssignedVisits(conn, technicianId) {
+  return conn('scheduled_services as s')
+    .leftJoin('customers as c', 's.customer_id', 'c.id')
+    .where('s.technician_id', technicianId)
+    .where('s.scheduled_date', '>=', etDateString(new Date()))
+    .whereNotIn('s.status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
+    .orderBy('s.scheduled_date')
+    .select('s.id', 's.scheduled_date', 's.service_type', 'c.first_name', 'c.last_name');
+}
+
+function formatFutureAssignedVisits(rows) {
+  return (rows || []).map((v) => ({
+    id: v.id,
+    scheduledDate: v.scheduled_date,
+    serviceType: v.service_type,
+    customerName: [v.first_name, v.last_name].filter(Boolean).join(' ') || null,
+  }));
+}
+
+// A staff row with any operational or pay history is a person, not a slot.
+async function technicianHasHistory(conn, technicianId) {
+  for (const table of ['scheduled_services', 'service_records', 'time_entries', 'review_incentive_payouts']) {
+    if (await conn(table).where({ technician_id: technicianId }).first('id')) return true;
+  }
+  return false;
+}
+
 async function deactivationBlocker(trx, target, actorId) {
   if (!target.active) return null;
   if (target.id === actorId) return 'You cannot deactivate your own staff account';
@@ -604,13 +649,23 @@ async function deactivationBlocker(trx, target, actorId) {
 async function createTechnician(req, res, next) {
   try {
     const body = req.body || {};
-    const { name, phone, email, autoFlipEnabled } = body;
+    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable } = body;
     if (typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Name is required' });
     }
+    // Team-tab profiles default to active (legacy behavior). A placeholder
+    // for a hire who has not started is created as `prospective`: no email
+    // needed, no sign-in, no slots, no capacity, never on a customer surface.
+    const status = employmentStatus === undefined ? 'active' : employmentStatus;
+    if (!isEmploymentStatus(status) || status === 'inactive') {
+      return res.status(400).json({ error: "employmentStatus must be 'active' or 'prospective'" });
+    }
+    if (fieldDispatchable !== undefined && typeof fieldDispatchable !== 'boolean') {
+      return res.status(400).json({ error: 'fieldDispatchable must be a boolean' });
+    }
     const normalizedEmail = normalizeTechnicianEmail(email);
     if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
-    if (!normalizedEmail.value) {
+    if (!normalizedEmail.value && status === 'active') {
       return res.status(400).json({ error: 'An active technician requires a valid staff email' });
     }
 
@@ -618,7 +673,10 @@ async function createTechnician(req, res, next) {
       name: name.trim(),
       phone: phone || null,
       email: normalizedEmail.value ?? null,
-      active: true,
+      ...employmentPatch(status),
+      // Field eligibility is granted deliberately on the Team tab, never by
+      // the row existing (Field Team Program: assignment ≠ employment).
+      field_dispatchable: fieldDispatchable === true,
     };
     // Honor the create-form's auto-flip checkbox. Without this, an
     // operator unchecking "Auto-flip enabled" during creation would
@@ -635,6 +693,9 @@ async function createTechnician(req, res, next) {
         return { conflict: true };
       }
       const [tech] = await trx('technicians').insert(insertRow).returning('*');
+      // Every hire starts able to take every service, pending review — the
+      // Team tab's Capabilities editor is where a category becomes Qualified.
+      await seedNewHireCapabilities(trx, tech.id);
       return { tech };
     });
     if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
@@ -642,7 +703,7 @@ async function createTechnician(req, res, next) {
     const { tech } = outcome;
     // Log id + structural state only; the row now carries payroll/PII
     // so names stay out of logs per AGENTS.md.
-    logger.info(`[team] Added technician id=${tech.id} (auto_flip_enabled=${tech.auto_flip_enabled})`);
+    logger.info(`[team] Added technician id=${tech.id} (employment_status=${tech.employment_status}, field_dispatchable=${tech.field_dispatchable}, auto_flip_enabled=${tech.auto_flip_enabled})`);
     return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
@@ -658,13 +719,27 @@ router.post('/technicians', requireAdmin, createTechnician);
 async function updateTechnician(req, res, next) {
   try {
     const body = req.body || {};
-    const { name, phone, email, active, autoFlipEnabled } = body;
+    const { name, phone, email, autoFlipEnabled, employmentStatus, fieldDispatchable } = body;
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
       return res.status(400).json({ error: 'Name cannot be empty' });
     }
-    if (active !== undefined && typeof active !== 'boolean') {
+    if (body.active !== undefined && typeof body.active !== 'boolean') {
       return res.status(400).json({ error: 'active must be a boolean' });
     }
+    if (employmentStatus !== undefined && !isEmploymentStatus(employmentStatus)) {
+      return res.status(400).json({ error: "employmentStatus must be 'prospective', 'active', or 'inactive'" });
+    }
+    if (fieldDispatchable !== undefined && typeof fieldDispatchable !== 'boolean') {
+      return res.status(400).json({ error: 'fieldDispatchable must be a boolean' });
+    }
+    // Legacy `active` boolean input maps onto employment status; an explicit
+    // employmentStatus wins when both are sent.
+    const requestedStatus = employmentStatus !== undefined
+      ? employmentStatus
+      : (body.active === undefined ? undefined : (body.active ? 'active' : 'inactive'));
+    // `active` below is the derived legacy view of the requested status; the
+    // existing deactivation safeguards key off it.
+    const active = requestedStatus === undefined ? undefined : requestedStatus === 'active';
     const normalizedEmail = normalizeTechnicianEmail(email);
     if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
 
@@ -682,6 +757,12 @@ async function updateTechnician(req, res, next) {
       const resultingEmail = email === undefined ? storedEmail : normalizedEmail.value;
       const resultingActive = active === undefined ? Boolean(target.active) : active;
       if (resultingActive && !resultingEmail) return { missingEmail: true };
+      // Identity is never recycled: once a row carries service, time, or
+      // payout history, a rename would move that history onto a different
+      // person. A replacement hire gets a new row.
+      if (name !== undefined && name.trim() !== target.name && await technicianHasHistory(trx, target.id)) {
+        return { renameLocked: true };
+      }
 
       if (active === false) {
         const blocker = await deactivationBlocker(trx, target, req.technicianId);
@@ -704,9 +785,14 @@ async function updateTechnician(req, res, next) {
       if (name !== undefined) updates.name = name.trim();
       if (phone !== undefined) updates.phone = phone || null;
       if (email !== undefined) updates.email = normalizedEmail.value;
-      if (active !== undefined) updates.active = active;
+      if (requestedStatus !== undefined) Object.assign(updates, employmentPatch(requestedStatus));
+      if (fieldDispatchable !== undefined) updates.field_dispatchable = fieldDispatchable;
 
-      const activeChanged = active !== undefined && active !== Boolean(target.active);
+      // Any transition that leaves `active` (→ inactive OR → prospective)
+      // revokes sessions; entering active from prospective also rotates so a
+      // token minted under the old state cannot carry over.
+      const currentStatus = target.employment_status || (target.active ? 'active' : 'inactive');
+      const activeChanged = requestedStatus !== undefined && requestedStatus !== currentStatus;
       const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
       const credentialsChanged = activeChanged || emailChanged;
       if (credentialsChanged) {
@@ -723,8 +809,15 @@ async function updateTechnician(req, res, next) {
       const revokeAccess = credentialsChanged || active === false;
       if (revokeAccess) await PushService.deactivateStaffUser(target.id, trx);
       const tech = await trx('technicians').where({ id: target.id }).first();
+      // Leaving the assignable pool through Edit — inactive, prospective, OR
+      // field eligibility removed — surfaces the same remaining-assignment
+      // list the DELETE path returns; visits are never touched here.
+      const futureAssignedVisits = isAssignable(target) && !isAssignable(tech)
+        ? await listFutureAssignedVisits(trx, target.id)
+        : [];
       return {
         tech,
+        futureAssignedVisits,
         revokeAccess,
         revocationReason: active === false
           ? 'account_deactivated'
@@ -746,13 +839,23 @@ async function updateTechnician(req, res, next) {
       });
     }
     if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
+    if (outcome.renameLocked) {
+      return res.status(409).json({
+        error: 'This staff record already has service, time, or payout history and cannot be renamed. Add the new hire as a separate record.',
+        code: 'IDENTITY_LOCKED',
+      });
+    }
 
     const { tech } = outcome;
     if (outcome.revokeAccess) {
       disconnectRevokedStaffSessions(tech.id, outcome.revocationReason);
     }
-    logger.info(`[team] Updated technician id=${tech.id} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
-    return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
+    logger.info(`[team] Updated technician id=${tech.id} (employment_status=${tech.employment_status}, field_dispatchable=${tech.field_dispatchable}, auto_flip_enabled=${tech.auto_flip_enabled})`);
+    return res.json({
+      success: true,
+      technician: sanitizeTechForAdmin(tech),
+      futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
+    });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
     return next(err);
@@ -760,6 +863,71 @@ async function updateTechnician(req, res, next) {
 }
 
 router.put('/technicians/:id', requireAdmin, updateTechnician);
+
+// GET /technicians/:id/capabilities — the five dispatch categories for one
+// tech, missing rows reported as 'unset'. Admin only: this is the editor's
+// read, and capability decisions are a management call.
+async function getTechnicianCapabilities(req, res, next) {
+  try {
+    const tech = await db('technicians').where({ id: req.params.id }).first('id');
+    if (!tech) return res.status(404).json({ error: 'Technician not found' });
+    const capabilities = await listCapabilities(db, tech.id);
+    return res.json({ technicianId: tech.id, capabilities });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// PUT /technicians/:id/capabilities — upsert any subset of the five
+// categories as { service_category, state, notes }. The caller is stamped as
+// verifier. Turning a category Off never touches the schedule: visits already
+// assigned in that category are listed back for manual reassignment (same
+// shape as leaving the dispatch pool), and auto-dispatch stops offering the
+// tech new work in it.
+async function putTechnicianCapabilities(req, res, next) {
+  try {
+    const body = req.body || {};
+    const normalized = normalizeCapabilityEntries(body.capabilities);
+    if (normalized.error) return res.status(400).json({ error: normalized.error });
+    const { entries } = normalized;
+
+    // A stale entry must roll back EVERY entry in the request (an earlier
+    // category may already have been written), so the error escapes the
+    // transaction and is translated to 409 outside it.
+    let outcome;
+    try {
+      outcome = await db.transaction(async (trx) => {
+        const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first('id');
+        if (!target) return { notFound: true };
+        await writeCapabilities(trx, target.id, entries, req.technicianId);
+        const turnedOff = new Set(entries.filter((e) => e.state === 'off').map((e) => e.service_category));
+        const futureAssignedVisits = turnedOff.size
+          ? (await listFutureAssignedVisits(trx, target.id))
+            .filter((v) => turnedOff.has(classifyServiceCategory(v.service_type)))
+          : [];
+        const capabilities = await listCapabilities(trx, target.id);
+        return { capabilities, futureAssignedVisits };
+      });
+    } catch (err) {
+      if (err.code !== 'CAPABILITY_STALE') throw err;
+      return res.status(409).json({ error: err.message, code: err.code, service_category: err.service_category });
+    }
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+
+    logger.info(`[team] Updated capabilities for technician id=${req.params.id} (${entries.map((e) => `${e.service_category}=${e.state}`).join(', ')}) by staff id=${req.technicianId}`);
+    return res.json({
+      success: true,
+      technicianId: req.params.id,
+      capabilities: outcome.capabilities,
+      futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+router.get('/technicians/:id/capabilities', requireAdmin, getTechnicianCapabilities);
+router.put('/technicians/:id/capabilities', requireAdmin, putTechnicianCapabilities);
 
 // GET /technicians/:id/earnings — hours × pay_rate breakdown for a
 // window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset
@@ -972,9 +1140,12 @@ async function deactivateTechnician(req, res, next) {
         .first('id');
       if (activeTimer) return { activeTimer: true };
 
-      if (target.active) {
+      // A prospective placeholder is offboarded the same way (it simply has
+      // no sessions to revoke); an already-inactive row is a no-op.
+      const wasOnStaff = (target.employment_status || (target.active ? 'active' : 'inactive')) !== 'inactive';
+      if (wasOnStaff) {
         await trx('technicians').where({ id: target.id }).update({
-          active: false,
+          ...employmentPatch('inactive'),
           auth_token_version: Number(target.auth_token_version || 0) + 1,
           password_reset_token_hash: null,
           password_reset_expires_at: null,
@@ -983,10 +1154,13 @@ async function deactivateTechnician(req, res, next) {
         });
       }
       await PushService.deactivateStaffUser(target.id, trx);
-      const tech = target.active
+      const tech = wasOnStaff
         ? await trx('technicians').where({ id: target.id }).first()
         : target;
-      return { tech, changed: Boolean(target.active) };
+      // Future work still on this tech is surfaced for reassignment — never
+      // cancelled or rewritten here. Completed visits keep their attribution.
+      const futureAssignedVisits = await listFutureAssignedVisits(trx, target.id);
+      return { tech, changed: wasOnStaff, futureAssignedVisits };
     });
 
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
@@ -1003,6 +1177,7 @@ async function deactivateTechnician(req, res, next) {
       success: true,
       deactivated: true,
       technician: sanitizeTechForAdmin(outcome.tech),
+      futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
     });
   } catch (err) {
     return next(err);
@@ -1173,6 +1348,8 @@ module.exports = router;
 module.exports._handlers = {
   createTechnician,
   deactivateTechnician,
+  getTechnicianCapabilities,
   listTechnicians,
+  putTechnicianCapabilities,
   updateTechnician,
 };

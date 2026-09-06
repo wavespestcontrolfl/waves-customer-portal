@@ -4,7 +4,7 @@
  * tech portal reads protocol scripts/equipment/photos for field reference. But
  * a technician must NOT author or publish the global lawn protocol. The
  * global-config authoring/publishing routes carry their own requireAdmin;
- * field readiness/stock ops stay tech-accessible.
+ * field reference reads stay tech-accessible.
  *
  * Pins the wiring by inspecting the router's layer stack (no service/db boot).
  */
@@ -36,13 +36,13 @@ describe('protocol global-config writes are admin-gated (P1-5)', () => {
     ['/lawn/products/:id', 'put'],
     ['/lawn/windows/:windowKey', 'put'],
     ['/lawn/windows/:windowKey/wiki-sync', 'post'],
-    ['/lawn/gates/:id', 'put'],
   ])('requireAdmin gates %s [%s]', (path, method) => {
     expect(chainFor(path, method)).toContain('requireAdmin');
   });
 
-  test('field readiness ops stay tech-accessible (no requireAdmin)', () => {
-    expect(chainFor('/lawn/readiness/:serviceId/assign', 'post')).not.toContain('requireAdmin');
-    expect(chainFor('/lawn/readiness/:serviceId/restock-requests', 'post')).not.toContain('requireAdmin');
+  test('retired readiness writes and gate editor are not mounted', () => {
+    const paths = protocolsRouter.stack.filter(l => l.route).map(l => l.route.path);
+    expect(paths.some(path => path.startsWith('/lawn/readiness'))).toBe(false);
+    expect(paths).not.toContain('/lawn/gates/:id');
   });
 });

@@ -48,9 +48,21 @@ function encryptedPasswordRaw(conn, plaintext) {
   return conn.raw('armor(pgp_sym_encrypt(?, ?))', [String(plaintext), key]);
 }
 
+// A decrypt failure that is the DATABASE's problem, not the key's: connection
+// (08), resource (53), operator/shutdown (57), rollback/deadlock (40), bad
+// transaction state (25), system/internal (58, XX), or a driver error with no
+// SQLSTATE at all (ECONNRESET, "Connection terminated"). A wrong key or an
+// unarmored legacy value is pgcrypto's 39000 / 22xxx — data, not infra.
+function isInfrastructureError(e) {
+  const code = e && e.code != null ? String(e.code) : '';
+  return !code || /^(08|53|57|40|25|58|XX)/.test(code) || /^E[A-Z]+$/.test(code);
+}
+
 // Read a vendor's login credentials with the password DECRYPTED (for a login adapter).
 // Returns null if the vendor doesn't exist; password is null when there's none stored, no
 // key is configured, or the stored value can't be decrypted (legacy plaintext / wrong key).
+// A decrypt attempt that fails for an INFRASTRUCTURE reason (isInfrastructureError) is
+// rethrown — the caller must not read a DB hiccup as "no password stored" (Codex #3853 r6 P1).
 async function getVendorLoginCredentials(conn, vendorId) {
   const row = await conn('vendors').where({ id: vendorId })
     .first('login_username', 'login_email', 'account_number', 'login_url', 'login_password_encrypted');
@@ -65,7 +77,18 @@ async function getVendorLoginCredentials(conn, vendorId) {
         const r = await conn.raw('SELECT pgp_sym_decrypt(dearmor(?), ?) AS pw', [row.login_password_encrypted, key]);
         const pw = r && r.rows && r.rows[0] && r.rows[0].pw;
         if (pw) { password = pw; break; }
-      } catch (e) { /* wrong key / not armored — try the next candidate */ }
+      } catch (e) {
+        // Wrong key / not armored — try the next candidate. An infrastructure
+        // failure is rethrown SANITIZED: Knex embeds the query's bindings in
+        // its error message — this ciphertext and the key itself — and the
+        // dispatcher logs the message it receives (pre-push hook P0). Only the
+        // classification survives; never the message or the cause.
+        if (!isInfrastructureError(e)) continue;
+        const err = new Error(`vendor credential decrypt failed: database error${e && e.code != null ? ` ${String(e.code)}` : ''}`);
+        err.code = e && e.code != null ? String(e.code) : undefined;
+        err.infrastructure = true;
+        throw err;
+      }
     }
   }
   return {
@@ -78,6 +101,7 @@ async function getVendorLoginCredentials(conn, vendorId) {
 }
 
 module.exports = {
+  isInfrastructureError,
   vendorCredentialKey,
   vendorCredentialKeys,
   passwordWriteAction,

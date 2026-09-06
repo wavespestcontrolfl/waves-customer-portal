@@ -723,7 +723,7 @@ describe('runCompletionCommsGuard', () => {
 // above through the service the route delegates to).
 // ---------------------------------------------------------------------------
 describe('wiring source contracts', () => {
-  const dispatchSource = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const dispatchSource = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
   const gatesSource = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
 
   test('BOTH /complete success exits invoke the guard — the incomplete-visit early return included', () => {
@@ -744,7 +744,7 @@ describe('wiring source contracts', () => {
     expect(backfillGuards).toBe(2);
     const incompleteBranch = dispatchSource.indexOf('if (isIncompleteVisit) {');
     expect(incompleteBranch).toBeGreaterThan(-1);
-    const earlyReturn = dispatchSource.indexOf('return res.json(responsePayload);', incompleteBranch);
+    const earlyReturn = dispatchSource.indexOf('return ({ status: 200, body: responsePayload });', incompleteBranch);
     const guardInBranch = dispatchSource.indexOf("require('../services/completion-comms-guard')", incompleteBranch);
     expect(guardInBranch).toBeGreaterThan(incompleteBranch);
     expect(guardInBranch).toBeLessThan(earlyReturn);
@@ -759,7 +759,7 @@ describe('wiring source contracts', () => {
     // handler's payload block is the next one after the call site).
     const respIdx = dispatchSource.indexOf('const responsePayload = {', call);
     expect(respIdx).toBeGreaterThan(call);
-    expect(dispatchSource.indexOf('res.json(responsePayload)', respIdx)).toBeGreaterThan(respIdx);
+    expect(dispatchSource.indexOf('return ({ status: 200, body: responsePayload })', respIdx)).toBeGreaterThan(respIdx);
     // Fail-soft: the call sits in its own try/catch that only warns.
     const block = dispatchSource.slice(call - 600, call + 600);
     expect(block).toMatch(/try\s*\{/);

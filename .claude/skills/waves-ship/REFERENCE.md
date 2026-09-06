@@ -16,7 +16,9 @@ gh api --paginate repos/wavespestcontrolfl/waves-customer-portal/pulls/<PR>/comm
 
 Distinguish stale vs fresh inline threads by `original_commit_id`: a thread anchored to an old commit you've since fixed is stale; a thread anchored to your current HEAD is a live finding. GraphQL `reviewThreads` gives `isResolved` if needed.
 
-Timing: inline P1/P2 comments land ~1–2 minutes AFTER the top-level wrapper. Poll until the total comment count is stable for ~90 seconds before treating the review as complete.
+Timing: use the delivery-completion rule in SKILL.md §4 and CHECKLIST.md.
+Do not maintain a separate wait duration here. Silence or stable counts
+without the required final-HEAD review evidence are not a clean verdict.
 
 ## Codex quirks
 - Bare `@codex` only works on the first tag of a PR. Re-reviews need the literal text `@codex review`.

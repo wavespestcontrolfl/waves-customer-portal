@@ -1,6 +1,6 @@
-const { shouldAutoInvoiceCompletion } = require('../routes/admin-dispatch')._test;
-const { completionSavedCardFallbackPolicy } = require('../routes/admin-dispatch')._test;
-const { membershipDuesCoverVisit } = require('../routes/admin-dispatch')._test;
+const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
+const { completionSavedCardFallbackPolicy } = require('../services/complete-scheduled-service');
+const { membershipDuesCoverVisit } = require('../services/billing-lane');
 
 describe('completion saved-card fallback policy', () => {
   test('suppresses fallback rails for a fresh in-progress claim', () => {
@@ -176,7 +176,7 @@ describe('shouldAutoInvoiceCompletion — per-application billing', () => {
 // row prices NULL, and monthly_rate is the whole-plan amount — the fallback
 // would bill the full package on every service row (Codex round-2 P1).
 describe('completionInvoiceAmount', () => {
-  const { completionInvoiceAmount } = require('../routes/admin-dispatch')._test;
+  const { completionInvoiceAmount } = require('../services/billing-lane');
   const base = {
     estimatedPrice: null,
     isCallback: false,
@@ -337,7 +337,7 @@ describe('membershipDuesCoverVisit', () => {
 describe('completion route wires dues-collected coverage', () => {
   const fs = require('fs');
   const path = require('path');
-  const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
   test('monthlyDuesCollected is keyed on the visit month and passed into membershipDuesCoverVisit', () => {
     expect(source).toMatch(/duesCollectedThisMonth = await monthlyDuesCollected\(\s*\n\s*db, svc\.customer_id, new Date\(`\$\{serviceDateOnly\(svc\.scheduled_date\)\}T12:00:00Z`\),/);

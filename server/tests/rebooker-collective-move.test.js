@@ -47,6 +47,18 @@ const SIB1 = dayOffset(17);
 const SIB2 = dayOffset(24);
 const SIB3 = dayOffset(31);
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed row (the reschedule writer reads the
+// committed technician_id off the CAS write).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : [])),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -64,7 +76,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -330,7 +342,7 @@ describe('reschedule() choke point', () => {
 
 describe('single-path date exceptions', () => {
   function wireSingleMocks(svc) {
-    const trxScheduled = chain({ update: jest.fn().mockResolvedValue(1) });
+    const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const trx = jest.fn((table) => {
     if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return trxScheduled;
@@ -1120,7 +1132,7 @@ describe('caller wiring (source)', () => {
 
   test('the IB reschedule tool refuses a gated cadence date move instead of moving one row (until its series path lands)', () => {
     const src = read('../services/intelligence-bar/tools.js');
-    const fn = src.indexOf('async function rescheduleAppointment(input)');
+    const fn = src.indexOf('async function rescheduleAppointment(');
     const refuse = src.indexOf("code: 'COLLECTIVE_MOVE_REQUIRED'", fn);
     const write = src.indexOf('scheduled_date: dateStr,', fn);
     expect(refuse).toBeGreaterThan(fn);

@@ -465,6 +465,7 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
     ? MODELS.TEXT_POLICIES.visionAnalysis
     : MODELS.TEXT_POLICIES.contentDraft;
   const msg = await dispatchWithFallback(policy, {
+    laneId: 'wdo_project_brief',
     text: prompt,
     images,
     maxTokens: 900,
@@ -551,6 +552,7 @@ async function extractWdoTreatmentPhoto({ photo, propertyAddress }) {
   // VISION first, OpenAI Terra on a miss — the same policy the WDO brief
   // rides when a photo is attached.
   const msg = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+    laneId: 'wdo_project_brief',
     text: buildWdoTreatmentPhotoPrompt(propertyAddress),
     images: [{ data: photo.buffer.toString('base64'), mimeType: photo.mediaType }],
     jsonMode: true,
@@ -3520,8 +3522,16 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // For WDO the FDACS PDF is email-only, so delivery requires the email to
     // succeed; for everything else any successful channel counts.
     const delivered = isWdo ? !!channels.email?.ok : successfulChannelCount > 0;
+    // A migrated historical delivery ('legacy_sent', migration
+    // 20260511000001) has no sent_at — its delivery_status is the ONLY
+    // record that the report was issued, and its public token still opens.
+    // A resend that delivers nothing keeps it (the attempt is recorded in
+    // delivery_channels / last_delivery_at); it must not read as a
+    // never-issued report (GH Codex #3893 r9 P2).
     const deliveryStatus = !delivered
-      ? (successfulChannelCount === 0 ? 'failed' : 'partial')
+      ? (successfulChannelCount === 0
+        ? (project.delivery_status === 'legacy_sent' ? 'legacy_sent' : 'failed')
+        : 'partial')
       : (successfulChannelCount < availableChannels.length ? 'partial' : 'sent');
     const deliveryUpdate = {
       delivery_channels: channels,

@@ -13,11 +13,13 @@
  * sides on different scales. No API calls per request.
  */
 
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
+const { applyAssignable } = require('../technician-eligibility');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -116,16 +118,24 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  // Load techs
-  let techQuery = db('technicians').where({ active: true }).select('id', 'name');
-  if (technicianId) techQuery = techQuery.where('id', technicianId);
-  const techs = await techQuery;
-  if (!techs.length) return { slots: [], evaluated: 0, note: 'No active technicians found' };
+  // Load techs — only assignable ones (active employment AND field-dispatchable).
+  // Every slot consumer (booking, estimate availability, reschedule, re-service,
+  // voice relay, auto-dispatch) inherits this filter, so a prospective
+  // placeholder or an office-only account never contributes a day.
+  let techQuery = applyAssignable(db('technicians'));
+  if (technicianId) techQuery = techQuery.where('technicians.id', technicianId);
+  const techs = await techQuery.select('id', 'name');
+  if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
   // Load all scheduled services in date range, per tech, with coords
   const services = await db('scheduled_services')
     .whereBetween('scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('scheduled_services.status', ['cancelled'])
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+    .whereNotNull('scheduled_services.window_start')
+    .where((q) => {
+      q.whereNull('scheduled_services.reservation_expires_at')
+        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+    })
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.id',
@@ -194,8 +204,8 @@ async function findAvailableSlots(opts) {
           id: s.id,
           lat: s.svc_lat || s.cust_lat,
           lng: s.svc_lng || s.cust_lng,
-          startMin: timeToMinutes(s.window_start) || dayOpen,
-          endMin: timeToMinutes(s.window_end) || (timeToMinutes(s.window_start) || dayOpen) + (s.estimated_duration_minutes || DEFAULT_SERVICE_MIN),
+          startMin: timeToMinutes(s.window_start),
+          endMin: timeToMinutes(s.window_end) ?? timeToMinutes(s.window_start) + (s.estimated_duration_minutes || DEFAULT_SERVICE_MIN),
           customer: `${s.first_name || ''} ${s.last_name || ''}`.trim() || 'Unknown',
           city: s.city,
           service_type: s.service_type,

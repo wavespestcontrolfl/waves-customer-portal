@@ -37,6 +37,7 @@ function setDbQueues(queues) {
   db.mockImplementation((table) => {
     // the policy read under the lock (§6.4 cap): defaults unless a test queues a row
     if (table === 'seo_link_policy' && !tableQueues.has(table)) return chain({ first: undefined });
+    if (table === 'seo_link_attempts' && !tableQueues.has(table)) return chain();
     const q = tableQueues.get(table);
     if (!q || q.length === 0) throw new Error(`unexpected db('${table}') call (queue empty)`);
     return q.shift();

@@ -156,11 +156,12 @@ function isShadow(actionType) {
 // the canary publishing guards + daily/weekly publish caps). A draft that
 // FAILS a quality gate is skipped silently rather than queued for review.
 // Router-flagged human-review cases (loop / cannibalization / .gov SERP)
-// still route to review. Unset → the trust-build approval ramp applies.
+// skip on blogs. Blogs default ON; other actions keep the trust-build ramp.
 function autoPublishEnabled(actionType) {
   const key = `AUTO_PUBLISH_${String(actionType || '').toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-  const v = (process.env[key] || '').toLowerCase();
-  return v === 'true' || v === '1' || v === 'on';
+  const value = process.env[key];
+  if (value == null) return actionType === 'new_supporting_blog';
+  return /^(true|1|on)$/i.test(value);
 }
 
 // Actions that require verified facts-bank backing before drafting — kept in
@@ -216,8 +217,9 @@ class AutonomousRunner {
     if (!opp) return finalize(run, t0, { outcome: 'skipped_no_opportunity' });
 
     run.opportunity_id = opp.id;
-    run.action_type = opp.action_type;
-    run.shadow_mode = isShadow(opp.action_type);
+    run.queue_claim_id = opp.claim_id || null;
+    run.action_type = opp.effective_action_type || opp.action_type;
+    run.shadow_mode = isShadow(run.action_type);
     const claimToken = opp.claimed_at;
 
     // 1a. Protected-page guard. Money pages, high-traffic pages, and manually
@@ -233,7 +235,7 @@ class AutonomousRunner {
       // is exceptions-only). A protected-check ERROR is an engine fault and
       // still parks for a human.
       if (initialProtected.is_error) {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken }, run.action_type);
       } else {
         await this._skipClaimOrThrow(queue, opp.id, `protected_page:${initialProtected.reason}`, { claimToken });
       }
@@ -254,7 +256,7 @@ class AutonomousRunner {
           skip_reason: `bucket_paused:${opp.bucket}`,
           reviewer_notes: `Bucket "${opp.bucket}" auto-paused after repeated regressions — review impact verdicts before resuming.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, `bucket_paused:${opp.bucket}`, { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `bucket_paused:${opp.bucket}`, { claimToken }, run.action_type);
         return finalized;
       }
     }
@@ -300,7 +302,7 @@ class AutonomousRunner {
       // Same exceptions-only rule as the initial check: by-design protection
       // skips silently; only a protected-check ERROR parks for a human.
       if (finalProtected.is_error) {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken }, run.action_type);
       } else {
         await this._skipClaimOrThrow(queue, opp.id, `protected_page:${finalProtected.reason}`, { claimToken });
       }
@@ -330,7 +332,7 @@ class AutonomousRunner {
           skip_reason: factsCheck.reason || 'facts_insufficient',
           reviewer_notes: factsCheck.notes,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, factsCheck.reason || 'facts_insufficient', { claimToken }, run.action_type);
         return finalized;
       }
     } else if (FACTS_GATED_ACTIONS.has(brief.action_type) && !run.shadow_mode) {
@@ -344,7 +346,7 @@ class AutonomousRunner {
         skip_reason: 'facts_sufficiency_unavailable',
         reviewer_notes: 'Facts-sufficiency module failed to load; live facts-gated action held to avoid publishing unverified content.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'facts_sufficiency_unavailable', { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'facts_sufficiency_unavailable', { claimToken }, run.action_type);
       return finalized;
     }
 
@@ -442,7 +444,7 @@ class AutonomousRunner {
           skip_reason: 'topic_targeting_unavailable',
           reviewer_notes: `Topic-targeting gate could not run (${topicResult.error}); new blog held rather than drafted unchecked.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken }, run.action_type);
         return finalized;
       }
       if (!topicResult.ok) {
@@ -468,9 +470,9 @@ class AutonomousRunner {
       }
       const finalized = await finalize(run, t0, result.patch);
       if (result.patch.outcome === 'skipped_shadow_mode') {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'shadow_internal_links', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'shadow_internal_links', { claimToken }, run.action_type);
       } else {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'internal_links_pending_review', { claimToken }, run.action_type);
       }
       return finalized;
     }
@@ -506,7 +508,7 @@ class AutonomousRunner {
         return finalized;
       }
       const finalized = await finalize(run, t0, result.patch);
-      await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'gbp_post_pending_review', { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || 'gbp_post_pending_review', { claimToken }, run.action_type);
       return finalized;
     }
 
@@ -600,9 +602,9 @@ class AutonomousRunner {
         const finalized = await finalize(run, t0, {
           outcome: 'completed_pending_review',
           skip_reason: 'operator_slug_mismatch',
-          reviewer_notes: `Writer slug "${slugRepair.mismatch.draft_slug || '(none)'}" does not match the operator-pinned slug "${slugRepair.mismatch.expected_slug}" and the drift is not auto-repairable (${slugRepair.reason}) — review/fix before publishing.`,
+          reviewer_notes: `Writer slug "${slugRepair.mismatch.draft_slug || '(none)'}" does not match the operator-pinned slug "${slugRepair.mismatch.expected_slug}" and the drift is not auto-repairable (${slugRepair.reason}) — publishing blocked.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'operator_slug_mismatch', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'operator_slug_mismatch', { claimToken }, run.action_type);
         return finalized;
       }
       if (slugRepair && slugRepair.ok) {
@@ -627,7 +629,7 @@ class AutonomousRunner {
             failure_message: err.message,
             reviewer_notes: `Metadata publish validation failed before creating an Astro PR: ${err.message}`,
           });
-          await this._pendingReviewClaimOrThrow(queue, opp.id, 'metadata_publish_validation_failed', { claimToken });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'metadata_publish_validation_failed', { claimToken }, run.action_type);
           return finalized;
         }
         await this._releaseClaimOrThrow(queue, opp.id, { claimToken });
@@ -637,7 +639,7 @@ class AutonomousRunner {
       if (result.queue === 'complete') {
         await this._completeClaimOrThrow(queue, opp.id, { notes: result.notes, claimToken });
       } else {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || result.notes, { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, result.patch.skip_reason || result.notes, { claimToken }, run.action_type);
       }
       return finalized;
     }
@@ -662,7 +664,7 @@ class AutonomousRunner {
           skip_reason: 'claims_ledger_unavailable',
           reviewer_notes: 'Claims-ledger validator module failed to load — failing closed; draft routed to review instead of publishing unvalidated local claims.',
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_unavailable', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_unavailable', { claimToken }, run.action_type);
         return finalized;
       }
       if (claimsValidator) {
@@ -691,7 +693,7 @@ class AutonomousRunner {
             skip_reason: 'claims_ledger_failed',
             reviewer_notes: notes,
           });
-          await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_failed', { claimToken });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'claims_ledger_failed', { claimToken }, run.action_type);
           return finalized;
         }
       }
@@ -712,7 +714,7 @@ class AutonomousRunner {
         skip_reason: 'content_guardrails_unavailable',
         reviewer_notes: 'Content-guardrails module failed to load — failing closed; draft routed to review instead of publishing without the price/brand/FAQ/link P0 checks.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken }, run.action_type);
       return finalized;
     }
     // Topic targeting on the EMITTED draft is judged BEFORE the guardrail
@@ -749,7 +751,7 @@ class AutonomousRunner {
           skip_reason: 'topic_targeting_unavailable',
           reviewer_notes: `Post-draft topic-targeting gate could not run (${engineFailure.message}); draft held for review rather than published unchecked.`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken }, run.action_type);
         return finalized;
       }
     }
@@ -772,7 +774,7 @@ class AutonomousRunner {
           skip_reason: skipReason,
           reviewer_notes: `${err.message} — routed to review (fail-closed, infra load failure not a writer mistake).`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken }, run.action_type);
         return finalized;
       }
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
@@ -836,7 +838,7 @@ class AutonomousRunner {
         skip_reason: 'comparison_table_unavailable',
         reviewer_notes: 'Comparison-table gate module failed to load — failing closed; draft routed to review instead of publishing without the disparagement/competitor checks.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_unavailable', { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_unavailable', { claimToken }, run.action_type);
       return finalized;
     }
     if (comparisonGate && draft) {
@@ -879,7 +881,7 @@ class AutonomousRunner {
             skip_reason: 'comparison_table_failed',
             reviewer_notes: `${notes} — ${parkNote}`,
           });
-          await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken });
+          await this._pendingReviewClaimOrThrow(queue, opp.id, 'comparison_table_failed', { claimToken }, run.action_type);
           return finalized;
         }
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
@@ -1089,32 +1091,11 @@ class AutonomousRunner {
     // 6. Trust-build check. AUTO_PUBLISH_<ACTION_TYPE>=true skips the human
     // trust-build ramp once every quality gate has passed; the canary
     // publishing guards + daily/weekly caps downstream still apply.
+    const unattendedBlog = run.action_type === 'new_supporting_blog';
     const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
-    // A named-competitor comparison routes to human review (legal/brand
-    // surface) UNLESS namedCompetitorAutopublish is on AND the run carries
-    // OPERATOR-INTERCEPT provenance (owner directive 2026-08-26: the
-    // intercept lane is fully autonomous — a CLEAN draft publishes; gate
-    // failures still block/park exactly as before). Provenance uses the
-    // canonical TRUE-intercept marker gsc_signal.intercept (stamped by the
-    // brief builder from opportunity.signal_metadata.intercept_brief) — NOT
-    // the operator_intercept bucket or operator_brief payload, which
-    // category/spoke seeds share (hook r3 P1). The owner's per-competitor
-    // authorization recorded in that intercept brief IS the human sign-off
-    // the review park would collect, given in advance; a PASSING draft can
-    // only name competitors that are curated-allowlisted (machine-validated
-    // per cell) or operator-authorized by that brief's own text — anything
-    // else P0-blocks in the comparison gate — and sourcing is still
-    // enforced by the fact-check gate and Codex on the PR. A
-    // named-competitor draft WITHOUT the marker keeps the review path
-    // regardless of the flag. Autopublish also requires
-    // namedCompetitorComparison — the autopublish flag alone never lifts a
-    // park. Gate reads fail CLOSED: an unreadable flag keeps the review
-    // park. With autopublish off (or out of scope) the run still uses the
-    // approvable trust-build review path.
-    // The predicate is the SHARED one in comparison-table-gate — the
-    // remediation parks and the poller's merge gate make the identical
-    // decision from the same function (PR #3508 r4 P1).
+    // Named-competitor blogs use the shared automated eligibility check.
+    // Comparison, sourcing, and merge-time head checks remain mandatory.
     let namedCompetitorAutopublish = false;
     try {
       namedCompetitorAutopublish = require('./comparison-table-gate')
@@ -1133,17 +1114,23 @@ class AutonomousRunner {
         || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
-    // 6b. Affiliate review (owner ruling 2026-08-31): EVERY draft that carries
-    // an <AffiliateLink> parks for the owner during the pilot — no autopublish,
-    // no trust-build shortcut, no email-reply approval (yellow-class consumer
-    // pesticides were approved CONDITIONAL on per-product scrutiny a reply-
-    // "approved" would rubber-stamp). The guardrails already gated the
-    // products; this is the human sign-off on the finished post. Approve with
-    // server/scripts/approve-autonomous-run.js (same publish path as the
-    // named-competitor review).
+    // The blog pilot now runs unattended; other content lanes keep their
+    // existing approval contract. Product/placement checks still run above.
     const affiliateProductIds = (contentGuardrails && typeof contentGuardrails.affiliateProductIdsIn === 'function' && draft?.body)
       ? contentGuardrails.affiliateProductIdsIn(draft.body) : [];
-    const affiliateReview = affiliateProductIds.length > 0;
+    const affiliateReview = !unattendedBlog && affiliateProductIds.length > 0;
+
+    // Blog risk flags fail closed without asking an operator to override them.
+    if (unattendedBlog && (brief.human_review_required || !autoPublish || forceNamedCompetitorReview)) {
+      const reason = !autoPublish ? 'auto_publish_disabled'
+        : forceNamedCompetitorReview ? 'named_competitor_disabled' : 'brief_risk_blocked';
+      const finalized = await finalize(run, t0, {
+        outcome: 'skipped', skip_reason: reason,
+        reviewer_notes: this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief),
+      });
+      await this._skipClaimOrThrow(queue, opp.id, reason, { claimToken });
+      return finalized;
+    }
 
     // 7. Decide outcome.
     if (dryRun || run.shadow_mode) {
@@ -1153,7 +1140,7 @@ class AutonomousRunner {
         outcome: 'skipped_shadow_mode',
         skip_reason: wouldPublish ? 'shadow_would_publish' : 'shadow_would_gate',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, finalized.skip_reason, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, finalized.skip_reason, { claimToken }, run.action_type);
       return finalized;
     }
 
@@ -1220,12 +1207,12 @@ class AutonomousRunner {
         skip_reason: reason,
         reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), affiliateNote, trustBuildNote].filter(Boolean).join(' | '),
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type);
       // Owner email-approval loop (2026-07-28): approvable kinds notify the
       // owner's inbox; the emailed reply executes the decision. Fire-and-
       // forget — a notification failure never affects the run outcome (the
       // poller retries unsent emails each cycle).
-      setImmediate(() => {
+      if (!unattendedBlog) setImmediate(() => {
         // The require itself is inside the guard: this immediate can fire
         // while the process (or a test environment) is tearing down, where
         // a deferred module load throws synchronously — a fire-and-forget
@@ -1244,9 +1231,9 @@ class AutonomousRunner {
       const finalized = await finalize(run, t0, {
         outcome: 'completed_pending_review',
         skip_reason: 'publisher_adapter_unavailable',
-        reviewer_notes: 'Astro draft/brief publisher adapter is not wired yet; route this approved draft manually.',
+        reviewer_notes: 'Astro draft/brief publisher adapter is unavailable; nothing was published.',
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, 'publisher_adapter_unavailable', { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, 'publisher_adapter_unavailable', { claimToken }, run.action_type);
       return finalized;
     }
 
@@ -1275,7 +1262,7 @@ class AutonomousRunner {
         skip_reason: publishingGuards.reason,
         reviewer_notes: publishingGuards.notes,
       });
-      await this._pendingReviewClaimOrThrow(queue, opp.id, publishingGuards.reason, { claimToken });
+      await this._pendingReviewClaimOrThrow(queue, opp.id, publishingGuards.reason, { claimToken }, run.action_type);
       return finalized;
     }
 
@@ -1302,7 +1289,7 @@ class AutonomousRunner {
           failure_message: err.message,
           reviewer_notes: `Astro publish validation failed before publishing: ${err.message}`,
         });
-        await this._pendingReviewClaimOrThrow(queue, opp.id, 'publish_validation_failed', { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'publish_validation_failed', { claimToken }, run.action_type);
         return finalized;
       }
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken }); // let next run retry
@@ -1356,7 +1343,7 @@ class AutonomousRunner {
         throw err;
       }
       try {
-        await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken }, run.action_type);
       } catch (err) {
         await this._parkPublishedClaimForReconciliation(queue, opp.id, 'astro_pr_queue_transition_failed', { claimToken }, err);
       }
@@ -1800,8 +1787,11 @@ class AutonomousRunner {
     if (!ok) throw new Error('queue_skip_failed_or_stale_claim');
   }
 
-  async _pendingReviewClaimOrThrow(queue, opportunityId, reason, payload) {
-    const ok = await queue.pendingReview(opportunityId, reason, payload);
+  async _pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, actionType) {
+    const skip = actionType === 'new_supporting_blog' && reason !== 'astro_pr_pending_merge';
+    const ok = skip
+      ? await queue.skip(opportunityId, reason, payload)
+      : await queue.pendingReview(opportunityId, reason, payload);
     if (!ok) throw new Error('queue_pending_review_failed_or_stale_claim');
   }
 
@@ -1995,7 +1985,7 @@ class AutonomousRunner {
   async _parkPublishedClaimForReconciliation(queue, opportunityId, reason, payload, cause) {
     logger.error(`[autonomous-runner] published ${opportunityId} but ${reason}: ${cause.message}`);
     try {
-      await this._pendingReviewClaimOrThrow(queue, opportunityId, reason, payload);
+      await this._pendingReviewClaimOrThrow(queue, opportunityId, reason, payload, null);
     } catch (err) {
       logger.error(`[autonomous-runner] failed to park published ${opportunityId} for reconciliation: ${err.message}`);
     }
@@ -3623,11 +3613,18 @@ class AutonomousRunner {
 // ── finalize: persist autonomous_runs row + return it ───────────────
 
 async function finalize(run, t0, patch, { persist = true } = {}) {
+  // Pending PRs belong to the poller. Other blog failures are terminal,
+  // observable skips; no portal visit or email reply is required.
+  if (run.action_type === 'new_supporting_blog' && patch.outcome === 'completed_pending_review'
+    && patch.skip_reason !== 'astro_pr_pending_merge') {
+    patch = { ...patch, outcome: 'skipped' };
+  }
   Object.assign(run, patch, { total_ms: Date.now() - t0, completed_at: new Date() });
   if (!persist) return run;
   try {
     const [persisted] = await db('autonomous_runs').insert({
       opportunity_id: run.opportunity_id || null,
+      queue_claim_id: run.queue_claim_id || null,
       brief_id: run.brief_id || null,
       action_type: run.action_type || 'unknown',
       page_type: run.page_type || null,

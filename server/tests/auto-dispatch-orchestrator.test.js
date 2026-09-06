@@ -366,3 +366,12 @@ test('unplaced due dates get the run budget ahead of ordinary route improvements
     else process.env.AUTO_DISPATCH_ALLOW_APPLY = previous;
   }
 });
+
+test('never heals a moved secondary property with primary-customer coordinates', async () => {
+  servicesResult = [svc({ service_address_line1: '200 Example Avenue', customer_address_line1: '100 Example Street' })];
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+  expect(res).toMatchObject({ skipped: 1, evaluated: 0, geocode_attempts: 0 });
+});

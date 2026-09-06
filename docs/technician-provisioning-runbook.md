@@ -13,6 +13,41 @@ profile row was already created for the hire's email, register returns 409
 with that email instead (it sets their first password via the emailed reset
 link), and add licensing via the compliance surface.
 
+## Placeholders before a hire (Tech #1, #2, #3)
+
+A hire who has not started is a **prospective** row: Team tab → "+ Add
+Technician" → Employment = *Prospective*. Only a name is needed. A
+prospective row cannot sign in, is never offered as a booking slot, never
+holds dispatch capacity, never appears on a customer surface, and is not a
+drop target on the board. Every visit writer checks this at save time
+(`server/services/technician-eligibility.js`), so a stale schedule screen
+cannot put a customer on it either.
+
+When the person starts (order matters — the register API below is for a
+brand-new row and returns 409 once the placeholder owns the email, and
+"Forgot password" refuses a row that is not active):
+
+1. Rename the placeholder to the hire's name (allowed only while the row has
+   no visit, time, or payout history — a row that already worked is a
+   person, never recycled; a replacement hire gets a new row).
+2. Team tab → Edit: set the hire's real mailbox as the email and Employment
+   = *Active*. Save. (An active row requires an email.)
+3. Have the hire use **"Forgot password"** on `/admin/login` with that
+   email — the emailed reset link sets their first password. Do NOT call the
+   register API for a placeholder.
+4. Add licensing on the Compliance page, then tick **"Can be assigned field
+   work"** on the Team tab once they may take solo stops. Employment and
+   field eligibility are separate on purpose: an office admin stays active
+   without ever becoming dispatchable, and a trainee can sign in before they
+   take work.
+5. Team tab → **Capabilities**: every hire starts with all five dispatch
+   categories (general pest, mosquito, lawn/tree & shrub, rodent,
+   termite/WDO) at *Needs review* — auto-dispatch may still place them there
+   but scores those stops lower. Mark a category *Qualified* once you have
+   seen them do it; *Off* stops auto-dispatch from offering them that work
+   (visits already assigned are listed for manual reassignment, never
+   moved). The editor records who verified each category and when.
+
 ## Before you start
 
 - You need an **admin session token** (log into the admin portal, or use the
@@ -92,11 +127,14 @@ curl -sS -X DELETE \
 ```
 
 It runs the full offboard atomically: refuses if the tech has an active
-timer or is the final admin, sets `active = false`, bumps
+timer or is the final admin, sets employment status to `inactive` (and
+the legacy `active = false`), bumps
 `auth_token_version` (revoking every issued JWT), clears pending
 password-reset tokens, deactivates push subscriptions, and disconnects
 sockets. The staff row is never deleted — visits, time entries, payroll,
-and reports reference the technician id.
+and reports reference the technician id. The response lists the tech's
+**future assigned visits**; they are left on the schedule for manual
+reassignment, never cancelled or rewritten.
 
 ## Related
 

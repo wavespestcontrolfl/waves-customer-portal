@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
-const PaymentRouter = require('../services/payment-router');
 const StripeService = require('../services/stripe');
 const stripeConfig = require('../config/stripe-config');
 const { authenticate } = require('../middleware/auth');
@@ -16,7 +15,7 @@ const { isEnabled } = require('../config/feature-gates');
 router.use(authenticate);
 
 // =========================================================================
-// GET /api/billing — Payment history (routed to correct processor)
+// GET /api/billing — Payment history
 // =========================================================================
 router.get('/', async (req, res, next) => {
   try {
@@ -30,7 +29,7 @@ router.get('/', async (req, res, next) => {
     }
     const requestedLimit = page.limit;
     const requestedCursor = page.cursor;
-    const service = await PaymentRouter.getServiceForCustomer(req.customerId);
+    const service = await StripeService;
 
     // Third-party Bill-To: a payment against a payer-billed invoice belongs to
     // the payer (AP contact), not the homeowner — drop those rows so the

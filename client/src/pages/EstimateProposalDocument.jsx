@@ -27,9 +27,9 @@ import { formatETDateTime } from '../lib/timezone';
 // residential guarantee claims.
 
 const NAVY = '#04395E';
-const INK = '#17242F';
-const MUTED = '#5B6A77';
-const LINE = '#C9CED4';
+const INK = '#04395E'; // sheet ink (theme-doc DOC.ink)
+const MUTED = '#3F4A65'; // DOC.muted
+const LINE = '#D8D0C0'; // DOC.borderStrong
 const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
 
@@ -113,7 +113,7 @@ function SectionHeader({ children }) {
   return (
     <div className="doc-keep-with-next" style={{
       borderBottom: `1.5px solid ${NAVY}`, margin: '14px 0 6px', paddingBottom: 3,
-      color: NAVY, fontSize: 10.5, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase',
+      color: NAVY, fontSize: 10.5, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{children}</div>
   );
 }
@@ -289,7 +289,7 @@ export default function EstimateProposalDocument({ data, token }) {
         <div className="doc-keep" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
           <img src="/waves-logo.png" alt="Waves Pest Control" style={{ height: 64, display: 'block' }} />
           <div style={{ textAlign: 'right', fontSize: 10.5, lineHeight: 1.5, color: MUTED }}>
-            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 800 }}>Waves Pest Control, LLC</div>
+            <div style={{ color: NAVY, fontSize: 12.5, fontWeight: 700 }}>Waves Pest Control, LLC</div>
             <div>{WAVES_SUPPORT_PHONE_DISPLAY} &middot; wavespestcontrol.com</div>
             <div>contact@wavespestcontrol.com</div>
             <div>Licensed &amp; insured &middot; {WAVES_FL_LICENSE_LINE}</div>
@@ -301,7 +301,7 @@ export default function EstimateProposalDocument({ data, token }) {
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8, gap: 12,
         }}>
-          <div style={{ color: NAVY, fontSize: 21, fontWeight: 800, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{docTitle}</div>
+          <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{docTitle}</div>
           <div style={{ fontSize: 11, color: MUTED, whiteSpace: 'nowrap' }}>
             {estimateNumber ? `Estimate ${estimateNumber} · ` : ''}{fmtInstant(estimate.createdAt)}
           </div>
@@ -351,7 +351,7 @@ export default function EstimateProposalDocument({ data, token }) {
             </div>
             {programList.map((program, pIdx) => (
               <div className="doc-keep" key={`${program.label}-${pIdx}`} style={{ marginTop: pIdx === 0 ? 0 : 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 800, color: NAVY, padding: '4px 0 2px' }}>{program.label}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: NAVY, padding: '4px 0 2px' }}>{program.label}</div>
                 {program.note ? (
                   <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>{program.note}</div>
                 ) : null}
@@ -400,7 +400,7 @@ export default function EstimateProposalDocument({ data, token }) {
             {buildings.map((building, bIdx) => (
               <div key={`${building.name || 'b'}-${bIdx}`} style={{ marginTop: bIdx === 0 ? 0 : 8 }}>
                 {multiBuilding ? (
-                  <div style={{ fontSize: 12, fontWeight: 800, color: NAVY, padding: '4px 0 2px' }}>{building.name || 'Service location'}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: NAVY, padding: '4px 0 2px' }}>{building.name || 'Service location'}</div>
                 ) : null}
                 {building.note ? (
                   <div style={{ fontSize: 11, color: MUTED, padding: '0 0 2px', lineHeight: 1.5 }}>{building.note}</div>
@@ -427,7 +427,7 @@ export default function EstimateProposalDocument({ data, token }) {
             ))}
             {correctiveWork.length > 0 && (
               <div>
-                <div style={{ fontSize: 12, fontWeight: 800, color: NAVY, padding: '6px 0 2px' }}>Corrective work (one-time)</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: NAVY, padding: '6px 0 2px' }}>Corrective work (one-time)</div>
                 {correctiveWork.map((work, idx) => (
                   <div key={`${work.label}-${idx}`} data-estimate-document-line="" style={{
                     display: 'flex', justifyContent: 'space-between', gap: 14,
@@ -477,7 +477,7 @@ export default function EstimateProposalDocument({ data, token }) {
               {showGrandTotal ? (
                 <div style={{
                   display: 'flex', justifyContent: 'space-between', padding: '5px 0 3px', fontSize: 13,
-                  borderTop: `1.5px solid ${NAVY}`, marginTop: 4, fontWeight: 800, color: NAVY,
+                  borderTop: `1.5px solid ${NAVY}`, marginTop: 4, fontWeight: 700, color: NAVY,
                 }}>
                   <span>{grandTotalLabel}</span>
                   <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(totals.firstYearTotal)}</span>
@@ -545,7 +545,7 @@ export default function EstimateProposalDocument({ data, token }) {
               <img
                 src={estimate.satelliteUrl}
                 alt={`Satellite view of ${estimate.address || 'the property'}`}
-                style={{ marginTop: 8, width: '100%', maxHeight: 260, objectFit: 'cover', borderRadius: 6, border: `1px solid ${LINE}` }}
+                style={{ marginTop: 8, width: '100%', maxHeight: 260, objectFit: 'cover', borderRadius: 10, border: `1px solid ${LINE}` }}
                 onError={() => setSatelliteFailed(true)}
               />
             ) : null}
@@ -563,7 +563,7 @@ export default function EstimateProposalDocument({ data, token }) {
           ))}
           {proposal?.terms && termRows.length > 0 ? (
             <div style={{ marginTop: 4 }}>
-              <div style={{ fontSize: 10.5, fontWeight: 800, color: NAVY }}>Additional terms</div>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: NAVY }}>Additional terms</div>
               <div style={{ fontSize: 11, color: INK, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{proposal.terms}</div>
             </div>
           ) : null}
