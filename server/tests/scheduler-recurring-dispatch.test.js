@@ -47,6 +47,14 @@ test('the existing daily tick maintains handoff alerts with autoDispatch disable
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });
 
+test.each([false, true])('handoff alerts stay registered with cronJobs off and autoDispatch=%s', async (autoDispatch) => {
+  isEnabled.mockImplementation((name) => name === 'autoDispatch' && autoDispatch);
+  await tick();
+  expect(cron.schedule).toHaveBeenCalledTimes(1);
+  expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
+  expect(runAutoDispatch).not.toHaveBeenCalled();
+});
+
 test('an enabled optimizer uses its existing in-run alert audit', async () => {
   isEnabled.mockImplementation((name) => ['cronJobs', 'autoDispatch'].includes(name));
   await tick();
