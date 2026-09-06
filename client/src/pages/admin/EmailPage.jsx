@@ -190,6 +190,7 @@ export default function EmailPage({ navigation, active }) {
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
   const hasDrafts = Object.values(composeForm).some(Boolean) || Object.values(drafts.replies).some(Boolean);
+  const loadSequence = useRef({ stats: 0, digest: 0, emails: 0, blocked: 0 });
 
   const loadStatus = useCallback(async () => {
     try {
@@ -202,26 +203,29 @@ export default function EmailPage({ navigation, active }) {
   }, []);
 
   const loadStats = useCallback(async () => {
+    const request = ++loadSequence.current.stats;
     try {
       const r = await adminFetch("/api/admin/email/stats");
       const d = await r.json();
-      setStats(d);
+      if (request === loadSequence.current.stats) setStats(d);
     } catch {
       /* ignore */
     }
   }, []);
 
   const loadDigest = useCallback(async () => {
+    const request = ++loadSequence.current.digest;
     try {
       const r = await adminFetch("/api/admin/email/daily-digest");
       const d = await r.json();
-      setDigest(d);
+      if (request === loadSequence.current.digest) setDigest(d);
     } catch {
       /* ignore */
     }
   }, []);
 
   const loadEmails = useCallback(async () => {
+    const request = ++loadSequence.current.emails;
     try {
       const params = new URLSearchParams({
         page,
@@ -239,6 +243,7 @@ export default function EmailPage({ navigation, active }) {
 
       const r = await adminFetch(`/api/admin/email/inbox?${params}`);
       const d = await r.json();
+      if (request !== loadSequence.current.emails) return;
       setEmails(d.emails || []);
       setTotal(d.total || 0);
     } catch {
@@ -247,10 +252,11 @@ export default function EmailPage({ navigation, active }) {
   }, [filter, search, page, showArchived]);
 
   const loadBlocked = useCallback(async () => {
+    const request = ++loadSequence.current.blocked;
     try {
       const r = await adminFetch("/api/admin/email/blocked");
       const d = await r.json();
-      setBlocked(d.blocked || []);
+      if (request === loadSequence.current.blocked) setBlocked(d.blocked || []);
     } catch {
       /* ignore */
     }
@@ -280,6 +286,9 @@ export default function EmailPage({ navigation, active }) {
       loadDigest();
     }
   }, [active, status, loadStats, loadEmails, loadDigest]);
+  useEffect(() => {
+    if (active && tab === "blocked") loadBlocked();
+  }, [active, tab, loadBlocked]);
 
   // Old bells/OAuth returns keep working through /admin/email's alias.
   // Observe query changes as well as mount so Back/Forward can select mail.
@@ -711,10 +720,7 @@ export default function EmailPage({ navigation, active }) {
         {...navigation}
         secondarySections={emailSections}
         secondaryActiveKey={tab}
-        onSecondaryChange={(key) => {
-          setTab(key);
-          if (key === "blocked") loadBlocked();
-        }}
+        onSecondaryChange={setTab}
         secondaryAriaLabel="Email section"
         secondaryNavGridClassName="grid-cols-2"
         action={{

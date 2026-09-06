@@ -23,6 +23,7 @@ async function main() {
   let releaseDraft;
   let smsMessages = [];
   let refreshedEmail = false;
+  let blockedSenders = [];
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
@@ -53,7 +54,7 @@ async function main() {
       else if (api === '/admin/email/inbox') body = { emails: [b], total: 1 };
       else if (api === '/admin/email/stats') body = { total: 1, unread: 0 };
       else if (api === '/admin/email/daily-digest') body = { total_received: 0 };
-      else if (api === '/admin/email/blocked') body = { blocked: [] };
+      else if (api === '/admin/email/blocked') body = { blocked: blockedSenders };
       else if (api === '/admin/email/send' && request.method() === 'POST') { await sendHold; body = failSend ? { error: 'Synthetic send failure' } : { success: true }; status = failSend ? 503 : 200; }
       else if (api === `/admin/email/message/${a.id}/ai-draft` && request.method() === 'POST') { await draftHold; body = { reply_draft: 'Synthetic delayed suggestion' }; }
       else if (api === `/admin/email/message/${a.id}`) body = a;
@@ -151,8 +152,11 @@ async function main() {
       await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked Senders' }).click();
       await page.getByPlaceholder('Block domain or email (e.g. spammer.com or bad@example.com)').waitFor();
       await channel(page, 'SMS').click();
+      blockedSenders = [{ id: 'fixture-block', domain: 'blocked.example.invalid', created_at: new Date().toISOString() }];
       await channel(page, 'Email').click();
       await page.getByPlaceholder('Block domain or email (e.g. spammer.com or bad@example.com)').waitFor();
+      await page.getByText('blocked.example.invalid', { exact: true }).waitFor();
+      blockedSenders = [];
       await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Inbox', exact: true }).click();
     });
     await scenario('hidden Email defers a changed message link until the channel opens', async () => {

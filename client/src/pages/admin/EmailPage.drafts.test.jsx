@@ -14,15 +14,19 @@ let sendResponse;
 let draftResponse;
 let messageResponse;
 let actionResponse;
+let loadResponses;
 let inbox;
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 beforeEach(() => {
   clearEmailDrafts(); sessionStorage.clear(); localStorage.setItem("waves_admin_token", "fixture-token");
   window.history.replaceState({}, "", "/admin/communications#tab=email");
   inbox = [a, b]; sendResponse = null; draftResponse = null; messageResponse = null; actionResponse = null;
+  loadResponses = {};
   vi.spyOn(window, "alert").mockImplementation(() => {});
   vi.stubGlobal("fetch", vi.fn(async (input, options = {}) => {
     const url = new URL(input, "https://fixture.invalid");
+    const loadResponse = loadResponses[url.pathname.split("/").at(-1)];
+    if (loadResponse) return loadResponse();
     if (url.pathname.endsWith("/oauth/status")) return response({ connected: true });
     if (url.pathname.endsWith("/inbox")) return response({ emails: inbox, total: inbox.length });
     if (url.pathname.endsWith("/send")) return sendResponse ? sendResponse(options) : response({ success: true });
@@ -34,16 +38,18 @@ beforeEach(() => {
     if (url.pathname.includes("/message/")) return messageResponse ? messageResponse(url) : response(url.pathname.endsWith(a.id) ? a : b);
     if (url.pathname.endsWith("/stats")) return response({ total: inbox.length, unread: 0 });
     if (url.pathname.endsWith("/daily-digest")) return response({ total_received: 0 });
+    if (url.pathname.endsWith("/blocked")) return response({ blocked: [] });
     if (url.pathname.endsWith("/customers")) return response({ customers: [] });
     throw new Error(`Unmatched fixture request ${options.method || "GET"} ${url.pathname}`);
   }));
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
-function mount(userId = "fixture-owner") {
-  return render(<BrowserRouter><Routes><Route path="/admin" element={<Outlet context={{ user: { id: userId, role: "admin" } }} />}>
-    <Route path="communications" element={<EmailPage active navigation={{ title: "Communications", sections: [] }} />} />
-  </Route></Routes></BrowserRouter>);
+function emailRoute(active = true, userId = "fixture-owner") {
+  return <BrowserRouter><Routes><Route path="/admin" element={<Outlet context={{ user: { id: userId, role: "admin" } }} />}>
+    <Route path="communications" element={<EmailPage active={active} navigation={{ title: "Communications", sections: [] }} />} />
+  </Route></Routes></BrowserRouter>;
 }
+function mount(userId = "fixture-owner") { return render(emailRoute(true, userId)); }
 async function compose() {
   fireEvent.click(await screen.findByRole("button", { name: "New Email" }));
   const dialog = screen.getByRole("dialog");
@@ -122,9 +128,7 @@ describe("Email draft and navigation preservation", () => {
     let finish;
     actionResponse = () => new Promise((resolve) => { finish = resolve; });
     fireEvent.click(screen.getByRole("button", { name: new RegExp(`${action}$`) }));
-    view.rerender(<BrowserRouter><Routes><Route path="/admin" element={<Outlet context={{ user: { id: "fixture-owner", role: "admin" } }} />}>
-      <Route path="communications" element={<EmailPage active={false} navigation={{ title: "Communications", sections: [] }} />} />
-    </Route></Routes></BrowserRouter>);
+    view.rerender(emailRoute(false));
     act(() => {
       window.history.pushState({}, "", `/admin/communications?id=${id}&tag=new&thread=fixture-customer#tab=sms`);
       window.dispatchEvent(new PopStateEvent("popstate"));
@@ -146,6 +150,27 @@ describe("Email draft and navigation preservation", () => {
     window.history.pushState({}, "", "/admin/settings?tab=general");
     await act(async () => finish(response({ success: true })));
     expect(window.location.pathname + window.location.search).toBe("/admin/settings?tab=general");
+  });
+
+  it.each([
+    ["inbox", { emails: [{ ...b, subject: "Fresh inbox result" }], total: 1 }, { emails: [{ ...a, subject: "Stale inbox result" }], total: 1 }, "Fresh inbox result", "Stale inbox result"],
+    ["stats", { unread: 9371, total: 1 }, { unread: 9361, total: 1 }, "9371", "9361"],
+    ["daily-digest", { total_received: 9371 }, { total_received: 9361 }, "9371", "9361"],
+    ["blocked", { blocked: [{ id: "fixture-new", domain: "fresh.example.invalid", created_at: new Date().toISOString() }] }, { blocked: [{ id: "fixture-old", domain: "stale.example.invalid", created_at: new Date().toISOString() }] }, "fresh.example.invalid", "stale.example.invalid"],
+  ])("returning to Email refreshes %s and ignores its older response", async (dataset, fresh, stale, freshText, staleText) => {
+    const pending = [];
+    loadResponses[dataset] = () => new Promise((resolve) => pending.push(resolve));
+    const view = mount();
+    if (dataset === "blocked") fireEvent.click(await screen.findByRole("button", { name: "Blocked Senders" }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    view.rerender(emailRoute(false));
+    view.rerender(emailRoute());
+    await waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => pending[1](response(fresh)));
+    expect(await screen.findByText(freshText, { exact: true })).toBeInTheDocument();
+    await act(async () => pending[0](response(stale)));
+    expect(screen.getByText(freshText, { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(staleText, { exact: true })).not.toBeInTheDocument();
   });
 
   it("retains a failed compose and clears it only after a confirmed send", async () => {

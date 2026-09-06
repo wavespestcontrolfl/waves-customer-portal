@@ -316,3 +316,21 @@ complete focused selection passes **100 tests across nine suites**; all 14
 browser scenarios, the production build and prebuild gates pass. Scoped Email
 lint has zero errors and three existing warnings. Evidence:
 `.tmp/email-late-actions-{red,all-focused,browser,build,lint}.log`.
+
+## P2 refresh fixes and structural follow-up
+
+The GitHub review of `1134d83bd1` returned no P0/P1 and three P2 findings.
+Two local refresh fixes now prevent older inbox/statistics/digest/blocked-list
+responses from overwriting newer data and refresh the retained Blocked Senders
+view on activation. Four out-of-order response regressions failed before the
+fix; the browser also reproduced the stale blocked list. Nine focused suites /
+**104 tests**, all 14 browser scenarios, the production build and prebuild
+checks pass (`.tmp/email-p2-refresh-{red,focused,browser-red,browser,build,lint}.log`).
+
+The third P2 is deferred in the PR body: `EmailPage.jsx:135` grows from
+complexity 47 at the parent to 63 after consolidation. A coherent separation of
+selection/loading and draft/send ownership requires broader component
+restructuring than the local refresh fixes. This is an accepted structural
+follow-up, not a claim that the expanded component warning predates the PR.
+Earlier continuation lint records include the warning as present at those
+checkpoints; the final PR summary explicitly identifies this deferral.
