@@ -314,10 +314,20 @@ async function alertArrivalUnreachable({ customerId, scheduledServiceId, emailRe
   }
 }
 
+// Staff get paged only for a genuinely unreachable email (no address /
+// suppressed) — the same test the en-route sender applies. A customer's
+// email opt-out or the rolled-back template is a deliberate skip, not a
+// contact-repair job.
+function emailLegUnreachable(emailRes) {
+  return !!emailRes && !emailRes.ok && (emailRes.blocked === true || emailRes.reason === "missing_email");
+}
+
 // classifyArrivalMiss + the staff alert when the miss is terminal.
 async function settleArrivalMiss(ctx, emailRes) {
   const verdict = classifyArrivalMiss({ results: ctx.results, emailRes, smsLegAvailable: ctx.smsLegAvailable });
-  if (verdict.suppressed && verdict.reason === "blocked") await alertArrivalUnreachable({ ...ctx, emailRes });
+  if (verdict.suppressed && verdict.reason === "blocked" && emailLegUnreachable(emailRes)) {
+    await alertArrivalUnreachable({ ...ctx, emailRes });
+  }
   return verdict;
 }
 

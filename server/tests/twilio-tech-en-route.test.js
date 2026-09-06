@@ -507,6 +507,36 @@ describe("TwilioService.sendTechEnRoute", () => {
     );
   });
 
+  test("sendTechArrived does NOT page staff when the customer opted out of email and no SMS leg exists", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: null, email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, email_enabled: false, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([]);
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(AppointmentEmail.sendTechArrivedEmail).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
+    expect(AppointmentReminders.alertNoReachableChannel).not.toHaveBeenCalled();
+  });
+
+  test("sendTechArrived does NOT page staff when the arrival template is disabled (rollback kill switch)", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: null, email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, tech_arrived_channel: "both" }),
+    );
+    getAppointmentContacts.mockReturnValue([]);
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: false, code: "EMAIL_TEMPLATE_DISABLED", error: "template archived" });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
+    expect(AppointmentReminders.alertNoReachableChannel).not.toHaveBeenCalled();
+  });
+
   test("sendTechArrived both channel: a disabled SMS leg with held contacts does not make a delivered email retryable", async () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", email: "sam@example.com" }),
