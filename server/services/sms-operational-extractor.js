@@ -6,7 +6,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
-const VERSION = 'sms-profile-v1';
+const VERSION = 'sms-profile-v2';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -66,7 +66,7 @@ Read prior messages for references, but extract ONLY facts evidenced by the CURR
 Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.
 - value must be an exact substring of quote, except contact_preference which must be call, text or email. Capture only the useful operational preference, never its medical explanation.
-- For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal the complete quoted sentence. Preserve every negation, exclusion, condition and qualifier; never shorten "do not treat the barn" to "treat the barn".
+- For EVERY fact, quote must retain the whole CURRENT message, including every sentence and qualifier. For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal quote. Never shorten a message to a standalone instruction that omits another clause. If separate topics do not belong together in the field, mark duration uncertain for staff review.
 - Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.
 - An instruction for today/one visit/vacation is visit_only, not durable. Ambiguous duration is uncertain. A change to payment, billing, ownership or communication consent is never a profile fact.
 - property_id must come from the provided properties and be unambiguous from context, otherwise null. Never infer another person's authority or merge accounts.
@@ -82,28 +82,15 @@ function groundExtraction(parsed, { message, properties = [] }) {
   const propertyIds = new Set(properties.map((p) => p.id));
   const grounded = (item) => body.includes(normalize(item.quote))
     && (!item.property_id || propertyIds.has(item.property_id));
+  // Sentence punctuation cannot establish semantic independence: "And only
+  // when ..." may qualify an earlier sentence. Retain the complete source
+  // instead of maintaining an open-ended list of possible conjunctions.
+  const completeSource = message.message_body.trim().replace(/[.!?]+$/, '');
   const facts = message.direction !== 'inbound' ? [] : parsed.facts.filter((item) => {
-    if (!grounded(item)) return false;
-    const preference = item.field === 'contact_preference';
-    const code = item.field.endsWith('_code');
-    if (preference || code || item.field === 'irrigation_controller_location' || /notes$|details$|instructions$|issues$/.test(item.field)) {
-      if (!preference && !code && item.value !== item.quote) return false;
-      const offset = message.message_body.indexOf(item.quote);
-      if (offset < 0) return false;
-      const before = message.message_body.slice(0, offset);
-      const after = message.message_body.slice(offset + item.quote.length);
-      // A literal substring is insufficient if it drops the preceding
-      // "do not" or a following condition from the same sentence. Semicolons
-      // and continuation newlines do not end a sentence.
-      if (before.trim() && !/[.!?]\s*$/.test(before)) return false;
-      if (after.trim() && !/[.!?]\s*$/.test(item.quote) && !/^\s*[.!?]/.test(after)) return false;
-      // A following qualifier still governs this instruction even when the
-      // customer used a full stop before it. Keep both in the quoted value.
-      if (/^\s*(?:[.!?]\s*)?(?:only|unless|except|but|provided|as long as|if|when|while|until)\b/i.test(after)) return false;
-    }
-    if (preference) return explicitContactPreference(item.quote) === item.value;
-    if (code) return matchesExplicitAccessCode(item);
-    return message.message_body.includes(item.value) && item.quote.includes(item.value);
+    if (!grounded(item) || item.quote.trim().replace(/[.!?]+$/, '') !== completeSource) return false;
+    if (item.field === 'contact_preference') return explicitContactPreference(item.quote) === item.value;
+    if (item.field.endsWith('_code')) return matchesExplicitAccessCode(item);
+    return item.value === item.quote && message.message_body.includes(item.value);
   });
   return { facts, dropped: parsed.facts.length - facts.length };
 }

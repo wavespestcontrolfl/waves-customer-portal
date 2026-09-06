@@ -132,8 +132,8 @@ describe('SMS operational evidence and ownership', () => {
       fact({ field: 'special_instructions', quote: 'Treat the yard', value: 'Treat the yard' }),
       fact({ field: 'special_instructions', quote: 'Do not treat the barn', value: 'Do not treat the barn' }),
     ]), { message, properties });
-    expect(result.facts.map((f) => f.value)).toEqual(['Do not treat the barn']);
-    expect(result.dropped).toBe(2);
+    expect(result.facts).toEqual([]);
+    expect(result.dropped).toBe(3);
   });
 
   test.each([';', '\n'])(
@@ -154,7 +154,9 @@ describe('SMS operational evidence and ownership', () => {
     },
   );
 
-  test.each(['Only when the pets are inside.', 'Unless the gate is locked.', 'But avoid the barn.'])(
+  test.each(['Only when the pets are inside.', 'Unless the gate is locked.', 'But avoid the barn.',
+    'And only when the pets are inside.', 'However, only when the pets are inside.',
+    'Also, please make sure the pets are inside first.'])(
     'a full stop cannot hide the following qualifier: %s', (condition) => {
       const quote = 'Treat the yard.';
       const body = `${quote} ${condition}`;
@@ -166,14 +168,27 @@ describe('SMS operational evidence and ownership', () => {
     },
   );
 
-  test('a complete punctuated sentence stays valid when another sentence follows', () => {
+  test('a multi-sentence fact retains every statement in the current message', () => {
     const message = source('Do not treat the barn. The dog stays inside.');
-    const note = 'Do not treat the barn.';
+    const note = message.message_body;
     const result = groundExtraction(extracted([], [
       fact({ field: 'special_instructions', quote: note, value: note }),
     ]), { message, properties });
     expect(result.facts.map((f) => f.value)).toEqual([note]);
     expect(result.dropped).toBe(0);
+  });
+
+  test('a shortened code or contact preference cannot discard a later condition', () => {
+    for (const [field, value, quote] of [
+      ['garage_code', '#1234', 'Garage code is #1234.'],
+      ['contact_preference', 'text', 'Text only please.'],
+    ]) {
+      const body = `${quote} And only when I ask first.`;
+      const result = groundExtraction(extracted([], [fact({ field, value, quote })]), {
+        message: source(body), properties,
+      });
+      expect(result).toMatchObject({ facts: [], dropped: 1 });
+    }
   });
 
   test('unknown fields fail schema validation and provider failures are retryable', async () => {
