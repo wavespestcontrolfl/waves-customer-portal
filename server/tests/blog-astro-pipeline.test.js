@@ -46,12 +46,15 @@ jest.mock('../services/content-astro/author-service', () => ({
 }));
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
+  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })),
 }));
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
 }));
 jest.mock('../services/content/hero-alt-vision', () => ({
   describeHeroForAlt: jest.fn().mockResolvedValue(null),
+  // The text/logo screen: clean by default (fail-open shape).
+  screenGeneratedImage: jest.fn().mockResolvedValue({ ok: true, checked: true, readableText: [], logos: [], reasons: [] }),
 }));
 
 const db = require('../models/db');

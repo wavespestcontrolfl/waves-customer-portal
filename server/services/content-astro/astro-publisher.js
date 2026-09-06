@@ -846,9 +846,10 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
   let plan = imageGenerator.planFor({ slug, mode, index, captions });
   let last = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
+    let gen;
     let img;
     try {
+      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
       img = await fetchImageBuffer(gen.dataUrl);
       if (!img?.buffer) throw new Error(`${mode} image generation produced no usable image`);
     } catch (err) {
@@ -856,7 +857,14 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
       // chain onto the thrown error — describeHeroFailure reads err.attempts,
       // and this failure class is exactly what the full diagnosis exists for
       // (Codex r1).
-      if (!err.attempts && Array.isArray(gen.attempts)) err.attempts = gen.attempts;
+      if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
+      // The screen is advisory: a retry that fails to generate keeps the
+      // usable first image rather than failing the publish (pre-push Codex
+      // P1 on 1436d5d69). With nothing usable yet, the error stands.
+      if (last) {
+        logger.warn(`[astro-publisher] ${mode} image retry for ${slug} failed (${err.message}) — keeping the first image despite the screen (${last.screen.reasons.join('; ')})`);
+        return last;
+      }
       throw err;
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
