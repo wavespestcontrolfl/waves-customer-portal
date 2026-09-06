@@ -220,14 +220,14 @@ function findKnownWavesNumber(value) {
 const TABS = [
   {
     key: "events",
-    label: "Events",
+    label: "Message Automations",
     Icon: Zap,
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "calls", label: "Calls", Icon: PhoneCall },
   { key: "triage", label: "Triage", Icon: Inbox },
   // Open promises across calls (call_commitments) — staff-wide like Calls.
-  { key: "owed", label: "Owed", Icon: ClipboardList },
+  { key: "owed", label: "Promises", Icon: ClipboardList },
   // Management tabs below are owner-only (2026-08-25 role lockdown):
   // template/routing/notification CONFIG and staff-performance scoring are
   // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
