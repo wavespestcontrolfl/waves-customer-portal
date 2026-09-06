@@ -258,18 +258,22 @@ async function resolveArrivalChannel(customerId, prefs, customer) {
 
 // One arrival email per appointment OCCURRENCE: live rescheduling reuses the
 // scheduled_services row (LIVE_LIFECYCLE_RESET clears arrival_sms_sent_at),
-// so the date rides in the key — retries of the same occurrence still dedupe.
-function arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, customerId }) {
+// so the scheduled date AND window start ride in the key — a same-day move
+// to another window is a new occurrence, while retries of the same
+// occurrence still dedupe.
+function arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, customerId }) {
   if (!scheduledServiceId) return String(customerId);
   const day = scheduledDate instanceof Date
     ? scheduledDate.toISOString().slice(0, 10)
     : String(scheduledDate || "").slice(0, 10);
-  return day ? `${scheduledServiceId}:${day}` : String(scheduledServiceId);
+  const start = String(scheduledWindowStart || "").slice(0, 5);
+  const when = [day, start].filter(Boolean).join("T");
+  return when ? `${scheduledServiceId}:${when}` : String(scheduledServiceId);
 }
 
 // The email leg. Honors the portal-wide email opt-out (a deterministic
 // "skipped" so fallbacks and classification treat it like a missing address).
-async function sendArrivalEmailLeg({ customerId, scheduledServiceId, scheduledDate, techName, emailAllowed }) {
+async function sendArrivalEmailLeg({ customerId, scheduledServiceId, scheduledDate, scheduledWindowStart, techName, emailAllowed }) {
   if (!emailAllowed) return { ok: false, skipped: true, reason: "email_disabled" };
   try {
     const AppointmentEmail = require("./appointment-email");
@@ -277,7 +281,7 @@ async function sendArrivalEmailLeg({ customerId, scheduledServiceId, scheduledDa
       customerId,
       scheduledServiceId,
       techName,
-      occurrence: arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, customerId }),
+      occurrence: arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, customerId }),
     });
   } catch (e) {
     logger.warn(`[twilio] tech-arrived email send failed for customer ${customerId}: ${e.message}`);
@@ -1191,7 +1195,7 @@ const TwilioService = {
    * text. Copy must not say "on the way" (that's en-route). Fired from
    * track-transitions markOnProperty when the live tracker flips to on-site.
    */
-  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null } = {}) {
+  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -1275,6 +1279,7 @@ const TwilioService = {
       customerId,
       scheduledServiceId,
       scheduledDate,
+      scheduledWindowStart,
       techName: customerTechName,
       emailAllowed,
       // The SMS leg exists when texting is enabled and there is someone to
@@ -1282,8 +1287,10 @@ const TwilioService = {
       // ("the leg existed and transiently failed") or deterministic.
       smsLegAvailable: smsAllowed && contacts.length > 0,
       // The opt-in hold emptied a NON-empty list: no SMS leg right now, but
-      // the hold is TRANSIENT (the recipient may still reply YES).
-      heldAllSms: !contacts.length && unfilteredContacts.length > 0,
+      // the hold is TRANSIENT (the recipient may still reply YES). Only while
+      // texting is enabled — a disabled SMS leg is permanent, and must not
+      // turn a delivered email into a retryable miss.
+      heldAllSms: smsAllowed && !contacts.length && unfilteredContacts.length > 0,
       attemptSmsLegs,
       results,
     });

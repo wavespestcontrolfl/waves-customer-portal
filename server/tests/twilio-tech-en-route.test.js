@@ -51,6 +51,7 @@ const db = require("../models/db");
 const smsTemplates = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("../services/short-url");
 const { getAppointmentContacts } = require("../services/customer-contact");
+const { filterRecipientsByOptin } = require("../services/recipient-optin");
 const {
   sendCustomerMessage,
 } = require("../services/messaging/send-customer-message");
@@ -448,13 +449,32 @@ describe("TwilioService.sendTechEnRoute", () => {
     getAppointmentContacts.mockReturnValue([{ phone: "+15551112222", name: "Sam", role: "primary" }]);
     AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: true });
 
-    await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9", scheduledDate: "2026-09-11" });
+    await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9", scheduledDate: "2026-09-11", scheduledWindowStart: "13:00:00" });
 
     // A live reschedule reuses the scheduled_services row, so the key must
-    // change with the date or the next arrival dedupes against the old email.
+    // change with the date AND the window (a same-day move to another slot
+    // is a new occurrence) or the next arrival dedupes against the old email.
     expect(AppointmentEmail.sendTechArrivedEmail).toHaveBeenCalledWith(
-      expect.objectContaining({ occurrence: "job-9:2026-09-11" }),
+      expect.objectContaining({ occurrence: "job-9:2026-09-11T13:00" }),
     );
+  });
+
+  test("sendTechArrived both channel: a disabled SMS leg with held contacts does not make a delivered email retryable", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: "+15551112222", email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, tech_arrived_channel: "both" }),
+    );
+    // A non-empty list the opt-in hold empties — but texting is OFF, so the
+    // SMS leg is permanently absent, not transiently held.
+    getAppointmentContacts.mockReturnValue([{ phone: "+15551112222", name: "Sam", role: "primary" }]);
+    filterRecipientsByOptin.mockResolvedValueOnce([]);
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: true });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true, emailSent: true });
   });
 
   test("sendTechArrived honours the portal-wide email opt-out: email channel falls back to SMS", async () => {
