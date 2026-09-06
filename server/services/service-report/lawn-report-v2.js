@@ -585,7 +585,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       // Only the noun shares a predicate: "underwatering and disease were not
       // observed" differs from "under-watered and no disease was observed".
       const predicate = match[0].startsWith('under') && match[0].endsWith('ing')
-        ? after.replace(/^\s+(?:and|or|nor)\s+(?:[a-z'’-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ')
+        ? after.replace(/^(?:\s+(?:and|or|nor)\s+|,\s*)(?:[a-z'’,-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ').replace(/,/g, ' ')
         : after;
       // Monitoring/prevention instructions and conditional diagnoses are not
       // present moisture evidence. Scope these qualifiers to this occurrence;

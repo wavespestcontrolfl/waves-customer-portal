@@ -291,6 +291,8 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Underwatering is possible during hot weather.',
     'Underwatering would explain future curling.',
     'Monitor for sprinklers not reaching the pavement edge.',
+    'Underwatering, disease, and insect damage were not observed.',
+    'Underwatering symptoms, such as curling, were not observed.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(false);
