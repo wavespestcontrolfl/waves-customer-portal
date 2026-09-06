@@ -183,11 +183,13 @@ class AppointmentTagger {
         brief = this.generateWDOBriefTemplate(service, propertyData);
       }
 
-      // Address and service edits invalidate research while providers run; a
+      // Address, service and ownership edits (a customer merge repoints the
+      // FK) invalidate research while providers run; a
       // terminal transition does too, but a live status moving to another live
       // status (pending → confirmed, confirmed → en_route) keeps the brief —
       // nothing sweeps a WDO visit later (previsit-brief skips WDO).
       const written = await db('scheduled_services').where({ id: service.id,
+        customer_id: service.customer_id ?? null,
         service_id: service.service_id ?? null,
         service_type: service.service_type ?? null,
         property_id: service.property_id ?? null,

@@ -119,6 +119,7 @@ describe('triggerWDOPrep provider-key gate', () => {
   }
 
   test.each([
+    ['customer_id', 'cust-merge-winner'],
     ['service_id', 'catalog-pest'],
     ['service_type', 'General Pest Control'],
     ['status', 'cancelled'],
