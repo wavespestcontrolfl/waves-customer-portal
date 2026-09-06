@@ -176,7 +176,7 @@ multiple slices. No database rollback or provider operation is involved.
 | `017f132d7` | Profile-health isolation, shell login return and pre-mount role guard; reverting reintroduces the documented parity defects |
 | `b8bf97f2b` | Keep Schedule second and add reproducible synthetic browser QA; reverting moves the group down and removes the QA runner |
 
-Keep this worktree and ignored evidence for local review. Nothing has been pushed; reconcile the separate unpublished consolidation
+Keep this worktree and ignored evidence for review. The initial audit was local; the PR follow-up below records later publication. Reconcile the separate unpublished consolidation
 branch before any future proposal to merge. The remaining product decisions are
 listed in README and the deferred parity matrix.
 
@@ -214,6 +214,14 @@ with the same 13 screenshots. The two focused helper/layout suites passed
 GitHub CI passed all seven jobs on the earlier published head, including its
 disposable-database and native build jobs. That is not CI evidence for the
 unpublished review fixes. Final-commit CI and Codex review remain required.
+
+The shell and HTTP helper now share `adminLoginUrl`, removing duplicate
+return-target construction. Its helper/layout checks passed again (15 tests),
+and the final build passed. A concurrent browser rerun timed out during its
+first page load while machine load exceeded 300; the subsequent sequential
+rerun passed all 10 scenarios. Assertions were not relaxed. Review fixes are
+committed locally; publishing them requires resolving the automatic-preview
+deployment boundary described below.
 
 Opening the PR also invoked the repository's existing Railway integration,
 which automatically created a PR preview. Read-only configuration inspection

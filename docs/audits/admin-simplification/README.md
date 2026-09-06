@@ -125,8 +125,11 @@ cases. The shell also supplies the original URL to login's existing validated
 was introduced. Login's existing technician-to-`/tech` policy is retained.
 
 Exact measurements, verification limits and per-slice rollback are in
-[verification.md](verification.md). This is a local review implementation; no
-push, PR, merge, deployment, production data change or provider action occurred.
+[verification.md](verification.md). The initial audit was completed locally.
+The approved follow-up opened PR #3980 and fixed its review findings locally;
+the verification log records the repository's automatic isolated Railway PR
+preview. No production change, merge or live customer/provider action was
+performed by this session.
 
 ## Remaining decisions
 
@@ -137,6 +140,6 @@ push, PR, merge, deployment, production data change or provider action occurred.
 5. Approve Billing versus Accounting scopes and canonical A/R definitions; the task does not authorize changing them. Decide how to link both Operating Costs editors to one location without changing role access.
 6. Should People navigation remain two direct leaves under one heading or gain a shared workspace header? Applicant `hired` currently does not itself establish an employee transition in the inspected status route; do not invent automatic onboarding.
 7. What urgent tool/integration failures are already guaranteed to reach the existing action inbox/bell? Until that is proven, retain the direct Tool Health destination. Do not hide outages in Settings.
-8. Reconcile this branch with the unpublished workspace-consolidation branch before either is proposed for merge. This review branch never overwrites that work.
+8. [Branch reconciliation is recorded](branch-reconciliation.md). The older workspace proposal remains intact and should not be merged wholesale alongside this cleanup.
 
 Before adding a new page, tab, AI assistant, queue, or action system, check whether the capability belongs in an existing canonical workflow. The existing navigation metadata, route tests, shared services and source queues are the prevention mechanism; no new governance service is needed.
