@@ -1314,6 +1314,36 @@ describe('the conversation side', () => {
       } else expect(endSession).not.toHaveBeenCalled();
     });
 
+    test.each(['before_handoff', 'after_callback'])('a stalled owner read cannot pin failure handoff (%s)', async (phase) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const context = require('../services/voice-agent/relay-context');
+      const owner = jest.spyOn(context, 'relaySessionClaimOwner');
+      if (phase === 'after_callback') owner.mockResolvedValueOnce({ ok: true, owner: 'first' });
+      owner.mockReturnValue(new Promise(() => {}));
+      const service = require('../services/notification-service');
+      service.revertRelayFailureCallback = jest.fn(async () => {});
+      const send = jest.fn();
+      const receipt = { callSid: 'CA-bound-handoff', callbackStamp: 'fixture', notificationId: 'fixture' };
+      const convo = new Convo({ callSid: 'CA-bound-handoff', sessionKey: 'first', from: '+19415550123', send, endSession: jest.fn(() => true) });
+      convo._callerVerified = true;
+      convo._modelFailures = 2;
+      convo._failureCallbackEndDecision = jest.fn();
+      convo._fileFailureCallback = jest.fn(async () => { convo._failureCallbackReceipt = receipt; return true; });
+      jest.useFakeTimers();
+      try {
+        const pending = convo._maybeHandoffForFailure(null);
+        await jest.advanceTimersByTimeAsync(2001);
+        expect(await pending).toBe(true);
+        expect(send).not.toHaveBeenCalled();
+        if (phase === 'after_callback') {
+          expect(service.revertRelayFailureCallback).toHaveBeenCalledWith(receipt);
+          expect(convo._failureCallbackEndDecision).toHaveBeenCalledWith(false);
+        } else expect(convo._fileFailureCallback).not.toHaveBeenCalled();
+      } finally { owner.mockRestore(); jest.useRealTimers(); }
+    });
+
     test('transfer snapshots the outcome after a pending capture settles', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
       process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
