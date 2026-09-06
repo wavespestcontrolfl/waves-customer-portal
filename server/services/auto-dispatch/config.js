@@ -55,9 +55,10 @@ function isApplyAllowed() {
 // can place them. Use the same gates and effective mode as the scheduler.
 function isCustomerRecurringDispatchEnabled() {
   const { gateEnvValue, isEnabled } = require('../../config/feature-gates');
+  const config = getAutoDispatchConfig();
   return gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH')
     && isEnabled('cronJobs') && isEnabled('autoDispatch')
-    && getAutoDispatchConfig().mode === 'apply';
+    && config.mode === 'apply' && config.maxChangesPerRun > 0;
 }
 
 /**

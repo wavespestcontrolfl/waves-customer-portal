@@ -891,7 +891,8 @@ server-side):
     authoritatively). The anchor keeps the offered tech under the same
     advisory-lock overlap guard. With `GATE_CUSTOMER_RECURRING_DISPATCH`
     and the existing `cronJobs`/`autoDispatch` scheduler gates active plus
-    effective `AUTO_DISPATCH_MODE=apply` (`AUTO_DISPATCH_ALLOW_APPLY=true`),
+    effective `AUTO_DISPATCH_MODE=apply` (`AUTO_DISPATCH_ALLOW_APPLY=true`)
+    with `AUTO_DISPATCH_MAX_CHANGES_PER_RUN > 0`,
     only the selected appointment must fit: later cadence visits keep their
     projected due dates with NULL time/display windows and a durable
     `recurring_dispatch_due_date`. Future overlap, blackout, and same-plan

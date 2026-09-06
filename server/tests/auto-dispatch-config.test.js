@@ -39,13 +39,14 @@ describe('customer recurring handoff prerequisites', () => {
   const savedGates = { cronJobs: gates.cronJobs, autoDispatch: gates.autoDispatch };
   beforeEach(() => {
     process.env.GATE_CUSTOMER_RECURRING_DISPATCH = 'true';
+    process.env.AUTO_DISPATCH_MAX_CHANGES_PER_RUN = '1';
     process.env.AUTO_DISPATCH_MODE = 'apply';
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
     gates.cronJobs = true;
     gates.autoDispatch = true;
   });
   afterEach(() => {
-    for (const key of ['GATE_CUSTOMER_RECURRING_DISPATCH', 'AUTO_DISPATCH_MODE', 'AUTO_DISPATCH_ALLOW_APPLY']) {
+    for (const key of ['GATE_CUSTOMER_RECURRING_DISPATCH', 'AUTO_DISPATCH_MODE', 'AUTO_DISPATCH_ALLOW_APPLY', 'AUTO_DISPATCH_MAX_CHANGES_PER_RUN']) {
       if (savedEnv[key] === undefined) delete process.env[key];
       else process.env[key] = savedEnv[key];
     }
@@ -66,6 +67,8 @@ describe('customer recurring handoff prerequisites', () => {
     ['AUTO_DISPATCH_ALLOW_APPLY', undefined],
     ['AUTO_DISPATCH_MODE', 'dry_run'],
     ['AUTO_DISPATCH_MODE', undefined],
+    ['AUTO_DISPATCH_MAX_CHANGES_PER_RUN', '0'],
+    ['AUTO_DISPATCH_MAX_CHANGES_PER_RUN', '-1'],
   ])('refuses handoff with %s=%s', (key, value) => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
