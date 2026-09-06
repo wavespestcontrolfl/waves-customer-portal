@@ -29,7 +29,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
-const { buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict, hasCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
+const { buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict, hasCountyEvidence, hasCountyPricingCore, hasUnconfirmedCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
 // Unassessed vacant parcel (vacant roll parcel, no building record — often
@@ -238,6 +238,9 @@ async function getCachedLookup(address) {
     const { hash } = addressKey(address);
     const row = await db('property_lookups').where({ address_hash: hash }).first();
     if (!row || !row.property_record) return null;
+    // Older AI records inherited county authority from a claimed URL. Retry
+    // them through the corrected evidence rules instead of serving that trust.
+    if (hasUnconfirmedCountyEvidence(row.property_record)) return null;
     if (!row.expires_at || new Date(row.expires_at).getTime() <= Date.now()) return null;
     // Defense in depth vs. partial rows (saveLookup refuses to write them):
     // no stored coordinates = no satellite regeneration = treat as a miss.
@@ -262,9 +265,9 @@ async function getCachedLookup(address) {
     // expiry.
     const shortTtlReason = detectUnassessedVacantParcel(row.property_record)
       ? 'vacant-parcel'
-      : (detectStaleImageryTurfConflict(row.property_record, row.ai_analysis)
+      : detectStaleImageryTurfConflict(row.property_record, row.ai_analysis)
         ? 'stale-imagery-conflict'
-        : null);
+        : !hasCountyPricingCore(row.property_record) ? 'missing-pricing-dimensions' : null;
     if (shortTtlReason) {
       const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
       const maxAgeMs = vacantParcelTtlDays() * 24 * 60 * 60 * 1000;
@@ -493,7 +496,7 @@ async function saveLookup(address, result) {
     // "the imagery/roll will catch up" windows, not stable property facts.
     const staleImagery = Boolean(detectStaleImageryTurfConflict(record, result.aiAnalysis));
     const rollMiss = !hasCountyEvidence(record);
-    const ttlDays = (vacantParcel || staleImagery) ? vacantParcelTtlDays()
+    const ttlDays = (vacantParcel || staleImagery || !hasCountyPricingCore(record)) ? vacantParcelTtlDays()
       : rollMiss ? rollMissTtlDays()
       : cacheTtlDays();
     const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);

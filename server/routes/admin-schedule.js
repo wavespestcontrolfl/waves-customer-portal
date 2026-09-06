@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('../services/scheduling/recurring-dispatch-due');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -6934,7 +6935,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   }),
                 svc,
               )
-                .update(updates)
+                .update({ ...updates, ...recurringDispatchDuePatch(svc, updates) })
                 // The technician on the COMMITTED row (the CAS does not pin
                 // technician_id): the move notice below goes to them.
                 .returning(['id', 'technician_id']);
@@ -8753,6 +8754,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // outside detailsChanged so a technician-only edit also checks.
       if (occupancyRouteTouched) {
         const occRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+        Object.assign(updates, recurringDispatchDuePatch(occRow, updates));
         if (occRow && !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(occRow.status))) {
           const occDate = updates.scheduled_date !== undefined
             ? dateOnly(updates.scheduled_date)
@@ -9589,7 +9591,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
             'track_sms_sent_at', 'arrival_sms_sent_at',
             // For the post-commit cleanup payload (tech release + refresh).
-            'technician_id', 'customer_id',
+            'technician_id', 'customer_id', 'recurring_dispatch_due_date',
           ];
           const pendingChildren = await trx('scheduled_services')
             .where({ recurring_parent_id: parent.id, is_recurring: true })
@@ -9730,7 +9732,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   }),
                 child,
               )
-                .update(childUpdates);
+                .update({ ...childUpdates, ...recurringDispatchDuePatch(child, childUpdates) });
               if (childUpdated === 0) {
                 // All-or-none, matching the rebooker's series CAS: leaving
                 // one occurrence behind while the parent and the rest move
@@ -9792,7 +9794,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                     }),
                   booster,
                 )
-                  .update(boosterUpdates);
+                  .update({ ...boosterUpdates, ...recurringDispatchDuePatch(booster, boosterUpdates) });
                 if (boosterUpdated === 0) {
                   // All-or-none — same contract as the child rewrite above.
                   throw Object.assign(
