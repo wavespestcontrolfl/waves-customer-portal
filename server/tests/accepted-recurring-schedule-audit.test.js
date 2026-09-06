@@ -61,6 +61,23 @@ test('a year of applications cannot be compressed into weekly dates', () => {
   expect(check(estimate(), rows)[0].issues).toContain('application_spacing_needs_review');
 });
 
+test('monthly metadata cannot disguise a year stretched across six-week dates', () => {
+  const rows = series('every_6_weeks', 12).map((row) => ({ ...row, recurring_pattern: 'monthly' }));
+  expect(check(estimate(), rows)[0].issues).toContain('application_spacing_needs_review');
+});
+
+test.each([
+  { recurring: { rodentBaitMo: 25 } },
+  { result: { results: { rodBaitMo: 25 } } },
+  { recurring: { rodentBaitMo: 25, services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations' }] } },
+])('scalar and duplicate line rodent plans use the scheduling unit cadence: %j', (estimate_data) => {
+  const e = estimate({ estimate_data });
+  expect(check(e)).toEqual([expect.objectContaining({ serviceFamily: 'rodent_bait', pattern: 'quarterly', expectedVisits: 4, issues: ['missing_schedule'] })]);
+  const rows = series('quarterly', 4).map((row) => ({ ...row, service_type: 'Quarterly Rodent Bait Station Service',
+    catalog_service_key: 'rodent_bait_quarterly', service_key_snapshot: 'rodent_bait_quarterly' }));
+  expect(check(e, rows)).toEqual([]);
+});
+
 test('a one-time catalog treatment does not count as a recurring application', () => {
   const [gap] = check(estimate(), [parent({ catalog_billing_type: 'one_time' })]);
   expect(gap.issues).toEqual(['missing_schedule']);
@@ -104,4 +121,18 @@ test('the same evidence dedupes and a repaired-then-regressed schedule gets a ne
   const before = check(estimate(), [parent()])[0];
   expect(check(estimate(), [parent()])[0].evidenceKey).toBe(before.evidenceKey);
   expect(check(estimate(), [parent({ id: 'replacement-1' })])[0].evidenceKey).not.toBe(before.evidenceKey);
+});
+
+test('cadence-only repairs and later regressions on the same rows refresh alert evidence', () => {
+  const e = estimate({ estimate_data: { result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }] } } } });
+  const rows = series('every_6_weeks', 9).map((row) => ({ ...row, service_type: 'Lawn Care', catalog_service_key: 'lawn_program',
+    service_key_snapshot: 'lawn_program', recurring_pattern: 'custom', recurring_interval_days: 60, updated_at: '2040-01-01T12:00:00Z' }));
+  const before = check(e, rows)[0];
+  expect(check(e, rows)[0].evidenceKey).toBe(before.evidenceKey);
+  const repaired = rows.map((row) => ({ ...row, recurring_interval_days: 42, updated_at: '2040-01-02T12:00:00Z' }));
+  expect(check(e, repaired)).toEqual([]);
+  const regressed = repaired.map((row) => ({ ...row, recurring_interval_days: 60, updated_at: '2040-01-03T12:00:00Z' }));
+  expect(check(e, regressed)[0].evidenceKey).not.toBe(before.evidenceKey);
+  expect(check(e, rows.map((row) => ({ ...row, recurring_interval_days: 61 })))[0].evidenceKey).not.toBe(before.evidenceKey);
+  expect(check(e, rows.map((row) => ({ ...row, date_exception: true })))[0].evidenceKey).not.toBe(before.evidenceKey);
 });

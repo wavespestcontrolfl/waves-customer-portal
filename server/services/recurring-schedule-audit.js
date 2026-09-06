@@ -189,8 +189,15 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
   })) return [];
   const acceptedFrequency = data.customerSelection?.frequency || null;
   const fallback = acceptedFrequency || inferFrequencyKeyFromEstimateData(data);
+  const { remaining, combos, standalone } = converter.combineRecurringServicesForScheduling(services, {
+    acceptFrequency: acceptedFrequency,
+    supplementalCompanions: converter.supplementalCompanionLines(data),
+  });
+  // The scheduling combiner dedupes line + scalar shapes and supplies each
+  // standalone program's cadence. Combo visits satisfy their source families.
+  const units = [...remaining, ...combos.flatMap((combo) => combo.combinedFrom), ...standalone.map((unit) => unit.service)];
   const findings = [];
-  for (const service of services) {
+  for (const service of units) {
     const family = converter.seedingFamilyKey(service);
     if (heldFamilies.has(family)) continue;
     const pattern = converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency);
@@ -241,7 +248,10 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
   const evidenceKey = createHash('sha256').update(JSON.stringify({
     issues, pattern, expectedVisits,
     rows: rows.map((row) => [row.id, row.status, row.recurring_pattern, row.is_recurring,
-      row.property_id, formatDateOnly(row.scheduled_date)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      row.recurring_interval_days, row.recurring_ongoing, row.date_exception,
+      row.recurring_nth, row.recurring_weekday, row.skip_weekends, row.weekend_shift,
+      // A correction followed by the SAME bad state must be a new incident.
+      row.updated_at, row.property_id, formatDateOnly(row.scheduled_date)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   })).digest('hex').slice(0, 20);
   return { estimateId: estimate.id, customerId: estimate.customer_id, serviceFamily: family,
     pattern, expectedVisits, recordedVisits: live.length, issues, evidenceKey,
@@ -250,6 +260,9 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
 
 function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
   const sorted = [...rows].sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date)));
+  const termRows = sorted.slice(0, seeder.plannedVisitCountForPattern(pattern));
+  const expectedTerm = seeder.buildRecurringFollowUpRows(termRows[0], { pattern, plannedCount: termRows.length });
+  const checkTermSpan = !termRows.some((row) => row.date_exception);
   return sorted.some((row, index) => {
     if (!index || row.date_exception || sorted[index - 1].date_exception) return false;
     const previous = sorted[index - 1];
@@ -260,10 +273,16 @@ function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
     if (!next) return false;
     // Ordinary rescheduling/weekend drift has room; a monthly plan with
     // quarterly dates still pages even if all its stored patterns say monthly.
-    const expected = parseETDateTime(`${next.scheduled_date}T12:00`);
-    const earliest = etDateString(addETDays(expected, -14));
-    const latest = etDateString(addETDays(expected, 14));
-    return currentDate < earliest || currentDate > latest;
+    const expectedDates = [next.scheduled_date];
+    // Small delays cannot accumulate into an 18-month "year" of service.
+    // Explicit exceptions keep their office-approved date semantics.
+    if (checkTermSpan && expectedTerm[index - 1]) expectedDates.push(expectedTerm[index - 1].scheduled_date);
+    return expectedDates.some((date) => {
+      const expected = parseETDateTime(`${date}T12:00`);
+      const earliest = etDateString(addETDays(expected, -14));
+      const latest = etDateString(addETDays(expected, 14));
+      return currentDate < earliest || currentDate > latest;
+    });
   });
 }
 
@@ -292,7 +311,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     .whereIn('s.customer_id', customerIds)
     .select('s.id', 's.customer_id', 's.property_id', 's.source_estimate_id', 's.recurring_parent_id',
       's.service_type', 's.service_key_snapshot', 's.is_callback', 's.followup_included',
-      's.status', 's.is_recurring', 's.recurring_pattern', 's.recurring_ongoing',
+      's.status', 's.is_recurring', 's.recurring_pattern', 's.recurring_ongoing', 's.updated_at',
       's.date_exception', 's.recurring_nth', 's.recurring_weekday', 's.recurring_interval_days', 's.skip_weekends', 's.weekend_shift',
       'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
@@ -309,20 +328,28 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     if (!latestDecision.has(row.recurring_parent_id)) latestDecision.set(row.recurring_parent_id, row.resolved_action);
   }
   const stopped = new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
+  // Index history once: each estimate only walks its explicitly linked roots.
+  const customers = new Map(customerIds.map((id) => [id, { roots: new Map(), holds: new Set() }]));
+  const estimatesById = new Map(estimates.map((estimate) => [estimate.id, { estimate, roots: new Set() }]));
+  for (const row of visits) {
+    const root = row.recurring_parent_id || row.id;
+    const series = customers.get(row.customer_id).roots;
+    if (!series.has(root)) series.set(root, []);
+    series.get(root).push(row);
+    const target = estimatesById.get(row.source_estimate_id);
+    if (target?.estimate.customer_id === row.customer_id) target.roots.add(root);
+  }
+  for (const event of retainedSeries) {
+    const metadata = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata;
+    const target = estimatesById.get(metadata?.estimateId);
+    if (target?.estimate.customer_id === event.customer_id && metadata.existingParentId) target.roots.add(metadata.existingParentId);
+  }
+  for (const hold of holds) customers.get(hold.customer_id).holds.add(hold.family_key);
   const findings = [];
-  for (const estimate of estimates) {
-    const customerRows = visits.filter((row) => row.customer_id === estimate.customer_id);
-    const roots = new Set(customerRows.filter((row) => row.source_estimate_id === estimate.id)
-      .map((row) => row.recurring_parent_id || row.id));
-    for (const event of retainedSeries) {
-      const metadata = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata;
-      if (event.customer_id === estimate.customer_id && metadata?.estimateId === estimate.id && metadata.existingParentId) {
-        roots.add(metadata.existingParentId);
-      }
-    }
-    const linkedRows = customerRows.filter((row) => roots.has(row.recurring_parent_id || row.id));
-    const heldFamilies = new Set(holds.filter((row) => row.customer_id === estimate.customer_id).map((row) => row.family_key));
-    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies }));
+  for (const { estimate, roots } of estimatesById.values()) {
+    const customer = customers.get(estimate.customer_id);
+    const linkedRows = [...roots].flatMap((root) => customer.roots.get(root) || []);
+    findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));
   }
   return findings;
 }

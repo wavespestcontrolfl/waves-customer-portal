@@ -93,6 +93,30 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     expect((await findings())[0].issues).toEqual(['missing_schedule']);
   });
 
+  test('a second acceptance cannot borrow another estimate\'s completed series', async () => {
+    const root = await visit();
+    for (let month = 2; month <= 12; month += 1) {
+      await visit({ recurring_parent_id: root.id, scheduled_date: `2040-${String(month).padStart(2, '0')}-15` });
+    }
+    const original = await trx('estimates').where({ id: estimateId }).first();
+    const secondEstimateId = randomUUID();
+    await trx('estimates').insert({ id: secondEstimateId, customer_id: customerId, status: 'accepted',
+      accepted_at: original.accepted_at, estimate_data: original.estimate_data,
+      accepted_service_mode: 'recurring', monthly_total: 100, annual_total: 1200 });
+    expect(await findings()).toEqual([expect.objectContaining({ estimateId: secondEstimateId, issues: ['missing_schedule'] })]);
+  });
+
+  test('scalar rodent acceptance is uncovered until its own quarterly series exists', async () => {
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { results: { rodBaitMo: 25 } } } });
+    expect(await findings()).toEqual([expect.objectContaining({ serviceFamily: 'rodent_bait', issues: ['missing_schedule'] })]);
+    const rodent = { service_type: 'Quarterly Rodent Bait Station Service', service_key_snapshot: 'rodent_bait_quarterly', recurring_pattern: 'quarterly' };
+    const root = await visit(rodent);
+    for (const month of ['04', '07', '10']) {
+      await visit({ ...rodent, recurring_parent_id: root.id, scheduled_date: `2040-${month}-15` });
+    }
+    expect(await findings()).toEqual([]);
+  });
+
   test('recent acceptances receive the full 24-hour conversion grace period', async () => {
     await trx('estimates').where({ id: estimateId }).update({ accepted_at: new Date(now.getTime() - 23 * 3600000) });
     expect(await findings()).toEqual([]);
