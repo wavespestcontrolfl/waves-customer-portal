@@ -6,7 +6,7 @@ jest.mock('../models/db', () => {
   return conn;
 });
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
-jest.mock('../services/llm/call', () => ({ dispatch: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
@@ -84,6 +84,75 @@ postgres('SMS operations on PostgreSQL', () => {
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('applied');
     // Existing Owed/call readers remain call-scoped. No new portal queue.
     expect(await listOpenCommitments(mockPg)).toEqual([]);
+  });
+
+  test('an irrigation fact turns on a legacy false irrigation flag atomically', async () => {
+    await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false });
+    context = await loadMessageContext(mockPg, message);
+    await recordMessageOperations(mockPg, message, result, context);
+    expect(await mockPg('property_preferences').first()).toMatchObject({
+      irrigation_system: true, irrigation_controller_location: result.facts[0].value,
+    });
+  });
+
+  test('access-code audits contain only ids and field provenance', async () => {
+    message.message_body = 'Lockbox code is #0123';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    result.facts = [{ field: 'lockbox_code', value: '#0123', quote: message.message_body,
+      duration: 'durable', property_id: context.properties[0].id }];
+    await recordMessageOperations(mockPg, message, result, context);
+    const audit = await mockPg('audit_log').where({ action: 'sms.property_preference.updated' }).first();
+    expect(Object.keys(audit.metadata).sort()).toEqual([
+      'customer_id', 'extractor_version', 'field', 'property_id', 'sms_log_id',
+    ]);
+    expect(JSON.stringify(audit)).not.toContain('#0123');
+  });
+
+  test('temporary source qualifiers prevent permanent writes despite durable model output', async () => {
+    message.message_body = `For tomorrow only. ${message.message_body}`;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    await recordMessageOperations(mockPg, message, result, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
+  test('intake does not hold SMS while waiting for a merge-owned customer lock', async () => {
+    const merge = await mockPg.transaction();
+    let signal;
+    const waitingForCustomer = new Promise((resolve) => { signal = resolve; });
+    const onQuery = (query) => {
+      if (/from "customers".*for update/.test(query.sql)) signal();
+    };
+    let worker;
+    try {
+      await merge('customers').where({ id: message.customer_id }).forUpdate().first();
+      mockPg.on('query', onQuery);
+      worker = recordMessageOperations(mockPg, message, result, context);
+      await waitingForCustomer;
+      // executeMerge owns customers before it repoints sms_log FKs. The
+      // worker must not block this child lock while awaiting the customer.
+      await merge('sms_log').where({ id: message.id }).forUpdate().noWait().first();
+      await merge('sms_log').where({ id: message.id }).update({ customer_id: null });
+      await merge.commit();
+      expect(await worker).toEqual({ skipped: 'source_changed' });
+      expect(await mockPg('property_preferences')).toHaveLength(0);
+    } finally {
+      mockPg.removeListener('query', onQuery);
+      if (!merge.isCompleted()) await merge.rollback();
+      if (worker) await worker;
+    }
+  });
+
+  test('profile-only processing does not call a provider for human outbound SMS', async () => {
+    delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
+    await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: '+12025550101',
+      message_type: 'manual', status: 'delivered' });
+    const extract = jest.fn();
+    await runSmsOperationalActions({ conn: mockPg, extract });
+    expect(extract).not.toHaveBeenCalled();
+    expect(await mockPg('data_hygiene_source_extractions').first()).toMatchObject({ status: 'no_fields' });
   });
 
   test('a failed critical audit rolls back profile and processed marker together', async () => {

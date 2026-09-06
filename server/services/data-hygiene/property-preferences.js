@@ -1,5 +1,7 @@
 'use strict';
 
+const { IRRIGATION_INPUT_FIELDS } = require('../irrigation-schedule-confirmation');
+
 // Shared compare-and-set writer for private property preferences.
 // Callers own authorization, field allowlists, the transaction and audit.
 async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
@@ -40,6 +42,7 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
     .where({ id: target.id, customer_id: proposal.scope_id })
     .update({
       [proposal.field]: proposedRaw,
+      ...(IRRIGATION_INPUT_FIELDS.includes(proposal.field) ? { irrigation_system: true } : {}),
       updated_at: trx.fn.now(),
     });
   if (!updated) {

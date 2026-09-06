@@ -2,7 +2,7 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
-jest.mock('../services/llm/call', () => ({ dispatch: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../utils/pan-scrub', () => {
   const actual = jest.requireActual('../utils/pan-scrub');
   return { ...actual, scrubPans: jest.fn(actual.scrubPans) };
@@ -12,7 +12,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const { groundExtraction, extractSmsOperations, buildPrompt } = require('../services/sms-operational-extractor');
 const { eligibleMessage, factVerdict, runSmsOperationalActions } = require('../services/sms-operational-actions');
-const { dispatch } = require('../services/llm/call');
+const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000101';
 const PROPERTY_ID = '00000000-0000-4000-8000-000000000102';
@@ -109,10 +109,10 @@ describe('SMS operational evidence and ownership', () => {
   });
 
   test('an unavailable scrubber stops extraction before any provider call', async () => {
-    dispatch.mockClear();
+    dispatchWithFallback.mockClear();
     require('../utils/pan-scrub').scrubPans.mockImplementationOnce(() => { throw new Error('scrubber unavailable'); });
     await expect(extractSmsOperations({ message: source('Please send the estimate'), properties })).rejects.toThrow('scrubber unavailable');
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
   test('notes cannot omit a negation or a condition from the source sentence', () => {
@@ -140,9 +140,36 @@ describe('SMS operational evidence and ownership', () => {
     expect(() => groundExtraction(extracted([], [fact({ field: 'payment_method' })]), {
       message: source(fact().quote), properties,
     })).toThrow('invalid_schema');
-    dispatch.mockResolvedValueOnce({ ok: false, reason: 'timeout' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'timeout' });
     await expect(extractSmsOperations({ message: source('Please send the estimate'), properties }))
       .rejects.toThrow('provider_failed');
+  });
+});
+
+describe('profile safeguards independent of model labels', () => {
+  test.each([
+    'For tomorrow only, leave the side gate open.',
+    'The controller is in the garage until Monday.',
+    'Temporarily use the side entrance.',
+    'For this visit please park outside.',
+    'While on vacation, leave the package outside.',
+  ])('holds a durable-labelled temporary instruction: %s', (quote) => {
+    expect(factVerdict(fact({ field: 'access_notes', quote, value: quote }), {
+      properties, senderIsPrimary: true,
+    })).toBe('temporary_instruction');
+  });
+
+  test('retains qualifiers from another sentence in the current SMS', () => {
+    expect(factVerdict(fact(), { properties, senderIsPrimary: true,
+      messageBody: `For tomorrow only. ${fact().quote}.`,
+    })).toBe('temporary_instruction');
+  });
+
+  test('uses the central cross-provider policy with a budget reserved for fallback', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: extracted([], []) });
+    await extractSmsOperations({ message: source('The controller is outside.'), properties });
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.highStakes);
+    expect(dispatchWithFallback.mock.calls[0][1]).not.toHaveProperty('timeoutMs');
   });
 });
 
@@ -180,6 +207,14 @@ describe('activation and intake', () => {
     process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
     expect(await runSmsOperationalActions({ conn })).toEqual({ skipped: 'activation_time_required' });
     expect(conn).not.toHaveBeenCalled();
+  });
+  test('keeps mixed-content reschedule replies eligible for profile capture', () => {
+    expect(eligibleMessage({ ...source('Yes. The controller is outside.'), message_type: 'reschedule_reply' })).toBe(true);
+  });
+  test('profile-only intake skips even human outbound messages before extraction', () => {
+    delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
+    expect(eligibleMessage({ ...source('The controller is outside.', 'outbound'),
+      from_phone: numbers.locations.parrish.number, message_type: 'manual', status: 'delivered' })).toBe(false);
   });
   test('excludes automated outbound messages, reactions and the AI number', () => {
     expect(eligibleMessage(source('Please send the estimate'))).toBe(true);

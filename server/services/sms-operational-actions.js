@@ -17,8 +17,7 @@ const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status'];
-const HUMAN_TYPES = ['manual', 'ai_approved', 'ai_revised'];
-const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply'];
+const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
 const tail = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 function eligibleMessage(message) {
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
@@ -27,25 +26,29 @@ function eligibleMessage(message) {
     && tail(ourNumber) !== tail(numbers.tollFree.number)
     && !!numbers.findByNumber(ourNumber)
     && !EXCLUDED_TYPES.includes(message.message_type)
-    && (message.direction === 'inbound'
-      || (HUMAN_TYPES.includes(message.message_type) && ['sent', 'delivered'].includes(message.status)));
+    && message.direction === 'inbound';
 }
 
-function factVerdict(fact, { properties, current = {}, expectedCurrent = current, senderIsPrimary }) {
+// Temporal qualifiers anywhere in the current SMS require staff review, even
+// if the model omits that sentence or labels the extracted fact durable.
+const TEMPORARY_INSTRUCTION = /\b(?:today|tomorrow|tonight|temporar(?:y|ily)|vacation|until|for now|this (?:time|visit|appointment|week|month)|next (?:visit|appointment)|one[- ]time|(?:just|only) (?:for|on)|(?:for|on) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i;
+
+function factVerdict(fact, { properties, current = {}, expectedCurrent = current, senderIsPrimary, messageBody = '' }) {
   if (!senderIsPrimary) return 'contact_authority';
   if (properties.length !== 1 || fact.property_id !== properties[0].id) return 'property_ambiguous';
-  if (fact.duration !== 'durable') return 'temporary_instruction';
+  if (fact.duration !== 'durable' || TEMPORARY_INSTRUCTION.test(`${messageBody} ${fact.quote}`)) return 'temporary_instruction';
   if (fact.field === 'contact_preference'
     && explicitContactPreference(fact.quote) !== fact.value) return 'preference_uncertain';
   if (fact.field.endsWith('_code') && !matchesExplicitAccessCode(fact)) return 'code_uncertain';
-  const maxLength = fact.field.endsWith('_code') ? 100 : fact.field === 'irrigation_controller_location' ? 200 : 600;
+  const maxLength = { neighborhood_gate_code: 100, property_gate_code: 100, lockbox_code: 100,
+    garage_code: 100, irrigation_controller_location: 200 }[fact.field] ?? 600;
   if (fact.value.length > maxLength) return 'value_too_long';
   const before = current[fact.field] ?? null;
   if (before !== (expectedCurrent[fact.field] ?? null)) return 'changed_during_extraction';
   if (before === fact.value) return 'unchanged';
   // Existing information is not erased merely because a new model pass
   // found different wording. Explicit correction policy is owner-reviewed.
-  if (before != null && before !== '') return 'existing_value_conflict';
+  if (![null, ''].includes(before)) return 'existing_value_conflict';
   return 'apply';
 }
 
@@ -62,7 +65,7 @@ async function applyFacts(trx, message, facts, context) {
     await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.property_preference.updated',
       resource_type: 'property_preferences', resource_id: target.id,
       metadata: { sms_log_id: message.id, customer_id: message.customer_id, property_id: fact.property_id,
-        field: fact.field, extractor_version: VERSION, value_hash: hashExtractionSource(fact.value) } });
+        field: fact.field, extractor_version: VERSION } });
     persistedCurrent = { ...target, [fact.field]: fact.value };
     // A row created by this batch hydrates DB defaults, not customer
     // choices. Keep untouched logical fields empty while CAS uses the
@@ -89,12 +92,16 @@ async function loadMessageContext(conn, message) {
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   return conn.transaction(async (trx) => {
+    // Match portal preference saves and merges: preference advisory lock,
+    // customer, then its SMS rows. Do not hold a child row while awaiting its owner.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(message.customer_id)]);
+    const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
+    if (!customer) return { skipped: 'customer_unavailable' };
     const live = await trx('sms_log').where({ id: message.id }).forUpdate().first();
     if (!enabled()) return { skipped: 'gate_off' };
     if (!live || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
     if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
-    const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
-    if (!customer) return { skipped: 'customer_unavailable' };
     const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
     const current = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().first();
     const sender = message.direction === 'inbound' ? message.from_phone : message.to_phone;
@@ -102,7 +109,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tail(sender)]).limit(2).select('id');
     const senderIsPrimary = matches.length === 1 && matches[0].id === customer.id;
     const facts = await applyFacts(trx, message, extracted.facts, {
-      properties, current: current || {}, expectedCurrent: matchedContext.preferences, senderIsPrimary,
+      properties, current: current || {}, expectedCurrent: matchedContext.preferences, senderIsPrimary, messageBody: message.message_body,
     });
     const analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });

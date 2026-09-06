@@ -3,7 +3,7 @@
 // Action understanding for the existing SMS pipeline. No writes or sends.
 const Ajv = require('ajv/dist/2020');
 const MODELS = require('../config/models');
-const { dispatch } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 const VERSION = 'sms-profile-v1';
@@ -101,8 +101,8 @@ function groundExtraction(parsed, { message, properties = [] }) {
 }
 
 async function extractSmsOperations(context) {
-  const result = await dispatch({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.FLAGSHIP }, {
-    text: buildPrompt(context), jsonSchema: SCHEMA, maxTokens: 4096, timeoutMs: 60000,
+  const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+    text: buildPrompt(context), jsonSchema: SCHEMA, maxTokens: 4096,
     laneId: 'sms-operational-actions', promptVersion: VERSION,
   });
   if (!result.ok) throw new Error('sms_operations_provider_failed');
