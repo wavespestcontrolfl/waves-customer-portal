@@ -4993,6 +4993,8 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(isTransientImageError(err([{ provider: 'gpt-image-2', result: { fatal: true, status: 400 } }, { provider: 'gemini', result: { fatal: true, status: 429 } }]))).toBe(true);
     expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 503 } }]))).toBe(true);
     expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 400 } }, { provider: 'gpt-image-2', result: { fatal: true, status: 'no_b64_in_response' } }]))).toBe(false);
+    // A chain skipped for a spent slot budget (the near-duplicate re-framing after a slow first leg) is transient, not a park (Codex r10 P2 on #3964).
+    expect(isTransientImageError(err([{ provider: 'gpt-image-2', result: { skipped: true, retryable: true, reason: 'chain budget exhausted (360000 ms)' } }]))).toBe(true);
   });
 
   test('publishAstro republish with a COMMITTED hero (absolute hub URL): the hero enters the duplicate check from its relative src (hook P1)', async () => {

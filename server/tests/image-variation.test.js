@@ -130,11 +130,33 @@ describe('buildPrompt with a plan', () => {
   });
 
   test('infographic style allows exactly the supplied captions and nothing else', () => {
-    const plan = { style: 'infographic', setting: 'on a plain background', timeOfDay: 'noon', vantage: 'straight-on, centered' };
-    const p = gen.buildPrompt({ title: 'T', keyword: 'Three steps', mode: 'blog-body', plan, captions: ['1 OFF', '2 MANUAL'] });
+    const plan = gen.planFor({ slug: SLUG, mode: 'blog-body', index: 1, style: 'infographic', captions: ['1 OFF', '2 MANUAL'] });
+    const p = gen.buildPrompt({ title: 'T', keyword: 'Three steps', mode: 'blog-body', shot: 'action', plan, captions: ['1 OFF', '2 MANUAL'] });
     expect(p).toMatch(/The ONLY text in the image is exactly: "1 OFF", "2 MANUAL"/);
     expect(p).not.toMatch(/No text, words/);
     expect(p).toMatch(/infographic/i);
+  });
+
+  test('an infographic plan is a layout on a plain background — no yard/room setting, time of day, or camera framing (Codex r10 P2 on #3964)', () => {
+    for (let i = 0; i < 20; i += 1) {
+      const plan = gen.planFor({ slug: `post-${i}`, mode: 'blog-body', index: 1, style: 'infographic', captions: ['Step one'], subject: 'Rain Bird sprinkler timer guide' });
+      expect(plan.style).toBe('infographic');
+      expect(gen.INFOGRAPHIC_LAYOUTS).toContain(plan.setting);
+      expect(Object.values(gen.SETTINGS).flat()).not.toContain(plan.setting);
+      expect(plan.timeOfDay).toBe('');
+      const p = gen.buildPrompt({ title: 'T', keyword: 'Three steps', topic: 'Turn the dial.', mode: 'blog-body', shot: 'action', avoid: 'a timer', city: 'Venice', plan, captions: ['Step one'] });
+      expect(p).toMatch(/Layout: .*on a plain light background/);
+      expect(p).not.toMatch(/Setting:|Vantage:|Framing:|Southwest Florida home/);
+      expect(p).not.toMatch(/\b(early morning|mid-morning|noon|late afternoon|golden hour|dusk)\b/);
+      // The alt describes the composition, not a home at a time of day.
+      const alt = gen.buildAltText({ title: 'T', keyword: 'Three steps', city: 'Venice', mode: 'blog-body', plan });
+      expect(alt).toMatch(/^Infographic illustrating Three steps: /);
+      expect(alt).not.toMatch(/Southwest Florida home/);
+    }
+    // Every other style keeps its scene plan.
+    const photo = gen.planFor({ slug: 'post-1', mode: 'blog-hero', index: 0, style: 'photo' });
+    expect(Object.values(gen.SETTINGS).flat()).toContain(photo.setting);
+    expect(photo.timeOfDay).toBeTruthy();
   });
 
   test('cartoon and illustration styles still forbid text; a caption on a non-infographic style is ignored', () => {

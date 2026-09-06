@@ -154,7 +154,8 @@ describe('ImageGenerator: one deadline for the whole chain (Codex r5 P2 on #3964
     await expect(gen.generate({ title: 'Test' })).rejects.toMatchObject({
       attempts: [
         expect.objectContaining({ provider: 'gpt-image-2' }),
-        expect.objectContaining({ provider: 'gemini', result: expect.objectContaining({ skipped: true, reason: expect.stringMatching(/chain budget exhausted/) }) }),
+        // Budget exhaustion is a timing condition → retryable, so the runner retries rather than parks (Codex r10 P2).
+        expect.objectContaining({ provider: 'gemini', result: expect.objectContaining({ skipped: true, retryable: true, reason: expect.stringMatching(/chain budget exhausted/) }) }),
         expect.objectContaining({ provider: 'gpt-image-1', result: expect.objectContaining({ skipped: true }) }),
       ],
     });

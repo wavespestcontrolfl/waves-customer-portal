@@ -215,6 +215,17 @@ function settingsFor(subject) {
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];
 const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking down', 'over the shoulder', 'straight-on, centered', 'three-quarter view'];
+// An infographic is a composition, not a scene: its plan names a LAYOUT in
+// place of a yard/room setting, no time of day, and a fixed straight-on
+// vantage — a photographic setting line contradicted the style's plain
+// background and let providers draw the scene instead (Codex r10 P2 on #3964).
+const INFOGRAPHIC_LAYOUTS = [
+  'a numbered step-by-step row of simple icons',
+  'a labeled-parts diagram with short callout lines',
+  'a side-by-side comparison of two or three panels',
+  'a do-and-don\'t checklist with check and cross marks',
+  'a circular process diagram with a few icon stages',
+];
 function hashString(input) {
   let h = 2166136261;
   const str = String(input || '');
@@ -240,6 +251,9 @@ function planFor({ slug, mode = 'blog-hero', index = 0, captions = [], subject =
   let style = forced && IMAGE_STYLES[forced] ? forced : perm[slot % perm.length];
   if (style === 'infographic' && !(Array.isArray(captions) && captions.length)) {
     style = slot < 3 ? perm[3] : 'illustration';
+  }
+  if (style === 'infographic') {
+    return { style, setting: pick(INFOGRAPHIC_LAYOUTS, 1), timeOfDay: '', vantage: 'straight-on, centered' };
   }
   return {
     style,
@@ -283,7 +297,12 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     : `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
   // A planned image names ITS setting, time and vantage; the legacy line
   // (one fixed postcard) only remains for callers that pass no plan.
-  const local = plan
+  // An infographic's plan is a layout on a plain background — no scene, time
+  // of day, or camera framing, which would contradict the style line.
+  const isInfographic = Boolean(plan) && plan.style === 'infographic';
+  const local = isInfographic
+    ? `Layout: ${plan.setting}, ${plan.vantage}, on a plain light background — no photographic scene, no time of day; at most one small Southwest Florida cue (a palm or wave icon).`
+    : plan
     ? `Setting: ${plan.setting}, ${plan.timeOfDay}, ${city ? `a ${city}-area Southwest Florida home` : 'a Southwest Florida home'}; Southwest Florida cues stay subtle (one palm or a stucco wall is plenty — do not fill the frame with palms and a tile roof). Vantage: ${plan.vantage}.`
     : (city
       ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
@@ -304,7 +323,7 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan = nu
     ? `The ONLY text in the image is exactly: ${captionList.map((c) => `"${c}"`).join(', ')} — spelled exactly, nothing else written anywhere.`
     : 'No text, words, letters, numbers, watermarks, or logos anywhere in the image.';
   const guards = `Must not depict: ${[...STANDARD_GUARDS, ...(Array.isArray(avoidDepicting) ? avoidDepicting : [])].map((g) => String(g || '').trim()).filter(Boolean).join('; ')}.`;
-  const framing = mode === 'blog-body' ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
+  const framing = mode === 'blog-body' && !isInfographic ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
   const distinct = (mode === 'blog-body' && avoid)
     ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
     : '';
@@ -338,6 +357,8 @@ function buildAltText({ title, topic, keyword, city, mode = 'blog-hero', plan = 
   const kind = styled
     ? (mode === 'social-square' ? `${styled} social tile` : styled)
     : (mode === 'social-square' ? 'Photorealistic social tile' : 'Photorealistic scene');
+  // An infographic has a layout, not a setting (Codex r10 P2 on #3964).
+  if (plan && plan.style === 'infographic') return `${kind} illustrating ${subject}: ${plan.setting}.`;
   return `${kind} of ${setting}, illustrating ${subject}.`;
 }
 
@@ -486,7 +507,10 @@ class ImageGenerator {
       const timeoutMs = legTimeoutMs(deadline, this._now());
       let result;
       if (timeoutMs === null) {
-        result = { skipped: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
+        // A spent budget is a timing condition, not a verdict on the provider:
+        // retryable so the runner retries the post instead of parking it
+        // (Codex r10 P2 on #3964).
+        result = { skipped: true, retryable: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
       } else if (cfg.api === 'openai') {
         result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs });
       } else if (cfg.api === 'gemini') {
@@ -586,6 +610,7 @@ module.exports._internals = {
   retryStyleFor,
   settingsFor,
   SETTINGS,
+  INFOGRAPHIC_LAYOUTS,
   DEFAULT_CHAIN,
   MODEL_MAP,
   MODE_SIZES,
