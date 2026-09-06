@@ -16,7 +16,6 @@ import {
   Settings as SettingsIcon,
   Target,
   ToggleLeft,
-  Users,
 } from "lucide-react";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -141,7 +140,6 @@ const VALID_TABS = [
   "general",
   "integrations",
   "gates",
-  "team",
   "link-library",
   "service-reports",
   "blackout-days",
@@ -155,7 +153,7 @@ const VALID_TABS = [
 // Tab state still holds the LEAF key (one of VALID_TABS); these groups only drive
 // which parent button is active and which leaf the parent jumps to.
 const SETTINGS_TAB_GROUPS = [
-  { key: "general", label: "General", Icon: Building2, tabs: ["general", "team", "link-library"] },
+  { key: "general", label: "General", Icon: Building2, tabs: ["general", "link-library"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
   { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days"] },
@@ -166,7 +164,6 @@ const SETTINGS_TAB_GROUPS = [
 // Per-leaf nav metadata for the sub-tab pill row.
 const SETTINGS_LEAF_META = {
   general: { label: "General", Icon: Building2 },
-  team: { label: "Team", Icon: Users },
   "link-library": { label: "Link Library", Icon: Link2 },
   integrations: { label: "Integrations", Icon: Plug },
   "service-reports": { label: "Service Reports", Icon: MapPinned },
@@ -227,7 +224,7 @@ export default function SettingsPage() {
   // skipped. Codex #2961 r4+r6.
   // Re-run only for REAL query changes: isMobile is read here (mobile-index
   // skip), but a breakpoint crossing must not resync state from a stale URL
-  // param — after a state-only selectTab, the URL can still say ?tab=team
+  // param — after a state-only selectTab, the URL can still say ?tab=general
   // while Portal Usage is rendered, and a resize would eject the user and
   // record the stale leaf (Codex #2961 r9).
   const prevSearchRef = useRef(null);
@@ -303,7 +300,7 @@ export default function SettingsPage() {
   // non-admin roles instead of rendering panels that can only 403
   // (2026-08-25 role lockdown). `user` is the server-verified /auth/me row.
   const isAdminRole = user?.role === "admin";
-  // Non-admin Settings: General (account/team view) + Operating Costs +
+  // Non-admin Settings: General (account view) + Operating Costs +
   // Portal Usage. Integrations (its tab renders "Admin access required"),
   // Service Reports, Scheduling, KPI targets, feature gates, and System
   // are owner-only.
@@ -646,23 +643,6 @@ export default function SettingsPage() {
             Railway Dashboard → Variables → set GATE_NAME=true or remove the
             variable.
           </div>{" "}
-        </Card>
-      )}
-      {/* ── TEAM ── */}
-      {tab === "team" && (
-        <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 16,
-            }}
-          >
-            Team Members
-          </div>{" "}
-          <TeamList />{" "}
         </Card>
       )}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
@@ -2536,69 +2516,3 @@ function IntegrationsTab({ canAdmin }) {
   );
 }
 
-function TeamList() {
-  const [team, setTeam] = useState([]);
-  useEffect(() => {
-    adminFetch("/admin/auth/me")
-      .then((me) => {
-        // Just show current user for now
-        setTeam([me]);
-      })
-      .catch(() => {});
-  }, []);
-
-  return (
-    <div>
-      {team.map((t, i) => (
-        <div
-          key={i}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 14,
-            padding: "12px 0",
-            borderBottom: `1px solid ${D.border}`,
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 10,
-              background: `linear-gradient(135deg, ${D.teal}, ${D.green})`,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: D.heading,
-              fontSize: 16,
-              fontWeight: 700,
-            }}
-          >
-            {(t.name || "?")[0]}
-          </div>{" "}
-          <div style={{ flex: 1 }}>
-            {" "}
-            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
-              {t.name}
-            </div>{" "}
-            <div style={{ fontSize: 12, color: D.muted }}>{t.email}</div>{" "}
-          </div>{" "}
-          <span
-            style={{
-              padding: "3px 10px",
-              borderRadius: 6,
-              fontSize: 11,
-              fontWeight: 500,
-              background: t.role === "admin" ? D.teal + "22" : D.border,
-              color: t.role === "admin" ? D.teal : D.muted,
-              textTransform: "capitalize",
-            }}
-          >
-            {t.role}
-          </span>{" "}
-        </div>
-      ))}
-    </div>
-  );
-}
