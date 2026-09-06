@@ -464,6 +464,30 @@ async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, 
   });
 }
 
+// Email twin of the tech_arrived SMS — sent when the customer's Tech Arrived
+// delivery channel is email/both (template seeded by 20260707000050, version
+// re-activated by 20260906000020). Retired 2026-08-06 (#3247), restored on
+// the owner's 2026-09-06 go so the Text / Email / Both picker means what it
+// says for arrivals.
+async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, idempotencyKey } = {}) {
+  // Same stamped-label override as the confirmation/reminder emails — the
+  // template's Property row must name where the tech actually arrived.
+  const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
+  return sendTemplate({
+    customerId,
+    templateKey: 'appointment.tech_arrived',
+    eventType: 'appointment.tech_arrived',
+    payload: {
+      tech_name: clean(techName) || 'Your technician',
+      ...(stampedLabel ? { property_label: stampedLabel } : {}),
+    },
+    idempotencyKey: idempotencyKey || `appointment.tech_arrived:${scheduledServiceId || customerId}`,
+    categories: ['appointment_tech_arrived'],
+    triggerEventId: `appointment.tech_arrived:${scheduledServiceId || customerId}`,
+    metadata: { scheduled_service_id: scheduledServiceId || null },
+  });
+}
+
 /**
  * Missed-visit (no-show) email — the email twin of the appointment_no_show
  * SMS, fired from AppointmentReminders.handleNoShow. missedWhen arrives
@@ -513,5 +537,6 @@ module.exports = {
   sendAppointmentReminderEmail,
   sendAppointmentNoShowEmail,
   sendTechEnRouteEmail,
+  sendTechArrivedEmail,
   _private: { sendTemplate, loadCustomer, resolveRecipients, isEmailLike, propertyLabel },
 };

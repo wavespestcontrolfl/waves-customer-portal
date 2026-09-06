@@ -5026,10 +5026,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
-                // SMS-only (no channelKey): the arrival email twin was
-                // retired 2026-08-06 — offering Email/Both here would show a
-                // choice the server no longer honors.
-                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'door', locked: false, defaultOn: true },
+                // Text / Email / Both: the arrival email twin (retired
+                // 2026-08-06) is back on the owner's 2026-09-06 go.
+                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'The moment your tech reaches your property', icon: 'door', locked: false, defaultOn: true },
                 // Weather & property advisories (portal roadmap bet 6, owner
                 // ruling 2026-08-13: push + bell). A NEW alert type must ship
                 // with its self-service opt-out on the live settings surface
