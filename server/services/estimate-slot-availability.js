@@ -704,10 +704,25 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const selectedFrequency = userOpts.selectedFrequency || '';
+  const combinedPolicy = serviceMode !== 'one_time'
+    && (process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
+  let recurringSelection = serviceMode === 'one_time' ? []
+    : recurringRowsForEstimate(estimate, estData, selectedFrequency);
+  if (combinedPolicy) {
+    const converter = require('./estimate-converter');
+    const units = converter.combineRecurringServicesForScheduling(
+      converter.foldTermiteRentalIntoBait(recurringSelection), { acceptFrequency: selectedFrequency },
+    );
+    recurringSelection = [
+      ...units.remaining,
+      ...units.standalone.map((unit) => unit.service),
+      ...units.combos.flatMap((unit) => unit.route.retiredBySeparateVisits ? unit.combinedFrom : [unit.service]),
+    ];
+  }
 
   let services = serviceMode === 'one_time'
     ? oneTimeProfileServices(estimate, estData)
-    : recurringRowsForEstimate(estimate, estData, selectedFrequency)
+    : recurringSelection
       .map((row) => {
         const key = serviceKeyFor(row);
         const label = labelForService(row);
@@ -761,12 +776,23 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
 
   // Legacy and single-service bookings retain their default. Combined stops
   // reserve the owner-approved 60 minutes for EACH selected service.
-  const reservationServiceMix = serviceMode !== 'one_time' && services.length > 1
-    && (process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true)
+  const reservationServiceMix = combinedPolicy && services.length > 1
     ? require('./combined-visit-capacity').capacityForServices(services)
     : null;
   if (reservationServiceMix && process.env.GATE_SEPARATE_COMBO_VISITS !== 'true') {
     throw require('./combined-visit-capacity').capacityUnavailable();
+  }
+  if (reservationServiceMix) {
+    const { converterFollowUpSeedingPattern } = require('./estimate-converter');
+    const supported = recurringSelection.every((row, index) => {
+      const profile = services[index];
+      const selected = { ...row, visitsPerYear: profile.visitsPerYear };
+      if (profile.service === 'pest_control') {
+        selected.frequency = require('./recurring-appointment-seeder').patternFromVisitsPerYear(profile.visitsPerYear);
+      }
+      return !!converterFollowUpSeedingPattern(selected, { service_type: profile.label });
+    });
+    if (!supported) throw require('./combined-visit-capacity').capacityUnavailable();
   }
   const durationMinutes = reservationServiceMix?.durationMinutes
     || clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);

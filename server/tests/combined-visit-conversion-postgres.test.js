@@ -88,12 +88,23 @@ postgres('combined capacity conversion on the migrated application schema', () =
     ['four services', lines],
     ['lawn and tree with different cadences', [lines[1], lines[2]]],
     ['pest and tree without lawn', [lines[0], lines[2]]],
-  ])('%s keep separate identities, sequential hours and their own cadences', async (_, selected) => {
+    ['pest and termite with rental and bond billing riders', [lines[0], {
+      service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4, frequency: 'quarterly',
+      catalog: 'termite_bait', pattern: 'quarterly',
+    }], ['termite_station_rental', 'termite_bond_1yr']],
+  ])('%s keep separate identities, sequential hours and their own cadences', async (_, selected, riders = []) => {
     const trx = await mockPg.transaction();
     try {
       const count = selected.length;
       const f = await fixture(trx, selected);
       await trx('customers').where({ id: f.customerId }).update({ autopay_enabled: true });
+      if (riders.length) {
+        const estimate = await trx('estimates').where({ id: f.estimateId }).first();
+        estimate.estimate_data.result.recurring.services.push(...riders.map((service) => ({
+          service, name: service, visitsPerYear: 4, annual: 120, mo: 10, perTreatment: 30,
+        })));
+        await trx('estimates').where({ id: f.estimateId }).update({ estimate_data: estimate.estimate_data });
+      }
       // Exercise the real public-accept transaction boundary: graduate the
       // hold, then convert using that same transaction.
       delete process.env.GATE_VISIT_COMBINED_CAPACITY;
@@ -166,6 +177,18 @@ postgres('combined capacity conversion on the migrated application schema', () =
         scheduledServiceId: parent.id, customerId: f.customerId,
         appointmentTime: `${f.date}T${parent.window_start}`, serviceType: parent.service_type,
       });
+      await trx('scheduled_services').where({ id: parents[1].id }).update({ window_end: '11:30' });
+      const pool = mockPg;
+      mockPg = trx;
+      try {
+        await AppointmentReminders.handleReschedule(parents[1].id, `${f.date}T10:00`, {
+          sendNotification: false, expectSchedule: { date: f.date, windowStart: '10:00' },
+        });
+      } finally { mockPg = pool; }
+      const synced = await trx('appointment_reminders').where({ scheduled_service_id: parents[1].id }).first();
+      const { parseETDateTime: parseSyncTime } = require('../utils/datetime-et');
+      expect(synced.appointment_time).toEqual(parseSyncTime(`${f.date}T09:00`));
+      expect(synced.suppressed_by_sibling).toBe(true);
       await trx('scheduled_services').where({ id: parents[0].id }).update({ technician_id: null });
       await expect(AppointmentReminders.resolveCommittedVisitTime(parents[1].id, {}, trx))
         .resolves.toMatchObject({ appointmentTime: `${f.date}T09:00` });
@@ -188,10 +211,11 @@ postgres('combined capacity conversion on the migrated application schema', () =
 
   test('an unfulfillable member rolls back the graduated hold and every seeded row', async () => {
     let f;
-    const invalidTree = { ...lines[2], visitsPerYear: 5, frequency: 'unresolved' };
     await expect(mockPg.transaction(async (trx) => {
-      f = await fixture(trx, [lines[0], lines[1], invalidTree]);
+      f = await fixture(trx, lines.slice(0, 3));
       await commitReservation({ scheduledServiceId: f.anchor.id, customerId: f.customerId, trx });
+      // A missing catalog binding must abort after the other programs seed.
+      await trx('scheduled_services').where({ id: f.anchor.id }).update({ service_id: null });
       await converter.convertEstimate(f.estimateId, { ...options, database: trx });
     })).rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE' });
     expect(await mockPg('scheduled_services').where({ source_estimate_id: f.estimateId })).toHaveLength(0);

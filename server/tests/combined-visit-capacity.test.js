@@ -8,7 +8,7 @@ const {
 const services = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito'];
 function estimateFor(keys) {
   return {
-    estimate_data: { result: { recurring: { services: keys.map((service) => ({ service, name: service, visitsPerYear: 6 })) } } },
+    estimate_data: { result: { recurring: { services: keys.map((service) => ({ service, name: service, visitsPerYear: ({ pest_control: 4, lawn_care: 6, tree_shrub: 6, mosquito: 12 })[service] || 4 })) } } },
   };
 }
 
@@ -30,6 +30,29 @@ describe('combined visit booking capacity', () => {
     expect(resolveEstimateSlotProfile(estimateFor(services)).durationMinutes).toBe(60);
     expect(resolveEstimateSlotProfile(estimateFor(services), { durationMinutes: 90 }).durationMinutes).toBe(90);
     expect(resolveEstimateSlotProfile(estimateFor(services)).reservationServiceMix).toBeUndefined();
+  });
+
+  test.each([
+    ['termite_bait', 'termite_station_rental'],
+    ['termite_bait', 'termite_bond_1yr'],
+    ['termite_bait', 'termite_station_rental', 'termite_bond_1yr'],
+  ].map((keys) => [keys]))('termite billing riders remain one physical program: %j', (keys) => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const profile = resolveEstimateSlotProfile(estimateFor(keys));
+    expect(profile.services).toHaveLength(1);
+    expect(profile.durationMinutes).toBe(60);
+    expect(profile.reservationServiceMix).toBeUndefined();
+    const mixed = resolveEstimateSlotProfile(estimateFor(['pest_control', ...keys]));
+    expect(mixed.durationMinutes).toBe(120);
+    expect(mixed.reservationServiceMix.services).toEqual(['pest_control', 'termite_bait']);
+  });
+
+  test('a service cadence the converter cannot seed is refused before offering a combined slot', () => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const estimate = estimateFor(['pest_control', 'lawn_care']);
+    estimate.estimate_data.result.recurring.services[0].visitsPerYear = 12;
+    expect(() => resolveEstimateSlotProfile(estimate))
+      .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
   });
 
   test('a persisted combined reservation keeps the accepted mix sized after the gate is off', () => {

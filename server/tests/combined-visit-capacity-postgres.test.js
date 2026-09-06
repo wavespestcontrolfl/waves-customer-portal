@@ -36,7 +36,7 @@ let admin;
 let mockPg;
 
 function estimateData(keys = ['pest_control', 'lawn_care']) {
-  return { result: { recurring: { services: keys.map((service) => ({ service, name: service, visitsPerYear: 4 })) } } };
+  return { result: { recurring: { services: keys.map((service) => ({ service, name: service, visitsPerYear: ({ pest_control: 4, lawn_care: 6, tree_shrub: 6, mosquito: 12 })[service] || 4 })) } } };
 }
 
 function signedSlot(estimateId, start = '09:00', durationMinutes = 120) {

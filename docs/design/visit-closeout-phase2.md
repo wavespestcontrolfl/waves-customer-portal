@@ -19,7 +19,10 @@ mixes must not be truncated to the old 180-minute picker cap. Keep each member's
 start on the hour and allocate the work sequentially. This is booking capacity;
 the customer arrival window remains the shared start plus 120 minutes.
 `GATE_VISIT_COMBINED_CAPACITY` requires `GATE_SEPARATE_COMBO_VISITS` so every
-selected application has its own service record. Creation defaults off.
+selected application has its own service record. Billing riders do not add work
+hours; scheduling uses the converter’s physical service units. Combined selections
+with unsupported converter families or cadences are refused before a hold.
+Creation defaults off.
 
 ## Existing mechanisms to extend
 

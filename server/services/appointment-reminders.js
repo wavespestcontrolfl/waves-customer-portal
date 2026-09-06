@@ -3770,7 +3770,8 @@ const AppointmentReminders = {
         });
       };
 
-      const newApptTime = parseETDateTime(newTime);
+      const resolved = await this.resolveCommittedVisitTime(scheduledServiceId, appointmentTimeParts(newTime));
+      const newApptTime = parseETDateTime(resolved ? resolved.appointmentTime : newTime);
       if (isNaN(newApptTime.getTime())) {
         logger.error(`[appt-remind] Reschedule: invalid time ${newTime}`);
         return null;

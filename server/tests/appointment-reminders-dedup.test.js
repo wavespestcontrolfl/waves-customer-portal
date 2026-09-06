@@ -467,7 +467,7 @@ describe('appointment reminder reschedule windows', () => {
       first: jest.fn().mockResolvedValue(customer || null),
     });
     const customerQueries = [customerQuery, landlineQuery];
-    const scheduledServiceQueries = [techQuery];
+    const scheduledServiceQueries = [chain({ first: jest.fn().mockResolvedValue(null) }), techQuery];
     const notificationPrefsQueries = [prefsQuery];
 
     if (sendResult) {
