@@ -24,10 +24,10 @@ describe("admin navigation registry", () => {
   it("uses the consolidated admin taxonomy", () => {
     expect(compactSections(ADMIN_DESKTOP_NAV_SECTIONS)).toEqual([
       { section: "Overview", itemIds: ["dashboard"] },
+      { section: "Service operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
       { section: "Customers & Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
       { section: "Communications", itemIds: ["communications", "email"] },
       { section: "Billing & Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
-      { section: "Service operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
       { section: "People", itemIds: ["staff", "recruiting"] },
       { section: "Marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },
       { section: "System", itemIds: ["agents", "toolHealth", "settings"] },
