@@ -2109,7 +2109,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect((source.match(/const completionInvoiceTaxRate = /g) || []).length).toBe(1);
       // The COMPLETION transaction is the nearest trx open above the stamp
       // (the file has other, earlier transactions on other routes).
-      const trxAt = source.lastIndexOf("await db.transaction(async (trx) => {", stampAt);
+      const trxAt = source.lastIndexOf("const persistRecord = async (trx) => {", stampAt);
       const serializeAt = source.indexOf('structured_notes: serializeJsonb(structuredNotes),');
       expect(stampAt).toBeGreaterThan(trxAt);
       expect(serializeAt).toBeGreaterThan(stampAt);
