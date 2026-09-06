@@ -15,6 +15,7 @@ const { compareSegments, segmentsText, callerTurnsFromText, nonEmptyFields, late
 
 const RECONNECT_LIMIT = 1;
 const RESUME_STATE_TIMEOUT_MS = 2000;
+const PROVIDER_FAILURE_LIMIT = 2;
 const RESUME_SEED_MAX_CHARS = 20000;
 
 function isRecoveryGateOn() {
@@ -211,9 +212,15 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
   try { return await Promise.race([read, timeout]); } catch { return null; } finally { clearTimeout(timer); }
 }
 
+/** 'handoff' once either counter reaches the limit; null otherwise. */
+function providerFailurePolicy({ modelFailures = 0, toolFailures = 0 } = {}) {
+  if (!isRecoveryGateOn()) return null;
+  return (modelFailures >= PROVIDER_FAILURE_LIMIT || toolFailures >= PROVIDER_FAILURE_LIMIT) ? 'handoff' : null;
+}
 
 module.exports = {
   RECONNECT_LIMIT,
+  PROVIDER_FAILURE_LIMIT,
   isRecoveryGateOn,
   claimReconnect,
   undoLateReconnect,
@@ -222,5 +229,6 @@ module.exports = {
   fallbackFence,
   loadResumeState,
   readReconnectState,
+  providerFailurePolicy,
   RESUME_SEED_MAX_CHARS,
 };

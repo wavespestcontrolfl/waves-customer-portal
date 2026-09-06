@@ -685,7 +685,8 @@ const gates = {
   // a resumed greeting; the new socket takes the claim), every socket's
   // transcript lands as a segment (metadata.relay_segments) and the owning
   // close composes the whole call; a second failure hands the caller to the
-  // office (transfer gate, office open) or voicemail. Off ⇒
+  // office (transfer gate, office open) or voicemail; a second consecutive
+  // model / tool failure hands off instead of re-prompting. Off ⇒
   // /relay-complete and the close-time writes are byte-identical to today.
   // Read at CALL time (services/voice-agent/relay-recovery.js, exact
   // 'true'); this entry is the status/log listing. Kill switch: unset.
@@ -2354,7 +2355,6 @@ const gates = {
   // transcript goes straight into the tech's notes box. Kill switch: unset.
   // Read at CALL time so a flip needs no redeploy.
   techDictationUpload: gateEnvValue('GATE_TECH_DICTATION_UPLOAD'),
-
 
   // Agent Activity feed — the Activity tab in /admin/agents: one read-only
   // timeline built from autonomous_runs, content_email_approvals,

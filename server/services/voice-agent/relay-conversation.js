@@ -545,6 +545,8 @@ class RelayConversation {
     this._toolFailures = 0; // consecutive failed tools
     this._inheritedFailures = { model: 0, tool: 0 };
     this._clearedFailures = { model: false, tool: false };
+    this._handoffForFailure = false; // the provider-failure handoff ran (once per call)
+    this._failureCallbackPromised = false;
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -1162,7 +1164,7 @@ class RelayConversation {
     // prior _runLoop is still in flight can't be inserted ahead of that loop's
     // assistant/tool_result messages and corrupt the conversation order.
     this._chain = this._chain.then(() => {
-      if (this.ended) return undefined;
+      if (this.ended || this._ending) return undefined;
       // Recorded HERE (inside the serialized chain), not at enqueue time, so
       // the transcript's caller/agent ordering matches what actually happened.
       // The MESSAGE itself is pushed inside _runLoop, after the office-hours
@@ -1311,6 +1313,10 @@ class RelayConversation {
     const { executeTool: run } = require('./relay-tools');
     const work = Promise.resolve()
       .then(() => run(name, input, ctx))
+      .then((out) => {
+        if (ctx.toolOutcome) ctx.toolOutcome.ok = ![TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out) && ctx.toolFailed !== true;
+        return out;
+      })
       .catch((err) => {
         // executeTool has its own try/catch; this is the belt-and-braces path.
         logger.error(`[voice-relay] tool "${name}" rejected: ${err.message}`);
@@ -1526,20 +1532,7 @@ class RelayConversation {
       // threw, means no /relay-complete transfer callback will ever come —
       // the tool reverts the stamp and answers accordingly. An endSession
       // that reports nothing (older callers) counts as sent.
-      endForTransfer: () => {
-        if (this._ending) return false;
-        let sent = false;
-        try {
-          if (this._endSession) {
-            const r = this._endSession({ reason: 'transfer', captured: this.leadCaptured, owner: this.sessionKey || null });
-            sent = r !== false;
-          }
-        } catch (e) {
-          logger.error(`[voice-relay] endSession (transfer) failed callSid=${this.callSid}: ${e.message}`);
-        }
-        if (sent) this._ending = true;
-        return sent;
-      },
+      endForTransfer: () => this._endForHandoff('transfer'),
       // SERVER state for the handoff packet — never the model's claims.
       handoffFacts: () => ({
         verificationTier: convo._callerVerified === true
@@ -1568,6 +1561,18 @@ class RelayConversation {
     };
   }
 
+  _endForHandoff(reason) {
+    if (this.ended || this._ending || !this._endSession) return false;
+    try {
+      const sent = this._endSession({ reason, captured: this.leadCaptured, owner: this.sessionKey || null }) !== false;
+      this._ending = sent;
+      return sent;
+    } catch (err) {
+      logger.error(`[voice-relay] handoff end frame failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return false;
+    }
+  }
+
   /** The claim-owner fence every close-time write rides (PR 2A: shared with the handoff packet). */
   _fenceOwner(q) {
     return this.sessionKey
@@ -1588,6 +1593,65 @@ class RelayConversation {
    * whose call_log row never vouched for its ANI) is out only on a proven
    * foreign owner.
    */
+  /**
+   * PR 2B — the provider-failure handoff (GATE_VOICE_RELAY_RECOVERY). A
+   * second consecutive model failure, or a second failed tool, ends the
+   * "could you say that again?" loop: Sandy says so, then transfers when the
+   * office is open (the 2A tool does its own fencing and ends the leg) or
+   * takes the callback (capture floor) and ends the call. Once per call.
+   * Returns true when it took over the turn.
+   */
+  async _maybeHandoffForFailure(toolCtx) {
+    const { providerFailurePolicy } = require('./relay-recovery');
+    if ([this._handoffForFailure, this.ended, this._ending].some(Boolean)) return false;
+    if (providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) !== 'handoff') return false;
+    await withTimeout(Promise.allSettled([...this._inFlightWrites.values()]), WRITE_DRAIN_TIMEOUT_MS);
+    if (this.ended || this._ending) return true; // consume the turn without recording unsent speech
+    if (this._inFlightWrites.size) {
+      if (!await this._sessionSuperseded()) this.say(require('./relay-language').copy('writePending', this.language));
+      return true; // the turn is answered; retry handoff on a later caller turn
+    }
+    this._handoffForFailure = true;
+    let superseded = await this._sessionSuperseded();
+    const { copy } = require('./relay-language');
+    const { isTransferAvailable } = require('./relay-transfer');
+    if (!superseded && isTransferAvailable(toolCtx?.officeOpenNow())) {
+      try {
+        const { executeTool } = require('./relay-tools');
+        const out = await executeTool('transfer_to_office', { intent: 'system trouble', summary: 'Sandy had repeated system trouble on this call' }, toolCtx);
+        this._recordTurn('tool', 'transfer_to_office');
+        if (/Transferring the caller/.test(String(out))) return true;
+      } catch (err) {
+        logger.warn(`[voice-relay] provider-failure transfer failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      }
+    }
+    if (!superseded) {
+      const filed = this._failureCallbackPromised || await this._fileFailureCallback();
+      superseded = await this._sessionSuperseded();
+      if (![superseded, this.ended, this._ending].some(Boolean)) {
+        // Once the callback copy can reach the caller, its office task must
+        // survive end-frame failure and every later retry on this socket.
+        this._failureCallbackPromised = filed;
+        this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
+      }
+    }
+    const sent = this._endForHandoff(superseded ? 'superseded' : 'provider_failure');
+    const retainCallback = this._failureCallbackPromised || [sent, !superseded].every(Boolean);
+    this._failureCallbackEndDecision?.(retainCallback);
+    this._handoffForFailure = sent;
+    if (!retainCallback) {
+      if (this._failureCallbackReceipt) {
+        const { revertRelayFailureCallback } = require('../notification-service');
+        try {
+          await revertRelayFailureCallback(this._failureCallbackReceipt);
+          this._failureCallbackReceipt = null;
+        } catch (err) {
+          logger.error(`[voice-relay] abandoned callback revert failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        }
+      }
+    }
+    return true;
+  }
 
   /**
    * Sandy's own promises — "someone will call you back", a queued estimate —
@@ -1692,6 +1756,55 @@ class RelayConversation {
     if (this._leadId && this._bookingRequested) {
       const { attachLeadToVoiceBookingCard } = require('./relay-booking');
       await withTimeout(attachLeadToVoiceBookingCard(this.callSid, this._leadId), 2000, false);
+    }
+  }
+
+  /**
+   * PR 2B — the provider-failure callback record: the office's callback bell
+   * for THIS call (`customer_voicemail_callback`, per-call tag, real number
+   * by owner ruling), bounded and best-effort. Returns true only when the
+   * bell row was written. Never on the sandbox (a dry run files nothing).
+   */
+  async _fileFailureCallback() {
+    if (this.ended || this.sandbox || !this.callSid) return false;
+    try {
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('id', 'customer_id', 'from_phone').catch(() => null), 2000, null);
+      if (!row) return false;
+      // A previous receipt can still be compensated. Only this attempt's
+      // locked notification result authorizes a callback promise. An existing
+      // claim is suppressed rather than accepted on another session's behalf.
+      const verified = this._callerVerified === true;
+      const phone = toE164((verified && row.from_phone) || this.from || '');
+      if (!isLikelyE164(phone)) return false;
+      const { triggerNotification } = require('../notification-triggers');
+      // The notification service locks the call and commits the bell, shared
+      // callback stamp, and evidence together. No durable claim can outlive a
+      // failed/aborted delivery, and takeover waits until that write finishes.
+      let resolveBell;
+      const bell = new Promise((resolve) => { resolveBell = resolve; });
+      const deadline = Date.now() + 3000;
+      const callbackRetained = new Promise((resolve) => { this._failureCallbackEndDecision = resolve; });
+      const delivery = triggerNotification('customer_voicemail_callback', {
+        name: this._estimateFields?.first_name || null,
+        phone,
+        service: null,
+        customerId: verified ? row.customer_id : null,
+        callLogId: row.id,
+        reason: 'sandy_provider_failure',
+      }, {
+        relayFailureCall: {
+          callSid: this.callSid, owner: verified ? this.sessionKey : null,
+          isActive: () => !this.ended && Date.now() < deadline,
+          onCommitted: (receipt) => { this._failureCallbackReceipt = receipt; },
+        },
+        onBell: resolveBell,
+        beforePush: async () => (await callbackRetained) && !(await this._sessionSuperseded()),
+      });
+      void delivery.then((result) => resolveBell(result?.bellWritten === true)).catch(() => resolveBell(false));
+      return await withTimeout(bell, 3000, false);
+    } catch (err) {
+      logger.warn(`[voice-relay] provider-failure callback failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+      return false;
     }
   }
 
@@ -1803,6 +1916,10 @@ class RelayConversation {
     if (this._officeHoursReady) {
       try { await withTimeout(this._officeHoursReady, OFFICE_HOURS_TIMEOUT_MS); } catch { /* degrade */ }
     }
+
+    // A previous turn may have deferred handoff while a write drained.
+    // Retry before a successful model round can clear the failure streak.
+    if (await this._maybeHandoffForFailure(toolCtx)) return;
 
     // ── PROMPT CACHING ORDERING ────────────────────────────────────────────
     // Caching is a strict PREFIX match over tools → system → messages, so the
@@ -1916,20 +2033,15 @@ class RelayConversation {
         // turn keeps its FIRST stamp, not the last round's.
         stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
-        this._modelFailures = 0;
+        this._modelFailures = 0; // a completed round resets the streak
         this._clearedFailures.model = true;
       } catch (err) {
-        if (streamTimedOut) {
-          this._modelFailures += 1;
-          stat.timedOut = true;
-          logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
-          this.say(require('./relay-language').copy('streamTimeout', this.language));
-          return;
-        }
-        if (this._controller.signal.aborted) return; // barge-in; caller is talking
+        if (!streamTimedOut && this._controller.signal.aborted) return; // barge-in
+        stat.timedOut = streamTimedOut;
+        const failure = streamTimedOut ? { level: 'warn', copy: 'streamTimeout' } : { level: 'error', copy: 'modelError' };
+        logger[failure.level]( `[voice-relay] model round failed callSid=${maskSid(this.callSid)} timeout=${streamTimedOut}: ${err.message}`);
         this._modelFailures += 1;
-        logger.error(`[voice-relay] anthropic error callSid=${this.callSid}: ${err.message}`);
-        this.say(require('./relay-language').copy('modelError', this.language));
+        if (!(await this._maybeHandoffForFailure(toolCtx))) this.say(require('./relay-language').copy(failure.copy, this.language));
         return;
       } finally {
         clearTimeout(streamTimer);
@@ -1961,7 +2073,7 @@ class RelayConversation {
       // knows nothing has been said yet and states the outcome itself.
       const assistantMessage = {
         role: 'assistant',
-        content: hasPendingWrite && text
+        content: hasPendingWrite
           ? msg.content.filter((b) => b.type !== 'text')
           : msg.content,
       };
@@ -1970,19 +2082,17 @@ class RelayConversation {
       // check-then-act — a reconnect can take the claim during the model
       // round, and this socket would then speak from cached account context.
       // One more read right before emission closes that window.
-      if (text && this.sessionKey && await this._sessionSuperseded().catch(() => false)) {
+      if (text && await this._sessionSuperseded().catch(() => false)) {
         logger.warn(`[voice-relay] speech withheld — session superseded mid-turn callSid=${this.callSid}`);
         this._ending = true;
         try { if (this._endSession) this._endSession({ reason: 'superseded', captured: this.leadCaptured }); } catch { /* closing */ }
         return;
       }
-      if (text && !hasPendingWrite) {
-        // The utterance's own history message — what a barge-in rewrites (PR 1B).
-        const entry = this.say(text);
+      const spokenText = hasPendingWrite ? '' : text;
+      if (spokenText) {
+        const entry = this.say(spokenText);
         if (entry) entry.historyMessage = assistantMessage;
-      } else if (text && hasPendingWrite) {
-        logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
-      }
+      } else if (text) logger.info(`[voice-relay] suppressed pre-write text on a write-tool turn callSid=${this.callSid}`);
 
       if (msg.stop_reason === 'tool_use') {
         const results = [];
@@ -1996,6 +2106,8 @@ class RelayConversation {
           // Detached tools retain their own outcome flag; live context getters stay live.
           const invocationCtx = Object.defineProperties({}, Object.getOwnPropertyDescriptors(toolCtx));
           invocationCtx.toolFailed = false;
+          const outcome = { name: block.name, ok: false };
+          invocationCtx.toolOutcome = outcome;
           const out = await this._executeToolBounded(block.name, block.input, invocationCtx);
           stat.toolMs += now() - toolStartAt;
           stat.toolCount += 1;
@@ -2005,25 +2117,17 @@ class RelayConversation {
           const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
           const toolOk = !sentinel && invocationCtx.toolFailed !== true;
           if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
-          this._toolOutcomes.push({ name: block.name, ok: toolOk });
-          this._toolFailures = toolOk ? 0 : this._toolFailures + 1;
+          this._toolOutcomes.push(outcome);
+          if (!sentinel) outcome.ok = toolOk; // a timeout must not overwrite a later confirmed result
+          this._toolFailures = toolOk ? 0 : this._toolFailures + 1; // PR 2B: consecutive failed tools
           this._clearedFailures.tool ||= toolOk;
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
-          // The threshold is judged after EACH failed tool (codex r3 P2): a
-          // later block in the same response must not run — and reset the
-          // streak — past the documented limit. The skipped blocks still get
-          // a tool_result so the history stays well-formed. Gate off ⇒ the
-
-          // A transfer (or any end) inside this round ends the SESSION: no
-          // further tool in the same response may run — a booking or capture
-          // after the handoff would be a write absent from the packet — and
-          // no further model round starts (codex r2 P2). The skipped blocks
-          // still get a tool_result so the history stays well-formed.
-          if (this._ending || this.ended) {
-            logger.info(`[voice-relay] session ending mid-round callSid=${this.callSid} — remaining tools skipped, no further model round`);
+          const failureHandoff = require('./relay-recovery').providerFailurePolicy({ modelFailures: this._modelFailures, toolFailures: this._toolFailures }) === 'handoff';
+          if (failureHandoff || this._ending || this.ended) {
             const skipped = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
-            results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the call is ending.' })));
+            results.push(...skipped.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current tool round has stopped.' })));
             this.messages.push({ role: 'user', content: results });
+            if (failureHandoff) await this._maybeHandoffForFailure(toolCtx);
             return;
           }
         }
