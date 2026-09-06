@@ -25,16 +25,18 @@ const logger = require('../logger');
 const effectiveActionSql = require('./opportunity-action-sql');
 
 // Keep read-only catch-up probes and atomic claims on the same eligibility.
-const claimableStatusSql = `(status = 'pending' OR (
+// A failed status write may leave a published run's row pending. Fence every
+// blog claim, not just legacy approval holds. Only a verified closed PR with
+// its branch removed can cease blocking; published URLs never do.
+const claimableStatusSql = `((status = 'pending' OR (
            ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
            AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
              OR skip_reason ~ '^trust_build_[0-9]+_of_[0-9]+$')
-           -- Existing approval holds re-enter the SAME guarded draft pipeline.
-           -- Never redraft work with any external publish already in flight.
-           AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
-             WHERE r.opportunity_id = opportunity_queue.id
-               AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
-         ))`;
+         )) AND (${effectiveActionSql} <> 'new_supporting_blog' OR NOT EXISTS (
+           SELECT 1 FROM autonomous_runs r WHERE r.opportunity_id = opportunity_queue.id
+             AND (r.published_url IS NOT NULL
+               OR (r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL))
+         )))`;
 
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 
@@ -170,6 +172,7 @@ class OpportunityQueue {
       `UPDATE opportunity_queue
          SET status = 'claimed',
              claimed_at = ?,
+             claim_id = gen_random_uuid(),
              attempt_count = CASE WHEN status = 'pending_review' THEN 1 ELSE attempt_count + 1 END,
              updated_at = now()
        WHERE id = (
@@ -413,14 +416,18 @@ class OpportunityQueue {
           completed_at = CASE WHEN r.outcome = 'completed_published' THEN now() ELSE NULL END,
           updated_at = now()
       FROM autonomous_runs r
-      WHERE q.status = 'pending_review'
+      WHERE (q.status IN ('claimed', 'pending', 'expired') AND q.claim_id = r.queue_claim_id
+          OR q.status = 'pending_review' AND q.skip_reason IN ('astro_pr_pending_merge', 'astro_pr_queue_transition_failed', 'published_queue_complete_failed') AND (
+            q.claim_id = r.queue_claim_id OR q.claim_id IS NULL AND r.queue_claim_id IS NULL))
         AND r.id = (SELECT latest.id FROM autonomous_runs latest
           WHERE latest.opportunity_id = q.id ORDER BY latest.claimed_at DESC, latest.id DESC LIMIT 1)
         AND r.action_type = 'new_supporting_blog'
-        AND ((q.skip_reason = 'astro_pr_queue_transition_failed'
+        AND (q.status IS DISTINCT FROM CASE WHEN r.outcome = 'completed_published' THEN 'done' ELSE 'pending_review' END
+          OR q.skip_reason IS DISTINCT FROM CASE WHEN r.outcome = 'completed_published' THEN NULL ELSE 'astro_pr_pending_merge' END)
+        AND (((q.claim_id = r.queue_claim_id OR q.skip_reason = 'astro_pr_queue_transition_failed')
           AND r.outcome = 'completed_pending_review' AND r.skip_reason = 'astro_pr_pending_merge'
-          AND r.astro_pr_url IS NOT NULL)
-        OR (q.skip_reason = 'published_queue_complete_failed'
+          AND r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL)
+        OR ((q.claim_id = r.queue_claim_id OR q.skip_reason = 'published_queue_complete_failed')
           AND r.outcome = 'completed_published' AND r.published_url IS NOT NULL))`);
   }
 

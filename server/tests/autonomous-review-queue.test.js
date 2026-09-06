@@ -325,7 +325,7 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
 
   // Pre-transaction reads saw OLD-RUN parked; by the time the transaction
   // runs, a requeue + replacement park committed and NEW-RUN is current.
-  function mockReplacedRun({ decision }) {
+  function mockReplacedRun({ decision, replaced = true }) {
     const oldRun = { id: 'old-run', outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_5', reviewer_notes: null };
     const newRun = { id: 'new-run', outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_5', reviewer_notes: null };
     const oppUpdates = [];
@@ -343,7 +343,7 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
       table === 'opportunity_queue' ? { id: 'opp-1', status: 'pending_review' } : oldRun,
     ));
     db.transaction = jest.fn(async (cb) => cb(
-      (table) => chainFor(table === 'opportunity_queue' ? { id: 'opp-1', status: 'pending_review' } : newRun),
+      (table) => chainFor(table === 'opportunity_queue' ? { id: 'opp-1', status: 'pending_review' } : (replaced ? newRun : oldRun)),
     ));
     return { oppUpdates, run: () => decideReviewItem('opp-1', { decision, reviewer: 'owner' }) };
   }
@@ -352,6 +352,12 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     const { oppUpdates, run } = mockReplacedRun({ decision: 'approve_trust_build' });
     await expect(run()).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer run replaced/) });
     expect(oppUpdates.find((u) => u.status === 'done')).toBeFalsy(); // opportunity untouched
+  });
+
+  test('an explicit requeue invalidates the previous durable claim', async () => {
+    const { oppUpdates, run } = mockReplacedRun({ decision: 'requeue', replaced: false });
+    await run();
+    expect(oppUpdates).toContainEqual(expect.objectContaining({ status: 'pending', claim_id: null, claimed_at: null }));
   });
 
   test('requeue rejects a replacement under the row lock', async () => {

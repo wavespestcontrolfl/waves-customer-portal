@@ -92,6 +92,11 @@ jobs:
         env:
           PROTOCOL_PUBLISH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/protocol-publish-postgres.test.js
+      - name: Blog queue ownership transaction tests
+        working-directory: server
+        env:
+          BLOG_QUEUE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/blog-queue-ownership-postgres.test.js
       - name: Intelligence Bar operational transaction tests
         working-directory: server
         env:
