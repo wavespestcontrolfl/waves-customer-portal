@@ -1667,6 +1667,20 @@ describe('admin communications SMS route', () => {
     });
   });
 
+  test.each([
+    ['+449415550103', ['449415550103']],
+    ['+19415550103', ['19415550103', '9415550103']],
+    ['(941) 555-0103', ['19415550103', '9415550103']],
+  ])('matches the full contact identity for %s', async (phone, expectedDigits) => {
+    const builder = makeQueryBuilder([]);
+    db.mockReturnValue(builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?phone=${encodeURIComponent(phone)}`, { headers: { Authorization: 'Bearer admin' } });
+      expect(res.status).toBe(200);
+      expect(builder.whereRaw).toHaveBeenCalledWith(expect.not.stringContaining('RIGHT('), expectedDigits);
+    });
+  });
+
   test('bounds searched SMS log results when no limit is supplied', async () => {
     const builder = makeQueryBuilder([smsMessageRow()]);
     db.mockReturnValue(builder);

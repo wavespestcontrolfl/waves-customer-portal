@@ -1246,6 +1246,9 @@ router.post('/:id/send-sms', async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number' });
+    if (req.body.to && leadAttribution.normalizePhone(req.body.to) !== leadAttribution.normalizePhone(lead.phone)) {
+      return res.status(409).json({ error: 'The lead phone changed. Reopen messages before sending.' });
+    }
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     const sendResult = await sendCustomerMessage({
@@ -1266,7 +1269,8 @@ router.post('/:id/send-sms', async (req, res, next) => {
         adminUserId: req.technicianId,
       },
     });
-    if (sendResult.blocked || sendResult.sent === false) {
+    const { isRealProviderSend } = require('../services/sms-auto-send');
+    if (sendResult.blocked || !isRealProviderSend(sendResult)) {
       return res.status(422).json(sendResult);
     }
 
@@ -1275,7 +1279,7 @@ router.post('/:id/send-sms', async (req, res, next) => {
       lead_id: req.params.id,
       activity_type: 'sms_sent',
       description: `SMS sent: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      performed_by: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
       metadata: JSON.stringify({ message }),
     });
 
@@ -1286,13 +1290,13 @@ router.post('/:id/send-sms', async (req, res, next) => {
 
     // Update status to 'contacted' if currently 'new'
     if (lead.status === 'new') {
-      await db('leads').where('id', req.params.id).update({ status: 'contacted', updated_at: new Date() });
+      const changed = await db('leads').where('id', req.params.id).where('status', 'new').update({ status: 'contacted', updated_at: new Date() });
       // Funnel-row mirror (monotonic, best-effort).
-      await bridgeLeadFunnelStage(req.params.id, 'contacted');
+      if (changed) await bridgeLeadFunnelStage(req.params.id, 'contacted');
     }
 
     const updated = await db('leads').where('id', req.params.id).first();
-    res.json({ lead: updated, sent: true });
+    res.json({ lead: updated, sent: true, providerMessageId: sendResult.providerMessageId });
   } catch (err) { next(err); }
 });
 

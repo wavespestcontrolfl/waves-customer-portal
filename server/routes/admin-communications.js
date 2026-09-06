@@ -1373,9 +1373,19 @@ router.get('/log', async (req, res, next) => {
     // Exact contact match for a lead that has no customer record yet. Never
     // use broad body/name search to choose the conversation or mark it read.
     if (req.query.phone !== undefined) {
-      const contactPhone = normalizePhoneLast10(req.query.phone);
-      if (!contactPhone) return res.status(400).json({ error: 'A valid contact phone is required' });
-      query = query.whereRaw("RIGHT(regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [contactPhone]);
+      const rawPhone = typeof req.query.phone === 'string' ? req.query.phone.trim() : '';
+      const digits = phoneDigits(rawPhone);
+      const normalized = normalizePhone(rawPhone);
+      if (!/^\+[1-9]\d{7,14}$/.test(normalized || '') || (!rawPhone.startsWith('+') && !/^(?:1)?\d{10}$/.test(digits))) {
+        return res.status(400).json({ error: 'A valid contact phone is required' });
+      }
+      const contactPhone = normalized.slice(1);
+      // NANP records may omit the leading 1. Never match the last ten
+      // digits of a longer international number, in either direction.
+      const contactDigitsSql = "regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g')";
+      query = /^1\d{10}$/.test(contactPhone)
+        ? query.whereRaw(`${contactDigitsSql} IN (?, ?)`, [contactPhone, contactPhone.slice(1)])
+        : query.whereRaw(`${contactDigitsSql} = ?`, [contactPhone]);
     }
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);

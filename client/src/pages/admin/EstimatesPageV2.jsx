@@ -75,6 +75,22 @@ import {
 
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
 
+// Estimate contacts are historical snapshots after acceptance. Resolve the
+// account's current phone before opening an account-scoped conversation.
+async function openEstimateMessages(estimate, openMessages) {
+  try {
+    if (!estimate.customerId) {
+      openMessages?.({ firstName: estimate.customerName, phone: estimate.customerPhone });
+      return;
+    }
+    const { customer } = await adminFetch(`/admin/customers/${estimate.customerId}/estimates-summary`);
+    if (!customer?.phone) throw new Error("This customer has no current phone number.");
+    openMessages?.({ id: customer.id, firstName: customer.first_name, lastName: customer.last_name, phone: customer.phone });
+  } catch (err) {
+    window.alert(err?.message || "Could not load the customer's current contact.");
+  }
+}
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
 
@@ -2334,7 +2350,7 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                         )}
                         {e.customerPhone && (
                           <button type="button"
-                            onClick={(evt) => { evt.stopPropagation(); openMessages?.({ id: e.customerId, firstName: e.customerName, phone: e.customerPhone }); }}
+                            onClick={(evt) => { evt.stopPropagation(); void openEstimateMessages(e, openMessages); }}
                             aria-label={`Message ${e.customerName || "customer"}`}
                             title={`Message ${e.customerPhone}`}
                             className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
@@ -3350,7 +3366,7 @@ export function MobileEstimateRow({
       )}
       {estimate.customerPhone && (
         <button type="button"
-          onClick={(e) => { e.stopPropagation(); openMessages?.({ id: estimate.customerId, firstName: estimate.customerName, phone: estimate.customerPhone }); }}
+          onClick={(e) => { e.stopPropagation(); void openEstimateMessages(estimate, openMessages); }}
           aria-label="SMS"
           className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
         >

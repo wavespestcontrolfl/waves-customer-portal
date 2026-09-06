@@ -29,6 +29,7 @@ describe('Pipeline queue navigation', () => {
     mount();
     fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Message', exact: true }));
+    expect(openMessages.mock.calls[0][1].leadId).toBe("lead-qa");
     const before = calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length;
     await act(async () => openMessages.mock.calls[0][1].onSent());
     await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));

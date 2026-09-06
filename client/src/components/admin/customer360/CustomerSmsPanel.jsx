@@ -3,8 +3,8 @@
 // rides above the keyboard. Reuses the existing per-customer thread
 // (GET /admin/customers/:id/comms), the canonical read writer
 // (POST /admin/communications/messages/read) and the same send route the
-// Communications composer uses (POST /admin/communications/sms) — no second
-// inbox.
+// Communications composer uses (POST /admin/communications/sms). Lead
+// outreach keeps POST /admin/leads/:id/send-sms for its lifecycle writes.
 //
 // Read rule: only inbound texts the server returned as unread are marked
 // read, only after the thread loaded successfully, and only once the server
@@ -108,11 +108,13 @@ function MessageBubble({ m }) {
   );
 }
 
-export default function CustomerSmsPanel({ customer, open, onClose, onSent, initialDraft = "" }) {
+export default function CustomerSmsPanel({ customer, open, onClose, onSent, leadId, initialDraft = "" }) {
   const isMobile = useIsMobile();
   const customerId = customer?.id ? String(customer.id) : null;
   const phone = customer?.phone || "";
-  const identity = customerId || (phone ? `phone:${phone.replace(/\D/g, "").slice(-10)}` : null);
+  const phoneDigits = phone.replace(/\D/g, "");
+  const phoneIdentity = phoneDigits.length === 10 && !phone.trim().startsWith("+") ? `1${phoneDigits}` : phoneDigits;
+  const identity = customerId || (phone ? `phone:${phoneIdentity}` : null);
   const name = `${customer?.firstName || ""} ${customer?.lastName || ""}`.trim() || "Customer";
 
   const [messages, setMessages] = useState([]);
@@ -252,9 +254,9 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, init
     setSendError("");
     setSentNote("");
     try {
-      const result = await adminFetch("/admin/communications/sms", {
+      const result = await adminFetch(leadId ? `/admin/leads/${leadId}/send-sms` : "/admin/communications/sms", {
         method: "POST",
-        body: JSON.stringify({ to, body, ...(customerId ? { customerId } : {}), messageType: "manual" }),
+        body: JSON.stringify(leadId ? { message: body, to } : { to, body, ...(customerId ? { customerId } : {}), messageType: "manual" }),
       });
       if (!result?.sent || !/^SM[0-9a-z_]+$/i.test(result.providerMessageId || "")) {
         throw new Error(result?.reason || result?.error || "Text was not handed to the provider. Your draft is retained.");

@@ -165,4 +165,30 @@ describe("CustomerSmsPanel", () => {
     expect(onSent).not.toHaveBeenCalled();
   });
 
+  it("keeps international drafts separate from a NANP contact with the same suffix", async () => {
+    adminFetch.mockResolvedValue({ messages: [] });
+    const international = { firstName: "International", phone: "+449415550103" };
+    const domestic = { firstName: "Domestic", phone: "+19415550103" };
+    const { rerender } = render(<CustomerSmsPanel customer={international} open onClose={vi.fn()} />);
+    fireEvent.change(await screen.findByLabelText("Message to International"), { target: { value: "International draft" } });
+    rerender(<CustomerSmsPanel customer={domestic} open onClose={vi.fn()} />);
+    expect(await screen.findByLabelText("Message to Domestic")).toHaveValue("");
+    rerender(<CustomerSmsPanel customer={international} open onClose={vi.fn()} />);
+    expect(await screen.findByLabelText("Message to International")).toHaveValue("International draft");
+  });
+
+  it("uses the lead outreach route and retains its provider outcome boundary", async () => {
+    adminFetch.mockImplementation(async (path) => path.endsWith("/send-sms")
+      ? { sent: true, providerMessageId: "SM_qa_lead" } : { messages: [] });
+    const onSent = vi.fn();
+    render(<CustomerSmsPanel customer={{ firstName: "QA lead", phone: "+19415550103" }} leadId="lead-qa" open onClose={vi.fn()} onSent={onSent} />);
+    fireEvent.change(await screen.findByLabelText("Message to QA lead"), { target: { value: "Hello lead" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send text" }));
+    await waitFor(() => expect(onSent).toHaveBeenCalledTimes(1));
+    const sent = adminFetch.mock.calls.find(([path]) => path.endsWith("/send-sms"));
+    expect(sent[0]).toBe("/admin/leads/lead-qa/send-sms");
+    expect(JSON.parse(sent[1].body)).toEqual({ message: "Hello lead", to: "+19415550103" });
+    expect(adminFetch.mock.calls.some(([path]) => path === "/admin/communications/sms")).toBe(false);
+  });
+
 });
