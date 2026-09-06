@@ -897,7 +897,7 @@ describe('content bank refill (2026-09-06)', () => {
       for (const t of topics) {
         expect(angles.has(t.angle)).toBe(true);
         expect(ctas.has(t.cta)).toBe(true);
-        expect(t.service).toMatch(/^(general pest|lawn care|termite|mosquito|rodent|tree and shrub)$/);
+        expect(t.service).toMatch(/^(general pest|lawn care|termite|mosquito|rodent|tree & shrub)$/);
       }
     }
   });
@@ -940,21 +940,61 @@ describe('content bank refill (2026-09-06)', () => {
   });
 });
 
-describe('campaign lane rotation is parity-free (Codex r1 on #3990)', () => {
+describe('campaign lane rotation walks the slot sequence (Codex r1 + r2 on #3990)', () => {
   const etNoonLocal = (iso) => new Date(`${iso}T16:00:00Z`);
+  const days = (ym, count) => [...Array(count)].map((_, i) => `${ym}-${String(i + 1).padStart(2, '0')}`);
+  let prev;
+  beforeEach(() => { prev = process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS; });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+    else process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = prev;
+  });
 
-  test('odd ET days (the campaign lane\'s days) reach all six topics and all four cities with no topic+city repeat', () => {
-    const odd = [...Array(31)].map((_, i) => i + 1).filter((d) => d % 2 === 1);
-    const plans = odd.map((d) => Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`)));
+  test('versus lane on: the 16 odd-day slots of a month reach every topic and city with no topic+city repeat', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const slots = days('2026-07', 31).filter((iso) => Number(iso.slice(8)) % 2 === 1);
+    const plans = slots.map((iso) => Studio.selectAutonomousCampaign(etNoonLocal(iso)));
     expect(new Set(plans.map((p) => p.topic)).size).toBe(6);
     expect(new Set(plans.map((p) => p.city)).size).toBe(4);
     const combos = plans.map((p) => `${p.topic}|${p.city}`);
     expect(new Set(combos).size).toBe(combos.length);
   });
 
-  test('no two consecutive days share a topic (an even-day lane yielding to campaign never repeats yesterday)', () => {
-    const all = [...Array(31)].map((_, i) => i + 1);
-    const topics = all.map((d) => Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`)).topic);
-    for (let i = 1; i < topics.length; i++) expect(topics[i]).not.toBe(topics[i - 1]);
+  test('versus lane off (default): the 24 slots of a 31-day month are exactly the full topic×city bank', () => {
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+    const slots = days('2026-07', 31).filter((iso) => Number(iso.slice(8)) % 4 !== 0);
+    expect(slots).toHaveLength(24);
+    const combos = slots.map((iso) => { const p = Studio.selectAutonomousCampaign(etNoonLocal(iso)); return `${p.topic}|${p.city}`; });
+    expect(new Set(combos).size).toBe(24);
+  });
+
+  test('across months the walk never repeats a combination inside 24 slots (bank size 6 × 4)', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // Compare by bank position (topic index + city) since the topic LIST
+    // changes at the month boundary; the walk itself must be gap-24.
+    const seen = new Map();
+    let minGap = Infinity;
+    let i = 0;
+    for (const ym of ['2026-07', '2026-08', '2026-09', '2026-10']) {
+      const len = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5)), 0)).getUTCDate();
+      for (const iso of days(ym, len).filter((d) => Number(d.slice(8)) % 2 === 1)) {
+        const p = Studio.selectAutonomousCampaign(etNoonLocal(iso));
+        const bank = Studio.SEASONAL_AUTONOMOUS_TOPICS[Number(ym.slice(5))];
+        const key = `${bank.findIndex((t) => t.topic === p.topic)}|${p.city}`;
+        if (seen.has(key)) minGap = Math.min(minGap, i - seen.get(key));
+        seen.set(key, i);
+        i += 1;
+      }
+    }
+    expect(minGap).toBe(24);
+  });
+
+  test('a yielded even day (review had no candidate) never duplicates the slot before or after it', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    for (const d of [4, 8, 12, 16, 20, 24, 28]) {
+      const pick = (day) => { const p = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(day).padStart(2, '0')}`)); return `${p.topic}|${p.city}`; };
+      expect(pick(d)).not.toBe(pick(d - 1));
+      expect(pick(d)).not.toBe(pick(d + 1));
+    }
   });
 });

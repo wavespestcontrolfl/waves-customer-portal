@@ -219,7 +219,7 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'rodents nesting in attics on cool nights', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'dry-season irrigation and brown spots', service: 'lawn care', angle: 'myth/fact', cta: 'read guide' },
     { topic: 'ghost ants in the kitchen during dry weather', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
-    { topic: 'cold snaps and palm fronds browning', service: 'tree and shrub', angle: 'what we are seeing', cta: 'read guide' },
+    { topic: 'cold snaps and palm fronds browning', service: 'tree & shrub', angle: 'what we are seeing', cta: 'read guide' },
   ],
   2: [
     { topic: 'early termite swarm season', service: 'termite', angle: 'new Florida homeowner', cta: 'book inspection' },
@@ -227,7 +227,7 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'large patch fungus in cool, wet turf', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
     { topic: 'discarded termite wings on windowsills', service: 'termite', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'spring cleanup: ants and roaches in mulch against the house', service: 'general pest', angle: 'myth/fact', cta: 'book inspection' },
-    { topic: 'hibiscus and ixora pests waking up', service: 'tree and shrub', angle: 'signs to check', cta: 'request estimate' },
+    { topic: 'hibiscus and ixora pests waking up', service: 'tree & shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   3: [
     { topic: 'peak termite swarm month', service: 'termite', angle: 'do not ignore this', cta: 'book inspection' },
@@ -235,7 +235,7 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'spring weeds before the rains', service: 'lawn care', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'paper wasps building under eaves', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'mosquito activity climbing as March warms up', service: 'mosquito', angle: 'new Florida homeowner', cta: 'request estimate' },
-    { topic: 'whitefly on gumbo limbo and ficus', service: 'tree and shrub', angle: 'signs to check', cta: 'request estimate' },
+    { topic: 'whitefly on gumbo limbo and ficus', service: 'tree & shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   4: [
     { topic: 'mosquito season starting after rain', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
@@ -251,13 +251,13 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'chinch bugs along hot sunny edges', service: 'lawn care', angle: 'signs to check', cta: 'read guide' },
     { topic: 'drywood termite pellets in the garage', service: 'termite', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'millipedes crowding the lanai after rain', service: 'general pest', angle: 'myth/fact', cta: 'read guide' },
-    { topic: 'sooty mold on shrubs after aphids', service: 'tree and shrub', angle: 'what we are seeing', cta: 'request estimate' },
+    { topic: 'sooty mold on shrubs after aphids', service: 'tree & shrub', angle: 'what we are seeing', cta: 'request estimate' },
   ],
   6: [
     { topic: 'mosquito surge after afternoon storms', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'summer roaches moving indoors', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
     { topic: 'lawn fungus after rain', service: 'lawn care', angle: 'signs to check', cta: 'read guide' },
-    { topic: 'no-see-ums at the coast at dusk', service: 'mosquito', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'no-see-ums at the coast at dusk', service: 'general pest', angle: 'myth/fact', cta: 'request estimate' },
     { topic: 'earwigs and springtails after downpours', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'gutters, downspouts, and mosquito breeding', service: 'mosquito', angle: 'signs to check', cta: 'request estimate' },
   ],
@@ -275,7 +275,7 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'fall armyworms moving across lawns', service: 'lawn care', angle: 'do not ignore this', cta: 'read guide' },
     { topic: 'mud daubers on the lanai ceiling', service: 'general pest', angle: 'myth/fact', cta: 'read guide' },
     { topic: 'mole crickets tunneling in wet turf', service: 'lawn care', angle: 'signs to check', cta: 'request estimate' },
-    { topic: 'mealybugs on hibiscus in the heat', service: 'tree and shrub', angle: 'signs to check', cta: 'request estimate' },
+    { topic: 'mealybugs on hibiscus in the heat', service: 'tree & shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   9: [
     { topic: 'last stretch of peak mosquito season', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
@@ -291,7 +291,7 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'brown widows in patio furniture and grills', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'large patch season starts as nights cool', service: 'lawn care', angle: 'do not ignore this', cta: 'read guide' },
     { topic: 'snowbird return: opening up the house', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
-    { topic: 'palm trimming and pests hiding in the boots', service: 'tree and shrub', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'palm trimming and pests hiding in the boots', service: 'tree & shrub', angle: 'myth/fact', cta: 'read guide' },
   ],
   11: [
     { topic: 'holiday guest pest prevention', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
@@ -485,7 +485,7 @@ const PEST_VERSUS_PAIRS = [
   },
   {
     key: 'whitefly_vs_mealybug',
-    service: 'tree and shrub',
+    service: 'tree & shrub',
     left: { name: 'Spiraling Whitefly', points: ['Cloud of tiny white flyers when leaves shake', 'White spiral egg patterns under leaves', 'Sticky leaves and sooty mold below'] },
     right: { name: 'Mealybug', points: ['White cottony clumps in leaf joints', 'Barely moves', 'Sticky residue on stems'] },
     verdict: 'Flies off or stays cottony? Different shrub pest.',
@@ -1320,20 +1320,51 @@ async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, ef
   }
 }
 
+// Campaign slot days: the ET days the campaign lane owns outright — not a
+// review day (day % 4 === 0) and, while the versus lane is on, not a versus
+// day (day % 4 === 2). Flipping SOCIAL_AUTONOMOUS_INCLUDE_VERSUS changes the
+// slot set and so reshuffles the walk once (accepted; same posture as a bank
+// size change in the versus lane).
+function isCampaignSlotDay(day) {
+  return day % 4 !== 0 && (day % 4 !== 2 || !AUTONOMOUS_FLAGS.includeVersus);
+}
+
+// Slot days from the sequence epoch up to (not including) the given ET date.
+// A few thousand iterations at most — pure, no DB, deterministic per day.
+function campaignSlotsBefore(year, month, day) {
+  let count = 0;
+  for (let y = VERSUS_SEQ_EPOCH_YEAR; y <= year; y += 1) {
+    const lastMonth = y === year ? month : 12;
+    for (let m = 1; m <= lastMonth; m += 1) {
+      const lastDay = (y === year && m === month) ? day - 1 : new Date(Date.UTC(y, m, 0)).getUTCDate();
+      for (let d = 1; d <= lastDay; d += 1) if (isCampaignSlotDay(d)) count += 1;
+    }
+  }
+  return count;
+}
+
 function selectAutonomousCampaign(now = new Date()) {
   // Anchor seasonal topic + city rotation to Eastern business dates, not UTC
   // (Railway runs TZ=UTC, which would flip topics a few hours early each day).
-  const { month, day } = etParts(now);
-  // Campaign days are mostly the ODD ET days (reviews take day % 4 === 0,
-  // versus day % 4 === 2), so any index sharing that stride's parity —
-  // day % 6 for topics, day % 4 for cities — reaches only half of each bank
-  // (topics 1/3/5, cities 1/3): the same aliasing #3651 fixed in the versus
-  // lane. These parity-free indexes walk all six topics and all four cities
-  // across a month's odd days with no topic+city pair repeated, and no two
-  // consecutive days share a topic when an even-day lane yields to campaign.
+  const { year, month, day } = etParts(now);
   const seasonal = SEASONAL_AUTONOMOUS_TOPICS[month] || SEASONAL_AUTONOMOUS_TOPICS[6];
-  const topic = seasonal[(day + Math.floor(day / 4)) % seasonal.length];
-  const city = WAVES_LOCATIONS[(Math.floor(day / 2) + Math.floor(day / 8)) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  // Both rotations advance one step per campaign SLOT (the days this lane
+  // owns outright — see isCampaignSlotDay), never from the raw day: indexing
+  // by day aliased to the lanes' parity (day % 6 reached topics 1/3/5, day % 4
+  // cities 1/3), the same defect #3651 fixed in the versus lane. Walking the
+  // slot sequence with the city phase-shifted one step per topic cycle visits
+  // every topic×city combination (6 × 4 = 24 slots) before any repeat, over
+  // exactly the days that fire.
+  const slotsBefore = campaignSlotsBefore(year, month, day);
+  // A day another lane yielded (no review candidate, versus pair out of
+  // season) is not a slot. Pick half a cycle ahead so the extra fire lands
+  // farthest from its neighbours in the walk instead of duplicating the next
+  // slot's card a day or two later.
+  const halfCycle = Math.floor((seasonal.length * WAVES_LOCATIONS.length) / 2);
+  const slot = isCampaignSlotDay(day) ? slotsBefore : slotsBefore + halfCycle;
+  const topic = seasonal[slot % seasonal.length];
+  const topicCycle = Math.floor(slot / seasonal.length);
+  const city = WAVES_LOCATIONS[(slot + topicCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
   return {
     ...topic,
     city,
@@ -1802,7 +1833,10 @@ function hashtags({ topic, city, service }) {
 const SERVICE_INTENT_KEYWORDS = [
   { match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertilizer', 'fertilize', 'fertilizing', 'fertilization', 'chinch', 'st. augustine'] },
   { match: ['termite', 'swarm', 'swarming', 'wdo', 'wood destroying'] },
-  { match: ['mosquito', 'standing water', 'no-see-um', 'no-see-ums'] },
+  { match: ['mosquito', 'standing water'] },
+  // No-see-ums are a separate service contract (covered only when named —
+  // estimate-service-details.js), so their intent never pulls mosquito pages.
+  { match: ['no-see-um', 'no-see-ums', 'biting midge', 'biting midges'] },
   { match: ['rodent', 'rat', 'rats', 'mouse', 'mice'] },
   { match: ['roach', 'cockroach', 'palmetto bug'] },
   { match: ['ant', 'ants'] },
