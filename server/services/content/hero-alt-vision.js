@@ -160,8 +160,12 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     // #3964, after the pre-push P1 on e8b864170).
     const allowedSeqs = allowedText.map((c) => normalizeText(c).split(' ').filter(Boolean)).filter((seq) => seq.length);
     const covered = allowedSeqs.map(() => new Set());
-    const runAt = (tokens, seq) => {
-      for (let i = 0; i + tokens.length <= seq.length; i += 1) {
+    // Fragments must reconstruct a caption in reading order: each run is
+    // searched from where the previous run for that caption ended, so
+    // ["Ants", "How to Stop"] never covers "How to Stop Ants" (Codex r4 P2).
+    const cursor = allowedSeqs.map(() => 0);
+    const runAt = (tokens, seq, from) => {
+      for (let i = from; i + tokens.length <= seq.length; i += 1) {
         if (tokens.every((tok, j) => seq[i + j] === tok)) return i;
       }
       return -1;
@@ -171,16 +175,14 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       if (!tokens.length) return false;
       let matched = false;
       allowedSeqs.forEach((seq, c) => {
-        const at = runAt(tokens, seq);
+        const at = runAt(tokens, seq, cursor[c]);
         if (at < 0) return;
         matched = true;
         for (let j = 0; j < tokens.length; j += 1) covered[c].add(at + j);
+        cursor[c] = at + tokens.length;
       });
       return !matched;
     });
-    // Every allowed caption must be read back in full: a partial read is an
-    // incomplete caption and no read at all is a missing one — the provider
-    // dropped the lettering the prompt required (Codex r3 P2 on #3964).
     const incomplete = allowedSeqs.map((seq, c) => (covered[c].size && covered[c].size < seq.length ? allowedText[c] : null)).filter(Boolean);
     const missing = allowedSeqs.map((seq, c) => (covered[c].size === 0 ? allowedText[c] : null)).filter(Boolean);
     const reasons = [];

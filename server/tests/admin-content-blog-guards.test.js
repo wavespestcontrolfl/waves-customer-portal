@@ -24,7 +24,7 @@ jest.mock('../services/content-astro/spoke-sites', () => ({ invalidSpokeSites: (
 jest.mock('../services/content/autonomous-review-queue', () => ({}));
 jest.mock('../services/content/internal-link-review-queue', () => ({}));
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => true }));
-jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn() }));
+jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn(), generatePlannedImage: jest.fn() }));
 
 const db = require('../models/db');
 const BlogWriter = require('../services/content/blog-writer');
@@ -263,6 +263,17 @@ describe('regenerate-image publish guard (codex r10)', () => {
 
     tableState.post = { id: POST_ID, status: 'draft', publish_claimed_at: new Date() };
     expect((await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } })).statusCode).toBe(409);
+  });
+
+  test('an admin hero is planned + screened like an autonomous one — seeded by the row slug — and the row stores its data URL (Codex r4 P2 on #3964)', async () => {
+    const calls = setupDb();
+    const AstroPublisher = require('../services/content-astro/astro-publisher');
+    AstroPublisher.generatePlannedImage.mockResolvedValue({ dataUrl: 'data:image/png;base64,QUJD', model: 'gpt-image-2', plan: { style: 'cartoon', setting: 'in a backyard, dew on the grass' }, screen: { checked: true, ok: true, reasons: [] } });
+    tableState.post = { id: POST_ID, status: 'draft', title: 'Ghost Ants In Sarasota', slug: 'pest-control/ghost-ants-sarasota', keyword: 'ghost ants', meta_description: 'm' };
+    const r = await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(200);
+    expect(AstroPublisher.generatePlannedImage).toHaveBeenCalledWith(expect.objectContaining({ mode: 'blog-hero', index: 0, slug: 'pest-control/ghost-ants-sarasota', title: 'Ghost Ants In Sarasota', keyword: 'ghost ants' }));
+    expect(calls.updates.at(-1).updates.featured_image_url).toBe('data:image/png;base64,QUJD');
   });
 });
 

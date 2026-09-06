@@ -227,25 +227,32 @@ function normalizeGenerateBody(body = {}) {
   return { topic, contentType, targetCity };
 }
 
-// ── Gemini hero-image generator ─────────────────────────────────────
+// ── Hero-image generator ────────────────────────────────────────────
 //
 // Shared between POST /generate (initial draft creation) and POST
 // /blog/:id/regenerate-image (operator-triggered retry). Returns a
 // `data:` URL on success; throws a typed Error otherwise so the
 // caller can surface the reason to the UI instead of silent-failing.
 //
+// Goes through the publisher's generatePlannedImage so an admin hero gets
+// the same per-post variation plan (seeded by the row's slug, so it never
+// shares a style with the body slots planned at publish time) and the same
+// text/logo screen + one retry as an autonomous hero (Codex r4 P2 on
+// #3964). The row keeps only the data URL — publishAstro treats it as
+// curated — so a screen still flagged after the retry is logged here for
+// the operator, who sees the picture in the editor and can regenerate.
+//
 // Call sites are expected to wrap this in try/catch and store the
 // error string alongside the post for display.
-async function generateFeaturedImage({ title, topic, keyword }) {
-  // Delegates to the provider-chained image-generator (gpt-image-2 →
-  // gpt-image-1.5 → gpt-image-1 → gemini by default; override via
-  // BLOG_IMAGE_PROVIDER env). Gemini is still in the chain by default
-  // so this keeps working with only GEMINI_API_KEY set.
-  const imageGenerator = require('../services/content/image-generator');
+async function generateFeaturedImage({ title, topic, keyword, slug }) {
+  const AstroPublisher = require('../services/content-astro/astro-publisher');
   try {
-    const result = await imageGenerator.generate({ title, topic, keyword, mode: 'blog-hero' });
-    logger.info(`[content] Generated featured image for "${title}" via ${result.model}`);
-    return result.dataUrl;
+    const hero = await AstroPublisher.generatePlannedImage({ title, topic, keyword, mode: 'blog-hero', slug, index: 0 });
+    logger.info(`[content] Generated featured image for "${title}" via ${hero.model} (${hero.plan.style}, ${String(hero.plan.setting).split(',')[0]})`);
+    if (hero.screen?.checked && !hero.screen.ok) {
+      logger.warn(`[content] Featured image for "${title}" still failed the text/logo screen after a retry (${hero.screen.reasons.join('; ')}) — operator review`);
+    }
+    return hero.dataUrl;
   } catch (err) {
     // Match the legacy throw contract — single-line Error the
     // /blog/:id/regenerate-image handler stores against the post.
@@ -778,6 +785,7 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
       title: post.title,
       topic: post.meta_description,
       keyword: post.keyword,
+      slug: blogSlug(post),
     });
 
     // Same predicates ATOMICALLY on the write (the image call above is slow —
@@ -1280,18 +1288,21 @@ Then a blank line, then the full content.`,
     }
     if (!autoTag && contentType === 'pest_pressure') autoTag = 'Pest Control';
 
-    // Generate featured image via Gemini.
+    // The row's slug seeds the hero's variation plan, so it is derived
+    // before the image call (same formula the insert below uses).
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 80);
+
+    // Generate the featured image (planned + screened, see generateFeaturedImage).
     let featuredImageUrl = null;
     let featuredImageError = null;
     try {
-      featuredImageUrl = await generateFeaturedImage({ title, topic, keyword });
+      featuredImageUrl = await generateFeaturedImage({ title, topic, keyword, slug });
     } catch (imgErr) {
       featuredImageError = imgErr.message || String(imgErr);
       logger.warn(`[content] Featured image generation failed: ${featuredImageError}`);
     }
 
     // Create the blog post record
-    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 80);
     const wordCount = content ? content.split(/\s+/).filter(Boolean).length : 0;
 
     const insertData = {

@@ -88,6 +88,12 @@ describe('planFor — deterministic variation per post and slot', () => {
     // An equipment or indoor subject SELECTS its pool — no outdoor leftovers (Codex r3 P2 on #3964).
     expect(gen.settingsFor('Rain Bird sprinkler timer: run it by hand')).toEqual(gen.SETTINGS.equipment);
     expect(gen.settingsFor('Which Tiny Ant Is in Your Kitchen?')).toEqual(gen.SETTINGS.indoor);
+    // A pest noun alone is not an indoor cue, and a lawn/yard cue wins over one (Codex r4 P2 on #3964).
+    expect(gen.settingsFor('What Made That Mound? Fire Ants, Pavement Ants, and Mole Crickets Compared mounds in lawn identification')).toEqual(gen.SETTINGS.yard);
+    expect(gen.settingsFor('Bed bug bites: what they look like')).toEqual(gen.SETTINGS.indoor);
+    expect(gen.settingsFor('Ghost ants: where they come from')).toEqual(gen.SETTINGS.yard);
+    expect(gen.settingsFor('Ants in the kitchen after rain')).toEqual(gen.SETTINGS.indoor);
+    expect(gen.settingsFor('Ants along the patio and lanai')).toEqual(gen.SETTINGS.yard);
     for (let i = 0; i < 30; i += 1) {
       expect(gen.SETTINGS.indoor).toContain(gen.planFor({ slug: `ant-${i}`, mode: 'blog-hero', index: 0, subject: 'Which Tiny Ant Is in Your Kitchen?' }).setting);
       expect(gen.SETTINGS.equipment).toContain(gen.planFor({ slug: `timer-${i}`, mode: 'blog-body', index: 1, subject: 'Hunter sprinkler timer guide' }).setting);
@@ -188,6 +194,9 @@ describe('screenGeneratedImage', () => {
     // No caption read back at all is a missing caption (Codex r3 P2 on #3964).
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false, reasons: [expect.stringMatching(/missing caption: "How to Stop Ants"/)] });
+    // Fragments out of reading order do not reconstruct the caption (Codex r4 P2 on #3964).
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["Ants", "How to Stop"], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: false });
     // Split fragments that together cover the caption, in order, still pass.
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": ["How to", "Stop Ants"], "logos_or_brand_marks": []}' });
     expect(await screenGeneratedImage({ buffer, allowedText: ['How to Stop Ants'] })).toMatchObject({ ok: true });

@@ -198,11 +198,17 @@ const SETTINGS = Object.freeze({
   ],
 });
 const EQUIPMENT_SUBJECT = /\b(controller|timer|clock|irrigation|sprinkler|spreader|mower|trimmer|sprayer|blower|hose|nozzle|equipment|tools?)\b/i;
-const INDOOR_SUBJECT = /\b(kitchen|pantry|bathroom|bedroom|attic|garage|indoors?|inside|baseboard|roach|cockroach|ants?|spiders?|rodents?|mice|mouse|rats?|bed bugs?|fleas?|silverfish|termites?)\b/i;
+// Indoor = an actual indoor cue (a room, "indoors", a baseboard) or a pest
+// that only lives indoors. Ants, spiders, rodents, fleas and termites are NOT
+// indoor cues on their own — a fire-ant-mound post is a lawn post — and an
+// explicit lawn / yard / exterior cue wins over any pest noun (Codex r4 P2 on
+// #3964).
+const INDOOR_SUBJECT = /\b(kitchen|pantry|bathroom|bedroom|attic|closet|cabinets?|indoors?|inside|baseboards?|roach(es)?|cockroach(es)?|bed bugs?|silverfish|drain flies)\b/i;
+const OUTDOOR_SUBJECT = /\b(lawn|turf|grass|sod|yard|mounds?|garden|hedges?|shrubs?|trees?|palms?|mulch|patio|lanai|pool|driveway|exterior|outdoors?|outside|perimeter|foundation)\b/i;
 function settingsFor(subject) {
   const text = String(subject || '');
-  if (INDOOR_SUBJECT.test(text)) return [...SETTINGS.indoor];
   if (EQUIPMENT_SUBJECT.test(text)) return [...SETTINGS.equipment];
+  if (INDOOR_SUBJECT.test(text) && !OUTDOOR_SUBJECT.test(text)) return [...SETTINGS.indoor];
   return [...SETTINGS.yard];
 }
 const TIMES_OF_DAY = ['early morning', 'mid-morning', 'noon', 'late afternoon', 'golden hour', 'dusk'];

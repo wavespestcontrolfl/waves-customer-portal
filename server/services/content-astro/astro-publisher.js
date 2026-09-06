@@ -868,7 +868,7 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
     const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText });
-    last = { ...img, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
+    last = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
     if (screen.ok) return last;
     if (attempt === 0) {
       // Retry in a style no sibling slot uses (a fresh style shakes a repeated
@@ -5037,6 +5037,7 @@ function stripManagedBodyImagesForPost(body, post) {
 
 module.exports = {
   publishAstro,
+  generatePlannedImage,
   reconcileTopicBlockedPostPrs,
   normalizeCategory,
   serviceAreasForCity,
