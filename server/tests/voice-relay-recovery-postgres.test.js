@@ -62,6 +62,10 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       t.jsonb('metadata'); t.timestamp('created_at').defaultTo(mockPg.fn.now());
     });
     await mockPg.schema.createTable('artifacts', (t) => { t.text('id').primary(); });
+    await mockPg.schema.createTable('triage_items', (t) => {
+      t.text('id').primary(); t.text('call_log_id'); t.text('reason_code'); t.text('status'); t.jsonb('payload');
+      t.timestamp('created_at').defaultTo(mockPg.fn.now()); t.timestamp('updated_at');
+    });
     await mockPg.schema.createTable('customers', (t) => { t.text('id').primary(); t.timestamp('deleted_at'); t.boolean('active'); t.text('waveguard_tier'); t.decimal('monthly_rate'); });
     await mockPg.schema.createTable('service_requests', (t) => {
       t.increments('id');
@@ -88,6 +92,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     await mockPg('notifications').delete();
     await mockPg('service_requests').delete();
     await mockPg('artifacts').delete();
+    await mockPg('triage_items').delete();
     await mockPg('call_log').delete();
     await mockPg('call_log').insert({ id: 'call-1', twilio_call_sid: callSid, metadata: {
       relay_session_claimed_at: new Date().toISOString(), relay_session_claim_owner: 'old', relay_session_claim_gen: 1,
@@ -312,6 +317,27 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     expect(await mockPg('notifications')).toHaveLength(0);
     expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeNull();
     expect((await fileCallback()).id).toBeTruthy();
+  });
+
+  test.each([null, 'own-lead'])('late resume backfills a committed booking while retaining this leg lead %s', async (ownLeadId) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const { buildSegment } = require('../services/voice-agent/relay-segments');
+    await mockPg('triage_items').insert({ id: 'booking-card', call_log_id: 'call-1', reason_code: 'outbound_booking_review',
+      status: 'open', payload: { origin: 'voice_agent', lead_id: null, fixture_marker: 'retained' } });
+    const convo = new RelayConversation({ callSid, sessionKey: 'new', sessionGeneration: 2, sandbox: true });
+    convo._bookingRequested = true;
+    convo._leadId = ownLeadId;
+    // The earlier lead is absent from the scalar stamp, then arrives in a late segment.
+    await mockPg('call_log').update({ metadata: { relay_session_claim_owner: 'new', relay_reconnects: 1,
+      relay_segments: [buildSegment({ generation: 1, sessionKey: 'old', text: 'Caller: first leg',
+        leadCaptured: true, leadId: 'restored-lead' })] } });
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    convo._callerVerified = true;
+    await convo._reloadResumeState();
+    expect(convo._resume.relayLeadId).toBe('restored-lead');
+    expect((await mockPg('triage_items').first()).payload).toEqual({
+      origin: 'voice_agent', lead_id: ownLeadId || 'restored-lead', fixture_marker: 'retained',
+    });
   });
 
   test.each([null, 'A model-written summary'])('late segments repair duration independently of the summary (%s)', async (summary) => {

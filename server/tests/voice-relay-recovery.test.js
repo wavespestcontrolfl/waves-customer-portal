@@ -517,7 +517,7 @@ describe('the conversation side', () => {
     const own = resumedConvo({ callSid: 'CA-lead-own' });
     own._leadId = 'L-mine';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1' } } });
-    own._applyResumeState({ reconnects: 1, relayLeadId: 'L1', promises: [], callerTurns: [] });
+    await own._applyResumeState({ reconnects: 1, relayLeadId: 'L1', promises: [], callerTurns: [] });
     expect(own._leadId).toBe('L-mine'); // a lead this leg captured itself is kept
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
     const none = resumedConvo({ callSid: 'CA-nolead' });
@@ -573,7 +573,7 @@ describe('the conversation side', () => {
     const ctx = convo._buildToolCtx();
     expect(ctx.getEstimateFields()).toEqual({ first_name: 'Anne', address_line1: '1 Main St' });
     ctx.markCaptured({ leadCreated: true, holdOpen: false });
-    convo._applyResumeState({ ...convo._resume }); // a reload after this leg captured must not re-arm the hold
+    await convo._applyResumeState({ ...convo._resume }); // a reload after this leg captured must not re-arm the hold
     expect(convo._holdOpenForRetry).toBe(false);
     convo._maybeEndAfterTurn();
     expect(endSession).toHaveBeenCalledTimes(1);
@@ -855,11 +855,11 @@ describe('the conversation side', () => {
     const context = { date: slot.date, startMinutes: 840, lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'any', expandOpenDays: true };
     const fresh = ctx.rememberSlot({ ...slot, start_time: '15:00' }, context);
     const state = { slotRefs: [['S1-1', context]] };
-    convo._applyResumeState(state);
+    await convo._applyResumeState(state);
     expect(ctx.resolveSlotRef(fresh).startMinutes).toBe(900);
     expect(ctx.resolveSlotRef('S1-1')).toEqual(context);
     expect(ctx.rememberSlot(slot, { ...context, timeOfDay: 'afternoon' })).toBe('S1-1');
-    convo._applyResumeState(state);
+    await convo._applyResumeState(state);
     expect(ctx.resolveSlotRef('S1-1').timeOfDay).toBe('afternoon');
     expect(ctx.rememberSlot({ ...slot, start_time: '15:00' }, context)).toBe(fresh);
   });
@@ -885,9 +885,9 @@ describe('the conversation side', () => {
     expect(ctx.consumeLookup()).toBe(false); // no prior segment yet
     // A previously consumed local lookup must survive later hydration.
     convo._lookupsUsed = 1;
-    convo._applyResumeState({ callerTurns: [], segmentsText: 'Caller: earlier', lookupsUsed: 2 });
+    await convo._applyResumeState({ callerTurns: [], segmentsText: 'Caller: earlier', lookupsUsed: 2 });
     expect(ctx.consumeLookup()).toBe(false);
-    convo._applyResumeState({ callerTurns: [], segmentsText: 'Caller: earlier', lookupsUsed: 2 });
+    await convo._applyResumeState({ callerTurns: [], segmentsText: 'Caller: earlier', lookupsUsed: 2 });
     expect(convo._lookupsUsed + convo._priorLookupsUsed).toBe(3); // reload is idempotent
   });
 
@@ -898,7 +898,7 @@ describe('the conversation side', () => {
     await convo._resumeReady;
     const ctx = convo._buildToolCtx();
     const fresh = ctx.rememberLookup({ id: 'customer-2' });
-    convo._applyResumeState({ callerTurns: [], lookupRefs: [['C1-1', 'customer-1']] });
+    await convo._applyResumeState({ callerTurns: [], lookupRefs: [['C1-1', 'customer-1']] });
     expect(ctx.resolveLookupRef(fresh)).toBe('customer-2');
     expect(ctx.resolveLookupRef('C1-1')).toBe('customer-1');
   });
@@ -920,8 +920,8 @@ describe('the conversation side', () => {
     convo._modelFailures = 1;
     convo._toolFailures = 1;
     const late = { ...convo._resume, modelFailures: 1, toolFailures: 1 };
-    convo._applyResumeState(late);
-    convo._applyResumeState(late);
+    await convo._applyResumeState(late);
+    await convo._applyResumeState(late);
     expect(convo._modelFailures).toBe(2);
     expect(convo._toolFailures).toBe(2);
     expect(require('../services/voice-agent/relay-recovery').providerFailurePolicy({ modelFailures: convo._modelFailures })).toBe('handoff');
@@ -929,7 +929,7 @@ describe('the conversation side', () => {
     const fresh = resumedConvo({ callSid: 'CA-independent-streak' });
     await fresh._resumeReady;
     fresh._clearedFailures.model = true;
-    fresh._applyResumeState(late);
+    await fresh._applyResumeState(late);
     expect(fresh._modelFailures).toBe(0);
     expect(fresh._toolFailures).toBe(1);
   });
@@ -940,11 +940,11 @@ describe('the conversation side', () => {
     const convo = resumedConvo({ callSid: 'CA-streak' });
     await convo._resumeReady;
     const late = { ...convo._resume, modelFailures: 1, toolFailures: 1, callerTurns: Array.from({ length: 39 }, (_, i) => `turn ${i}`) };
-    convo._applyResumeState(late); // before any round on this leg ⇒ the streak carries over
+    await convo._applyResumeState(late); // before any round on this leg ⇒ the streak carries over
     expect(convo._modelFailures).toBe(1);
     convo._clearedFailures = { model: true, tool: true }; // successful rounds cleared both providers
     convo._modelFailures = 0; convo._toolFailures = 0;
-    convo._applyResumeState(late);
+    await convo._applyResumeState(late);
     expect(convo._modelFailures).toBe(0);
     expect(convo._toolFailures).toBe(0);
     // 39 earlier caller turns + this one ⇒ the cap (40) ends the call

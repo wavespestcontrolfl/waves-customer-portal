@@ -403,7 +403,7 @@ describe('BOTH GATES ON — request_booking behavior', () => {
       } }) }) });
       const state = await recovery.loadResumeState(fixtureDb, 'CA-relay-1', { sessionKey: 'resumed' });
       const resumed = new RelayConversation({ sessionGeneration: 2, send: jest.fn() });
-      resumed._applyResumeState(state);
+      await resumed._applyResumeState(state);
       process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
       await executeTool('request_booking', { ...GOOD_INPUT, slot_ref: ref }, slotCtx({
         resolveSlotRef: resumed._buildToolCtx().resolveSlotRef,
