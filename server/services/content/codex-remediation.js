@@ -2159,6 +2159,13 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       }
       // Open AND at our head on the re-read → proceed with the round.
     }
+    // A cached PR response can catch up to our commit while the branch has
+    // already advanced again. Confirm the ref immediately before syncing;
+    // lookup failures fall through to the fail-closed catch below.
+    const syncHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase();
+    if (!newHead || syncHead !== String(newHead).trim().toLowerCase()) {
+      return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(syncHead)}); sync withheld`, onPark, newHead || headSha, PARK_POST_PUSH);
+    }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that
     // never reached main (if the PR merged during the push and this fetch

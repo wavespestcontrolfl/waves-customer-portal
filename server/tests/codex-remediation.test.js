@@ -465,7 +465,7 @@ describe('runRemediationForPr', () => {
     let reads = 0;
     const gh = makeGh({ gh: {
       getPr: async () => ({ state: 'open', head: { sha: ++reads < 4 ? HEAD : 'newcommit999aaa', ref: CTX.branch } }),
-      getBranchSha: async () => HEAD,
+      getBranchSha: async () => reads < 4 ? HEAD : 'newcommit999aaa',
     } });
     const onRemediated = jest.fn();
     const result = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
@@ -473,6 +473,24 @@ describe('runRemediationForPr', () => {
     expect(onRemediated).toHaveBeenCalledTimes(1);
     expect(db._tables.codex_remediation_state[0]).toMatchObject({ synced_sha: 'newcommit999aaa', sync_pending_sha: null });
     expect(gh._calls.comments).toHaveLength(1);
+  });
+
+  test.each(['parallel777push', null, 'error'])('cached PR catches up to our commit but the ref is %s → sync stays held', async (refResult) => {
+    const db = makeDb();
+    let reads = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: ++reads < 3 ? HEAD : 'newcommit999aaa', ref: CTX.branch } }),
+      getBranchSha: async () => {
+        if (refResult === 'error') throw new Error('ref unavailable');
+        return refResult;
+      },
+    } });
+    const onRemediated = jest.fn();
+    const result = await runRemediationForPr({ ...CTX, onRemediated }, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(result.parked).toBe(true);
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ park_phase: 'post_push', sync_pending_sha: 'newcommit999aaa' });
+    expect(gh._calls.comments).toHaveLength(0);
   });
 
   test('a branch that keeps reporting the pre-push head exhausts the consistency wait and stays held', async () => {
