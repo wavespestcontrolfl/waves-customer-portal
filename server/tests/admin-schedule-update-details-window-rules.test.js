@@ -449,3 +449,25 @@ test('address saves fence destination partner technicians and reject changed sna
   expect(handler.slice(recheck, write)).toContain('JSON.stringify(lockedPartners) !== JSON.stringify(addressPartners)');
   expect(handler.slice(recheck, write)).toContain('throw httpError(409,');
 });
+
+test('address rows are fenced on every locked recurrence date (cadence rewrite + regroup adoption)', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const preFenceAt = handler.indexOf('const preFence = addressPlan ?');
+  const fence = handler.indexOf('await lockTechDays(trx, preFence)');
+  expect(preFenceAt).toBeGreaterThan(-1);
+  expect(fence).toBeGreaterThan(preFenceAt);
+  const block = handler.slice(preFenceAt, fence);
+  expect(block).toContain('[...lockedRecurrenceDates].map((date) => ({ techId, date }))');
+  expect(block).not.toContain('[row.scheduled_date, updates.scheduled_date]');
+});
+
+test('an address change combined with a collective series date move is refused before any write', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const plan = handler.indexOf('const seriesMovePlan = await planCollectiveEditDateMove(req);');
+  const refuse = handler.indexOf('if (seriesMovePlan && propertyId !== undefined)');
+  const firstTrx = handler.indexOf('await db.transaction(');
+  expect(plan).toBeGreaterThan(-1);
+  expect(refuse).toBeGreaterThan(plan);
+  expect(refuse).toBeLessThan(firstTrx);
+  expect(handler.slice(refuse, refuse + 700)).toContain('throw httpError(422,');
+});

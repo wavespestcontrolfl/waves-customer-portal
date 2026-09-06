@@ -7527,6 +7527,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
     const seriesMovePlan = await planCollectiveEditDateMove(req);
+    if (seriesMovePlan && propertyId !== undefined) {
+      // An address change regroups relocated occurrences on their OLD dates
+      // inside the edit transaction; the collective date move that follows
+      // refuses a grouped visit (VISIT_SERIES_MOVE_UNSUPPORTED), so the
+      // address would commit while the requested move 409s. Refuse the
+      // combination before any write.
+      throw httpError(422, 'Change the address and move the series date in separate saves.');
+    }
     if (seriesMovePlan) {
       // The series commit lands the date and the window (supplied, kept, or
       // explicitly cleared) after the per-row edit below; that edit saves
@@ -8572,9 +8580,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // maintenance locks, including same-slot assignment echoes from the modal.
       // Otherwise an ordinary save and an address save can deadlock.
       {
+        // Address rows are fenced on EVERY locked date, not just their own
+        // and the requested move: a cadence rewrite in the same save can land
+        // an assigned child on any planned destination day, where regrouping
+        // onto an unassigned partner takes that technician's day lock.
         const preFence = addressPlan ? addressPlan.rows.flatMap((row) =>
           [row.technician_id, requestedTechnicianId].flatMap((techId) =>
-            [row.scheduled_date, updates.scheduled_date].filter(Boolean).map((date) => ({ techId, date: dateOnly(date) })))) : [];
+            [...lockedRecurrenceDates].map((date) => ({ techId, date })))) : [];
         for (const partner of addressPartners) {
           preFence.push({ techId: partner.technician_id, date: dateOnly(partner.scheduled_date) });
         }
