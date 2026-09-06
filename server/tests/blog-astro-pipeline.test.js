@@ -3794,6 +3794,27 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     const without = AstroPublisher._internals.buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c' });
     expect(without).not.toContain('Backfilled schema-required fields');
   });
+
+  test('every PR body that commits generated images carries the "### Images" provenance, and a flagged screen is bold (Codex hook on the image lane)', () => {
+    const { buildPrBody, buildDraftPrBody, buildRefreshPrBody, buildMetadataPrBody } = AstroPublisher._internals;
+    const flagged = { model: 'gpt-image-2', plan: { style: 'cartoon', setting: 'inside a residential garage, tools on the wall', timeOfDay: 'dusk' }, screen: { checked: true, ok: false, reasons: ['logo or brand mark: Orkin'] } };
+    const clean = { model: 'gemini-image-pro', plan: { style: 'photo', setting: 'a pool cage', timeOfDay: 'noon' }, screen: { checked: true, ok: true, reasons: [] } };
+    const images = { hero: flagged, body: [clean] };
+    const admin = buildPrBody({ post: { category: 'lawn-care' }, slug: 'x', branch: 'b', content: 'a b', images });
+    const draft = buildDraftPrBody({ frontmatter: {}, slug: 'x', branch: 'b', content: 'a b', brief: {}, images });
+    const refresh = buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c', images: { hero: null, body: [flagged] } });
+    for (const body of [admin, draft, refresh]) {
+      expect(body).toContain('### Images');
+      expect(body).toContain('**screen flagged after retry: logo or brand mark: Orkin**');
+      expect(body).toContain('gpt-image-2 (cartoon, inside a residential garage, dusk)');
+    }
+    expect(admin).toContain('- body-1: gemini-image-pro (photo, a pool cage, noon) — screen clean');
+    // No images → no section; the metadata lane never commits images and takes no `images` at all.
+    expect(buildPrBody({ post: {}, slug: 'x', branch: 'b', content: 'a' })).not.toContain('### Images');
+    expect(buildRefreshPrBody({ ...base, oldBody: 'a', newBody: 'a b', images: { hero: null, body: [] } })).not.toContain('### Images');
+    expect(() => buildMetadataPrBody(base)).not.toThrow();
+    expect(buildMetadataPrBody(base)).not.toContain('### Images');
+  });
 });
 
 
