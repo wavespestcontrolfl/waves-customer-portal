@@ -5506,7 +5506,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // copyStampedServiceAddressFields, and the sole-property anchor below
       // sees property_id already set and leaves it alone.
       if (bookingProperty) {
-        for (const [field, value] of Object.entries(bookingProperty)) {
+        // Re-validated UNDER the booking transaction (codex #4015 r1 P2): the
+        // preflight snapshot was read before the occupancy / customer locks,
+        // so a concurrent edit or deactivation of the chosen property must
+        // refuse here (422, rolls back) rather than commit a stale address
+        // or a now-inactive property_id.
+        const freshProperty = await require('../services/customer-properties')
+          .bookingPropertyStamp({ customerId, propertyId }, trx);
+        for (const [field, value] of Object.entries(freshProperty)) {
           if (cols[field]) insertData[field] = value;
         }
       }
