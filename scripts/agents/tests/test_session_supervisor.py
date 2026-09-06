@@ -171,6 +171,15 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(supervisor.update_job(self.root, self.key, 'one', {'status': 'watching'}))
         self.assertEqual(supervisor.read_jobs(self.root)[self.key]['status'], 'paused')
 
+    def test_retry_cannot_reclaim_a_worktree_enrolled_to_another_session(self):
+        self.job['status'] = 'paused'
+        other = {**self.job, 'status': 'watching', 'session': '00000000-0000-4000-8000-000000000002'}
+        jobs = {self.key: self.job, 'codex:' + other['session']: other}
+        supervisor.atomic_json(self.root / 'jobs.json', jobs)
+        with self.assertRaises(ValueError):
+            supervisor.control(self.root, argparse.Namespace(job=self.key, action='retry', execute=True))
+        self.assertEqual(supervisor.read_jobs(self.root), jobs)
+
     def test_concurrent_tick_cannot_launch_a_second_worker(self):
         self.store()
         with supervisor.locked(self.root, 'tick'), \
@@ -333,7 +342,9 @@ class SupervisorTests(unittest.TestCase):
         launch_home = self.root / 'home'
         launch_home.mkdir()
         state = launch_home / '.local/share/waves-session-supervisor'
-        with patch.object(supervisor.sys, 'platform', 'darwin'), \
+        with patch.dict(os.environ, {'CODEX_HOME': str(launch_home / 'codex-custom'),
+                                     'CLAUDE_CONFIG_DIR': str(launch_home / 'claude-custom')}), \
+                patch.object(supervisor.sys, 'platform', 'darwin'), \
                 patch.object(supervisor.Path, 'home', return_value=launch_home), \
                 patch.object(supervisor.shutil, 'which', return_value='/usr/bin/tool'), \
                 patch.object(supervisor, 'command', return_value='') as run:
@@ -344,6 +355,8 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(data['ProgramArguments'][-2:], ['tick', '--execute'])
             self.assertEqual(Path(data['ProgramArguments'][1]).read_bytes(), Path(supervisor.__file__).read_bytes())
             self.assertEqual(data['StartInterval'], 60)
+            self.assertEqual(data['EnvironmentVariables']['CODEX_HOME'], str(launch_home / 'codex-custom'))
+            self.assertEqual(data['EnvironmentVariables']['CLAUDE_CONFIG_DIR'], str(launch_home / 'claude-custom'))
             run.assert_called_once()
             with self.assertRaises(ValueError):
                 supervisor.install(state, execute=True)

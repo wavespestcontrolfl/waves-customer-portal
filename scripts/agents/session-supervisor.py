@@ -211,6 +211,15 @@ def session_busy(job):
     return bool(result.stdout.strip())
 
 
+def check_enrollment(jobs, key, job):
+    for other_key, other in jobs.items():
+        overlap = other_key == key or other['worktree'] == job['worktree'] or (other['repo'], other['pr']) == (job['repo'], job['pr'])
+        if overlap and (other.get('launch_pending') or group_exists(other.get('worker_pid'))):
+            raise ValueError('Existing worker or interrupted launch must be recovered before re-enrollment')
+        if overlap and other['status'] not in ['complete', 'paused', 'blocked']:
+            raise ValueError('Session, PR, or worktree already enrolled; finish or pause its existing job first')
+
+
 def enroll(root, args):
     session = str(uuid.UUID(args.session))
     cwd = str(Path(args.worktree).resolve(strict=True))
@@ -235,12 +244,7 @@ def enroll(root, args):
     key = args.provider + ':' + session
     with locked(root) if args.execute else nullcontext():
         jobs = read_jobs(root)
-        for other_key, other in jobs.items():
-            overlap = other_key == key or other['worktree'] == cwd or (other['repo'], other['pr']) == (job['repo'], job['pr'])
-            if overlap and (other.get('launch_pending') or group_exists(other.get('worker_pid'))):
-                raise ValueError('Existing worker or interrupted launch must be recovered before re-enrollment')
-            if overlap and other['status'] not in ['complete', 'paused', 'blocked']:
-                raise ValueError('Session, PR, or worktree already enrolled; finish or pause its existing job first')
+        check_enrollment(jobs, key, job)
         if args.execute:
             jobs[key] = job
             atomic_json(root / 'jobs.json', jobs)
@@ -476,8 +480,10 @@ def control(root, args):
         if args.action == 'finish' and not snapshot(job)['merged']:
             raise ValueError('Finish requires a merged PR; pause cancelled or blocked work')
         if args.execute:
-            if args.action == 'retry' and group_exists(job.get('worker_pid')):
-                raise ValueError('Wait for the paused worker to exit before retrying it')
+            if args.action == 'retry':
+                if group_exists(job.get('worker_pid')):
+                    raise ValueError('Wait for the paused worker to exit before retrying it')
+                check_enrollment({k: v for k, v in jobs.items() if k != args.job}, args.job, job)
             job.update({'status': {'pause': 'paused', 'retry': 'watching', 'finish': 'complete'}[args.action],
                         'revision': str(uuid.uuid4()), 'reason': 'owner_' + args.action})
             if args.action == 'retry':
@@ -512,7 +518,8 @@ def install(root, execute=False):
     plist = Path.home() / 'Library/LaunchAgents' / (LABEL + '.plist')
     data = {'Label': LABEL, 'ProgramArguments': [python, str(target), '--state-dir', str(root), 'tick', '--execute'],
             'StartInterval': 60, 'RunAtLoad': True, 'ProcessType': 'Background',
-            'EnvironmentVariables': {'PATH': os.environ['PATH'], 'HOME': str(Path.home())},
+            'EnvironmentVariables': {k: v for k, v in environment().items()
+                                     if k in ['PATH', 'HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR']},
             'StandardOutPath': str(root / 'service.log'), 'StandardErrorPath': str(root / 'service-error.log')}
     if execute:
         if plist.exists():
