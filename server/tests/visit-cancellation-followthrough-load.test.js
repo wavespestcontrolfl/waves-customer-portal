@@ -25,6 +25,7 @@ const mockHoldCancel = jest.fn();
 const mockApptCancel = jest.fn(async () => ({ released: true }));
 const mockAlertUnresolved = jest.fn(async () => {});
 jest.mock('../services/estimate-card-holds', () => ({
+  NO_SHOW_FEE_MAX_AGE_MS: 48 * 3600000,
   handleCardHoldCancellation: (...a) => mockHoldCancel(...a),
 }));
 jest.mock('../services/appointment-card-request', () => ({
@@ -65,7 +66,9 @@ describe('visit-cancellation-followthrough', () => {
       mockHoldCancel.mockResolvedValueOnce(outcome);
       await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
     }
-    expect(mockAlertUnresolved).not.toHaveBeenCalled();
+    expect(mockAlertUnresolved).not.toHaveBeenCalledWith(expect.objectContaining({
+      outcome: expect.objectContaining({ released: false }),
+    }));
     // no_hold falls through to the appointment-card rail instead
     mockHoldCancel.mockResolvedValueOnce({ handled: false, reason: 'no_hold' });
     await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
@@ -105,5 +108,63 @@ describe('cancellation fee clock', () => {
     await require('../services/visit-cancellation-followthrough').runVisitCancellationFollowThrough({ targetIds: ['svc-1'], now });
     expect(require('../models/db')).not.toHaveBeenCalled();
     expect(mockHoldCancel).toHaveBeenCalledWith(expect.objectContaining({ now }));
+  });
+});
+
+
+describe('review regressions: freshness and invoice collection', () => {
+  const { runVisitCancellationFollowThrough } = require('../services/visit-cancellation-followthrough');
+  const InvoiceService = require('../services/invoice');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockCancellationTime = '2030-01-09T18:00:00Z';
+    mockHoldCancel.mockResolvedValue({ reason: 'no_hold' });
+    jest.useFakeTimers().setSystemTime(new Date('2030-01-10T18:00:00Z'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  it.each([false, true])('waives a weeks-old retry with explicit time=%s on both rails', async (explicit) => {
+    jest.setSystemTime(new Date('2030-02-01T18:00:00Z'));
+    const now = new Date(mockCancellationTime);
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], ...(explicit ? { now } : {}) });
+    expect(mockHoldCancel).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', waiveFee: true, now });
+    expect(mockApptCancel).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', waiveFee: true, now });
+  });
+
+  it.each([
+    ['2030-01-11T18:00:00Z', false],
+    ['2030-01-11T18:00:00.001Z', true],
+  ])('applies the existing 48-hour freshness boundary at %s', async (realNow, waived) => {
+    jest.setSystemTime(new Date(realNow));
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
+    expect(mockHoldCancel).toHaveBeenCalledWith(expect.objectContaining({ waiveFee: waived }));
+  });
+
+  it('keeps an explicit waiver available when history is missing', async () => {
+    mockCancellationTime = null;
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1'], waiveFee: true });
+    expect(mockHoldCancel).toHaveBeenCalledWith(expect.objectContaining({ waiveFee: true }));
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  it('waits for invoice cleanup before invoking either fee rail', async () => {
+    let finishVoid;
+    InvoiceService.voidOpenInvoicesForCancelledService.mockImplementationOnce(() => new Promise(resolve => { finishVoid = resolve; }));
+    const pending = runVisitCancellationFollowThrough({ targetIds: ['svc-1'] });
+    expect(mockHoldCancel).not.toHaveBeenCalled();
+    expect(mockApptCancel).not.toHaveBeenCalled();
+    finishVoid();
+    await pending;
+    expect(mockHoldCancel).toHaveBeenCalled();
+    expect(mockApptCancel).toHaveBeenCalled();
+  });
+
+  it('a failed invoice cleanup skips fees and alerts without stranding other visits or tracking', async () => {
+    InvoiceService.voidOpenInvoicesForCancelledService.mockRejectedValueOnce(new Error('invoice cleanup failed'));
+    await runVisitCancellationFollowThrough({ targetIds: ['svc-1', 'svc-2'] });
+    expect(mockHoldCancel).toHaveBeenCalledTimes(1);
+    expect(mockHoldCancel).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'svc-2' }));
+    expect(mockAlertUnresolved).toHaveBeenCalledWith({ scheduledServiceId: 'svc-1', outcome: { released: false, reason: 'fee_step_error' } });
+    expect(require('../services/track-transitions').cancel).toHaveBeenCalledTimes(2);
   });
 });

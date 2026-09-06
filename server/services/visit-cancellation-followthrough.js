@@ -12,13 +12,11 @@
  * growing a parallel path and share this one (AGENTS.md: find the existing
  * mechanism and extend its coverage).
  *
- * Ordering matches the original and is load-bearing:
- *   1. Card fee rails — the estimate card-hold, falling back to the /secure
- *      appointment-card agreement when the visit has no hold row. An
- *      unresolved outcome ALERTS the office; it is never a silent cancel.
- *   2. Invoice void — restores applied account credit and the estimate
- *      deposit ledger, and stops dunning chasing a cancelled visit. Inspection
- *      -credit reversal runs INSIDE it, after the voids.
+ * Collection ordering is load-bearing:
+ *   1. Invoice void — closes the service invoice collection rail before a
+ *      cancellation fee is attempted, restores credit, and stops dunning.
+ *   2. Card fee rails — the estimate card-hold, falling back to the /secure
+ *      agreement when no hold exists. Unresolved outcomes alert the office.
  *   3. Tracker cancel — moves track_state off scheduled/en_route and stamps
  *      cancelled_at + the 24h receipt window, recording failures for the ops
  *      alert rail.
@@ -53,99 +51,62 @@ const {
  *   same-status retries must never evaluate fees against the retry clock.
  */
 async function runVisitCancellationFollowThrough({
-  targetIds,
+  targetIds = [],
   actorId = null,
   waiveFee = false,
   reason = null,
   source = 'cancellation',
   now,
 } = {}) {
-  const ids = (Array.isArray(targetIds) ? targetIds : []).filter(Boolean);
-  if (ids.length === 0) return { settled: 0 };
+  const ids = targetIds.filter(Boolean);
+  const CardHolds = require('./estimate-card-holds');
+  const ApptCardRequests = require('./appointment-card-request');
+  const InvoiceService = require('./invoice');
 
-  // ——— 1. Card fee rails ———
-  {
-    const CardHolds = require('./estimate-card-holds');
-    const ApptCardRequests = require('./appointment-card-request');
-    for (const id of ids) {
-      try {
-        // A waiver never evaluates the fee window, including legacy visits
-        // without transition history. Preserve that explicit no-charge choice.
-        let cancelledAt = now || (waiveFee ? new Date() : null);
-        if (!cancelledAt) {
-          const transition = await db('job_status_history')
-            .where({ job_id: id, to_status: 'cancelled' })
-            .whereNot('from_status', 'cancelled')
-            .orderBy('transitioned_at', 'desc')
-            .first('transitioned_at');
-          cancelledAt = transition?.transitioned_at;
-        }
-        const feeTime = new Date(cancelledAt);
-        if (!cancelledAt || !Number.isFinite(feeTime.getTime())) {
-          throw new Error('Cancellation time unavailable; fee requires review');
-        }
-        const holdResult = await CardHolds.handleCardHoldCancellation({
-          scheduledServiceId: id,
-          waiveFee,
-          now: feeTime,
-        });
-        // Non-clean hold outcomes must ALERT, not just return (pre-push
-        // r16 P1): the rail reports charge_failed / charge_review /
-        // lane_check_failed / competing_consent_review as values, and a
-        // caller that only checks thrown errors would report a successful
-        // cancellation while the fee sits unresolved. Clean = charged,
-        // released, parked, or nothing to do.
-        const holdClean = holdResult?.charged === true
-          || holdResult?.released === true
-          || holdResult?.parked === true
-          || ['no_hold', 'park_gate_off'].includes(holdResult?.reason);
-        if (!holdClean) {
-          // Normalized shape (uncapped r17 P1): the alert helper keys on
-          // released === false, which the hold rail's failure returns omit.
-          await ApptCardRequests.alertUnresolvedCancellationFee({
-            scheduledServiceId: id,
-            outcome: { released: false, reason: holdResult?.reason || 'hold_unresolved' },
-          });
-        }
-        // Visits with no hold row may still carry the /secure lane's agreed
-        // fee (mutually exclusive rails — the rail itself re-checks).
-        if (holdResult?.reason === 'no_hold') {
-          const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
-            scheduledServiceId: id,
-            waiveFee,
-            now: feeTime,
-          });
-          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: apptFeeOutcome });
-        }
-      } catch (e) {
-        // A thrown fee step = unresolved lane ownership; alert, then continue.
-        logger.error(`[${source}] cancellation card-hold handling failed (target ${id}): ${e.message}`);
-        try {
-          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: { released: false, reason: 'fee_step_error' } });
-        } catch (alertErr) {
-          logger.error(`[${source}] cancellation fee alert failed (target ${id}): ${alertErr.message}`);
-        }
-      }
-    }
-  }
-
-  // ——— 2. Invoice void (idempotent; also reverses inspection credit) ———
-  // Per-target isolation (uncapped r18 P1): one failing void must not
-  // strand every LATER target's invoice/credit/dunning state — the same
-  // isolation contract the fee step above keeps.
-  {
-    const InvoiceService = require('./invoice');
-    for (const id of ids) {
-      try {
-        await InvoiceService.voidOpenInvoicesForCancelledService(id);
-      } catch (e) {
-        logger.error(`[${source}] cancellation invoice void failed (target ${id}): ${e.message}`);
-      }
-    }
-  }
-
-  // ——— 3. Tracker state ———
   for (const id of ids) {
+    let feeOutcome;
+    try {
+      // Close service-invoice collection before starting a Stripe fee call.
+      // A failed cleanup skips the fee and alerts, but tracker cleanup and
+      // the other cancelled visits still proceed.
+      await InvoiceService.voidOpenInvoicesForCancelledService(id);
+
+      // Explicit waivers need no history, including legacy cancelled visits.
+      let cancelledAt = now || (waiveFee ? new Date() : null);
+      if (!cancelledAt) {
+        const transition = await db('job_status_history')
+          .where({ job_id: id, to_status: 'cancelled' })
+          .whereNot('from_status', 'cancelled')
+          .orderBy('transitioned_at', 'desc')
+          .first('transitioned_at');
+        cancelledAt = transition?.transitioned_at;
+      }
+      const feeTime = new Date(cancelledAt || NaN);
+      if (!Number.isFinite(feeTime.getTime())) {
+        throw new Error('Cancellation time unavailable; fee requires review');
+      }
+      // Two clocks: original cancellation decides the cutoff; REAL elapsed
+      // time prevents a stale retry from charging weeks after the event.
+      const feeOptions = {
+        scheduledServiceId: id,
+        waiveFee: waiveFee || Date.now() - feeTime.getTime() > CardHolds.NO_SHOW_FEE_MAX_AGE_MS,
+        now: feeTime,
+      };
+      const { reason: holdReason, charged, released, parked } = await CardHolds.handleCardHoldCancellation(feeOptions);
+      feeOutcome = holdReason === 'no_hold'
+        ? await ApptCardRequests.handleAppointmentCardCancellation(feeOptions)
+        : {
+          released: [charged, released, parked, holdReason === 'park_gate_off'].includes(true),
+          reason: holdReason || 'hold_unresolved',
+        };
+    } catch (e) {
+      logger.error(`[${source}] cancellation money handling failed (target ${id}): ${e.message}`);
+      feeOutcome = { released: false, reason: 'fee_step_error' };
+    }
+    // One normalized outcome for BOTH rails and thrown failures. The alert
+    // service ignores clean outcomes, so no duplicate decision tree here.
+    await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: feeOutcome });
+
     try {
       const result = await trackTransitions.cancel(id, { reason, actorId });
       await recordTrackTransitionResultFailure({ jobId: id, action: 'cancel', actorId, result });
