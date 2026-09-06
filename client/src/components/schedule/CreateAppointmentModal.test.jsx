@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bookableProperties,
+  bookingPropertyTarget,
   buildFindTimeRequestBody,
   defaultBookingPropertyId,
   ESTIMATE_SOURCE_LABEL,
@@ -124,6 +126,9 @@ describe('buildFindTimeRequestBody', () => {
       horizonDays: 7,
     });
     expect(body).not.toHaveProperty('serviceId');
+    // No property chosen → no address override; the server resolves the primary.
+    expect(body.address).toBeUndefined();
+    expect(body.lat).toBeUndefined();
     expect(body).toMatchObject({
       customerId: 'cust-1',
       serviceType: 'Quarterly Pest',
@@ -184,5 +189,25 @@ describe('multi-property booking helpers', () => {
     expect(filterScheduleEstimatesForProperty(all, 'p-home')).toEqual([forHome, anywhere]);
     // No picker (single-property customer / lane dark) → nothing is hidden.
     expect(filterScheduleEstimatesForProperty(all, '')).toEqual(all);
+  });
+});
+
+describe('service-address picker guards', () => {
+  const COMPLETE = { id: 'p1', is_primary: true, address_line1: '6176 46th St East', city: 'Bradenton', state: 'FL', zip: '34203', latitude: '27.4400000', longitude: '-82.5200000' };
+  const STREET_ONLY = { id: 'p2', is_primary: false, address_line1: '4410 Palma Sola Blvd', city: '', state: 'FL', zip: null };
+  const RENTAL = { id: 'p3', is_primary: false, address_line1: '4410 Palma Sola Blvd', city: 'Bradenton', state: 'FL', zip: '34209' };
+
+  it('offers only properties with a complete street address (the server refuses the rest)', () => {
+    expect(bookableProperties([COMPLETE, STREET_ONLY, RENTAL]).map((p) => p.id)).toEqual(['p1', 'p3']);
+    // An incomplete PRIMARY never becomes the default either.
+    expect(defaultBookingPropertyId(bookableProperties([{ ...COMPLETE, zip: '' }, RENTAL]))).toBe('p3');
+  });
+
+  it('routes slot searches to the chosen property: coords when present, else its address', () => {
+    expect(bookingPropertyTarget(COMPLETE)).toEqual({ address: '6176 46th St East, Bradenton, FL 34203', lat: 27.44, lng: -82.52 });
+    expect(bookingPropertyTarget(RENTAL)).toEqual({ address: '4410 Palma Sola Blvd, Bradenton, FL 34209', lat: undefined, lng: undefined });
+    expect(bookingPropertyTarget(null)).toEqual({});
+    const body = buildFindTimeRequestBody({ customerId: 'c', ...bookingPropertyTarget(COMPLETE), serviceName: 's', durationMinutes: 60, dateFrom: 'a', dateTo: 'b' });
+    expect(body).toMatchObject({ customerId: 'c', lat: 27.44, lng: -82.52, address: '6176 46th St East, Bradenton, FL 34203' });
   });
 });

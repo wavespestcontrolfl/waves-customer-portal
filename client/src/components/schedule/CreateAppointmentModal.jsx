@@ -428,6 +428,31 @@ export function filterScheduleEstimatesForProperty(estimates = [], propertyId) {
   return estimates.filter((e) => !e?.propertyId || String(e.propertyId) === String(propertyId));
 }
 
+// Only a property with a complete street address can be booked — the server
+// refuses anything less (bookingPropertyStamp 422) — so the picker never
+// offers, or defaults to, an incomplete legacy row. Fewer than two complete
+// rows → no picker, and the server's sole-property anchor / profile address
+// applies exactly as before.
+export function bookableProperties(properties = []) {
+  return (properties || []).filter((p) => p && ['address_line1', 'city', 'state', 'zip']
+    .every((field) => typeof p[field] === 'string' && p[field].trim()));
+}
+
+// Slot-search target for the chosen property: coords when the row carries
+// them (fastest), else its address for the server to geocode. Either wins
+// over the customer's primary in resolveFindTimeTarget.
+export function bookingPropertyTarget(property) {
+  if (!property) return {};
+  const lat = Number(property.latitude);
+  const lng = Number(property.longitude);
+  const { street, locality } = formatBookingPropertyAddress(property);
+  return {
+    address: [street, locality].filter(Boolean).join(', ') || undefined,
+    lat: Number.isFinite(lat) ? lat : undefined,
+    lng: Number.isFinite(lng) ? lng : undefined,
+  };
+}
+
 export function formatBookingPropertyAddress(property) {
   if (!property) return '';
   const street = [property.address_line1, property.address_line2].filter(Boolean).join(', ');
@@ -443,9 +468,17 @@ export function buildFindTimeRequestBody({
   dateTo,
   technicianId,
   horizonDays = 7,
+  // Chosen service address (bookingPropertyTarget); absent → the server
+  // resolves the customer's primary as before.
+  address,
+  lat,
+  lng,
 }) {
   return {
     customerId,
+    address: address || undefined,
+    lat: lat ?? undefined,
+    lng: lng ?? undefined,
     serviceType: serviceName,
     durationMinutes,
     dateFrom,
@@ -656,7 +689,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     adminFetch(`/admin/customers/${customerId}/properties?context=appointment_address`)
       .then((data) => {
         if (cancelled) return;
-        const list = Array.isArray(data?.properties) ? data.properties : [];
+        const list = bookableProperties(Array.isArray(data?.properties) ? data.properties : []);
         setBookingProperties(list);
         if (data?.canChangeAppointmentAddress === true && list.length > 1) {
           setSelectedPropertyId(defaultBookingPropertyId(list));
@@ -680,15 +713,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   }, [propertyPickerActive, linkedEstimate?.propertyId]);
 
   const chooseBookingProperty = (propertyId) => {
+    if (String(propertyId) === String(selectedPropertyId)) return;
     setSelectedPropertyId(String(propertyId));
-    // A quote priced for another property cannot ride this booking.
+    // A quote priced for another property cannot ride this booking — drop the
+    // link AND the lines it filled (they carry sourceEstimateId), otherwise
+    // the submit would book the other property at the quote's prices as a
+    // manual appointment and skip the server's mismatch check.
     if (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId)) {
       setLinkedEstimate(null);
+      setServices((arr) => arr.filter((line) => !line.sourceEstimateId));
     }
+    // Slot suggestions were scored at the previous address.
+    setTimeSlots(null);
   };
-  const visibleScheduleEstimates = filterScheduleEstimatesForProperty(
-    scheduleEstimates,
-    propertyPickerActive ? selectedPropertyId : '',
+  // Memoized: it is a dependency of the auto-apply effect below, so a fresh
+  // array every render would re-run that effect on every keystroke.
+  const visibleScheduleEstimates = useMemo(
+    () => filterScheduleEstimatesForProperty(scheduleEstimates, propertyPickerActive ? selectedPropertyId : ''),
+    [scheduleEstimates, propertyPickerActive, selectedPropertyId],
   );
 
   // Find-a-Time state
@@ -926,7 +968,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const customerId = selectedCustomer?.id;
     const auto = pickAutoScheduleEstimate({
       customerId,
-      estimates: scheduleEstimates,
+      // Property-filtered: a quote for another property must never auto-fill.
+      estimates: visibleScheduleEstimates,
       isLoading: scheduleEstimatesLoading,
       error: scheduleEstimateError,
       linkedEstimate,
@@ -937,7 +980,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     autoAppliedScheduleEstimateRef.current = auto.key;
     applyScheduleEstimate(auto.estimate.id);
     // Deliberately keyed on the schedule-estimate pipeline state only.
-  }, [scheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
+  }, [visibleScheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
 
   const defaultEstimateAppliedRef = useRef(false);
   useEffect(() => {
@@ -1252,6 +1295,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         method: 'POST',
         body: JSON.stringify(buildFindTimeRequestBody({
           customerId: selectedCustomer.id,
+          ...bookingPropertyTarget(selectedBookingProperty),
           serviceName: selectedService.name,
           durationMinutes: dur,
           dateFrom: searchFrom,
@@ -1595,9 +1639,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
+  const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
   const { bestTimes } = useBestTimes({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
+    // Rank at the CHOSEN property, not the customer's primary.
+    address: bestTimesTarget.address,
+    lat: bestTimesTarget.lat,
+    lng: bestTimesTarget.lng,
     durationMinutes: slotCheckDuration,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
