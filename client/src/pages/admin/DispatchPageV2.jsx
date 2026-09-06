@@ -38,6 +38,7 @@ import {
   useEffect,
   useRef,
   useCallback,
+  useMemo,
   lazy,
   Suspense,
 } from "react";
@@ -61,6 +62,7 @@ import TimeGridDays from "../../components/schedule/TimeGridDays";
 import MobileWeekGrid from "../../components/schedule/MobileWeekGrid";
 import MobileDayStrip from "../../components/schedule/MobileDayStrip";
 import MobileDispatchList from "../../components/schedule/MobileDispatchList";
+import useDispatchReadiness from "../../components/schedule/useDispatchReadiness";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
@@ -991,6 +993,14 @@ export default function DispatchPageV2({
   }
 
   const isReferencePanel = activeTab !== "board" && viewMode === "day";
+  const readiness = useDispatchReadiness({
+    services: data?.services,
+    date,
+    active: activeTab === "board" && viewMode === "day" && data?.date === date && !loading && !error,
+  });
+  const dayServices = useMemo(() => (data?.services || []).map(service => ({
+    ...service, readiness: readiness?.[service.id],
+  })), [data?.services, readiness]);
   if (loading && !isReferencePanel)
     return (
       <div className="py-16 text-center text-13 text-ink-secondary">
@@ -1018,7 +1028,7 @@ export default function DispatchPageV2({
   if (!data && !isReferencePanel) return null;
 
   const safeData = data || {};
-  const services = safeData.services || [];
+  const services = dayServices;
   const techSummary = safeData.techSummary || [];
   const technicians = safeData.technicians || [];
   const zoneColors = safeData.zoneColors || {};

@@ -67,7 +67,15 @@ already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
-`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*` (the
+`/api/public/estimates/:token/find-slots`,
+`/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
+service profile uses the converter's canonical stored/engine service rows.
+Generated or saved tier selections replace the listed service cadences and
+retain omitted companion programs; choosing a tier is not a service removal.
+The existing pest-only recurring choice on eligible one-time-toggle estimates
+retains its intentional companion exclusion, using the acceptance predicate.
+Existing request fields, token/signature guards, rate limits, privacy headers,
+and booking duration policy apply), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
 the queued PDF / report-email renders that share `buildReportV1Data` —
 renders the report's IDENTITY facts from the completion-time snapshot on
@@ -82,7 +90,27 @@ snapshot leg that could not be frozen (missing customer or technician row)
 is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
-cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
+`moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
+stored `composite_scores.drought_stress`. Missing or invalid historical
+values yield `null`; raw model responses and the full composite are never
+projected. The existing customer/visit linkage and signed assessment pin
+requirements apply to this field too. Localized watering advice uses this
+structured severity, overridden by an explicit boolean
+`scores.stressFlags.drought_stress` from the same confirmed assessment.
+The resolved boolean-or-null state travels as `reportV2.water.droughtSignal`
+through the final public/PDF reconciliation; only `true` permits a drought
+hypothesis to be rewritten into a coverage finding. Localized-drought cards
+label an explicit technician finding `tech_confirmed`; automated coverage
+advice retains its `area_estimated` label.
+Without either signal, observation/summary wording cannot trigger sprinkler
+advice or an unqualified "no action needed" reassurance. Measured water
+deficits/surpluses and eligible stored water snapshots
+retain their existing behavior. The optional whole-report AI narrative runs
+only when `droughtSignal` is `true`; otherwise all deterministic report copy
+is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
+older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
@@ -680,6 +708,14 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+Appointment reminders registered by `/accept` derive their date and arrival
+from the committed service row. A server-owned `reservation_service_mix`
+allocation can preserve one booked arrival across sequential member work
+windows, including when grouping is disabled. The existing reminder dedupe,
+reschedule sync, sibling promotion, and send-time hold checks use that arrival;
+a member moved away from its allocated date/start returns to its own arrival.
+Registration still suppresses immediate confirmation delivery. This metadata
+is internal and adds no request field or public payload field.
 `/accept` existing-appointment adoption (`existingAppointmentId` in the
 body, offered by the view contract instead of the slot picker): the row
 must belong to this customer, be unclaimed or claimed by THIS estimate,
@@ -889,9 +925,34 @@ server-side):
     "only this visit moves" note for the series-shift warning before
     Confirm (the GET's threshold drives it; the POST decides
     authoritatively). The anchor keeps the offered tech under the same
-    advisory-lock overlap guard; shifted siblings that would double-book
-    a route are committed UNASSIGNED inside the trx and parked as a
-    `schedule_conflict` admin notification. Treat any widening of this
+    advisory-lock overlap guard. With `GATE_CUSTOMER_RECURRING_DISPATCH`
+    and the existing `cronJobs`/`autoDispatch` scheduler gates active plus
+    effective `AUTO_DISPATCH_MODE=apply` (`AUTO_DISPATCH_ALLOW_APPLY=true`)
+    with `AUTO_DISPATCH_MAX_CHANGES_PER_RUN > 0` and
+    `AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES=false`,
+    only the selected appointment must fit: later cadence visits keep their
+    projected due dates with NULL time/display windows and a durable
+    `recurring_dispatch_due_date`. Future overlap, blackout, and same-plan
+    date collisions cannot reject that selection. Auto-dispatch places these
+    visits within ±3 calendar days of the due date, honoring preferences;
+    initial placement bypasses improvement thresholds, with unresolved
+    visits escalated through `schedule_conflict`. Future staff-locked,
+    customer-confirmed, reschedule-held, reminder-frozen or committed/grouped visits stay
+    unchanged and are flagged for staff review instead of blocking the
+    selected appointment. GET/POST add optional `futurePlacementDays: 3`
+    for disclosure. Web POST echoes `disclosed_future_placement_days`
+    (`3` or `null`); a mismatch with the effective mode returns 409
+    `SCOPE_CHANGED` before writing, including a rebooker recheck. Older
+    pages omitting it retain legacy behavior only while deferral is off;
+    otherwise they refresh and re-disclose. SMS retains its existing
+    series policy until it has a placement disclosure. Success copy keeps
+    the unchanged-commitment caveat. The confirmation SMS uses the separate
+    `appointment_recurring_placement_confirmed` template when the recorded
+    operation has deferred placement, including on retries; it states the
+    ±3-day placement and unchanged-commitment caveat. Authentication is unchanged. Untimed
+    reminder windows are preclosed atomically until placement. Gate off
+    preserves legacy conflict checks; already-recorded due dates remain
+    dispatchable and bounded. Treat any widening of this
     scope (other customers' rows, live visits, non-cadence rows) as P0.
 A pending/confirmed visit whose time already passed is MISSED (rebookable
 via the same link — eligibility `missed:true`); terminal/live/no_show

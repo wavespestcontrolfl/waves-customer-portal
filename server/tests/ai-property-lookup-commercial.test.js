@@ -676,7 +676,8 @@ describe('Manatee PAO property lookup facts', () => {
 
     expect(record._source).toBe('ai');
     expect(record._raw._source).toBe('ai');
-    expect(record._aiSourceType).toBe('county');
+    expect(record._aiSourceType).toBe('model_inference');
+    expect(merged._fieldEvidence.squareFootage.fieldVerify).toBe(true);
     expect(merged._source).toBe('ai');
     expect(merged._raw._source).toBe('ai_trio');
   });

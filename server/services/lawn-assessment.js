@@ -346,11 +346,18 @@ function averageScores(claudeResult, geminiResult) {
   // are AI-only with no tech tile, so we don't emit a stress_damage divergence
   // flag — it would count in the summary with no tile to highlight, giving the
   // tech nothing to act on before confirming.
-  for (const field of ['insect_damage', 'drought_stress', 'mechanical_damage']) {
+  for (const field of ['insect_damage', 'mechanical_damage']) {
     const c = FUNGAL_MAP[claudeResult[field]] ?? 0;
     const g = FUNGAL_MAP[geminiResult[field]] ?? 0;
     composite[field] = FUNGAL_REVERSE[Math.round((c + g) / 2)];
   }
+  // Missing provider evidence is unknown, not a no-drought vote.
+  const droughtRanks = [claudeResult.drought_stress, geminiResult.drought_stress]
+    .filter(value => Object.keys(FUNGAL_MAP).includes(value))
+    .map(value => FUNGAL_MAP[value]);
+  composite.drought_stress = droughtRanks.length
+    ? FUNGAL_REVERSE[Math.round(droughtRanks.reduce((sum, rank) => sum + rank, 0) / droughtRanks.length)]
+    : null;
 
   // Observations: the customer-facing narrative is a SINGLE voice — the primary
   // VISION model (Claude), falling back to Gemini — never the two glued together
@@ -392,6 +399,10 @@ function mapToDisplayScores(composite) {
     // above so the Lawn Diagnostic tool, trends, and snapshot are untouched.
     stress_damage: computeStressDamageDisplay(composite),
     overwatering_signal: !!composite.overwatering_signal,
+    // Keep the moisture cause alongside the combined Stress/Damage score.
+    // /assess persists this object; absent/invalid evidence must stay unknown.
+    drought_stress: ['none', 'minor', 'moderate', 'severe'].includes(composite.drought_stress)
+      ? composite.drought_stress : null,
     observations: composite.observations || '',
   };
 }

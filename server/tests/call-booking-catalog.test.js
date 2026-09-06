@@ -1287,6 +1287,15 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
   });
 
+  test.each([null, '09:00:00'])('rebases or clears a shifted child dispatch marker with window %s', async (windowStart) => {
+    const { conn, log } = fakeConn({ kids: [{
+      id: 'kid-1', day: '2026-07-16', new_day: '2026-07-19',
+      window_start: windowStart, recurring_dispatch_due_date: '2026-07-16',
+    }] });
+    expect(await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' })).toBe(1);
+    expect(log.update.recurring_dispatch_due_date).toBe(windowStart ? null : '2026-07-19');
+  });
+
   test('re-reads each child UNDER the locks: a child whose tech/day changed meanwhile is skipped, and the write CASes on the locked tech/window/duration', async () => {
     const before = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
     // First select (pre-lock plan) → t1; second select (locked re-read) → the tech changed to t2.

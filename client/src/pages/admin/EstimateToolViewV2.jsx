@@ -64,7 +64,8 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
-import { palmPrefillAllowed } from "../../lib/lookupPrefill";
+import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed } from "../../lib/lookupPrefill";
+import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 import {
   normalizePhoneDigits,
@@ -2412,6 +2413,7 @@ export default function EstimateToolViewV2({
       serviceInterest: initialServiceInterest,
     }),
   );
+  const propertyAddressRef = useRef(String(form.address || "").trim());
 
   useEffect(() => {
     const incoming = {
@@ -2919,8 +2921,12 @@ export default function EstimateToolViewV2({
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
         rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
+        // Hydration supplies this estimate's own measurements; it is not an
+        // address edit carrying another property's form values.
+        propertyAddressRef.current = String(seeded.address || "").trim();
         setForm(seeded);
         setEnrichedProfile(d.engineProfile || null);
+        setLookupMeta(null);
         setSatelliteData(null);
         setEstimate(null);
         setSavedId(null);
@@ -2983,6 +2989,8 @@ export default function EstimateToolViewV2({
         ...(key === "address" ? { measuredTurfSf: "", unitCount: "", _unitCountEdited: false } : {}),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
+        ...(key === "homeSqFt" ? { _homeSqFtEdited: true } : {}),
+        ...(key === "lotSqFt" ? { _lotSqFtEdited: true } : {}),
         // The edit is BOUND to the address it was typed for — every
         // address-replacement path (typed, autocomplete, customer select,
         // incoming prefill) then disarms the save without each needing its
@@ -3335,15 +3343,33 @@ export default function EstimateToolViewV2({
   }, [existingCustomerMatch?.id, form.customerId]);
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
-  // "" | "saving" | "saved" | "error" — Save-verified action in the
-  // field-verify nudge block (persists the edited dimensions as tech-verified
-  // overrides so future lookups of this address stop re-flagging them).
-  const [verifySaveState, setVerifySaveState] = useState("");
+  const [lookupMeta, setLookupMeta] = useState(null);
+  const [verifySaveState, setVerifySaveState] = useState({});
+  const verificationVersionRef = useRef(0);
+
+  useEffect(() => {
+    const address = String(form.address || "").trim();
+    if (propertyAddressRef.current === address) return;
+    propertyAddressRef.current = address;
+    ++lookupSeqRef.current;
+    lookupAbortRef.current?.abort();
+    unitLookupAddressRef.current = "";
+    setForm((f) => ({ ...f, ...EMPTY_PROPERTY_MEASUREMENTS }));
+    setEnrichedProfile(null);
+    setLookupMeta(null);
+    setSatelliteData(null);
+    setLookupStatus({ type: "", msg: "" });
+    setSatelliteStatus({ type: "", msg: "" });
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }, [form.address]);
 
   // A "saved" badge only describes the values it was clicked for — moving to
   // another address or editing sqft/lot/stories re-arms the action.
   useEffect(() => {
-    setVerifySaveState("");
+    ++verificationVersionRef.current;
+    setVerifySaveState({});
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
 
   // Live engine preview for the treatable-turf "Lot estimate" fallback.
@@ -3434,30 +3460,27 @@ export default function EstimateToolViewV2({
     form.nearWater,
   ]);
 
-  const saveVerifiedValues = useCallback(async () => {
-    const fields = {};
-    if (String(form.homeSqFt || "").trim() !== "") fields.squareFootage = Number(form.homeSqFt);
-    if (String(form.lotSqFt || "").trim() !== "") fields.lotSize = Number(form.lotSqFt);
-    // A story count nobody actually knew (lookup default, operator never
-    // touched it) must not be persisted as "tech verified" — for an
-    // unknown-stories aggregate that would defeat the footprint suppression
-    // on every future lookup of the address (codex P2 #2721).
-    const storiesIsUntouchedDefault =
-      enrichedProfile?.storiesSource === "default" && !form._storiesEdited;
-    if (String(form.stories || "").trim() !== "" && !storiesIsUntouchedDefault)
-      fields.stories = Number(form.stories);
-    if (!form.address || !Object.keys(fields).length) return;
-    setVerifySaveState("saving");
+  const saveVerifiedValues = useCallback(async (field) => {
+    const key = { squareFootage: "homeSqFt", lotSize: "lotSqFt", stories: "stories" }[field];
+    const value = Number(form[key]);
+    const address = form.address.trim();
+    if (!key || !address || !Number.isFinite(value) || value <= 0) return;
+    if (field === "stories" && !form._storiesEdited && enrichedProfile?.storiesSource === "default") return;
+    const fields = { [field]: value };
+    const version = verificationVersionRef.current;
+    setVerifySaveState((s) => ({ ...s, [field]: "saving" }));
     try {
       const r = await fetch("/api/admin/estimator/property-lookup/verify", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ address: form.address, fields }),
+        body: JSON.stringify({ address, fields }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setVerifySaveState("saved");
+      if (formAddressRef.current.trim() !== address || verificationVersionRef.current !== version) return;
+      setVerifySaveState((s) => ({ ...s, [field]: "saved" }));
     } catch {
-      setVerifySaveState("error");
+      if (formAddressRef.current.trim() !== address || verificationVersionRef.current !== version) return;
+      setVerifySaveState((s) => ({ ...s, [field]: "error" }));
     }
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, enrichedProfile]);
 
@@ -3848,7 +3871,7 @@ export default function EstimateToolViewV2({
     });
   }
 
-  async function doLookup() {
+  async function doLookup({ refresh = false } = {}) {
     const address = form.address.trim();
     // Read at click time: a deep link seeds form.customerId with no chip.
     const customerAlreadyLinked = !!(existingCustomerMatch || form.customerId);
@@ -3858,12 +3881,9 @@ export default function EstimateToolViewV2({
     }
     setLookupStatus({
       type: "loading",
-      msg: "Looking up property... (AI property search + AI satellite analysis)",
+      msg: refresh ? "Refreshing property records and satellite analysis…" : "Checking property records and satellite analysis…",
     });
-    setSatelliteStatus({
-      type: "loading",
-      msg: "Running AI satellite analysis...",
-    });
+    setSatelliteStatus({ type: "", msg: "" });
     setForm((f) => ({ ...f, measuredTurfSf: "" }));
     setEstimate(null);
     setSavedId(null);
@@ -3892,7 +3912,7 @@ export default function EstimateToolViewV2({
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ address }),
+        body: JSON.stringify({ address, refresh }),
         signal: lookupController.signal,
       });
       if (!r.ok) throw new Error("API " + r.status);
@@ -3909,13 +3929,19 @@ export default function EstimateToolViewV2({
       }
 
       const ep = data.enriched;
+      if (!ep) throw new Error("Property details were not returned. Try refreshing the records.");
       setEnrichedProfile(ep);
-      setVerifySaveState("");
+      setLookupMeta({
+        address,
+        matchedAddress: (data.propertyRecord || data.rentcast)?.formattedAddress || null,
+        checkedAt: data.meta?.cachedAt || data.meta?.timestamp || new Date().toISOString(),
+        cache: data.meta?.cache,
+        errors: data.errors || [],
+      });
+      setVerifySaveState({});
       unitLookupAddressRef.current = ep.residentialUnitLookup ? address : "";
 
       const upd = {};
-      if (ep.homeSqFt) upd.homeSqFt = String(ep.homeSqFt);
-      if (ep.lotSqFt) upd.lotSqFt = String(ep.lotSqFt);
       if (ep.stories) upd.stories = String(ep.stories);
       if (ep.propertyType || ep.category) {
         Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
@@ -3981,12 +4007,15 @@ export default function EstimateToolViewV2({
         const next = {
           ...f,
           ...upd,
+          homeSqFt: f._homeSqFtEdited ? f.homeSqFt : (ep.homeSqFt ? String(ep.homeSqFt) : ""),
+          lotSqFt: ep.residentialUnitLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt ? String(ep.lotSqFt) : ""),
+          stories: f._storiesEdited ? f.stories : (ep.stories ? String(ep.stories) : "1"),
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
           // Rides the form so the homeSqFt/stories effect can't re-derive a
           // footprint the lookup refused to claim (codex P1 #2721).
           _footprintUnknownLookup: ep.footprintUnknown === true,
           _poolCageSizeEdited: false,
-          _storiesEdited: false,
+          _storiesEdited: !!f._storiesEdited,
           _unitCountEdited: false,
           // Every lookup re-seeds the count for ITS address — a value typed
           // for the previous address must never linger where an edit could
@@ -4056,44 +4085,6 @@ export default function EstimateToolViewV2({
       setSavedId(null);
       setSavedViewUrl(null);
 
-      // Existing customers at this street. A SUGGESTION only: the operator
-      // links one explicitly (or keeps what they typed). Skipped when a
-      // customer is already linked — a deliberate link is never second-
-      // guessed by a re-lookup.
-      setAddressMatches([]);
-      if (!customerAlreadyLinked) {
-        try {
-          // Server-side, unit-aware (the canonical street comparator): a
-          // typed "Unit 4" excludes "Apt 7" at the same building; a typed
-          // address with no unit still lists every unit there.
-          const custR = await fetch("/api/admin/customers/at-address", {
-            method: "POST",
-            headers: authHeaders,
-            // Typed/prefilled contact ranks the matching household member
-            // first (server tags it contactMatch).
-            body: JSON.stringify({
-              address,
-              phone: form.customerPhone || null,
-              email: form.customerEmail || null,
-            }),
-            signal: lookupController.signal,
-          });
-          if (custR.ok) {
-            const custData = await custR.json();
-            if (lookupSuperseded()) return;
-            setAddressMatches(custData.customers || []);
-            setAddressMatchesFor(addressMatchKey(address, form.customerPhone, form.customerEmail));
-          }
-        } catch {
-          /* ignore customer lookup errors */
-        }
-      }
-
-      // The inner catch above deliberately swallows customer-lookup errors —
-      // including the AbortError a NEWER lookup raises by aborting this one —
-      // so re-gate before the satellite/status writes below.
-      if (lookupSuperseded()) return;
-
       if (data.satellite) {
         const aiSources = normalizeAiSources(
           data.aiAnalysis?.aiSources || data.aiAnalysis?._sources,
@@ -4115,22 +4106,17 @@ export default function EstimateToolViewV2({
         });
       }
 
-      const rc = data.propertyRecord || data.rentcast;
       const ai = data.aiAnalysis;
-      const lines = [];
-      if (rc)
-        lines.push(
-          `${rc.formattedAddress} — ${rc.squareFootage || "?"} sf / ${rc.lotSize || "?"} sf lot / ${rc.stories || 1} story`,
-        );
-      if (ep.yearBuilt)
-        lines.push(
-          `Built ${ep.yearBuilt} · ${ep.constructionMaterial} · ${ep.foundationType} foundation · ${ep.roofType} roof`,
-        );
-      if (ep.propertyDataQuality)
-        lines.push(
-          `Property data quality: ${String(ep.propertyDataQuality.level || "unknown").toUpperCase()} (${ep.propertyDataQuality.score || 0}/100)`,
-        );
-      setLookupStatus({ type: "ok", msg: lines.join("\n") });
+      const addressNeedsConfirmation = ep.fieldVerifyFlags?.some((flag) => flag?.field === "address");
+      const hasDimensions = Number(ep.homeSqFt) > 0 || Number(ep.lotSqFt) > 0;
+      setLookupStatus({
+        type: addressNeedsConfirmation || !hasDimensions ? "err" : "ok",
+        msg: addressNeedsConfirmation
+          ? "Address needs confirmation. Check the address below before building the estimate."
+          : !hasDimensions
+            ? "Home and lot measurements were not found. Refresh the records or enter measurements you have checked."
+            : "Property lookup complete. Review the measurements and sources below.",
+      });
 
       if (ai) {
         const conf =
@@ -4154,6 +4140,39 @@ export default function EstimateToolViewV2({
       if (data.errors?.length > 0) {
         console.warn("[estimate] Partial errors:", data.errors);
       }
+
+      // Existing customers at this street. A SUGGESTION only: the operator
+      // links one explicitly (or keeps what they typed). Skipped when a
+      // customer is already linked — a deliberate link is never second-
+      // guessed by a re-lookup.
+      setAddressMatches([]);
+      if (!customerAlreadyLinked) {
+        try {
+          // Server-side, unit-aware (the canonical street comparator): a
+          // typed "Unit 4" excludes "Apt 7" at the same building; a typed
+          // address with no unit still lists every unit there.
+          const custR = await fetch("/api/admin/customers/at-address", {
+            method: "POST",
+            headers: authHeaders,
+            // Typed/prefilled contact ranks the matching household member
+            // first (server tags it contactMatch).
+            body: JSON.stringify({
+              address,
+              phone: form.customerPhone || null,
+              email: form.customerEmail || null,
+            }),
+            signal: lookupController.signal,
+          });
+          if (!custR.ok) return;
+          const custData = await custR.json();
+          if (lookupSuperseded()) return;
+          setAddressMatches(custData.customers || []);
+          setAddressMatchesFor(addressMatchKey(address, form.customerPhone, form.customerEmail));
+        } catch {
+          /* ignore customer lookup errors */
+        }
+      }
+
     } catch (e) {
       // A superseded lookup aborts deliberately — its error must not paint
       // over the newer lookup's status.
@@ -5960,7 +5979,7 @@ export default function EstimateToolViewV2({
               <StatusLine status={lookupStatus} />{" "}
               <div className="grid grid-cols-2 gap-2 mb-2">
                 {" "}
-                <Button onClick={doLookup} variant="primary" size="md">
+                <Button onClick={() => doLookup()} variant="primary" size="md" disabled={lookupStatus.type === "loading"}>
                   Property Lookup
                 </Button>{" "}
                 <Button
@@ -6061,84 +6080,17 @@ export default function EstimateToolViewV2({
                 </Button>{" "}
               </div>{" "}
               <StatusLine status={satelliteStatus} />
-              {enrichedProfile?.propertyDataQuality && (
-                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs">
-                  {" "}
-                  <div className="flex items-center justify-between gap-3 mb-1">
-                    {" "}
-                    <div className="text-11 font-medium uppercase tracking-label text-ink-secondary">
-                      Property Data Quality
-                    </div>{" "}
-                    <div
-                      className={`text-11 font-medium uppercase tracking-label ${
-                        enrichedProfile.propertyDataQuality.level === "high"
-                          ? "text-emerald-700"
-                          : enrichedProfile.propertyDataQuality.level ===
-                              "medium"
-                            ? "text-amber-700"
-                            : "text-alert-fg"
-                      }`}
-                    >
-                      {enrichedProfile.propertyDataQuality.level || "unknown"} ·{" "}
-                      {enrichedProfile.propertyDataQuality.score || 0}/100
-                    </div>{" "}
-                  </div>{" "}
-                  <div className="text-12 text-ink-secondary">
-                    {(enrichedProfile.propertyProviders || []).join(" + ") ||
-                      "No provider"}{" "}
-                    ·{" "}
-                    {(
-                      enrichedProfile.propertyDataQuality.sourceTypes || []
-                    ).join(", ") || "no source type"}{" "}
-                    ·{" "}
-                    {enrichedProfile.propertyDataQuality
-                      .verifiedCriticalFields || 0}
-                    /
-                    {enrichedProfile.propertyDataQuality.totalCriticalFields ||
-                      4}{" "}
-                    critical fields verified
-                  </div>
-                  {enrichedProfile.fieldEvidence && (
-                    <div className="mt-2 grid grid-cols-2 gap-1">
-                      {[
-                        "squareFootage",
-                        "lotSize",
-                        "stories",
-                        "propertyType",
-                      ].map((field) => {
-                        const item = enrichedProfile.fieldEvidence[field];
-                        const missing = (
-                          enrichedProfile.propertyDataQuality
-                            ?.missingCriticalFields || []
-                        ).includes(field);
-                        if (!item && !missing) return null;
-                        return (
-                          <div
-                            key={field}
-                            className="text-11 text-ink-tertiary truncate"
-                          >
-                            {" "}
-                            <span
-                              className={
-                                missing || item?.fieldVerify
-                                  ? "text-alert-fg font-medium"
-                                  : "text-emerald-700 font-medium"
-                              }
-                            >
-                              {missing
-                                ? "Missing"
-                                : item.fieldVerify
-                                  ? "Verify"
-                                  : "Trusted"}
-                            </span>{" "}
-                            {field.replace(/([A-Z])/g, " $1").toLowerCase()}:{" "}
-                            {item?.sourceLabel || item?.sourceType || "no source"}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
+              {enrichedProfile && (
+                <PropertyLookupResult
+                  profile={enrichedProfile}
+                  form={form}
+                  meta={lookupMeta}
+                  refreshing={lookupStatus.type === "loading"}
+                  onRefresh={() => doLookup({ refresh: true })}
+                  onEditAddress={() => addressRef.current?.focus()}
+                  onVerify={saveVerifiedValues}
+                  verification={verifySaveState}
+                />
               )}
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
@@ -6150,20 +6102,7 @@ export default function EstimateToolViewV2({
                       {flag.reason ? ` — ${flag.reason}` : ""}
                     </div>
                   ))}
-                  <button
-                    type="button"
-                    onClick={saveVerifiedValues}
-                    disabled={verifySaveState === "saving" || verifySaveState === "saved"}
-                    className="mt-1.5 text-12 underline text-zinc-900 disabled:no-underline disabled:text-zinc-500"
-                  >
-                    {verifySaveState === "saving"
-                      ? "Saving verified values…"
-                      : verifySaveState === "saved"
-                        ? "Verified values saved — future lookups will use them"
-                        : verifySaveState === "error"
-                          ? "Save failed — tap to retry"
-                          : "Save current sqft / lot / stories as field-verified"}
-                  </button>
+
                 </div>
               )}
               {existingCustomerMatch && (
@@ -8813,7 +8752,7 @@ export default function EstimateToolViewV2({
                 >
                   {!livePreview.anySelected
                     ? "Select Services to Get Started"
-                    : "Ready to Generate"}
+                    : "Estimate preview"}
                 </div>{" "}
                 <div className="text-14 text-ink-secondary mb-4">
                   {!livePreview.anySelected
@@ -8824,12 +8763,12 @@ export default function EstimateToolViewV2({
                   <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-13 text-ink-secondary leading-relaxed">
                     {" "}
                     <div className="text-11 font-medium text-zinc-900 uppercase tracking-label mb-1.5">
-                      Property Loaded
+                      Current property inputs
                     </div>{" "}
                     <div>{form.address}</div>{" "}
                     <div>
-                      {(Number(form.homeSqFt) || 0).toLocaleString()} sf home ·{" "}
-                      {(Number(form.lotSqFt) || 0).toLocaleString()} sf lot ·{" "}
+                      {form.homeSqFt ? `${Number(form.homeSqFt).toLocaleString("en-US")} sq ft home` : "Home area not entered"} ·{" "}
+                      {form.lotSqFt ? `${Number(form.lotSqFt).toLocaleString("en-US")} sq ft lot` : "Lot area not entered"} ·{" "}
                       {form.stories || 1} story
                     </div>
                     {form.hasPool === "YES" && (

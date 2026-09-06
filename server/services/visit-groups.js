@@ -1876,7 +1876,7 @@ function visitSummariesForRows(rows, {
 // path, never two drifting copies). True = do not send:
 //   1. a LIVE move_hold_until on the row's reminder record;
 //   2. renderedSlotMs (the epoch of the slot the body quotes) matching
-//      neither the row's own start nor the grouped stop's canonical start;
+//      neither the row's promised arrival nor the grouped stop's canonical start;
 //   3. the hold RE-READ after the slot/visit awaits — a mover can claim
 //      between the first hold read and those queries, with the row still
 //      showing the pre-move slot.
@@ -1895,7 +1895,7 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
     if (Number.isFinite(renderedSlotMs)) {
       const live = await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('scheduled_date', 'window_start', 'visit_id');
+        .first('id', 'reservation_service_mix', 'scheduled_date', 'window_start', 'visit_id');
       if (!live || !live.scheduled_date) return true; // row gone/stale — never send the old slot
       const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
       const day = etCalendarDayOf(live.scheduled_date);
@@ -1903,7 +1903,8 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
         const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
         return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
       };
-      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
+      const arrivalStart = await require('./reservation-arrival').arrivalStartForService(db, live);
+      const candidates = [toMs(arrivalStart ? String(arrivalStart).slice(0, 5) : null)];
       if (live.visit_id) {
         const stopStart = await liveStopStartHHMM(db, live.visit_id);
         if (stopStart) candidates.push(toMs(stopStart));

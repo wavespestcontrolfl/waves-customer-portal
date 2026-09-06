@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import { Button, Card, CardBody } from "../ui";
 import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -60,6 +61,7 @@ export default function CustomerPropertiesPanelV2({
   const [loadErr, setLoadErr] = useState("");
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
+  const selectedAddressRef = useRef(null);
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [rowBusy, setRowBusy] = useState(null);
@@ -180,7 +182,7 @@ export default function CustomerPropertiesPanelV2({
             Service addresses ({properties.length})
           </div>
           {canEdit && !adding && (
-            <Button variant="secondary" size="sm" onClick={() => setAdding(true)}>
+            <Button variant="secondary" size="sm" onClick={() => { selectedAddressRef.current = null; setAdding(true); }}>
               Add service address
             </Button>
           )}
@@ -302,12 +304,34 @@ export default function CustomerPropertiesPanelV2({
               <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-line1">
                 Street address
               </label>
-              <input
+              <AddressAutocomplete
+                enabled={import.meta.env.VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE === "true"}
+                appearance="admin"
+                geocodeOnBlur={false}
+                placeholder="Start typing an address…"
                 id="cp-line1"
-                className={inputCls}
+                className={`${inputCls} text-16`}
                 maxLength={LIMITS.address_line1}
                 value={form.address_line1}
-                onChange={(e) => setForm((f) => ({ ...f, address_line1: e.target.value }))}
+                onChange={(value) => setForm((f) => ({ ...f, address_line1: value }))}
+                onSelect={(parts) => {
+                  const previous = selectedAddressRef.current;
+                  selectedAddressRef.current = {
+                    line1: parts.line1 || form.address_line1,
+                    city: parts.city || form.city,
+                    state: parts.state || form.state,
+                    zip: parts.zip || form.zip,
+                  };
+                  setForm((f) => ({
+                    ...f,
+                    address_line1: parts.line1 || f.address_line1,
+                    address_line2: parts.line2 || (!previous || sameAutocompleteAddress(previous, parts) ? f.address_line2 : ""),
+                    city: parts.city || f.city,
+                    state: parts.state || f.state,
+                    zip: parts.zip || f.zip,
+                  }));
+                  document.getElementById("cp-line2")?.focus();
+                }}
               />
             </div>
             <div className="sm:col-span-2">
