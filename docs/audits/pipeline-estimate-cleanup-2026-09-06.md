@@ -1,6 +1,6 @@
 # Pipeline and estimate workflow evidence
 
-Local implementation in `codex/pipeline-estimate-cleanup-20260906`, based on locally available `origin/main` at `8c72d111aa6954b779108f87620479ce65e40a7c`. Code commits: `b620359c3` (server protections), `47f3f8ed9` (UI and shared conversations), and `3bdfb7406` (group delivery-option guard). The final code revision is `3bdfb7406`; this report is a separate documentation commit. No fetch, push, PR, merge, deployment, or production verification was performed for this task.
+Local implementation in `codex/pipeline-estimate-cleanup-20260906`, based on locally available `origin/main` at `8c72d111aa6954b779108f87620479ce65e40a7c`. Code commits: `b620359c3` (server protections), `47f3f8ed9` (UI and shared conversations), and `3bdfb7406` (group delivery-option guard). The final code revision is `3bdfb7406`; this report is a separate documentation commit. That original checkpoint included no fetch, push, PR, merge, deployment, or production verification. The release-validation follow-up below supersedes its completion status.
 
 ## Scope and isolation
 
@@ -198,3 +198,36 @@ PATH=/opt/homebrew/opt/node@20/bin:$PATH node .tmp/qa/pipeline-estimate/start-ap
 ```
 
 The API command uses the existing QA transport/network blockers; a normal backend startup is not a substitute. Both preview servers were left running. Their lifetime depends on the host/session; no persistence beyond this environment is promised.
+
+## Release-validation follow-up
+
+The owner authorized continuation through validation and PR preparation. The existing clean worktree was resumed at `2a3a30b60`. Current `origin/main` (`f9f6f3dc9`) was fetched and merged without conflicts in `f59fe5941`. A subsequent main update (`38254ecb9`) changes only social-content implementation/tests; it is included for PR compatibility without changing the checked estimate surfaces. No production access, migrations, live provider calls, or customer communications were performed.
+
+### Additional implementation and verification
+
+- Added safe-area padding to `EstimateSendDialog` and constrained its scrollable document to the available overlay height. Both collapsed and expanded message previews were exercised at 1440×900 and 390×900. There was no horizontal overflow; the expanded dialog stayed within 12px viewport margins and its confirmation action could be scrolled into view. Physical Safari/PWA behavior is still unverified.
+- Filled all six previously missing **local synthetic** `pricing_config` rows from the checked-out engine defaults. Inserts ignored existing keys and were restricted to the worktree-owned loopback QA database; the six rows were read back. No production rate, engine constant, or committed pricing fixture changed.
+- Re-ran six affected server suites after the main merge: **205 tests passed**, including revision, reviewed-send, group delivery-option, latest tier-selection and conversion protections. Seven affected client files passed **36 tests**. `npm run build` passed, including brand/domain/vendor gates; changed-dialog ESLint passed with its existing complexity warning and no errors. `git diff --check` passed.
+- Re-ran the real Express/PostgreSQL journey after the merge and fixture completion: create retry retained the same ID, stale save returned 409, the second property retained its identity, customer/property records were unchanged, staff preview did not change engagement state, the sent-attempt replay produced no additional transport/activity, and four technician access checks returned 403.
+- Browser coverage now includes all 27 listed service options, followed by measured-input cases and the commercial path. Every listed option plus a commercial office estimate reached a completed intercepted send after its synthetic measurements/eligibility confirmations were supplied. Dethatching was tested both without approval (held) and with a synthetic verified-thatch-probe approval (sent). Missing turf/bed/palm measurements and missing approvals were exercised separately from valid synthetic inputs. The completed runs produced no HTTP errors from pricing configuration or estimate APIs. All message transport was intercepted by the existing QA server; provider acceptance wording is a simulated outcome, not evidence of delivery.
+- New screenshots were visually inspected: `/tmp/waves-pipeline-release-{1440,390}.png`, `/tmp/waves-send-release-{1440,390}.png`, and `/tmp/waves-send-expanded-release-390.png`. Pipeline names, native stage controls, toolbar and phone rows remain readable; the send dialog uses the admin monochrome palette and its actions remain reachable.
+
+Local evidence: `.tmp/qa/pipeline-estimate/release-{server,client,build,api,lint}.log`, `service-browser-results.json`, `service-browser-measured-results.json`, `service-browser-final-cases.json`, and `service-browser-dethatch.json`. These contain synthetic fixtures and are intentionally excluded from Git. Repeated browser runs reached the login limiter; the final small follow-up used a short-lived fixture JWT signed with the existing local QA secret. Earlier browser and API journeys exercised real password login. No production authentication controls were changed.
+
+### Customer360 integration
+
+The separate `wt-customer360` checkout still contains uncommitted owner work and was not modified. Its `activity.js`, `useUnreadConversations.js` and `inbound-sms-read.js` match this lane byte-for-byte. The remaining shared differences were traced:
+
+- This lane extends `CustomerSmsPanel` with phone-scoped lead conversations, the provider wrapper, explicit transport outcomes, and 16px input text. Customer360's customer-based call shape remains supported.
+- This lane wraps the admin layout with the conversation/send providers. Customer360's forthcoming layout edits must retain those wrappers.
+- The communications route includes the exact-phone query and the admin-only unread-count guard. Preserve those additions when reconciling Customer360.
+
+This PR can be reviewed independently of the uncommitted Customer360 page work; a later Customer360 integration must merge these shared additions rather than replace the files with its older copies. Native/Astro consumer searches found no callers of the changed admin-estimate/property-lookup routes; no public route contract was widened.
+
+### Deferred P2s and remaining external checks
+
+- `client/src/components/admin/EstimateSendDialog.jsx:39`, `client/src/pages/admin/EstimateToolViewV2.jsx:3823` and `:4095`, and `server/routes/admin-estimates.js:1150` / `:4854`: structural complexity warnings remain. A meaningful reduction requires changing the save/send decision flow; moving branches into one-use helpers would not simplify it. This follow-up preserves the tested protections and records the deferral.
+- Other changed shared components/queue functions retain structural and unused-variable warnings listed in `final-lint.log` (204 warnings in the original all-changed-file pass). This is not a warning-free release.
+- `server/services/inbound-sms-read.js` / `client/src/hooks/useUnreadConversations.js`: the existing badge counts endpoint-scoped conversations, while the inbox groups by contact phone. A contact using two Waves numbers can therefore show a badge count of two and one inbox thread. Changing that metric is deferred to a coordinated Communications/Customer360 change.
+- Physical iPhone Safari/PWA, Gmail/Outlook rendering, live provider template versions and the hosted commercial proposal/PDF renderer remain unverified. The original local SMTP/PDF checks remain applicable; no hosted document was generated during this follow-up.
+- The local restored schema is not evidence that current migrations ran in a dev/preview or production environment. CI and final-head automated PR review must complete before this lane is described as merge-ready.

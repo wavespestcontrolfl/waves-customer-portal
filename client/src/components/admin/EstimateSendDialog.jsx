@@ -105,8 +105,8 @@ export default function EstimateSendDialog({ request, onClose }) {
   const notice = [request.warning, preview?.requiresEngineReview ? preview.blockReason : "", preview?.uncertainAttempt ? "An earlier send has an uncertain outcome. Check the conversation and email delivery records; another send could duplicate it." : ""].filter(Boolean).join(" ");
   const needsAcknowledgment = !!notice;
   return createPortal(
-    <div className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-3 sm:p-6">
-      <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="estimate-send-title" className="w-full max-w-2xl max-h-[calc(100dvh-24px)] overflow-y-auto bg-white text-ink-primary rounded-sm shadow-xl p-5 sm:p-6 text-16">
+    <div className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center px-3 sm:px-6 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-[calc(12px+env(safe-area-inset-bottom,0px))]">
+      <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="estimate-send-title" className="w-full max-w-2xl max-h-full overflow-y-auto bg-white text-ink-primary rounded-sm shadow-xl p-5 sm:p-6 text-16">
         <div className="flex items-start justify-between gap-4">
           <div><h2 id="estimate-send-title" className="text-22 font-medium">Review and send</h2><p className="text-14 text-ink-secondary mt-1">The saved estimate is the offer being sent.</p></div>
           <Button variant="ghost" className="min-h-11" disabled={busy} onClick={() => onClose(outcome)}>Close</Button>
